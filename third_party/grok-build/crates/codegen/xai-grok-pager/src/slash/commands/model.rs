@@ -157,10 +157,26 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
         let is_current = current_id == Some(id);
         let supports = supports_reasoning_effort(info);
 
+        // dscode: provider scoping — the bridge sends the provider id in the
+        // model's _meta. It prefixes the display and joins the match text, so
+        // typing "/model <provider>" filters the dropdown to that provider.
+        let provider = info
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("provider"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
         let display = if is_current {
-            format!("{} (current)", info.name)
-        } else {
+            if provider.is_empty() {
+                format!("{} (current)", info.name)
+            } else {
+                format!("[{}] {} (current)", provider, info.name)
+            }
+        } else if provider.is_empty() {
             info.name.clone()
+        } else {
+            format!("[{}] {}", provider, info.name)
         };
 
         // Trailing space on reasoning models: signals "more input
@@ -172,9 +188,15 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
             info.name.clone()
         };
 
+        let match_text = if provider.is_empty() {
+            info.name.clone()
+        } else {
+            format!("{} {}", provider, info.name)
+        };
+
         items.push(ArgItem {
             display,
-            match_text: info.name.clone(),
+            match_text,
             insert_text,
             description: info.description.clone().unwrap_or_default(),
         });

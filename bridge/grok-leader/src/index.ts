@@ -125,7 +125,7 @@ type AskUserQuestionExtResponse =
 /** Flattened wire catalog plus the provider ownership the bare model ids hide. */
 interface ModelCatalog {
   currentModelId: string
-  availableModels: Array<{ modelId: string; name: string; description?: string }>
+  availableModels: Array<{ modelId: string; name: string; description?: string; _meta?: { provider: string } }>
   providerByModel: Map<string, string>
 }
 
@@ -256,6 +256,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           modelId: model.id,
           name: model.name,
           ...model.description === undefined ? {} : { description: model.description },
+          _meta: { provider: row.provider },
         })
       }
     }
