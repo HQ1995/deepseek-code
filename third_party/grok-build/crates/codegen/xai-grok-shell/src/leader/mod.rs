@@ -85,9 +85,10 @@ use tracing::{debug, info, warn};
 pub use transport::listener_is_ready;
 const SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
-/// dscode external-leader bootstrap: the dsh CLI boots slower than a
-/// self-spawn, and a hung one must fail fast so the TUI can point at its log.
-const EXTERNAL_SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// dscode external-leader bootstrap: a cold dsh boot (node + profile load)
+/// takes 15-25s, so the wait must cover it - too short a wait makes the TUI's
+/// outer retry spawn a second leader while the first is still booting.
+const EXTERNAL_SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Same source the leader reports, so adoption compares versions like-for-like.
 const CLIENT_LEADER_VERSION: &str = xai_grok_version::VERSION;
 /// Max wait for an evicted leader to exit before force-killing (relaunch drain ~5s).
@@ -1511,8 +1512,8 @@ enum SpawnSpec<'a> {
 /// The external leader never takes the flock itself, so the spawner keeps the
 /// lock from spawn until the socket is connectable (racing sessions wait
 /// instead of double-spawning onto one socket), releases it on handoff, and
-/// gives up after a single ~5s wait (an external boot failure is a config/log
-/// problem, not a transient race).
+/// gives up after a single ~30s wait - killing the spawned child on failure
+/// so a failed external boot never leaks a leader process.
 pub async fn connect_or_spawn_external(
     client_type: &str,
     mode: ClientMode,
@@ -1584,6 +1585,9 @@ async fn connect_or_spawn_inner(
     let mut zombie_timer: ZombieTimer = None;
     let mut evict_attempts: Option<(u32, u32)> = None;
     let mut self_spawn_attempts: u32 = 0;
+    // PID of the externally spawned leader, killed if it never becomes
+    // connectable (single-owner: a failed boot must not leak a leader).
+    let mut external_spawn_pid: Option<u32> = None;
     loop {
         match lock.try_acquire() {
             Ok(true) => {
@@ -1634,7 +1638,7 @@ async fn connect_or_spawn_inner(
                         // wait (and adopt) instead of double-spawning onto one
                         // socket. On spawn error the lock stays held and Drop
                         // cleans the files we were replacing.
-                        spawn(&sock_path)?;
+                        external_spawn_pid = Some(spawn(&sock_path)?);
                     }
                 }
                 let conn = match wait_for_socket_connectable(
@@ -1650,6 +1654,15 @@ async fn connect_or_spawn_inner(
                     Err(ConnectionError::Timeout) => {
                         self_spawn_attempts += 1;
                         if external {
+                            if let Some(pid) = external_spawn_pid {
+                                warn!(pid, "External leader never became connectable; killing it");
+                                if let Err(e) = crate::util::kill_process_with_signal(
+                                    pid,
+                                    crate::util::KillSignal::Term,
+                                ) {
+                                    warn!(error = %e, pid, "Failed to kill failed external leader");
+                                }
+                            }
                             let _ = lock.release();
                         }
                         if self_spawn_attempts >= max_spawn_attempts {
@@ -1666,6 +1679,15 @@ async fn connect_or_spawn_inner(
                     }
                     Err(e) => {
                         if external {
+                            if let Some(pid) = external_spawn_pid {
+                                warn!(pid, "External leader failed to connect; killing it");
+                                if let Err(kill_err) = crate::util::kill_process_with_signal(
+                                    pid,
+                                    crate::util::KillSignal::Term,
+                                ) {
+                                    warn!(error = %kill_err, pid, "Failed to kill failed external leader");
+                                }
+                            }
                             let _ = lock.release();
                         }
                         return Err(e);
@@ -2376,8 +2398,8 @@ mod tests {
         drop(conn);
     }
     /// A hung external leader is not retried: exactly one spawn callback, one
-    /// ~5s connectable wait, then SpawnFailed - and the flock is released so
-    /// the next session can try again.
+    /// connectable wait, then SpawnFailed - and the flock is released so the
+    /// next session can try again.
     #[tokio::test(start_paused = true)]
     async fn connect_or_spawn_external_gives_up_after_one_attempt() {
         let temp = TempDir::new().unwrap();

@@ -27,7 +27,8 @@ branding (our identity). Keep this list current on every sync.
   --sandbox off/--no-auto-update; acp::connect_via_leader and the
   LeaderReconnector call the new xai-grok-shell connect_or_spawn_external
   (connect-first adoption of a live leader, flock-serialized single spawner,
-  one ~5s wait) so sessions spawned by the old shell leader on the same socket
+  one ~30s wait that covers a cold node boot, failed spawns are killed) so
+  sessions spawned by the old shell leader on the same socket
   are still adopted. scripts/dscode.sh + bin/dscode are gone; install.sh links
   ~/.local/bin/dscode directly to the prebuilt binary.
 - Leader mode: --leader/--leader-socket flags connect the TUI to our bridge
