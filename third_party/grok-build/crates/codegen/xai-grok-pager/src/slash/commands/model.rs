@@ -129,8 +129,7 @@ fn split_trailing_token(args: &str) -> Option<(&str, &str)> {
 /// Longest-name-first to disambiguate names that share a prefix.
 fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::ModelId> {
     let mut candidates: Vec<(&acp::ModelId, &str)> = models
-        .available
-        .iter()
+        .scoped_models()
         .filter(|(_, info)| supports_reasoning_effort(info))
         .map(|(id, info)| (id, info.name.as_str()))
         .collect();
@@ -153,30 +152,25 @@ fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::Mod
 fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
     let current_id = models.current.as_ref();
     let mut items: Vec<ArgItem> = Vec::with_capacity(models.available.len());
-    for (id, info) in &models.available {
+    let scope = models.current_provider_scope();
+    for (id, info) in models.scoped_models() {
         let is_current = current_id == Some(id);
         let supports = supports_reasoning_effort(info);
 
-        // dscode: provider scoping — the bridge sends the provider id in the
-        // model's _meta. It prefixes the display and joins the match text, so
-        // typing "/model <provider>" filters the dropdown to that provider.
-        let provider = info
-            .meta
-            .as_ref()
-            .and_then(|m| m.get("provider"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        // dscode: provider scoping — the "[provider] " prefix stays only when
+        // there is no scope (global list) or the row belongs to a different
+        // provider. When the list is already scoped to this row's provider,
+        // the prefix would repeat the scope and is dropped.
+        let provider = models.provider_for(id);
 
         let display = if is_current {
-            if provider.is_empty() {
-                format!("{} (current)", info.name)
-            } else {
-                format!("[{}] {} (current)", provider, info.name)
-            }
+            format!("{} (current)", info.name)
         } else if provider.is_empty() {
             info.name.clone()
-        } else {
+        } else if scope.is_empty() || provider != scope {
             format!("[{}] {}", provider, info.name)
+        } else {
+            info.name.clone()
         };
 
         // Trailing space on reasoning models: signals "more input
@@ -243,6 +237,19 @@ mod tests {
     fn plain_model(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
         let id = acp::ModelId::new(Arc::from(id));
         let info = acp::ModelInfo::new(id.clone(), name.to_string());
+        (id, info)
+    }
+
+    fn provider_model(
+        id: &str,
+        name: &str,
+        provider: &str,
+    ) -> (acp::ModelId, acp::ModelInfo) {
+        let id = acp::ModelId::new(Arc::from(id));
+        let mut meta = serde_json::Map::new();
+        meta.insert("provider".into(), serde_json::Value::String(provider.into()));
+        let info = acp::ModelInfo::new(id.clone(), name.to_string())
+            .meta(serde_json::Value::Object(meta).as_object().cloned());
         (id, info)
     }
 
@@ -321,6 +328,80 @@ mod tests {
         // Plain model has no trailing space -- Enter commits immediately.
         let plain = items.iter().find(|i| i.match_text == "Grok 4.5").unwrap();
         assert_eq!(plain.insert_text, "Grok 4.5");
+    }
+
+    #[test]
+    fn provider_scope_filters_model_items() {
+        let mut state = ModelState::default();
+        let (a, ainfo) = provider_model("ds-chat", "DS Chat", "deepseek");
+        let (b, binfo) = provider_model("ds-reasoner", "DS Reasoner", "deepseek");
+        let (c, cinfo) = provider_model("pi-code", "Pi Code", "pi");
+        state.available.insert(a.clone(), ainfo);
+        state.available.insert(b, binfo);
+        state.available.insert(c, cinfo);
+        // Current model = deepseek, so the /model list is scoped to deepseek
+        // and rows drop the redundant [deepseek] prefix.
+        state.current = Some(a);
+        state.current_provider = Some("deepseek".into());
+
+        let ctx = AppCtx {
+            models: &state,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            workflows_available: true,
+            screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
+        };
+        let items = ModelCommand.suggest_args(&ctx, "").unwrap();
+        assert_eq!(items.len(), 2, "pi-code is filtered out of a deepseek-scoped /model");
+        assert_eq!(items[0].display, "DS Chat (current)");
+        assert_eq!(items[1].display, "DS Reasoner");
+    }
+
+    #[test]
+    fn unscoped_state_keeps_provider_prefixes() {
+        let mut state = ModelState::default();
+        // Current model carries no provider meta: the scope falls back to the
+        // (unset) bridge currentProviderId, so the list stays global and the
+        // provider rows keep their prefixes.
+        let (a, ainfo) = plain_model("ds-chat", "DS Chat");
+        let (b, binfo) = provider_model("pi-code", "Pi Code", "pi");
+        state.available.insert(a.clone(), ainfo);
+        state.available.insert(b, binfo);
+        state.current = Some(a);
+        // No current provider (pre-session catalog): full list, prefixed.
+        let ctx = AppCtx {
+            models: &state,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            workflows_available: true,
+            screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
+        };
+        let items = ModelCommand.suggest_args(&ctx, "").unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].display, "DS Chat (current)");
+        assert_eq!(items[1].display, "[pi] Pi Code");
+    }
+
+    #[test]
+    fn switching_current_model_moves_provider_scope() {
+        let mut state = ModelState::default();
+        let (ds, dsinfo) = provider_model("ds-chat", "DS Chat", "deepseek");
+        let (gpt, gptinfo) = provider_model("gpt-4", "GPT-4", "openai");
+        state.available.insert(ds.clone(), dsinfo);
+        state.available.insert(gpt.clone(), gptinfo);
+        state.current = Some(ds);
+        assert_eq!(state.current_provider_scope(), "deepseek");
+        state.set_current(gpt, None);
+        assert_eq!(state.current_provider_scope(), "openai");
+        let items = build_model_items(&state);
+        assert_eq!(items.len(), 1, "only the new provider's models are offered");
+        assert_eq!(items[0].display, "GPT-4 (current)");
     }
 
     #[test]
