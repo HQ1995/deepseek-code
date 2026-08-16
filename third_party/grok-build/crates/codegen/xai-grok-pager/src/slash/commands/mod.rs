@@ -10,7 +10,6 @@ pub mod btw;
 pub mod cd;
 pub mod compact;
 pub mod compact_mode;
-pub mod config_agents;
 pub mod context;
 pub mod copy;
 pub mod dashboard;
@@ -42,7 +41,6 @@ pub mod mcps;
 pub mod model;
 pub mod multiline;
 pub mod new;
-pub mod personas;
 pub mod plan;
 pub mod plugin;
 pub mod preset;
@@ -143,8 +141,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(tasks::TasksCommand),
         Arc::new(release_notes::ReleaseNotesCommand),
         Arc::new(tutorial::TutorialCommand),
-        Arc::new(config_agents::ConfigAgentsCommand),
-        Arc::new(personas::PersonasCommand),
         Arc::new(preset::PresetCommand),
         // Hidden easter egg: never listed, runs on bare `/gboom`.
         Arc::new(gboom::GboomCommand),

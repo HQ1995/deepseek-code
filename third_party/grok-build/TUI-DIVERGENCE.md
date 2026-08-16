@@ -25,6 +25,13 @@ branding (our identity). Keep this list current on every sync.
 - Persona/preset selection is fed by the bridge's bundle/status personas;
   no TUI-side persona list of its own.
 
+## Feature
+
+- Slash commands removed (x.ai authoring/management surfaces, dsh has no
+  matching concept): /personas and /config-agents (agents-modal authoring UI),
+  /login, /logout, /share, /feedback, /imagine, /imagine_video, /import_claude,
+  /gboom, /voice, /release_notes, /announcements, /recap, /timeline. /preset
+  remains the only preset picker; /usage is kept pending provider billing.
 ## Patch
 
 - None currently. Generic bug fixes found here must go upstream as PRs and
