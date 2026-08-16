@@ -11,16 +11,16 @@
     "directory": "bridge/grok-leader"
   },
   "type": "module",
-  "main": "lib/index.js",
-  "types": "lib/index.d.ts",
+  "main": "lib/types/index.js",
+  "types": "lib/types/index.d.ts",
   "exports": {
     ".": {
-      "types": "./lib/index.d.ts",
-      "default": "./lib/index.js"
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/types/index.js"
     },
     "./invariant": {
-      "types": "./lib/invariant.d.ts",
-      "default": "./lib/invariant.js"
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/types/invariant.js"
     },
     "./src/*": "./src/*",
     "./package.json": "./package.json",
@@ -33,7 +33,7 @@
   ],
   "license": "MIT",
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -b tsconfig.json"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
