@@ -1,37 +1,45 @@
 #!/usr/bin/env bash
-# deepseek-code launcher: harness leader server (built from the submodule) +
-# the vendored grok TUI. The single entrypoint is `bin/dscode`.
+# deepseek-code launcher: the installed official npm dsh CLI boots the
+# deepseek-leader profile (bridge leader server); the vendored grok TUI
+# connects to it. The deepseek-harness submodule build is never used.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOCKET="${DEEPSEEK_LEADER_SOCKET:-/tmp/deepseek-leader-$UID.sock}"
 TUI="$ROOT/third_party/grok-build/target/release/dscode"
-DSH="$ROOT/deepseek-harness/apps/cli/lib/bin.js"
+DSH_BIN=""
+
+# The INSTALLED official dsh first, npx on demand. Resolve through npm's own
+# global prefix so a stale ~/.local/bin/dsh shim on PATH can never win.
+if command -v npm >/dev/null 2>&1; then
+  DSH_BIN="$(npm prefix -g 2>/dev/null || true)/bin/dsh"
+fi
+if [[ -x "$DSH_BIN" ]]; then
+  DSH_RUN=("$DSH_BIN")
+else
+  DSH_RUN=(npx --yes @deepseek-ai/dsh)
+fi
 
 # Single-owner socket: remove a stale file from a crashed run before booting
 # the leader, so the TUI can never connect to a dead peer.
 rm -f "$SOCKET"
 
 if [[ ! -x "$TUI" ]]; then
-  echo "dscode: TUI binary not built; run scripts/build-deepseek-tui.sh first" >&2
-  exit 1
-fi
-if [[ ! -f "$DSH" ]]; then
-  echo "dscode: harness not built; run scripts/install.sh first" >&2
+  echo "dscode: TUI binary not present; run scripts/install.sh first" >&2
   exit 1
 fi
 
-# Start the harness leader server (auto-initializes the deepseek-leader profile).
+# Start the leader server (the profile is initialized by scripts/install.sh).
 # numactl node-1 pinning is this host's policy, not a public requirement: keep
 # it when available, drop it cleanly elsewhere.
 LOG="${DEEPSEEK_LEADER_LOG:-/tmp/deepseek-leader.log}"
 if command -v numactl >/dev/null 2>&1; then
   DSH_TELEMETRY_DISABLED=1 DEEPSEEK_LEADER_SOCKET="$SOCKET" \
-    numactl --cpunodebind=1 --membind=1 node "$DSH" --profile deepseek-leader \
+    numactl --cpunodebind=1 --membind=1 "${DSH_RUN[@]}" --profile deepseek-leader \
     >"$LOG" 2>&1 &
 else
   DSH_TELEMETRY_DISABLED=1 DEEPSEEK_LEADER_SOCKET="$SOCKET" \
-    node "$DSH" --profile deepseek-leader \
+    "${DSH_RUN[@]}" --profile deepseek-leader \
     >"$LOG" 2>&1 &
 fi
 LEADER_PID=$!
