@@ -6,8 +6,8 @@ Apache-2.0) driving the DeepSeek Harness agent runtime.
 ## Build
 
 ```sh
-scripts/build-deepseek-tui.sh   # cargo build --release of the vendored TUI
-pnpm install && pnpm run build:lib:host   # harness + leader server
+scripts/install.sh              # build the harness submodule, build+install the bridge, fetch the TUI
+scripts/build-deepseek-tui.sh   # (dev) cargo build --release of the vendored TUI
 ```
 
 ## Launch

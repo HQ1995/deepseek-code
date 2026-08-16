@@ -1,69 +1,63 @@
 # Harness updates
 
-How deepseek-harness upstream releases flow into this repository.
+The DeepSeek Harness backend lives in the `deepseek-harness/` git submodule,
+pinned to a commit on the `HQ1995/deepseek-harness` fork. This repo carries no
+harness source; an upgrade is a pointer bump plus a rebuild.
 
 ## Mechanism
 
-The repo ships as one squashed initial commit, so there is no shared ancestry
-with upstream. Updating the backend is a repeated unrelated-histories merge
-(the conflict surface is exactly the divergence list below, verified small):
+The fork is a clone of `deepseek-ai/deepseek-harness` plus the dscode patches
+listed below. Updating the backend is two moves:
+
+1. Update the fork: clone it, `git merge upstream/main`, resolve the
+   divergence list, push a new fork commit.
+2. Bump the pointer here:
 
 ```sh
-git fetch upstream main
-git merge --allow-unrelated-histories --no-edit upstream/main
-# resolve only the divergences below, then commit
+git submodule update --remote deepseek-harness
+git add deepseek-harness
+git commit -m "chore: bump deepseek-harness submodule"
 ```
 
-The only conflicts are the places where this repo deliberately diverges. Keep
-that list short and reviewed; everything else merges automatically. Long-term
-target: move the bridge out of the fork entirely (out-of-tree plugin) so this
-merge stops being necessary.
+Then rebuild and reinstall. The installer does this for a release tag; a manual
+bump needs the same three steps:
 
-## Known divergences from upstream (review each when updating)
+```sh
+( cd deepseek-harness && CI=true pnpm install --frozen-lockfile && pnpm run build:lib:host )
+( cd bridge/grok-leader && pnpm install && pnpm run build )
+dsh plugin --profile deepseek-leader add bridge/grok-leader
+```
+
+## Why the fork (not npm)
+
+The launcher builds dsh from the submodule, not npm, because the published
+`@deepseek-ai/dsh-*` 0.1.0-rc.6 set lacks the EMFILE/ENOSPC watch-capacity
+degradation and its `latest` tags are incoherent across the package set. The
+fork carries that fix; see the divergence list below.
+
+## Fork divergences from upstream (review each fork update)
 
 - `packages/boot/app-boot/src/index.ts` — watch-capacity degradation
-  (EMFILE/ENOSPC watcher failures no longer kill the surface). Upstream may
-  adopt an equivalent fix; prefer theirs over ours when it lands.
-- `apps/cli/src/profile-boot.ts` — scoped uncaught-watch-capacity guard.
-- `packages/bridge/` — deepseek-build's own grok-leader server (new packages,
-  never conflicts).
-- Root identity: `package.json` name `deepseek-build`, README header block
-  (README.md + README.zh.md).
-- `third_party/grok-build/` — vendored grok TUI (Apache-2.0), out of the
-  harness tree entirely.
+  (`isWatchCapacityError`, `installUncaughtWatchCapacityGuard`, EMFILE/ENOSPC
+  swallow in `watchUserPatches`/`installFailLoud`). Prefer an equivalent
+  upstream fix when one lands.
+- `apps/cli/src/profile-boot.ts` — scoped uncaught-watch-capacity guard around
+  the watcher setup window.
+- `packages/boot/app-boot/src/profile.ts` — `deepseek-leader` profile template
+  (`@deepseek-ai/dsh-base` only; the grok-leader bridge is out-of-tree).
+- `.agents/notes/implemented/bug-fix/2026-08-15-watch-capacity-degrades-hot-reload.*`
+  — the agent note for the watch-capacity fix.
 
-## Update checklist
+## Compatibility contract
 
-1. `git fetch upstream main && git merge upstream/main`.
-2. Resolve the divergences above (verify the EMFILE fix against the merged
-   app-boot; if upstream fixed it differently, drop ours).
-3. `pnpm install && pnpm run build:lib:host`.
-4. Run the built-bin e2e and the bridge tests; re-run the TUI probe smoke.
-5. If upstream's protocol expectations changed, re-check against
-   `docs/grok-leader-protocol.md`.
-
-## Compatibility contract (deepseek-build)
-
-This repo is a TUI, not a harness fork feature set. The compatibility promise:
-
-- The TUI (vendored grok-build, `third_party/`) never depends on harness internals;
-  it only speaks the leader wire protocol (docs/grok-leader-protocol.md).
-- The bridge (`packages/bridge/grok-leader`) is the only harness-side surface. Its
-  target shape is an OUT-OF-TREE plugin installed with
-  `dsh plugin --profile deepseek-leader add ...`, so a harness update is a
-  package upgrade plus a re-test, not a rebase.
-- Harness updates flow as a plain `git merge upstream/main` (ancestry is
-  grafted at the real upstream commit 47f9438). The known divergence list above
-  is the entire conflict surface; keep it from growing.
-
-## Migration plan (out-of-tree bridge)
-
-1. Enumerate the bridge's imports of internal harness packages (dsh-agent,
-   dsh-session, dsh-llm, dsh-user-questions, dsh-user-approval,
-   dsh-agent-default-model, dsh-agent-presets, dsh-session-persistence).
-2. Pin each to its published npm peer surface; drop any non-published internal
-   usage (or add a thin published wrapper).
-3. Package the bridge standalone (pnpm project outside the workspace) with those
-   peerDependencies; keep a `dsh.profile.bundles` profile definition.
-4. Test `dsh plugin --profile deepseek-leader add <bridge>` against a pristine
-   published `@deepseek-ai/dsh` install; the TUI is untouched.
+- The TUI (`third_party/grok-build/`, vendored grok-build, Apache-2.0) only
+  speaks the leader wire protocol (`docs/grok-leader-protocol.md`); it never
+  depends on harness internals.
+- The bridge (`bridge/grok-leader/`) is the only harness-side surface. It is an
+  out-of-tree plugin installed with
+  `dsh plugin --profile deepseek-leader add bridge/grok-leader`, and it resolves
+  every `@deepseek-ai/dsh-*` peer from the built submodule tree (not npm), so
+  the bridge and the dsh CLI share one build.
+- After a submodule bump, re-run the built-bin e2e (`scripts/e2e-deepseek.sh`)
+  and the bridge tests; if the protocol changed, re-check
+  `docs/grok-leader-protocol.md`.
