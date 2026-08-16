@@ -1,0 +1,11 @@
+# grok-build upstream sync baseline
+
+Last synced from: UNKNOWN (the tree was vendored flat without .git history;
+vendor date 2026-08-15, TUI app version 1.0.4)
+
+Upstream HEAD observed at record time (2026-08-16):
+https://github.com/xai-org/grok-build.git @ 5163763e703c319e4554c2f455535c5adb6e51e8
+
+Next sync: clone upstream, diff against this tree, port selected changes by
+hand, then update this file with the commit you synced from. Never leave it
+UNKNOWN after a sync.
