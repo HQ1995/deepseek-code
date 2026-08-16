@@ -1155,9 +1155,9 @@ fn restricted_command_submit_opens_three_option_upsell() {
     app.agents
         .get_mut(&id)
         .unwrap()
-        .set_restricted_commands(&["imagine".to_string()]);
+        .set_restricted_commands(&["usage".to_string()]);
 
-    let effects = dispatch(Action::SendPrompt("/imagine a sunset".into()), &mut app);
+    let effects = dispatch(Action::SendPrompt("/usage".into()), &mut app);
 
     assert!(
         effects.is_empty(),
@@ -1218,21 +1218,21 @@ fn restricted_command_with_open_modal_keeps_composer_text() {
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.set_restricted_commands(&["imagine".to_string()]);
+        agent.set_restricted_commands(&["usage".to_string()]);
         // A question modal is already up (credit-limit upsell).
         open_credit_limit_upsell(agent, CreditLimitUpsellMode::UnifiedCredits, false);
         assert!(agent.question_view.is_some());
         // The user typed the restricted command into the composer.
-        agent.prompt.set_text("/imagine a sunset");
+        agent.prompt.set_text("/usage");
     }
 
-    let effects = dispatch(Action::SendPrompt("/imagine a sunset".into()), &mut app);
+    let effects = dispatch(Action::SendPrompt("/usage".into()), &mut app);
 
     assert!(effects.is_empty(), "no passthrough / send: {effects:?}");
     let agent = &app.agents[&id];
     assert_eq!(
         agent.prompt.text(),
-        "/imagine a sunset",
+        "/usage",
         "composer text must be preserved for a later resubmit"
     );
     assert!(
@@ -1260,7 +1260,7 @@ fn unknown_non_restricted_command_still_passes_through() {
     app.agents
         .get_mut(&id)
         .unwrap()
-        .set_restricted_commands(&["imagine".to_string()]);
+        .set_restricted_commands(&["usage".to_string()]);
 
     let effects = dispatch(Action::SendPrompt("/frobnicate arg".into()), &mut app);
 
@@ -1371,7 +1371,7 @@ fn open_url_welcome_toasts_single_line_url_when_browser_unavailable() {
 
     use crate::app::link_opener::browser_unavailable_line;
 
-    let terms = crate::views::privacy_banner::PRIVACY_BANNER_TERMS_URL;
+    let terms = "https://x.ai/legal/terms-of-service";
     let effects = dispatch(Action::OpenUrl(terms.to_string()), &mut app);
     assert!(effects.is_empty());
     let toast = app
@@ -1391,7 +1391,7 @@ fn open_url_welcome_toasts_single_line_url_when_browser_unavailable() {
 
     // Policy URL is shorter than terms (compile-time constants); second toast
     // replaces the first in welcome toast state.
-    let policy = crate::views::privacy_banner::PRIVACY_BANNER_POLICY_URL;
+    let policy = "https://x.ai/legal/privacy-policy";
     let _ = dispatch(Action::OpenUrl(policy.to_string()), &mut app);
     let toast = app
         .welcome_toast

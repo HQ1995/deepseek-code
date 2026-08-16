@@ -36,3 +36,14 @@ branding (our identity). Keep this list current on every sync.
 
 - None currently. Generic bug fixes found here must go upstream as PRs and
   be removed from this list when accepted.
+Slash commands removed: login, logout, share, feedback, imagine,
+imagine_video, import_claude, gboom, voice, release_notes, announcements,
+recap, timeline.
+Why: these x.ai-cloud-only commands have no dsh-adaptable equivalent; the
+TUI is a frontend over the dsh bridge.
+Kept: usage (provider billing adaptation pending), mcps, plugin, doctor,
+debug, settings_cmd, compact, rewind, tasks, plan, workflows, model,
+preset, personas, and the TUI-own UI commands.
+Only the commands were removed: the announcement banner view, the voice
+engine and keybinding, the gboom game, and the share/recap/voice registry
+gates remain, so the banner CTA still advertises /announcements hide.

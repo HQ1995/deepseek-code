@@ -1742,38 +1742,9 @@ mod tests {
         assert!(!snapshot.matches.is_empty());
     }
 
-    #[test]
-    fn gboom_never_appears_in_suggestions() {
-        // The /gboom easter egg is executable but must stay out of the
-        // dropdown: not in the full list, not via prefix, not via exact name.
-        let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
-        let state = SlashState::default();
-        let models = ModelState::default();
-
-        for query in ["/", "/g", "/gbo", "/gboom"] {
-            ctrl.refresh(&state, query, query.len(), &models);
-            let snapshot = state.snapshot();
-            assert!(
-                snapshot
-                    .matches
-                    .iter()
-                    .all(|row| !row.display.contains("gboom")),
-                "/gboom leaked into suggestions for query {query:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn gboom_still_resolves_for_execution() {
-        // Dispatch resolves via `registry.get()`, which ignores `visible()`.
-        let reg = test_registry();
-        let cmd = reg.get("gboom").expect("/gboom resolvable for dispatch");
-        assert_eq!(cmd.name(), "gboom");
-    }
-
     /// `/debug` lists via `visible()` = cfg!(debug_assertions); tests
     /// compile with debug_assertions, so it must surface here. Release
-    /// builds flip the same constant to false (the /gboom hidden
+    /// builds flip the same constant to false (the hidden-command
     /// mechanism), which is untestable from a debug test build — hence
     /// the cfg gate rather than a release-side assertion.
     #[test]
@@ -1821,7 +1792,12 @@ mod tests {
 
     #[test]
     fn shell_prequalified_skill_appears_beside_builtin() {
-        let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
+        // Hermetic registry: `/login` is a builtin only in this test (the
+        // x.ai login command was removed from the builtin set).
+        let mut ctrl = SlashController::new(
+            CommandRegistry::new(vec![Arc::new(TieCmd("login"))]),
+            std::path::PathBuf::from("."),
+        );
         let meta = serde_json::json!({
             "scope": "plugin",
             "path": "/plugins/acme/skills/login/SKILL.md",
@@ -2193,7 +2169,6 @@ mod tests {
             "/compact",
             "/fork",
             "/rewind",
-            "/share",
             "/context",
             "/copy",
             "/export",
@@ -3168,19 +3143,19 @@ mod tests {
         let state = SlashState::default();
         let models = ModelState::default();
 
-        let text = "hi /imagine\n\n  /execute-plan";
-        let cursor = text.find("/imagine").unwrap() + "/imagine".len();
+        let text = "hi /multiline\n\n  /execute-plan";
+        let cursor = text.find("/multiline").unwrap() + "/multiline".len();
         ctrl.refresh(&state, text, cursor, &models);
         let snapshot = state.snapshot();
         assert!(
             snapshot.cursor_in_command,
-            "cursor at end of /imagine must stay in command mode for Tab"
+            "cursor at end of /multiline must stay in command mode for Tab"
         );
         assert_eq!(snapshot.args_range, None);
         assert_eq!(
             snapshot.command_range,
-            Some(3..11),
-            "Tab must target /imagine, not the later /execute-plan token"
+            Some(3..13),
+            "Tab must target /multiline, not the later /execute-plan token"
         );
     }
 

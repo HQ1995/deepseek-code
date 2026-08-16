@@ -1544,7 +1544,6 @@ fn apply_auth_meta_clears_api_key_flag_and_restores_billing_on_personal_login() 
 #[test]
 fn apply_auth_meta_api_key_enables_voice_and_skips_tier_gate() {
     let mut app = test_app();
-    advertise_media_tools(&mut app);
     assert!(!app.voice_mode_enabled);
     app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
         auth_mode: Some("ApiKey".into()),
@@ -1581,27 +1580,6 @@ fn expected_tier_restricted_commands() -> Vec<String> {
         .map(|n| (*n).to_string())
         .collect()
 }
-/// Make every tier-restricted command visible on the welcome prompt so the
-/// present/absent assertions exercise the deny list, not incidental
-/// fail-closed hiding:
-/// - `/imagine`, `/imagine-video` are `required_tools()`-gated, so advertise
-///   their tools (otherwise the registry fail-closes them).
-/// - `/voice` is fail-closed hidden until the remote flag turns it on, so
-///   reveal it via the registry directly. (We drive the prompt's registry
-///   rather than `apply_voice_mode_enabled`, which also flips a process-global
-///   atomic and would leak across parallel tests.)
-fn advertise_media_tools(app: &mut AppView) {
-    app.welcome_prompt
-        .slash_controller
-        .registry_mut()
-        .set_available_tools(
-            ["image_gen", "image_to_video"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-        );
-    app.welcome_prompt.set_voice_visible(true);
-}
 fn assert_tier_restricted_commands_absent(app: &AppView) {
     let reg = app.welcome_prompt.slash_controller.registry();
     for name in TIER_RESTRICTED_COMMANDS {
@@ -1615,16 +1593,21 @@ fn assert_tier_restricted_commands_absent(app: &AppView) {
 fn assert_tier_restricted_commands_present(app: &AppView) {
     let reg = app.welcome_prompt.slash_controller.registry();
     for name in TIER_RESTRICTED_COMMANDS {
+        // `voice` has no slash command anymore; it only feeds the
+        // Ctrl+Space/F8 keybinding gate, so there is nothing to assert on
+        // the registry for it.
+        if *name == "voice" {
+            continue;
+        }
         assert!(
             reg.get(name).is_some(),
-            "/{name} must be available when not tier-restricted (tools advertised)"
+            "/{name} must be available when not tier-restricted"
         );
     }
 }
 #[test]
 fn apply_auth_meta_restricts_usage_for_free_tier() {
     let mut app = test_app();
-    advertise_media_tools(&mut app);
     app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
     assert_eq!(
         app.tier_restricted_commands,
@@ -1636,7 +1619,6 @@ fn apply_auth_meta_restricts_usage_for_free_tier() {
 #[test]
 fn apply_auth_meta_restricts_usage_for_x_basic_tier() {
     let mut app = test_app();
-    advertise_media_tools(&mut app);
     let meta = xai_grok_shell::auth::AuthMeta {
         subscription_tier: Some("X Basic".into()),
         ..Default::default()
@@ -1651,7 +1633,6 @@ fn apply_auth_meta_restricts_usage_for_x_basic_tier() {
 #[test]
 fn apply_auth_meta_lifts_restrictions_for_paid_tiers_and_teams() {
     let mut app = test_app();
-    advertise_media_tools(&mut app);
     let meta = xai_grok_shell::auth::AuthMeta {
         subscription_tier: Some("SuperGrok".into()),
         ..Default::default()
@@ -1660,7 +1641,6 @@ fn apply_auth_meta_lifts_restrictions_for_paid_tiers_and_teams() {
     assert!(app.tier_restricted_commands.is_empty());
     assert_tier_restricted_commands_present(&app);
     let mut app = test_app();
-    advertise_media_tools(&mut app);
     app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
     assert!(!app.tier_restricted_commands.is_empty());
     app.subscription_tier = Some("SuperGrok".into());
