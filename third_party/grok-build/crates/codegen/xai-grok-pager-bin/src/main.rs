@@ -1918,6 +1918,25 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             std::env::set_var(xai_grok_shell::agent::chat_modes::GROK_CHAT_MODE_ENV, "1");
         }
     }
+    // dscode single entry point: a plain TUI launch (no subcommand, no
+    // one-shot prompt, no --no-leader) always runs against the external dsh
+    // leader. These are the flags scripts/dscode.sh used to add; the actual
+    // connect-first/spawn happens in acp::connect_via_leader.
+    if args.command.is_none()
+        && args.single.is_none()
+        && args.prompt_json.is_none()
+        && args.prompt_file.is_none()
+        && !args.no_leader
+    {
+        args.leader = true;
+        if args.leader_socket.is_none() {
+            args.leader_socket = Some(xai_grok_pager::dsh_leader::default_leader_socket());
+        }
+        if args.sandbox.is_none() {
+            args.sandbox = Some("off".into());
+        }
+        args.no_auto_update = true;
+    }
     if let Some(ref socket) = args.leader_socket {
         unsafe { std::env::set_var(xai_grok_shell::leader::LEADER_SOCKET_ENV, socket) };
     }
