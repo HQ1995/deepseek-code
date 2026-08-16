@@ -125,6 +125,10 @@ type AskUserQuestionExtResponse =
 /** Flattened wire catalog plus the provider ownership the bare model ids hide. */
 interface ModelCatalog {
   currentModelId: string
+  /** Provider roster as listed by the harness llm service ({id, name?}). */
+  providers: Array<{ id: string; name?: string }>
+  /** Provider that owns currentModelId ('' when no current model). */
+  currentProviderId: string
   availableModels: Array<{ modelId: string; name: string; description?: string; _meta?: { provider: string } }>
   providerByModel: Map<string, string>
 }
@@ -194,7 +198,7 @@ interface UserQuestionsLike {
 }
 /** Structural read of the llm service: provider and model catalogs only. */
 interface LlmLike {
-  listProviders(): Array<{ id: string }>
+  listProviders(): Array<{ id: string; name?: string }>
   listModels(provider: string): Promise<Array<{ id: string; name: string; description?: string }>>
 }
 
@@ -239,6 +243,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   /** Rebuild the flattened wire catalog plus the provider ownership the bare ids hide. */
   const refreshCatalog = async (): Promise<ModelCatalog> => {
+    const providers = llm === undefined ? [] : llm.listProviders().map(p => ({ id: p.id, ...p.name === undefined ? {} : { name: p.name } }))
     const rows = llm === undefined
       ? []
       : await Promise.all(llm.listProviders().map(async provider => ({
@@ -272,6 +277,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
     catalog = {
       currentModelId,
+      providers,
+      currentProviderId: currentModelId === '' ? '' : providerByModel.get(currentModelId) ?? '',
       availableModels,
       providerByModel,
     }
@@ -592,6 +599,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         modelState: {
           currentModelId: current.currentModelId,
           availableModels: current.availableModels,
+          // SessionModelState carries only currentModelId/availableModels; the
+          // provider roster and current-provider id ride in modelState._meta
+          // (the ACP extension point the pager reads back as ModelState meta).
+          _meta: {
+            currentProviderId: current.currentProviderId,
+            providers: current.providers,
+          },
         },
       },
     }
@@ -968,6 +982,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
     record.selection.current = selection
     if (agentDefaultModel !== undefined) await agentDefaultModel.saveSelection(selection)
+    // The catalog may have fallen back to a different provider's model (or the
+    // persisted default may have moved providers); refresh so the next
+    // models/list (and initialize _meta) reports the provider that now owns
+    // the current model. Without this a re-spawned TUI shows the pre-switch
+    // provider scope.
+    if (catalog !== undefined) await refreshCatalog()
     return {}
   }
 
@@ -976,6 +996,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return {
       currentModelId: current.currentModelId,
       availableModels: current.availableModels,
+      _meta: {
+        currentProviderId: current.currentProviderId,
+        providers: current.providers,
+      },
     }
   }
 
