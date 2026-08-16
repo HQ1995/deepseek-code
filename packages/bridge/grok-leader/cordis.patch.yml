@@ -1,0 +1,29 @@
+# The dsh-grok-leader bundle patch: the harness-side half of the leader
+# profile. The real grok TUI connects to this server over the leader unix
+# socket; the server drives the harness Agent/Session/llm services directly.
+# No Host, HTTP server, or browser layer is mounted.
+
+- id: system-prompt
+  config:
+    persona: >-
+      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
+
+# Long-lived server: no module-reload HMR.
+- id: hmr
+  disabled: true
+
+# The preset roster, mirroring the web profile: the shipped preset root is
+# patched in by apps/cli profile-boot (SHIPPED_PRESET_ROOT) because only the
+# app can resolve its own config directory; the writable user root is the
+# roster's own default.
+- insert:
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: minimal
+
+- insert:
+    - id: grok-leader
+      name: '@deepseek-ai/dsh-grok-leader'
+      config:
+        socketPath: !!js process.env.DEEPSEEK_LEADER_SOCKET

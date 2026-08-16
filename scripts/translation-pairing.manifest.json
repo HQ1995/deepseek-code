@@ -1,0 +1,19 @@
+{
+  "excluded": [
+    ".agents/notes/AGENTS.md",
+    ".agents/notes/implemented/AGENTS.md",
+    ".agents/notes/implemented/CLAUDE.md",
+    "README.md",
+    "docs/AGENTS.md",
+    "docs/cordis-api/inherited.md",
+    "docs/deepseek-build.md",
+    "docs/dscode-usage.md",
+    "docs/grok-leader-protocol.md",
+    "docs/grok-tui-connect.md",
+    "docs/harness-updates.md",
+    "docs/i18n/style-samples.md",
+    "docs/i18n/terminology.md",
+    "docs/i18n/translation-prompt.md",
+    "packages/bridge/grok-leader/README.md"
+  ]
+}

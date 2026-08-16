@@ -1,0 +1,505 @@
+/**
+ * End-to-end leader tests over a real unix socket against a mocked agent
+ * registry, pinned to the captured TUI handshake
+ * (tests/fixtures/grok-tui-messages.jsonl, docs/grok-tui-connect.md).
+ */
+import { randomUUID } from 'node:crypto'
+import { createConnection, type Socket } from 'node:net'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-session-persistence'
+import { encodeJsonFrame, FrameDecoder } from '../src/codec.ts'
+import * as GrokLeader from '../src/index.ts'
+
+interface MockAgentInternals {
+  cancelCalls: number
+  followups: string[]
+  disposed: boolean
+}
+
+type MockAgent = Agent & { internals: MockAgentInternals }
+
+interface MockRegistry {
+  created: Array<{ sessionId: string; cwd?: string; agentPreset?: string }>
+  resumed: Array<{ sessionId: string }>
+  byId: Map<string, MockAgent>
+  create(options: unknown): Promise<{ agent: Agent; dispose: () => Promise<void> }>
+  resume(options: unknown): Promise<{ agent: Agent; dispose: () => Promise<void> }>
+  get(id: SessionId): Agent | undefined
+}
+
+function makeMockRegistry(ctx: Context): MockRegistry {
+  const created: Array<{ sessionId: string; cwd?: string }> = []
+  const resumed: Array<{ sessionId: string }> = []
+  const byId = new Map<string, MockAgent>()
+  const makeAgent = (sessionId: SessionId, cwd: string | undefined): MockAgent => {
+    const internals: MockAgentInternals = { cancelCalls: 0, followups: [], disposed: false }
+    const agent = {
+      id: sessionId,
+      options: {} as AgentOptions,
+      session: {
+        id: sessionId,
+        header: { id: sessionId, version: 0, createdAt: 0, ...cwd === undefined ? {} : { cwd } },
+        events: [],
+      },
+      inbox: {},
+      status: 'idle',
+      ctx,
+      internals,
+      cancel() { internals.cancelCalls += 1 },
+      whenIdle() { return Promise.resolve() },
+      runMaintenance(task: (signal: AbortSignal) => Promise<unknown>) { return task(new AbortController().signal) },
+      send() {},
+      followup(message: unknown) {
+        const content = (message as { content?: Array<{ type?: string; text?: string }> }).content ?? []
+        for (const block of content) {
+          if (block.type === 'text' && block.text !== undefined) internals.followups.push(block.text)
+        }
+      },
+      steer() {},
+      inject() {},
+    } as unknown as MockAgent
+    byId.set(sessionId, agent)
+    return agent
+  }
+  return {
+    created,
+    resumed,
+    byId,
+    async create(options) {
+      const o = options as { sessionId: SessionId; meta?: { cwd?: string; agentPreset?: string }; setup?: (agentCtx: Context) => unknown }
+      created.push({
+        sessionId: o.sessionId,
+        ...o.meta?.cwd === undefined ? {} : { cwd: o.meta.cwd },
+        ...o.meta?.agentPreset === undefined ? {} : { agentPreset: o.meta.agentPreset },
+      })
+      if (o.setup !== undefined) await o.setup(ctx)
+      const agent = makeAgent(o.sessionId, o.meta?.cwd)
+      return { agent, dispose: async () => { agent.internals.disposed = true; byId.delete(o.sessionId) } }
+    },
+    async resume(options) {
+      const o = options as { resumeSessionId: SessionId; setup?: (agentCtx: Context) => unknown }
+      resumed.push({ sessionId: o.resumeSessionId })
+      if (o.setup !== undefined) await o.setup(ctx)
+      const agent = makeAgent(o.resumeSessionId, undefined)
+      return { agent, dispose: async () => { agent.internals.disposed = true; byId.delete(o.resumeSessionId) } }
+    },
+    get(id) { return byId.get(id) },
+  }
+}
+
+const mockLlm = {
+  listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' }, { id: 'pi', name: 'Pi AI' }],
+  listModels: async (provider: string) => provider === 'deepseek'
+    ? [
+      { provider: 'deepseek', id: 'deepseek-chat', name: 'DeepSeek Chat' },
+      { provider: 'deepseek', id: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
+    ]
+    : provider === 'pi'
+      ? [{ provider: 'pi', id: 'pi-code', name: 'Pi Code' }]
+      : [],
+}
+
+function makeMockPersistence() {
+  const header = { version: 0, id: SessionId('persisted-session'), createdAt: 0, cwd: '/tmp/proj', agentPreset: 'standard' }
+  const loaded: string[] = []
+  return {
+    header,
+    loaded,
+    list: async () => [header],
+    load: async (id: SessionId) => { loaded.push(id); return { meta: header, events: [] } },
+  }
+}
+
+function makeMockPresets() {
+  const resolved: Array<string | undefined> = []
+  const mounted: string[] = []
+  return {
+    resolved,
+    mounted,
+    list: async () => [
+      { id: 'standard', trust: 'system', name: '标准模式', description: 'standard desc' },
+      { id: 'code', trust: 'system', name: 'PTC 模式', description: 'code desc' },
+      { id: 'minimal', trust: 'system', name: '极简模式', description: 'minimal desc' },
+      { id: 'cordis', trust: 'system', name: '创造模式', description: 'cordis desc' },
+    ],
+    resolve: async (id?: string) => {
+      resolved.push(id)
+      const chosen = id ?? 'standard'
+      if (chosen === 'standard' || chosen === 'code' || chosen === 'minimal' || chosen === 'cordis') return { id: chosen }
+      throw new Error('agent-presets: preset "' + chosen + '" not found (available: standard, cordis, minimal, code)')
+    },
+    mount: async (_agentCtx: unknown, id?: string) => {
+      mounted.push(id ?? 'standard')
+      return { id: id ?? 'standard' }
+    },
+  }
+}
+
+const mockDefaultModel = {
+  saved: [] as Array<{ provider: string; model: string; reasoningEffort?: string }>,
+  saveSelection: async (next: { provider: string; model: string; reasoningEffort?: string }) => {
+    mockDefaultModel.saved.push(next)
+  },
+}
+
+const mockSessionsStore = {
+  flushed: [] as unknown[],
+  flush: async (session: object) => { mockSessionsStore.flushed.push(session); return true },
+}
+
+interface LeaderHarness {
+  ctx: Context
+  socketPath: string
+  registry: MockRegistry
+  persistence: ReturnType<typeof makeMockPersistence>
+  presets: ReturnType<typeof makeMockPresets> | undefined
+}
+
+interface ClientHandle {
+  socket: Socket
+  next(): Promise<Record<string, unknown>>
+  send(msg: unknown): void
+  request(id: number, method: string, params?: unknown): Promise<Record<string, unknown>>
+  notify(method: string, params?: unknown): void
+}
+
+async function makeClient(socketPath: string): Promise<ClientHandle> {
+  const socket = createConnection(socketPath)
+  await new Promise<void>((resolveConnect, reject) => {
+    socket.once('connect', () => { resolveConnect() })
+    socket.once('error', reject)
+  })
+  const decoder = new FrameDecoder()
+  const queue: Record<string, unknown>[] = []
+  const waiters: Array<(value: Record<string, unknown>) => void> = []
+  socket.on('data', (chunk) => {
+    for (const frame of decoder.push(chunk)) {
+      const raw = JSON.parse(new TextDecoder().decode(frame)) as Record<string, unknown>
+      // Unwrap acp envelopes: the inner JSON-RPC object carries the request id.
+      const msg = raw.type === 'acp' && typeof raw.payload === 'string'
+        ? JSON.parse(raw.payload) as Record<string, unknown>
+        : raw
+      const waiter = waiters.shift()
+      if (waiter !== undefined) waiter(msg)
+      else queue.push(msg)
+    }
+  })
+  const next = (): Promise<Record<string, unknown>> => {
+    const head = queue.shift()
+    if (head !== undefined) return Promise.resolve(head)
+    return new Promise((resolveWait) => { waiters.push(resolveWait) })
+  }
+  return {
+    socket,
+    next,
+    send(msg: unknown) { socket.write(encodeJsonFrame(msg)) },
+    async request(id: number, method: string, params?: unknown) {
+      const payload: Record<string, unknown> = { jsonrpc: '2.0', id, method }
+      if (params !== undefined) payload.params = params
+      socket.write(encodeJsonFrame({ type: 'acp', payload: JSON.stringify(payload) }))
+      for (let spins = 0; ; spins++) {
+        const msg = await next()
+        if (msg.id === id) return msg
+        queue.push(msg)
+        if (spins > 5) throw new Error('request spin: want id ' + String(id) + ' got ' + JSON.stringify(msg).slice(0, 240))
+      }
+    },
+    notify(method: string, params?: unknown) {
+      const payload: Record<string, unknown> = { jsonrpc: '2.0', method }
+      if (params !== undefined) payload.params = params
+      socket.write(encodeJsonFrame({ type: 'acp', payload: JSON.stringify(payload) }))
+    },
+  }
+}
+
+async function makeHarness(options: { presets?: boolean } = {}): Promise<LeaderHarness> {
+  const ctx = new Context()
+  const registry = makeMockRegistry(ctx)
+  const persistence = makeMockPersistence()
+  const presets = options.presets === true ? makeMockPresets() : undefined
+  ctx.provide('agents', registry as unknown as Context['agents'])
+  ctx.provide('llm', mockLlm as unknown as Context['llm'])
+  ctx.provide('sessionPersistence', persistence as unknown as Context['sessionPersistence'])
+  ctx.provide('sessions', mockSessionsStore as unknown as Context['sessions'])
+  if (presets !== undefined) ctx.provide('agentPresets', presets as unknown as Context['agentPresets'])
+  ctx.provide('agentDefaultModel', mockDefaultModel as unknown as Context['agentDefaultModel'])
+  const socketPath = resolve(tmpdir(), 'dsh-grok-leader-' + String(process.pid) + '-' + randomUUID() + '.sock')
+  await ctx.plugin({
+    name: 'grok-leader-test',
+    inject: [...GrokLeader.inject],
+    apply: (inner: Context) => { GrokLeader.apply(inner, { socketPath }) },
+  })
+  return { ctx, socketPath, registry, persistence, presets }
+}
+
+const register = (client: ClientHandle): void => {
+  client.send({ type: 'register', client_type: 'grok-shell', mode: 'stdio' })
+}
+
+describe('grok leader over a unix socket', () => {
+  let harness: LeaderHarness | undefined
+  let client: ClientHandle | undefined
+
+  afterEach(async () => {
+    client?.socket.destroy()
+    await harness?.ctx.fiber.dispose()
+    harness = undefined
+    client = undefined
+    mockDefaultModel.saved.length = 0
+  })
+
+  const start = async (options: { presets?: boolean } = {}): Promise<LeaderHarness & { client: ClientHandle }> => {
+    harness = await makeHarness(options)
+    client = await makeClient(harness.socketPath)
+    return { ...harness, client }
+  }
+
+  it('completes the probe-verified handshake with the captured reply shapes', async () => {
+    const { registry, client: c } = await start()
+    c.send({
+      type: 'register',
+      client_type: 'grok-shell',
+      mode: 'stdio',
+      capabilities: {
+        yolo_mode: true, auto_mode: false, default_model: null, client_version: '1.0.4',
+        code_nav_enabled: false, terminal: false, fs_read: false, fs_write: false,
+      },
+    })
+    expect(await c.next()).toEqual({
+      type: 'registered',
+      client_id: 1,
+      ready: true,
+      leader_protocol_version: 1,
+      leader_binary_version: '1.0.4',
+      leader_capabilities: { control_v1: true, workspace_exposure: false, relaunch_v1: false },
+    })
+
+    c.send({ type: 'ping' })
+    expect(await c.next()).toEqual({ type: 'pong' })
+
+    const initialize = await c.request(0, 'initialize', {
+      protocolVersion: 1,
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false, auth: { terminal: false } },
+    })
+    expect(initialize.error).toBeUndefined()
+    expect(initialize.result).toMatchObject({
+      protocolVersion: 1,
+      authMethods: [{ id: 'xai.api_key', name: 'API key' }],
+      _meta: {
+        grokShell: true,
+        modelState: {
+          currentModelId: '',
+          availableModels: [
+            { modelId: 'deepseek-chat', name: 'DeepSeek Chat' },
+            { modelId: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
+            { modelId: 'pi-code', name: 'Pi Code' },
+          ],
+        },
+      },
+    })
+    expect(registry.created).toHaveLength(0)
+  })
+
+  it('runs the session flow: new, prompt, cancel, models, list, load, close', async () => {
+    const { registry, persistence, client: c } = await start()
+    register(c)
+    await c.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    expect(registry.created).toEqual([{ sessionId, cwd: process.cwd() }])
+
+    const promptResult = await c.request(2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hello there' }] })
+    // Turnless mock: admission never claims a turn, so the prompt settles cancelled at idle.
+    expect(promptResult.result).toEqual({ stopReason: 'cancelled' })
+    expect(registry.byId.get(sessionId)?.internals.followups).toEqual(['hello there'])
+
+    // The accepted prompt is echoed before the response so it enters the transcript.
+    const echo = await c.next()
+    expect(echo).toMatchObject({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId,
+        update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'hello there' } },
+        _meta: { eventSeq: 1, promptId: expect.any(String) as string },
+      },
+    })
+
+    c.notify('session/cancel', { sessionId })
+    c.notify('_x.ai/log', { src: 'grok-pager', entries: [] })
+
+    const models = await c.request(3, 'x.ai/models/list', {})
+    expect(models.result).toEqual({
+      currentModelId: '',
+      availableModels: [
+        { modelId: 'deepseek-chat', name: 'DeepSeek Chat' },
+        { modelId: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
+        { modelId: 'pi-code', name: 'Pi Code' },
+      ],
+    })
+
+    const listed = await c.request(4, 'session/list', {})
+    expect(listed.result).toEqual({
+      sessions: [{ sessionId: 'persisted-session', cwd: '/tmp/proj', updatedAt: '1970-01-01T00:00:00.000Z' }],
+    })
+
+    const loaded = await c.request(5, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [] })
+    expect(loaded.result).toEqual({})
+    expect(persistence.loaded).toEqual(['persisted-session'])
+    expect(registry.resumed).toEqual([{ sessionId: 'persisted-session' }])
+
+    const closed = await c.request(6, 'session/close', { sessionId: 'persisted-session' })
+    expect(closed.result).toEqual({})
+    // The mock disposer removes the entry, so absence is the disposal proof.
+    expect(registry.byId.has('persisted-session')).toBe(false)
+    expect(mockSessionsStore.flushed).toHaveLength(1)
+
+    // Unknown notifications are dropped and unknown requests get method-not-found.
+    const unknown = await c.request(7, 'no/such/method', {})
+    expect(unknown.error).toEqual({ code: -32601, message: 'method not found: no/such/method' })
+
+    // The connection survives all of it: ping still answers.
+    c.send({ type: 'ping' })
+    expect(await c.next()).toEqual({ type: 'pong' })
+  })
+
+  it('rejects invalid session requests with JSON-RPC errors', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+
+    const badCwd = await c.request(1, 'session/new', { cwd: 'relative', mcpServers: [] })
+    expect(badCwd.error).toEqual({ code: -32602, message: 'cwd must be an absolute path: relative' })
+
+    const badMcp = await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [{ name: 'fs', command: 'node', args: [], env: [] }] })
+    expect(badMcp.error).toEqual({ code: -32602, message: 'mcpServers is not supported' })
+
+    const created = await c.request(3, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+
+    const unknownSession = await c.request(4, 'session/prompt', { sessionId: 'missing', prompt: [{ type: 'text', text: 'x' }] })
+    expect(unknownSession.error).toEqual({ code: -32602, message: 'unknown session: missing' })
+
+    const imagePrompt = await c.request(5, 'session/prompt', { sessionId, prompt: [{ type: 'image', data: '', mimeType: 'image/png' }] })
+    expect(imagePrompt.error).toEqual({ code: -32602, message: 'only text and resource_link prompt content is supported' })
+  })
+
+  it('enforces registration and rejects a second registration', async () => {
+    const { client: c } = await start()
+
+    c.send({ type: 'acp', payload: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize' }) })
+    expect(await c.next()).toEqual({ type: 'error', code: 1, message: 'Expected Register message' })
+
+    register(c)
+    await c.next()
+    register(c)
+    expect(await c.next()).toEqual({ type: 'error', code: 2, message: 'Already registered' })
+  })
+
+  it('tears down a disconnected client owned sessions', async () => {
+    const { registry, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)
+    expect(agent).toBeDefined()
+
+    c.send({ type: 'disconnect' })
+    await new Promise<void>((resolveClose) => { c.socket.once('close', () => { resolveClose() }) })
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
+    expect(agent?.internals.disposed).toBe(true)
+    expect(registry.byId.size).toBe(0)
+  })
+
+  it('routes the grok agentProfile to the dsh preset roster', async () => {
+    const { registry, presets, client: c } = await start({ presets: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'code' } })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    expect(registry.created).toEqual([{ sessionId, cwd: process.cwd(), agentPreset: 'code' }])
+    expect(presets?.resolved).toEqual(['code'])
+    expect(presets?.mounted).toEqual(['code'])
+  })
+
+  it('lists the dsh preset roster as bundle/status personas', async () => {
+    const { client: c } = await start({ presets: true })
+    register(c)
+    await c.next()
+    const status = await c.request(1, 'x.ai/bundle/status', {})
+    expect(status.error).toBeUndefined()
+    expect(status.result).toEqual({
+      hasCache: true,
+      personas: ['standard', 'code', 'minimal', 'cordis'],
+      roles: [],
+      agents: [],
+      skills: [],
+      personaDetails: [
+        { name: 'Standard mode', description: 'Full coding agent with file editing, shell, file and web search, skills, planning, goals, subagents, and workflows.', hasInputs: false, hasOutputs: false },
+        { name: 'Code mode', description: 'All Standard mode capabilities, with tools exposed through the Code Mode SDK so the model can combine multi-step operations in one TypeScript program.', hasInputs: false, hasOutputs: false },
+        { name: 'Minimal mode', description: 'Two-tool coding agent with persistent bash and str_replace_editor.', hasInputs: false, hasOutputs: false },
+        { name: 'Creator mode', description: 'Built for creating custom agent presets, with all Standard mode capabilities plus runtime inspection, plugin experiments, and preset-authoring guidance.', hasInputs: false, hasOutputs: false },
+      ],
+      roleDetails: [],
+    })
+  })
+
+  it('overrides the persisted preset on session/load when a valid preset is explicitly requested', async () => {
+    const { presets, client: c } = await start({ presets: true })
+    register(c)
+    await c.next()
+    const loaded = await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [], _meta: { agentProfile: 'minimal' } })
+    expect(loaded.error).toBeUndefined()
+    expect(presets?.mounted).toEqual(['minimal'])
+  })
+
+  it('keeps the persisted preset on session/load when no preset is explicitly requested', async () => {
+    const { presets, client: c } = await start({ presets: true })
+    register(c)
+    await c.next()
+    const loaded = await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [] })
+    expect(loaded.error).toBeUndefined()
+    expect(presets?.mounted).toEqual(['standard'])
+  })
+
+  it('defaults a preset-less session to the roster default', async () => {
+    const { registry, presets, client: c } = await start({ presets: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    expect(registry.created).toEqual([{ sessionId, cwd: process.cwd(), agentPreset: 'standard' }])
+    expect(presets?.mounted).toEqual(['standard'])
+  })
+
+  it('falls back to the default preset for grok built-ins and rejects JSON-object agent selections', async () => {
+    const { client: c } = await start({ presets: true })
+    register(c)
+    await c.next()
+    const unknown = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'grok-build-plan' } })
+    expect(unknown.error).toBeUndefined()
+    const objectProfile = await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: { name: 'custom' } } })
+    expect(objectProfile.error).toEqual({ code: -32602, message: '_meta.agentProfile JSON definitions are not supported; send a preset id string' })
+  })
+
+  it('resolves session/set_model provider through the catalog mapping', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const switched = await c.request(2, 'session/set_model', { sessionId, modelId: 'pi-code', _meta: { reasoningEffort: 'high' } })
+    expect(switched.result).toEqual({})
+    expect(mockDefaultModel.saved).toEqual([{ provider: 'pi', model: 'pi-code', reasoningEffort: 'high' }])
+  })
+})
