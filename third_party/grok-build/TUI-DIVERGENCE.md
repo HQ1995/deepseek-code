@@ -15,6 +15,21 @@ branding (our identity). Keep this list current on every sync.
 
 ## Feature
 
+- Single-entry-point leader bootstrap: the binary is the launcher. A plain TUI
+  run (no subcommand, no one-shot prompt, no --no-leader) defaults to leader
+  mode against the EXTERNAL dsh CLI instead of grok's self-spawn:
+  crates/codegen/xai-grok-pager/src/dsh_leader.rs resolves dsh (DSH_BIN env ->
+  "dsh" on PATH -> /home/hanqing/.local/share/pi-node/.../bin/dsh -> npx),
+  spawns "dsh --profile deepseek-leader" with DEEPSEEK_LEADER_SOCKET /
+  DSH_TELEMETRY_DISABLED=1 and a numactl node-1 wrapper (host policy,
+  conditional), logs to /tmp/deepseek-leader.log, and records the PID in the
+  sibling .lock. pager-bin main.rs synthesizes --leader/--leader-socket/
+  --sandbox off/--no-auto-update; acp::connect_via_leader and the
+  LeaderReconnector call the new xai-grok-shell connect_or_spawn_external
+  (connect-first adoption of a live leader, flock-serialized single spawner,
+  one ~5s wait) so sessions spawned by the old shell leader on the same socket
+  are still adopted. scripts/dscode.sh + bin/dscode are gone; install.sh links
+  ~/.local/bin/dscode directly to the prebuilt binary.
 - Leader mode: --leader/--leader-socket flags connect the TUI to our bridge
   over the grok leader unix-socket protocol instead of x.ai; local xai auth
   is bypassed in leader mode.
@@ -42,8 +57,10 @@ branding (our identity). Keep this list current on every sync.
   remains the only preset picker; /usage is kept pending provider billing.
 ## Patch
 
-- None currently. Generic bug fixes found here must go upstream as PRs and
-  be removed from this list when accepted.
+- crates/codegen/xai-grok-shell/src/session/acp_session_tests/tool_layer_images_bridge_tests.rs:
+  added the missing 'use base64::Engine as _;' (base64 0.22 trait import) so the
+  shell test binary compiles. Generic bug fixes found here must go upstream as
+  PRs and be removed from this list when accepted.
 Slash commands removed: login, logout, share, feedback, imagine,
 imagine_video, import_claude, gboom, voice, release_notes, announcements,
 recap, timeline.
