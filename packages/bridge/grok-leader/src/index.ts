@@ -116,6 +116,12 @@ export type GrokSessionUpdate =
   | { sessionUpdate: 'tool_call'; toolCallId: string; title: string; kind: 'generic'; status: 'in_progress'; rawInput: string }
   | { sessionUpdate: 'tool_call_update'; toolCallId: string; status: 'completed' | 'error'; content?: Array<{ type: 'text'; text: string }>; error?: { name: string; code: string } }
 
+/** grok AskUserQuestionExtResponse: tagged on `outcome`, snake_case variant names. */
+type AskUserQuestionExtResponse =
+  | { outcome: 'accepted'; answers: Record<string, string[]>; annotations?: Record<string, { preview?: string; notes?: string }> }
+  | { outcome: 'chat_about_this' | 'skip_interview'; partial_answers?: Record<string, string> }
+  | { outcome: 'cancelled' }
+
 /** Flattened wire catalog plus the provider ownership the bare model ids hide. */
 interface ModelCatalog {
   currentModelId: string
@@ -148,6 +154,15 @@ interface SessionRecord {
   turnStartMs: number | undefined
   /** Monotonic per-session counter stamped into every update _meta.eventSeq. */
   eventSeq: number
+  /** Cumulative session token accounting summed from assistant/message usage. */
+  inputTokens: number
+  outputTokens: number
+  /** Counters the grok x.ai/session/info context reads. */
+  turnCount: number
+  toolCallCount: number
+  messageCount: number
+  /** True once the current step streamed a text-delta; suppresses the assembled-message re-emit. */
+  textStreamed: boolean
   inflight: {
     resolve: (reason: StopReasonWire) => void
     reject: (error: Error) => void
@@ -333,6 +348,45 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     })
   }
 
+  /** Accumulate the token and counter facts one session event contributes. */
+  const noteEvent = (record: SessionRecord, event: SessionEvent): void => {
+    if (event.type === 'assistant/message') {
+      const usage = event.data.usage
+      if (usage !== undefined) {
+        record.inputTokens += usage.inputTokens
+        record.outputTokens += usage.outputTokens
+      }
+      record.messageCount += 1
+    } else if (event.type === 'tool/call') {
+      record.toolCallCount += 1
+    } else if (event.type === 'user/message' && (event.data.source as { kind?: unknown }).kind === 'user') {
+      record.messageCount += 1
+    } else if (event.type === 'turn/end') {
+      record.turnCount += 1
+    }
+  }
+
+  /** Map one event to wire updates, attaching the cumulative token total to agent text. */
+  const mapEvent = (
+    record: SessionRecord,
+    event: SessionEvent,
+    replay: boolean,
+  ): Array<GrokSessionUpdate & { totalTokens?: number }> => {
+    if (event.type === 'step/start') record.textStreamed = false
+    noteEvent(record, event)
+    const totalTokens = record.inputTokens + record.outputTokens
+    const updates: Array<GrokSessionUpdate & { totalTokens?: number }> = []
+    for (const item of sessionEventToUpdates(event, { replay, textStreamed: record.textStreamed })) {
+      if (item.sessionUpdate === 'agent_message_chunk') {
+        record.textStreamed = true
+        updates.push({ ...item, totalTokens })
+      } else {
+        updates.push(item)
+      }
+    }
+    return updates
+  }
+
   // Translate the session firehose into grok streaming deltas. Committed text,
   // reasoning deltas, tool calls, and tool results stream; titles, plans, and
   // retry markers are presentation or trace data and stay off the wire.
@@ -345,7 +399,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (event.type === 'turn/start') {
         record.turnStartMs = event.time
       }
-      for (const item of sessionEventToUpdates(event, { replay: false })) {
+      for (const item of mapEvent(record, event, false)) {
         emitUpdate(conn, record, event.seq, item, false)
       }
     } finally {
@@ -409,14 +463,45 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         if (conn === undefined) {
           throw new UserQuestionError('no connected grok client owns this agent', 'NO_CLIENT')
         }
-        // TODO(verify): exact x.ai/ask_user_question request/answer shapes —
-        // server.rs:499 routes it like a permission modal and the gateway ext
-        // wrapper nests method+params one level (server.rs:440). The payload
-        // and answer mapping below are placeholders.
-        return requestClient<AskUserQuestionAnswer>(conn, '_x.ai/ask_user_question', {
-          method: WIRE.askUserQuestion,
-          params: { questions: request.questions },
+        // grok keys accepted answers by question text, so remember each text's dsh id.
+        const textToId = new Map<string, string>()
+        const grokQuestions = request.questions.map((question) => {
+          textToId.set(question.question, question.id)
+          return {
+            question: question.question,
+            options: (question.options ?? []).map(option => ({
+              label: option.label,
+              description: option.description ?? '',
+            })),
+            ...(question.multiSelect !== undefined ? { multiSelect: question.multiSelect } : {}),
+            ...(question.id !== undefined ? { id: question.id } : {}),
+          }
         })
+        // The ACP ext_method reverse request rides the wrapped wire form: a
+        // top-level `_x.ai/ask_user_question` with method + params nested one
+        // level (server.rs method_of / interaction_inner_params). dsh does not
+        // expose the tool call id, so mint an opaque one the client echoes back.
+        const response = await requestClient<AskUserQuestionExtResponse>(conn, '_x.ai/ask_user_question', {
+          method: WIRE.askUserQuestion,
+          params: {
+            sessionId: record.agent.session.id,
+            toolCallId: randomUUID(),
+            questions: grokQuestions,
+            mode: 'default',
+          },
+        })
+        if (response.outcome !== 'accepted') {
+          throw new UserQuestionError('the user cancelled ask_user_question', 'ASK_CANCELLED')
+        }
+        const answers: AskUserQuestionAnswer['answers'] = []
+        for (const [text, labels] of Object.entries(response.answers)) {
+          const id = textToId.get(text)
+          if (id === undefined) continue
+          const notes = response.annotations?.[text]?.notes
+          const selected = labels.filter(label => label !== 'Other')
+          answers.push({ id, selected, ...(notes !== undefined && notes.length > 0 ? { custom: notes } : {}) })
+        }
+        return { answers }
       },
     })
     ctx.effect(() => disposeProvider, 'grok-leader.userQuestions')
@@ -605,6 +690,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       lastSeq: 0,
       turnStartMs: undefined,
       eventSeq: 1,
+      inputTokens: 0,
+      outputTokens: 0,
+      turnCount: 0,
+      toolCallCount: 0,
+      messageCount: 0,
+      textStreamed: false,
       inflight: undefined,
     }
     sessions.set(sessionId, record)
@@ -738,6 +829,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       lastSeq: 0,
       turnStartMs: undefined,
       eventSeq: 1,
+      inputTokens: 0,
+      outputTokens: 0,
+      turnCount: 0,
+      toolCallCount: 0,
+      messageCount: 0,
+      textStreamed: false,
       inflight: undefined,
     }
     sessions.set(sessionId, record)
@@ -748,7 +845,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const conn = connections.get(clientId)
     if (conn !== undefined) {
       for (const event of inspection.events) {
-        for (const item of sessionEventToUpdates(event, { replay: true })) {
+        for (const item of mapEvent(record, event, true)) {
           emitUpdate(conn, record, event.seq, item, true)
         }
       }
@@ -885,18 +982,20 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const p = paramRecord(params, 'x.ai/session/info')
         const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
         const record = sessionId === undefined ? undefined : sessions.get(sessionId)
+        const total = 100000
+        const used = record === undefined ? 0 : record.inputTokens + record.outputTokens
         return {
           result: {
             sessionId: record?.agent.session.id ?? '',
             cwd: record?.agent.session.header.cwd ?? '',
-            turns: 0,
-            turnIndex: 0,
+            turns: record?.turnCount ?? 0,
+            turnIndex: record === undefined ? 0 : Math.max(0, record.turnCount - 1),
             model: null,
             context: {
-              used: 0, total: 100000, systemPromptTokens: 0, toolDefinitionsCount: 0,
-              toolDefinitionsTokens: 0, compactionCount: 0, turnCount: 0,
-              toolCallCount: 0, messageCount: record?.agent.session.events.length ?? 0,
-              messageTokens: 0, freeTokens: 100000, usagePct: 0,
+              used, total, systemPromptTokens: 0, toolDefinitionsCount: 0,
+              toolDefinitionsTokens: 0, compactionCount: 0, turnCount: record?.turnCount ?? 0,
+              toolCallCount: record?.toolCallCount ?? 0, messageCount: record?.messageCount ?? 0,
+              messageTokens: used, freeTokens: total - used, usagePct: Math.min(100, Math.round((used / total) * 100)),
             },
           },
         }
@@ -1187,18 +1286,19 @@ export function promptHasUnsupportedContent(prompt: unknown): boolean {
 
 /**
  * Map one harness session event to the streaming deltas the grok client
- * renders. Live mode maps committed assistant text, reasoning deltas, tool
- * calls, and tool results; user messages map only on replay because the
- * bridge echoes the accepted prompt itself (or the user's message never
- * enters the client transcript).
+ * renders. Assistant text and reasoning stream from assistant/chunk deltas;
+ * the assembled assistant/message is a fallback for providers that never
+ * streamed. Tool calls and tool results stream; user messages map only on
+ * replay because the bridge echoes the accepted prompt itself.
  * @param event - harness session event.
  * @param options.replay - true while replaying a persisted transcript.
- * @returns zero or more wire-shaped updates with optional token totals.
+ * @param options.textStreamed - true once this step already streamed its text.
+ * @returns zero or more wire-shaped updates.
  */
 export function sessionEventToUpdates(
   event: SessionEvent,
-  options: { replay: boolean },
-): Array<GrokSessionUpdate & { totalTokens?: number }> {
+  options: { replay: boolean; textStreamed: boolean },
+): Array<GrokSessionUpdate> {
   if (!options.replay && event.type === 'user/message') return []
   switch (event.type) {
     case 'user/message': {
@@ -1211,18 +1311,22 @@ export function sessionEventToUpdates(
     }
     case 'assistant/chunk': {
       const chunk = event.data.chunk as { type?: string; text?: string }
-      if (chunk.type !== 'reasoning-delta' || typeof chunk.text !== 'string' || chunk.text.length === 0) return []
-      return [{
-        sessionUpdate: 'agent_thought_chunk',
-        content: { type: 'text', text: chunk.text },
-      }]
+      if (typeof chunk.text !== 'string' || chunk.text.length === 0) return []
+      if (chunk.type === 'text-delta') {
+        return [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk.text } }]
+      }
+      if (chunk.type === 'reasoning-delta') {
+        return [{ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: chunk.text } }]
+      }
+      return []
     }
     case 'assistant/message': {
-      const usage = event.data.usage as { outputTokens?: number } | undefined
+      // Text deltas already streamed this step; re-emitting the assembled
+      // content would duplicate them in the TUI. Keep it only as the fallback.
+      if (options.textStreamed) return []
       return textBlocks(event.data.message.content).map(content => ({
         sessionUpdate: 'agent_message_chunk',
         content,
-        ...usage?.outputTokens === undefined ? {} : { totalTokens: usage.outputTokens },
       }))
     }
     case 'tool/call':
