@@ -1,26 +1,25 @@
 #!/usr/bin/env bash
-# deepseek-code one-line installer: clone this repo with its deepseek-harness
-# submodule, build dsh from the submodule (the EMFILE watch-capacity fix ships
-# only in that build), install the grok-leader bridge into the leader profile,
-# download the prebuilt TUI, and link the launchers.
+# deepseek-code installer: the official @deepseek-ai/dsh CLI from npm, the
+# grok-leader bridge as an out-of-tree plugin in the deepseek-leader profile,
+# the prebuilt grok TUI into this repo tree, and launchers into ~/.local/bin.
+# The deepseek-harness submodule is dev/upgrade-only and never required.
+#
+# Known gap: published dsh 0.1.0-rc.6 lacks the EMFILE/ENOSPC watch-capacity
+# fix carried by the fork (upstream PR planned); watch-driven hot reload can
+# degrade under heavy watch pressure until it lands upstream.
 set -euo pipefail
 
-DEST="${DEEPSEEK_CODE_HOME:-$HOME/deepseek-code}"
-# Pinned release tag. Tracking main is opt-in via DEEPSEEK_CODE_BRANCH=main.
-RELEASE="${DEEPSEEK_CODE_RELEASE:-v0.1.0}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The prebuilt TUI is unchanged by harness migrations, so it keeps its own
-# release tag (v0.0.1) rather than tracking the repo release.
+# release tag rather than tracking the repo release.
 TUI_RELEASE="${DEEPSEEK_CODE_TUI_RELEASE:-v0.0.1}"
-BRANCH="${DEEPSEEK_CODE_BRANCH:-}"
-REPO="${DEEPSEEK_CODE_REPO:-https://github.com/HQ1995/deepseek-code.git}"
 
 echo "deepseek-code installer"
-echo "  dest: $DEST"
-echo "  ref: ${BRANCH:-$RELEASE}"
+echo "  repo: $ROOT"
 
-# Toolchain gates: the harness requires node ^22.19.0 || >=24.0.0 and pnpm
-# 11.7.0 (its packageManager pin); fail with a clear message instead of an
-# opaque pnpm/build failure deep into the submodule install.
+# Toolchain gates: node ^22.19.0 || >=24.0.0, npm beside it, and pnpm (the
+# official dsh plugin command forwards to pnpm). Fail with a clear message
+# instead of an opaque pnpm failure deep in the plugin step.
 node_version="$(node -p 'process.version.slice(1)' 2>/dev/null || true)"
 if [[ -z "$node_version" ]]; then
   echo "error: node is required (^22.19.0 || >=24.0.0); install it first" >&2
@@ -32,62 +31,68 @@ if ! { [[ "$node_major" == 22 && "$node_minor" -ge 19 ]] || [[ "$node_major" -ge
   echo "error: node ^22.19.0 || >=24.0.0 required, found $node_version" >&2
   exit 1
 fi
-pnpm_version="$(pnpm -v 2>/dev/null || true)"
-pnpm_major="$(echo "$pnpm_version" | cut -d. -f1)"
-if [[ -z "$pnpm_version" || "$pnpm_major" -lt 11 ]]; then
-  echo "error: pnpm >= 11 required (harness pins 11.7.0), found ${pnpm_version:-none}; enable it with: corepack enable && corepack use pnpm@11.7.0" >&2
+if ! command -v npm >/dev/null 2>&1; then
+  echo "error: npm is required alongside node" >&2
+  exit 1
+fi
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo "error: pnpm is required by 'dsh plugin'; enable it with: corepack enable" >&2
   exit 1
 fi
 
-# Checkout (or update) with the harness submodule materialized.
-if [[ ! -d "$DEST/.git" ]]; then
-  REF="$RELEASE"
-  [[ -n "$BRANCH" ]] && REF="$BRANCH"
-  git clone --depth 1 --branch "$REF" --recurse-submodules --shallow-submodules "$REPO" "$DEST"
+# Official dsh CLI. The launcher prefers this global binary and falls back to
+# npx on demand, so a failed global install is a warning, not a stop.
+DSH_BIN="$(npm prefix -g)/bin/dsh"
+if npm install -g @deepseek-ai/dsh@next >/dev/null; then
+  echo "  installed @deepseek-ai/dsh@next ($("$DSH_BIN" --version))"
 else
-  git -C "$DEST" fetch --tags --force --prune
-  if [[ -n "$BRANCH" ]]; then
-    git -C "$DEST" checkout "$BRANCH"
-    git -C "$DEST" pull --ff-only
-  else
-    git -C "$DEST" checkout --detach "$RELEASE"
-  fi
-  git -C "$DEST" submodule update --init --recursive
+  echo "  warning: 'npm install -g @deepseek-ai/dsh@next' failed; the launcher will use: npx --yes @deepseek-ai/dsh" >&2
+fi
+if [[ -x "$DSH_BIN" ]]; then
+  DSH_RUN=("$DSH_BIN")
+else
+  DSH_RUN=(npx --yes @deepseek-ai/dsh)
 fi
 
-# Build dsh from the harness submodule so the launcher runs a binary that
-# contains the EMFILE/ENOSPC watch-capacity degradation (npm 0.1.0-rc.6 lacks
-# it). This also materializes the packages the bridge's peers resolve to.
-echo "  building dsh from deepseek-harness (pnpm; several minutes)..."
-( cd "$DEST/deepseek-harness" && pnpm install --frozen-lockfile && pnpm run build:lib )
-
-# Build the bridge against the same harness tree, then install it as a plugin
-# into the deepseek-leader profile.
+# Build the bridge against its pinned npm peers, then install it as a plugin
+# into the deepseek-leader profile. The official CLI initializes the profile
+# with the dsh-base bundle and reconciles the bridge's cordis.patch.yml layer.
 echo "  building the grok-leader bridge..."
-( cd "$DEST/bridge/grok-leader" && pnpm install && pnpm run build )
+( cd "$ROOT/bridge/grok-leader" && pnpm install && pnpm run build )
 echo "  installing the bridge into the deepseek-leader profile..."
-"$DEST/bin/dsh" plugin --profile deepseek-leader add "file:$DEST/bridge/grok-leader"
+"${DSH_RUN[@]}" plugin --profile deepseek-leader add "file:$ROOT/bridge/grok-leader"
 
-# Prebuilt TUI binary (unchanged by this migration).
-mkdir -p "$DEST/third_party/grok-build/target/release"
+# Prebuilt TUI binary into the repo tree.
+mkdir -p "$ROOT/third_party/grok-build/target/release"
 if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
-  if [[ -x "$DEST/third_party/grok-build/target/release/dscode" ]]; then
+  if [[ -x "$ROOT/third_party/grok-build/target/release/dscode" ]]; then
     echo "  prebuilt dscode already present; skipping download"
   else
     echo "  downloading prebuilt dscode ($TUI_RELEASE)..."
-    curl -fL -o "$DEST/third_party/grok-build/target/release/dscode" \
+    curl -fL -o "$ROOT/third_party/grok-build/target/release/dscode" \
       "https://github.com/HQ1995/deepseek-code/releases/download/$TUI_RELEASE/dscode-linux-x86_64"
-    chmod +x "$DEST/third_party/grok-build/target/release/dscode"
+    chmod +x "$ROOT/third_party/grok-build/target/release/dscode"
   fi
 else
   echo "  no prebuilt binary for this platform; building TUI with cargo (takes minutes)..."
-  ( cd "$DEST/third_party/grok-build" && cargo build --release -p xai-grok-pager-bin )
+  ( cd "$ROOT/third_party/grok-build" && cargo build --release -p xai-grok-pager-bin )
 fi
 
+# Launchers. dsh is linked only when no working dsh is reachable on PATH (the
+# official CLI usually owns that name); a foreign regular file is left alone.
 mkdir -p "$HOME/.local/bin"
-ln -sf "$DEST/bin/dscode" "$HOME/.local/bin/dscode"
-ln -sf "$DEST/bin/dsh" "$HOME/.local/bin/dsh"
+ln -sf "$ROOT/bin/dscode" "$HOME/.local/bin/dscode"
+if dsh --version >/dev/null 2>&1; then
+  echo "  dsh already reachable on PATH; leaving it in place"
+elif [[ -e "$HOME/.local/bin/dsh" && ! -L "$HOME/.local/bin/dsh" ]]; then
+  echo "  warning: $HOME/.local/bin/dsh exists and is not a symlink; leaving it alone" >&2
+else
+  ln -sf "$ROOT/bin/dsh" "$HOME/.local/bin/dsh"
+  echo "  linked dsh"
+fi
 
 echo
 echo "done. run: dscode"
 echo "  (make sure $HOME/.local/bin is on PATH)"
+echo "  note: published dsh 0.1.0-rc.6 lacks the EMFILE/ENOSPC watch-capacity"
+echo "  fix carried by the fork; watch-driven hot reload may degrade under load."

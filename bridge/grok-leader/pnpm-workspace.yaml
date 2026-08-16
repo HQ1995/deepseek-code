@@ -1,8 +1,7 @@
 packages:
   - .
 
-# Peer deps (cordis/schemastery and every @deepseek-ai/dsh-*) resolve from the
-# built deepseek-harness tree at build/runtime through project references and
-# the profile fallback, never from npm. Keep the standalone bridge build from
-# pulling registry copies of them.
+# Peer deps (cordis/schemastery and every @deepseek-ai/dsh-*) are installed as
+# devDependencies at the same pinned ^0.1.0-rc.6 versions the official npm dsh
+# ships, so this build stays out of the deepseek-harness submodule.
 autoInstallPeers: false
