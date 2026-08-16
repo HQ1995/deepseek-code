@@ -1,0 +1,23 @@
+{
+  // Out-of-tree build: compile the bridge against the deepseek-harness
+  // submodule's composite projects via project references (the same graph the
+  // submodule's own build uses), so bridge and dsh CLI share one type source.
+  "extends": "../../deepseek-harness/tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../../deepseek-harness/vendor/cosmokit" },
+    { "path": "../../deepseek-harness/vendor/cordis" },
+    { "path": "../../deepseek-harness/vendor/schemastery" },
+    { "path": "../../deepseek-harness/packages/core/session" },
+    { "path": "../../deepseek-harness/packages/core/agent" },
+    { "path": "../../deepseek-harness/packages/llm/llm" },
+    { "path": "../../deepseek-harness/packages/interaction/user-approval" },
+    { "path": "../../deepseek-harness/packages/interaction/user-questions" },
+    { "path": "../../deepseek-harness/packages/session/session-persistence" },
+    { "path": "../../deepseek-harness/packages/runtime-diagnostics/invariants" }
+  ]
+}

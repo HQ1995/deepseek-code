@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# dsh CLI from the built deepseek-harness submodule. Building from the
+# submodule (rather than npm) is what ships the EMFILE watch-capacity fix.
+exec node "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/deepseek-harness/apps/cli/lib/bin.js" "$@"

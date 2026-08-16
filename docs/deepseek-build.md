@@ -9,13 +9,13 @@ driving the DeepSeek Harness agent runtime.
   source (Apache-2.0). The TUI is `crates/codegen/xai-grok-pager` with its
   composition root `xai-grok-pager-bin`; the vendored copy renames the binary
   artifact to `dscode` (`[[bin]] name = "dscode"`).
-- `packages/`, `apps/cli` — the DeepSeek Harness fork (MIT): agent runtime,
-  Cordis plugin system, provider/model directory, sessions and persistence,
-  tools, approvals.
+- `deepseek-harness/` — the DeepSeek Harness fork (MIT), pinned as a git
+  submodule: agent runtime, Cordis plugin system, provider/model directory,
+  sessions and persistence, tools, approvals.
 - The seam: grok's **leader protocol** — 4-byte big-endian length-prefixed JSON
   frames over a unix socket (`xai-grok-shell/src/leader/{protocol,transport,server,client}.rs`).
   The TUI runs in leader-client mode; a harness-owned plugin
-  (`packages/bridge/grok-leader`, in progress) listens on the socket and maps
+  (`bridge/grok-leader`) listens on the socket and maps
   the protocol onto the harness's Agent/Session/llm services.
 
 ## Status
