@@ -8,7 +8,7 @@ The grok-build terminal UI driving the DeepSeek Harness. Full terminal experienc
 curl -fsSL https://raw.githubusercontent.com/HQ1995/deepseek-code/main/scripts/install.sh | bash
 ```
 
-Requirements: git, a Rust toolchain (rustup), Node 22+, pnpm. First install builds the TUI from source (a few minutes).
+Requirements: git, Node 22+, pnpm. Linux x86_64 downloads a prebuilt TUI binary; other platforms build it with cargo.
 
 ## Use
 
