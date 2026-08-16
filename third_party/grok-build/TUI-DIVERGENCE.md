@@ -24,6 +24,14 @@ branding (our identity). Keep this list current on every sync.
   ever changes, update these labels too.
 - Persona/preset selection is fed by the bridge's bundle/status personas;
   no TUI-side persona list of its own.
+- /provider command (crates/codegen/xai-grok-pager/src/slash/commands/provider.rs):
+  lists providers from the bridge's initialize _meta.modelState.providers and
+  switches the session to the picked provider's first catalog model by reusing
+  the existing SetDefaultModel pipeline. The "current provider" is derived
+  from the current model's provider meta (the bridge's currentProviderId is
+  only a fallback), and /model's dropdown filters to that provider. The bridge
+  owns provider auth/config (~/.dsh); the TUI never hardcodes provider auth
+  assumptions.
 
 ## Feature
 

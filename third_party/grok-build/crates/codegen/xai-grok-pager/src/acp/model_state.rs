@@ -52,11 +52,23 @@ pub struct ModelState {
     pub available: IndexMap<acp::ModelId, acp::ModelInfo>,
     pub current: Option<acp::ModelId>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Provider roster as advertised by the agent (id, optional name).
+    pub providers: Vec<ProviderInfo>,
+    /// Provider owning `current` ('' when unknown). dscode: session-scoped
+    /// provider filter for /model; see slash::commands::provider.
+    pub current_provider: Option<String>,
     /// External override for the context window size (tokens).
     /// When set, `get_context_window()` returns this instead of
     /// reading from the current model's metadata. Used for subagent
     /// views where SubagentProgress reports the actual window size.
     context_window_override: Option<u64>,
+}
+
+/// One provider row from _meta.modelState.providers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInfo {
+    pub id: String,
+    pub name: Option<String>,
 }
 
 impl ModelState {
@@ -77,6 +89,52 @@ impl ModelState {
     /// Machine-readable model ID string for the current model (e.g. "grok-4.5").
     pub fn current_model_id_str(&self) -> Option<&str> {
         Some(self.current.as_ref()?.0.as_ref())
+    }
+
+    /// Provider owning the current model ('' when no model or unknown).
+    /// Derived from the current model's catalog meta so a switch (via /model,
+    /// /provider, or a session/set_model) moves the scope immediately; the
+    /// bridge's currentProviderId is only the fallback for a current model
+    /// the catalog does not describe.
+    pub fn current_provider_id(&self) -> &str {
+        if let Some(provider) = self
+            .current
+            .as_ref()
+            .map(|id| self.provider_for(id))
+            .filter(|p| !p.is_empty())
+        {
+            return provider;
+        }
+        self.current_provider.as_deref().unwrap_or("")
+    }
+
+    /// Provider owning `id` ('' when absent from the catalog).
+    pub fn provider_for(&self, id: &acp::ModelId) -> &str {
+        self.available
+            .get(id)
+            .and_then(|info| info.meta.as_ref())
+            .and_then(|meta| meta.get("provider"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    }
+
+    /// The provider a freshly-picked model would belong to, derived from the
+    /// current model so no separate TUI-side selection state exists. '' when
+    /// no model is active (dashboard seed before a session exists).
+    pub fn current_provider_scope(&self) -> &str {
+        self.current_provider_id()
+    }
+
+    /// Models offered to the /model surface and effort autocomplete: scoped to
+    /// the current provider when one is selected, plus the current model itself
+    /// when it lives outside the scope (a pending cross-provider switch is
+    /// still visible as "(current)").
+    pub fn scoped_models(&self) -> impl Iterator<Item = (&acp::ModelId, &acp::ModelInfo)> {
+        let scope = self.current_provider_scope();
+        self.available.iter().filter(move |(id, _)| {
+            let provider = self.provider_for(*id);
+            provider.is_empty() || scope.is_empty() || provider == scope || Some(*id) == self.current.as_ref()
+        })
     }
 
     /// Total context window tokens for the current model (if available).
@@ -300,6 +358,31 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     available: models,
                     current: current_model,
                     reasoning_effort,
+                    providers: state
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.get("providers"))
+                        .and_then(|v| v.as_array())
+                        .map(|rows| {
+                            rows.iter()
+                                .filter_map(|row| {
+                                    let id = row.get("id")?.as_str()?.to_string();
+                                    let name = row
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .map(str::to_string);
+                                    Some(ProviderInfo { id, name })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    current_provider: state
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.get("currentProviderId"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
                     context_window_override: None,
                 }
             })

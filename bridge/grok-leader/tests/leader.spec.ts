@@ -353,6 +353,13 @@ describe('grok leader over a unix socket', () => {
             { modelId: 'deepseek-reasoner', name: 'DeepSeek Reasoner', _meta: { provider: 'deepseek' } },
             { modelId: 'pi-code', name: 'Pi Code', _meta: { provider: 'pi' } },
           ],
+          _meta: {
+            currentProviderId: '',
+            providers: [
+              { id: 'deepseek', name: 'DeepSeek' },
+              { id: 'pi', name: 'Pi AI' },
+            ],
+          },
         },
       },
     })
@@ -396,6 +403,13 @@ describe('grok leader over a unix socket', () => {
         { modelId: 'deepseek-reasoner', name: 'DeepSeek Reasoner', _meta: { provider: 'deepseek' } },
         { modelId: 'pi-code', name: 'Pi Code', _meta: { provider: 'pi' } },
       ],
+      _meta: {
+        currentProviderId: '',
+        providers: [
+          { id: 'deepseek', name: 'DeepSeek' },
+          { id: 'pi', name: 'Pi AI' },
+        ],
+      },
     })
 
     const listed = await c.request(4, 'session/list', {})
@@ -626,6 +640,10 @@ describe('grok leader over a unix socket', () => {
         { modelId: 'only-a', name: 'Only A', _meta: { provider: 'a' } },
         { modelId: 'only-b', name: 'Only B', _meta: { provider: 'b' } },
       ],
+      _meta: {
+        currentProviderId: 'a',
+        providers: [{ id: 'a' }, { id: 'b' }],
+      },
     })
   })
 
