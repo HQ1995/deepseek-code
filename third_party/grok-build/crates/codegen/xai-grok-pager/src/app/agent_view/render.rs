@@ -52,7 +52,7 @@ pub struct AppRenderParams<'a> {
     /// advertises `Esc cancel` while an app-level owner would consume it.
     pub esc_owned_before_agent: bool,
     /// Current agent preset label shown in the prompt footer: the picked
-    /// persona when set, otherwise the roster default "standard".
+    /// persona when set, otherwise the roster default "minimal".
     pub preset_label: &'a str,
 }
 /// What the bottom shortcuts bar renders this frame.

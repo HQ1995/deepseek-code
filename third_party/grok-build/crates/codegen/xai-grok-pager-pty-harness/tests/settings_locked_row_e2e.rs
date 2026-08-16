@@ -42,7 +42,7 @@ const TEAM_REASON: &str = "Managed by your team admin.";
 /// Head of the row's description in `settings/defs.rs`. Kept short so it
 /// can't span one of the modal's word wraps — `contains_text` joins rows
 /// with `\n`, so a match on wrapped copy would silently never fire.
-const DESCRIPTION_PREFIX: &str = "Opt-in to provide SpaceXAI";
+const DESCRIPTION_PREFIX: &str = "Opt-in to provide DeepSeek";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore] // opt-in: spawns the real pager binary in a PTY (CI runs with --ignored)

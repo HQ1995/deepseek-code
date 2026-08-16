@@ -4886,7 +4886,7 @@ impl AppView {
                                     voice_listening,
                                     voice_interim: voice_interim.as_deref(),
                                     esc_owned_before_agent,
-                                    preset_label: self.persona_override.as_deref().unwrap_or("standard"),
+                                    preset_label: self.persona_override.as_deref().unwrap_or("minimal"),
                                 },
                             );
                             if let Some(modal) = self.import_claude_modal.as_mut() {
@@ -5005,7 +5005,7 @@ impl AppView {
                                                     link_spans,
                                                     AppRenderParams {
                                                         esc_owned_before_agent,
-                                                        preset_label: self.persona_override.as_deref().unwrap_or("standard"),
+                                                        preset_label: self.persona_override.as_deref().unwrap_or("minimal"),
                                                         ..Default::default()
                                                     },
                                                 )
