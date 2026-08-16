@@ -6,7 +6,7 @@ Apache-2.0) driving the DeepSeek Harness agent runtime.
 ## Build
 
 ```sh
-scripts/install.sh              # build the harness submodule, build+install the bridge, fetch the TUI
+scripts/install.sh              # install official dsh (npm/npx), build+install the bridge, fetch the TUI
 scripts/build-deepseek-tui.sh   # (dev) cargo build --release of the vendored TUI
 ```
 
