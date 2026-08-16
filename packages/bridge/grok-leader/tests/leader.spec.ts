@@ -22,6 +22,7 @@ interface MockAgentInternals {
   cancelCalls: number
   followups: string[]
   disposed: boolean
+  idleWaiters: Array<() => void>
 }
 
 type MockAgent = Agent & { internals: MockAgentInternals }
@@ -35,12 +36,12 @@ interface MockRegistry {
   get(id: SessionId): Agent | undefined
 }
 
-function makeMockRegistry(ctx: Context): MockRegistry {
+function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry {
   const created: Array<{ sessionId: string; cwd?: string }> = []
   const resumed: Array<{ sessionId: string }> = []
   const byId = new Map<string, MockAgent>()
   const makeAgent = (sessionId: SessionId, cwd: string | undefined): MockAgent => {
-    const internals: MockAgentInternals = { cancelCalls: 0, followups: [], disposed: false }
+    const internals: MockAgentInternals = { cancelCalls: 0, followups: [], disposed: false, idleWaiters: [] }
     const agent = {
       id: sessionId,
       options: {} as AgentOptions,
@@ -54,7 +55,10 @@ function makeMockRegistry(ctx: Context): MockRegistry {
       ctx,
       internals,
       cancel() { internals.cancelCalls += 1 },
-      whenIdle() { return Promise.resolve() },
+      whenIdle() {
+        if (!manualIdle) return Promise.resolve()
+        return new Promise<void>((resolveIdle) => { internals.idleWaiters.push(resolveIdle) })
+      },
       runMaintenance(task: (signal: AbortSignal) => Promise<unknown>) { return task(new AbortController().signal) },
       send() {},
       followup(message: unknown) {
@@ -105,6 +109,14 @@ const mockLlm = {
     : provider === 'pi'
       ? [{ provider: 'pi', id: 'pi-code', name: 'Pi Code' }]
       : [],
+}
+
+/** Two providers that both list the id "shared": exercises the catalog dedup. */
+const collidingLlm = {
+  listProviders: () => [{ id: 'a' }, { id: 'b' }],
+  listModels: async (provider: string) => provider === 'a'
+    ? [{ id: 'shared', name: 'Shared A' }, { id: 'only-a', name: 'Only A' }]
+    : [{ id: 'shared', name: 'Shared B' }, { id: 'only-b', name: 'Only B' }],
 }
 
 function makeMockPersistence() {
@@ -220,13 +232,50 @@ async function makeClient(socketPath: string): Promise<ClientHandle> {
   }
 }
 
-async function makeHarness(options: { presets?: boolean } = {}): Promise<LeaderHarness> {
+/** Poll until the predicate holds, then return; fail after the timeout. */
+async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() > deadline) throw new Error('waitFor timed out')
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 1) })
+  }
+}
+
+/** Fire a JSON-RPC request without awaiting its response (deferred-response tests). */
+function sendRequest(client: ClientHandle, id: number, method: string, params?: unknown): void {
+  const payload: Record<string, unknown> = { jsonrpc: '2.0', id, method }
+  if (params !== undefined) payload.params = params
+  client.send({ type: 'acp', payload: JSON.stringify(payload) })
+}
+
+/** Consume frames until the response with id arrives, dropping the rest. */
+async function waitForId(client: ClientHandle, id: number): Promise<Record<string, unknown>> {
+  for (;;) {
+    const msg = await client.next()
+    if (msg.id === id) return msg
+  }
+}
+
+/** Consume frames until every requested id has been answered (order-independent). */
+async function collectIds(client: ClientHandle, ids: number[]): Promise<Map<number, Record<string, unknown>>> {
+  const found = new Map<number, Record<string, unknown>>()
+  while (found.size < ids.length) {
+    const msg = await client.next()
+    if (typeof msg.id === 'number' && ids.includes(msg.id)) found.set(msg.id, msg)
+  }
+  return found
+}
+
+async function makeHarness(
+  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string } = {},
+): Promise<LeaderHarness> {
   const ctx = new Context()
-  const registry = makeMockRegistry(ctx)
+  const registry = makeMockRegistry(ctx, options.manualIdle === true)
   const persistence = makeMockPersistence()
   const presets = options.presets === true ? makeMockPresets() : undefined
   ctx.provide('agents', registry as unknown as Context['agents'])
-  ctx.provide('llm', mockLlm as unknown as Context['llm'])
+  ctx.provide('llm', options.llm ?? mockLlm as unknown as Context['llm'])
   ctx.provide('sessionPersistence', persistence as unknown as Context['sessionPersistence'])
   ctx.provide('sessions', mockSessionsStore as unknown as Context['sessions'])
   if (presets !== undefined) ctx.provide('agentPresets', presets as unknown as Context['agentPresets'])
@@ -235,7 +284,7 @@ async function makeHarness(options: { presets?: boolean } = {}): Promise<LeaderH
   await ctx.plugin({
     name: 'grok-leader-test',
     inject: [...GrokLeader.inject],
-    apply: (inner: Context) => { GrokLeader.apply(inner, { socketPath }) },
+    apply: (inner: Context) => { GrokLeader.apply(inner, { socketPath, ...options.model === undefined ? {} : { model: options.model } }) },
   })
   return { ctx, socketPath, registry, persistence, presets }
 }
@@ -256,7 +305,9 @@ describe('grok leader over a unix socket', () => {
     mockDefaultModel.saved.length = 0
   })
 
-  const start = async (options: { presets?: boolean } = {}): Promise<LeaderHarness & { client: ClientHandle }> => {
+  const start = async (
+    options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string } = {},
+  ): Promise<LeaderHarness & { client: ClientHandle }> => {
     harness = await makeHarness(options)
     client = await makeClient(harness.socketPath)
     return { ...harness, client }
@@ -501,5 +552,110 @@ describe('grok leader over a unix socket', () => {
     const switched = await c.request(2, 'session/set_model', { sessionId, modelId: 'pi-code', _meta: { reasoningEffort: 'high' } })
     expect(switched.result).toEqual({})
     expect(mockDefaultModel.saved).toEqual([{ provider: 'pi', model: 'pi-code', reasoningEffort: 'high' }])
+  })
+
+  it('queues a second prompt behind the in-flight one (FIFO)', async () => {
+    const { registry, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)
+    expect(agent).toBeDefined()
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent!.internals.idleWaiters.length === 1)
+    expect(agent!.internals.followups).toEqual(['first'])
+
+    // The second prompt must queue instead of hard-erroring while the first runs.
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
+    expect(agent!.internals.followups).toEqual(['first'])
+
+    agent!.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 2)).result).toEqual({ stopReason: 'cancelled' })
+    await waitFor(() => agent!.internals.followups.length === 2 && agent!.internals.idleWaiters.length === 1)
+    expect(agent!.internals.followups).toEqual(['first', 'second'])
+
+    agent!.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
+  })
+
+  it('cancel settles the in-flight and queued prompts as cancelled', async () => {
+    const { registry, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'one' }] })
+    await waitFor(() => agent!.internals.idleWaiters.length === 1)
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'two' }] })
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
+    expect(agent!.internals.followups).toEqual(['one'])
+
+    c.notify('session/cancel', { sessionId })
+    const responses = await collectIds(c, [2, 3])
+    expect(responses.get(2)!.result).toEqual({ stopReason: 'cancelled' })
+    expect(responses.get(3)!.result).toEqual({ stopReason: 'cancelled' })
+    expect(agent!.internals.followups).toEqual(['one']) // the queued prompt never ran
+  })
+
+  it('dedupes colliding model ids and falls back to a catalog entry', async () => {
+    const { client: c } = await start({ llm: collidingLlm, model: 'not-in-catalog' })
+    register(c)
+    await c.next()
+
+    const initialize = await c.request(0, 'initialize', { protocolVersion: 1 })
+    const modelState = (initialize.result as {
+      _meta: { modelState: { currentModelId: string; availableModels: Array<{ modelId: string; name: string }> } }
+    })._meta.modelState
+    expect(modelState.availableModels).toEqual([
+      { modelId: 'shared', name: 'Shared A' },
+      { modelId: 'only-a', name: 'Only A' },
+      { modelId: 'only-b', name: 'Only B' },
+    ])
+    expect(modelState.currentModelId).toEqual('shared')
+
+    const models = await c.request(1, 'x.ai/models/list', {})
+    expect(models.result).toEqual({
+      currentModelId: 'shared',
+      availableModels: [
+        { modelId: 'shared', name: 'Shared A' },
+        { modelId: 'only-a', name: 'Only A' },
+        { modelId: 'only-b', name: 'Only B' },
+      ],
+    })
+  })
+
+  it('advertises the preset command and serves the session prompt history', async () => {
+    const { client: c } = await start({ presets: true })
+    register(c)
+    await c.next()
+
+    const initialize = await c.request(0, 'initialize', { protocolVersion: 1 })
+    const meta = (initialize.result as {
+      _meta: { cancelRewind: boolean; availableCommands: Array<{ name: string; description: string; input?: { hint: string } }> }
+    })._meta
+    expect(meta.cancelRewind).toBe(false)
+    expect(meta.availableCommands).toEqual([
+      { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | code | minimal | cordis' } },
+    ])
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    await c.request(2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hello' }] })
+    await c.next() // consume the echoed user_message_chunk before the next request
+
+    const commands = await c.request(3, 'x.ai/commands/list', { sessionId })
+    expect(commands.result).toEqual({
+      commands: [
+        { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | code | minimal | cordis' } },
+      ],
+    })
+
+    const history = await c.request(4, 'x.ai/prompt_history', { cwd: process.cwd(), filter_session_id: sessionId })
+    expect(history.result).toEqual({ prompts: ['hello'] })
   })
 })

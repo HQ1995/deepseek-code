@@ -148,6 +148,15 @@ interface SessionRecord {
   turnStartMs: number | undefined
   /** Monotonic per-session counter stamped into every update _meta.eventSeq. */
   eventSeq: number
+  /** Accepted user prompts, oldest first; served by x.ai/prompt_history. */
+  prompts: string[]
+  /** FIFO of validated prompts waiting for the in-flight one to settle.
+   *  ponytail: plain per-session FIFO; no grok send-now/interject/reorder. */
+  promptQueue: Array<{
+    p: Record<string, unknown>
+    resolve: (value: { stopReason: StopReasonWire }) => void
+    reject: (error: Error) => void
+  }>
   inflight: {
     resolve: (reason: StopReasonWire) => void
     reject: (error: Error) => void
@@ -225,7 +234,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const availableModels: ModelCatalog['availableModels'] = []
     for (const row of rows) {
       for (const model of row.models) {
-        if (!providerByModel.has(model.id)) providerByModel.set(model.id, row.provider)
+        // Deterministic dedup: the first provider that lists an id owns it.
+        if (providerByModel.has(model.id)) continue
+        providerByModel.set(model.id, row.provider)
         availableModels.push({
           modelId: model.id,
           name: model.name,
@@ -233,10 +244,18 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         })
       }
     }
+    const requested = config.model
+      ?? (ctx.get('agentDefaultModel') as { currentSelection?: () => { model: string } } | undefined)?.currentSelection?.().model
+      ?? ''
+    // A configured model absent from the catalog must not reach the client as
+    // an unresolvable currentModelId; fall back to the catalog's first entry.
+    let currentModelId = requested
+    if (currentModelId !== '' && !providerByModel.has(currentModelId)) {
+      currentModelId = availableModels[0]?.modelId ?? ''
+      logger.warn('grok-leader: model "' + requested + '" is not in the catalog; falling back to "' + currentModelId + '"')
+    }
     catalog = {
-      currentModelId: config.model
-        ?? (ctx.get('agentDefaultModel') as { currentSelection?: () => { model: string } } | undefined)?.currentSelection?.().model
-        ?? '',
+      currentModelId,
       availableModels,
       providerByModel,
     }
@@ -441,6 +460,23 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return params as Record<string, unknown>
   }
 
+  /**
+   * Slash commands advertised to the grok TUI. The only real bridge command is
+   * /preset, sourced from the live preset roster; grok built-ins (/compact, …)
+   * are not implemented here and stay off the wire. ponytail: advertising only,
+   * /preset is not executed as a preset switch — it reaches the model as text.
+   */
+  const availableCommands = async (): Promise<Array<{ name: string; description: string; input?: { hint: string } }>> => {
+    const roster = agentPresets()
+    const presets = roster === undefined ? [] : await roster.list()
+    if (presets.length === 0) return []
+    return [{
+      name: 'preset',
+      description: 'Switch the active agent preset',
+      input: { hint: presets.map(preset => preset.id).join(' | ') },
+    }]
+  }
+
   const initializeResponse = async (): Promise<unknown> => {
     const current = await refreshCatalog()
     return {
@@ -456,16 +492,17 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       // own credentials, so the bridge answers authenticate with no meta.
       authMethods: [{ id: 'xai.api_key', name: 'API key' }],
       agentInfo: { name: 'deepseek-harness-grok-leader', version: '0.1.0-rc.5' },
-      // TODO(verify): grokShell/cancelRewind/sessionRecap mirror the captured
-      // stub initialize result verbatim; cancelRewind semantics are unverified
-      // (mvp_agent/acp_agent.rs initialize). modelState flattens provider-scoped
-      // dsh model ids into one global catalog of modelId strings (agent.rs
-      // SessionModelState); the leader-side providerByModel map keeps the
-      // provider ownership for session/set_model.
+      // cancelRewind is false: the bridge cancels turns but does not implement
+      // the client-side rewind composer restore, so it stays unadvertised.
+      // modelState flattens provider-scoped dsh model ids into one global
+      // catalog of modelId strings (agent.rs SessionModelState); the
+      // leader-side providerByModel map keeps provider ownership for
+      // session/set_model.
       _meta: {
         grokShell: true,
-        cancelRewind: true,
+        cancelRewind: false,
         sessionRecap: false,
+        availableCommands: await availableCommands(),
         modelState: {
           currentModelId: current.currentModelId,
           availableModels: current.availableModels,
@@ -605,6 +642,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       lastSeq: 0,
       turnStartMs: undefined,
       eventSeq: 1,
+      prompts: [],
+      promptQueue: [],
       inflight: undefined,
     }
     sessions.set(sessionId, record)
@@ -622,19 +661,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return { sessionId }
   }
 
-  const prompt = async (params: unknown): Promise<unknown> => {
-    assertOpen()
-    const p = paramRecord(params, 'session/prompt')
-    const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
-    const record = sessionId === undefined ? undefined : sessions.get(sessionId)
-    if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
-    if (record.inflight !== undefined) throw invalidParams('a prompt is already in flight for this session')
-    const blocks = p.prompt
-    if (promptHasUnsupportedContent(blocks)) {
-      throw invalidParams('only text and resource_link prompt content is supported')
-    }
-    const text = acpPromptToText(blocks)
-    if (text.trim().length === 0) throw invalidParams('empty prompt')
+  /**
+   * Run one validated prompt: admit it, stream the echo, and settle at turn
+   * end (or idle for a turnless slot). Reads the prompt content from p again
+   * because the queued entry stores the raw request, not a decoded message.
+   */
+  const runPrompt = async (record: SessionRecord, p: Record<string, unknown>): Promise<{ stopReason: StopReasonWire }> => {
+    const text = acpPromptToText(p.prompt)
     if (agents.get(record.agent.id) !== record.agent) {
       throw internalError('prompt was not queued: the agent was disposed outside the bridge')
     }
@@ -671,6 +704,44 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return { stopReason }
   }
 
+  /** Start the next queued prompt once the in-flight one has settled. */
+  const advancePromptQueue = (record: SessionRecord): void => {
+    if (record.inflight !== undefined) return
+    const entry = record.promptQueue.shift()
+    if (entry === undefined) return
+    void runPrompt(record, entry.p).then(entry.resolve, entry.reject).finally(() => advancePromptQueue(record))
+  }
+
+  /** Settle every queued (not-yet-run) prompt as cancelled (cancel/close/teardown). */
+  const discardPromptQueue = (record: SessionRecord): void => {
+    for (const entry of record.promptQueue.splice(0)) entry.resolve({ stopReason: 'cancelled' })
+  }
+
+  /** Enqueue a validated prompt and run it as soon as the session is idle. */
+  const enqueuePrompt = (record: SessionRecord, p: Record<string, unknown>): Promise<{ stopReason: StopReasonWire }> =>
+    new Promise((resolve, reject) => {
+      record.promptQueue.push({ p, resolve, reject })
+      advancePromptQueue(record)
+    })
+
+  const prompt = async (params: unknown): Promise<unknown> => {
+    assertOpen()
+    const p = paramRecord(params, 'session/prompt')
+    const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
+    const record = sessionId === undefined ? undefined : sessions.get(sessionId)
+    if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
+    const blocks = p.prompt
+    if (promptHasUnsupportedContent(blocks)) {
+      throw invalidParams('only text and resource_link prompt content is supported')
+    }
+    const text = acpPromptToText(blocks)
+    if (text.trim().length === 0) throw invalidParams('empty prompt')
+    // A prompt joins the session history at acceptance, mirroring the grok
+    // shell's queue-time history append.
+    record.prompts.push(text)
+    return await enqueuePrompt(record, p)
+  }
+
   const cancel = (params: unknown): void => {
     const p = typeof params === 'object' && params !== null && !Array.isArray(params)
       ? params as Record<string, unknown>
@@ -680,6 +751,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (record === undefined) return
     record.agent.cancel({ kind: 'user' })
     settlePrompt(record, 'cancelled')
+    discardPromptQueue(record)
   }
 
   const loadSession = async (clientId: number, params: unknown): Promise<unknown> => {
@@ -694,6 +766,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       sessions.delete(sessionId)
       existing.agent.cancel({ kind: 'user' })
       settlePrompt(existing, 'cancelled')
+      discardPromptQueue(existing)
       const store = ctx.get('sessions') as SessionsLike | undefined
       if (store !== undefined) await store.flush(existing.agent.session)
       await existing.dispose()
@@ -738,6 +811,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       lastSeq: 0,
       turnStartMs: undefined,
       eventSeq: 1,
+      prompts: [],
+      promptQueue: [],
       inflight: undefined,
     }
     sessions.set(sessionId, record)
@@ -806,6 +881,18 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
+  /** One session's accepted prompts, most-recent-first (scrollback/up-arrow). */
+  const promptHistory = (params: unknown): { prompts: string[] } => {
+    const p = paramRecord(params, 'x.ai/prompt_history')
+    const scoped = typeof p.filter_session_id === 'string'
+      ? SessionId(p.filter_session_id)
+      : typeof p.session_id === 'string'
+        ? SessionId(p.session_id)
+        : undefined
+    const record = scoped === undefined ? undefined : sessions.get(scoped)
+    return { prompts: record === undefined ? [] : [...record.prompts].reverse() }
+  }
+
   /**
    * The dsh preset roster as the grok bundle persona list. The TUI renders
    * one persona per preset; selecting one sends its name back as
@@ -842,6 +929,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
     record.agent.cancel({ kind: 'user' })
     settlePrompt(record, 'cancelled')
+    discardPromptQueue(record)
     sessions.delete(record.agent.session.id)
     const store = ctx.get('sessions') as SessionsLike | undefined
     if (store !== undefined) await store.flush(record.agent.session)
@@ -870,9 +958,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       case WIRE.modelsList:
         return await modelsList()
       case 'x.ai/commands/list':
-        return { commands: [] }
+        return { commands: await availableCommands() }
       case 'x.ai/prompt_history':
-        return { prompts: [] }
+        return promptHistory(params)
       case 'x.ai/marketplace/list':
         return { sources: [] }
       case 'x.ai/billing':
@@ -979,6 +1067,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     for (const record of records) {
       record.agent.cancel({ kind: 'user' })
       settlePrompt(record, 'cancelled')
+      discardPromptQueue(record)
       sessions.delete(record.agent.session.id)
       void record.dispose()
     }
@@ -1112,6 +1201,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     for (const record of records) {
       record.agent.cancel({ kind: 'user' })
       settlePrompt(record, 'cancelled')
+      discardPromptQueue(record)
     }
     quiescing = (async () => {
       for (const conn of connections.values()) conn.socket.destroy()
