@@ -11,6 +11,7 @@ mod config_toml_edit;
 pub mod diagnostics;
 pub mod disk_usage_cmd;
 pub mod docs;
+pub mod dsh_leader;
 pub mod doctor_cmd;
 pub mod export_cmd;
 pub(crate) mod fs_size;

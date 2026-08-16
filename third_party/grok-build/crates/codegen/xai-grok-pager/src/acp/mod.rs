@@ -269,7 +269,8 @@ pub async fn connect_via_leader(
     raw_config: &toml::Value,
 ) -> Result<AcpConnection> {
     use xai_grok_shell::leader::{
-        ClientCapabilities, ClientMode, LeaderReconnector, ReconnectPolicy, connect_or_spawn,
+        ClientCapabilities, ClientMode, LeaderReconnector, ReconnectPolicy,
+        connect_or_spawn_external,
     };
 
     // These flags are baked into the agent at startup.  In leader mode the
@@ -304,21 +305,32 @@ pub async fn connect_via_leader(
     };
 
     startup::enter(StartupPhase::LeaderConnect);
-    let conn = connect_or_spawn(
+    // dscode: the leader is the external dsh CLI, never a self-spawn (a
+    // self-spawned 'dscode agent leader' has no bridge and cannot answer).
+    let conn = connect_or_spawn_external(
         client_type,
         ClientMode::Stdio,
         &env_urls,
         capabilities.clone(),
+        crate::dsh_leader::spawn_dsh_leader,
     )
-    .await?;
+    .await
+    .map_err(|e| match &e {
+        xai_grok_shell::leader::ConnectionError::SpawnFailed(_) => anyhow::anyhow!(
+            "{e}. dsh leader log: {}",
+            crate::dsh_leader::leader_log_path().display()
+        ),
+        _ => anyhow::anyhow!("{e}"),
+    })?;
 
     let (status_tx, status_rx) = LeaderReconnector::status_channel();
-    let reconnector = LeaderReconnector::new(
+    let reconnector = LeaderReconnector::new_external(
         client_type,
         ClientMode::Stdio,
         env_urls,
         capabilities,
         status_tx,
+        crate::dsh_leader::spawn_dsh_leader,
     );
     let bridge = leader_bridge::bridge_leader_connection(
         conn,
