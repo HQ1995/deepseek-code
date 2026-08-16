@@ -628,8 +628,15 @@ pub async fn run(
     let screen_mode_override = screen_mode_relaunch::take_screen_mode_env_override();
     let cancel = CancellationToken::new();
     let startup_start = std::time::Instant::now();
-    let raw_config = xai_grok_shell::config::load_effective_config()
-        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    // dscode: leader mode is a pure TUI over the bridge   no ~/.grok config
+    // layers, no campaigns, no remote cache. Empty config keeps every
+    // downstream resolver at its defaults; dsh owns all real configuration.
+    let raw_config = if args.leader {
+        toml::Value::Table(Default::default())
+    } else {
+        xai_grok_shell::config::load_effective_config()
+            .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?
+    };
     let grok_com_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(
         &raw_config,
     ) {
@@ -639,15 +646,25 @@ pub async fn run(
             xai_grok_shell::auth::GrokComConfig::default()
         }
     };
-    let refreshed_auth = tokio::time::timeout(
-        xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-        xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config),
-    )
-    .await
-    .unwrap_or(None);
-    let early_prefetch = match refreshed_auth {
-        Some(auth) => xai_grok_shell::agent::models::start_early_prefetch_with_auth(Some(auth)),
-        None => xai_grok_shell::agent::models::start_early_prefetch(Some(grok_com_config.clone())),
+    // dscode: leader mode never touches x.ai   skip auth refresh and the
+    // remote-settings prefetch entirely. The bridge owns settings/catalog.
+    let refreshed_auth = if args.leader {
+        None
+    } else {
+        tokio::time::timeout(
+            xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
+            xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config),
+        )
+        .await
+        .unwrap_or(None)
+    };
+    let early_prefetch = if args.leader {
+        None
+    } else {
+        match refreshed_auth {
+            Some(auth) => xai_grok_shell::agent::models::start_early_prefetch_with_auth(Some(auth)),
+            None => xai_grok_shell::agent::models::start_early_prefetch(Some(grok_com_config.clone())),
+        }
     };
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
     tokio::task::spawn_blocking(|| {});
@@ -659,8 +676,12 @@ pub async fn run(
         remote_settings.as_ref().and_then(|s| s.auto_mode.clone()),
     );
     xai_grok_shell::util::config::set_remote_campaigns_from_settings(remote_settings.as_ref());
-    let raw_config = xai_grok_shell::config::load_effective_config()
-        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    let raw_config = if args.leader {
+        toml::Value::Table(Default::default())
+    } else {
+        xai_grok_shell::config::load_effective_config()
+            .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?
+    };
     let prefetch_elapsed = startup_start.elapsed();
     let requested_confinement = xai_grok_sandbox::requested_confinement_profile();
     let LeaderMode {
