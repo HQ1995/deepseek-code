@@ -4,4 +4,4 @@ packages:
 # Peer deps (cordis/schemastery and every @deepseek-ai/dsh-*) are installed as
 # devDependencies at the same pinned ^0.1.0-rc.6 versions the official npm dsh
 # ships, so this build stays out of the deepseek-harness submodule.
-autoInstallPeers: false
+autoInstallPeers: true
