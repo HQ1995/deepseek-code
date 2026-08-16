@@ -1,6 +1,0 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
-#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-15-grok-leader-transport.md
-2026-08-15-grok-leader-transport.md: 34b4921367a8ccc0badeeefff4d820d8ca96cc44
-2026-08-15-grok-leader-transport.zh.md: 017f1be8abf870702b4032be92b1a49dd911e771

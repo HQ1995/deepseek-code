@@ -1,0 +1,4 @@
+[submodule "deepseek-harness"]
+	path = deepseek-harness
+	url = https://github.com/HQ1995/deepseek-harness.git
+	branch = main
