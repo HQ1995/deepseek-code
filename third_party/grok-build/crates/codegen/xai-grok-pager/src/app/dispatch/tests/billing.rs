@@ -1371,7 +1371,7 @@ fn open_url_welcome_toasts_single_line_url_when_browser_unavailable() {
 
     use crate::app::link_opener::browser_unavailable_line;
 
-    let terms = crate::views::privacy_banner::PRIVACY_BANNER_TERMS_URL;
+    let terms = "https://x.ai/legal/terms-of-service";
     let effects = dispatch(Action::OpenUrl(terms.to_string()), &mut app);
     assert!(effects.is_empty());
     let toast = app
@@ -1391,7 +1391,7 @@ fn open_url_welcome_toasts_single_line_url_when_browser_unavailable() {
 
     // Policy URL is shorter than terms (compile-time constants); second toast
     // replaces the first in welcome toast state.
-    let policy = crate::views::privacy_banner::PRIVACY_BANNER_POLICY_URL;
+    let policy = "https://x.ai/legal/privacy-policy";
     let _ = dispatch(Action::OpenUrl(policy.to_string()), &mut app);
     let toast = app
         .welcome_toast
