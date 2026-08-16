@@ -369,7 +369,9 @@ pub enum PaletteCommand {
 }
 /// Build the default set of palette entries with section grouping.
 pub(crate) fn default_palette_entries(
-    sharing_enabled: bool,
+    // Kept for call-site stability; the gated `/share` entry it used to
+    // control was removed with the x.ai session-sharing command.
+    _sharing_enabled: bool,
     slash: &crate::slash::SlashController,
 ) -> Vec<PaletteEntry> {
     let screen_mode = slash.screen_mode();
@@ -411,11 +413,6 @@ pub(crate) fn default_palette_entries(
             command: PaletteCommand::SlashCommand("/resume".into()),
         },
         PaletteEntry {
-            label: "Share Session".into(),
-            shortcut: "/share".into(),
-            command: PaletteCommand::SlashCommand("/share".into()),
-        },
-        PaletteEntry {
             label: "Rename Session".into(),
             shortcut: "/rename ".into(),
             command: PaletteCommand::SlashCommand("/rename ".into()),
@@ -424,11 +421,6 @@ pub(crate) fn default_palette_entries(
             label: "Session Info".into(),
             shortcut: "/session-info".into(),
             command: PaletteCommand::SlashCommand("/session-info".into()),
-        },
-        PaletteEntry {
-            label: "Send Feedback".into(),
-            shortcut: "/feedback".into(),
-            command: PaletteCommand::SlashCommand("/feedback ".into()),
         },
         // ── Context ──
         PaletteEntry {
@@ -570,11 +562,6 @@ pub(crate) fn default_palette_entries(
         },
     ];
     entries.retain(|entry| {
-        if !sharing_enabled
-            && matches!(&entry.command, PaletteCommand::SlashCommand(s) if s.trim() == "/share")
-        {
-            return false;
-        }
         if let PaletteCommand::SlashCommand(text) = &entry.command
             && let Some(invocation) = crate::slash::parse_invocation(text.trim())
             && !slash
@@ -1310,26 +1297,13 @@ mod doc_viewer_scroll_tests {
     }
 }
 #[cfg(test)]
-mod palette_sharing_tests {
+mod palette_tests {
     use super::*;
-    fn has_share(entries: &[PaletteEntry]) -> bool {
-        entries
-            .iter()
-            .any(|e| matches!(&e.command, PaletteCommand::SlashCommand(s) if s.trim() == "/share"))
-    }
     fn slash(mode: crate::app::ScreenMode) -> crate::slash::SlashController {
         let mut controller =
             crate::slash::SlashController::with_builtins(std::path::PathBuf::from("."));
         controller.set_screen_mode(mode);
         controller
-    }
-    #[test]
-    fn default_palette_includes_share_when_enabled() {
-        let entries = default_palette_entries(true, &slash(crate::app::ScreenMode::Fullscreen));
-        assert!(
-            has_share(&entries),
-            "/share should be present when sharing_enabled=true"
-        );
     }
     #[test]
     fn default_palette_includes_dashboard() {
@@ -1402,37 +1376,6 @@ mod palette_sharing_tests {
             !fullscreen
                 .iter()
                 .any(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
-        );
-    }
-    #[test]
-    fn default_palette_omits_share_when_disabled() {
-        let entries = default_palette_entries(false, &slash(crate::app::ScreenMode::Fullscreen));
-        assert!(
-            !has_share(&entries),
-            "/share must not appear in palette when sharing_enabled=false"
-        );
-    }
-    #[test]
-    fn filter_palette_omits_share_when_disabled() {
-        let entries = filter_palette_entries("", false, &slash(crate::app::ScreenMode::Fullscreen));
-        assert!(
-            !has_share(&entries),
-            "/share must not appear in unfiltered palette when sharing_enabled=false"
-        );
-        let entries =
-            filter_palette_entries("share", false, &slash(crate::app::ScreenMode::Fullscreen));
-        assert!(
-            !has_share(&entries),
-            "/share must not appear when filtering for 'share' with sharing_enabled=false"
-        );
-    }
-    #[test]
-    fn filter_palette_includes_share_when_enabled_and_matched() {
-        let entries =
-            filter_palette_entries("share", true, &slash(crate::app::ScreenMode::Fullscreen));
-        assert!(
-            has_share(&entries),
-            "/share should match a 'share' query when sharing_enabled=true"
         );
     }
     #[test]

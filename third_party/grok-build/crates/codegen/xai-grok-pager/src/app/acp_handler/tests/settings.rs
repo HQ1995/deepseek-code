@@ -609,15 +609,6 @@
         );
         for agent in app.agents.values() {
             assert!(!agent.sharing_enabled);
-            let reg = agent.prompt.slash_controller.registry();
-            assert!(
-                reg.get("share").is_none(),
-                "/share stays out of the completion menu"
-            );
-            assert!(
-                reg.get_for_dispatch("share").is_some(),
-                "typed /share still resolves so the disable path can run"
-            );
         }
     }
 

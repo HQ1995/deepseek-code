@@ -4,7 +4,6 @@
 //! command structs and provides `builtin_commands()` for registry
 //! construction.
 pub mod always_approve;
-pub mod announcements;
 pub mod auto;
 pub mod btw;
 pub mod cd;
@@ -24,19 +23,12 @@ pub mod effort_levels;
 pub mod exit;
 pub mod expand;
 pub mod export;
-pub mod feedback;
 pub mod find;
 pub mod fork;
-pub mod gboom;
 pub mod help;
 pub mod history;
 pub mod home;
-pub mod imagine;
-pub mod imagine_video;
-pub mod import_claude;
 pub mod jump;
-pub mod login;
-pub mod logout;
 pub mod loop_cmd;
 pub mod mcps;
 pub mod model;
@@ -47,8 +39,6 @@ pub mod plan;
 pub mod plugin;
 pub mod preset;
 pub mod queue;
-pub mod recap;
-pub mod release_notes;
 pub mod remember;
 pub mod rename;
 pub mod resume;
@@ -57,10 +47,8 @@ pub mod screen_mode_switch;
 pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
-pub mod share;
 pub mod tasks;
 pub mod theme;
-pub mod timeline;
 pub mod timestamps;
 pub mod toggle_mouse_reporting;
 pub mod transcript;
@@ -68,7 +56,6 @@ pub mod tutorial;
 pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;
-pub mod voice;
 pub mod workflows;
 use super::command::SlashCommand;
 use std::sync::Arc;
@@ -108,14 +95,11 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(plugin::PluginsCommand),
         Arc::new(plugin::MarketplaceCommand),
         Arc::new(plugin::SkillsCommand),
-        Arc::new(share::ShareCommand),
         Arc::new(session_info::SessionInfoCommand),
         Arc::new(rename::RenameCommand),
         Arc::new(dashboard::DashboardCommand),
         Arc::new(cd::CdCommand),
         Arc::new(theme::ThemeCommand),
-        Arc::new(feedback::FeedbackCommand),
-        Arc::new(announcements::AnnouncementsCommand),
         Arc::new(remember::RememberCommand),
         Arc::new(plan::PlanCommand),
         Arc::new(view_plan::ViewPlanCommand),
@@ -123,31 +107,20 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(mcps::McpsCommand),
         Arc::new(workflows::WorkflowsCommand),
         Arc::new(btw::BtwCommand),
-        Arc::new(recap::RecapCommand),
         Arc::new(doctor::DoctorCommand),
-        Arc::new(voice::VoiceCommand),
         Arc::new(loop_cmd::LoopCommand),
-        Arc::new(imagine::ImagineCommand),
-        Arc::new(imagine_video::ImagineVideoCommand),
         Arc::new(timestamps::TimestampsCommand),
-        Arc::new(timeline::TimelineCommand),
         Arc::new(toggle_mouse_reporting::ToggleMouseReportingCommand),
         Arc::new(settings_cmd::SettingsCommand),
         Arc::new(rewind::RewindCommand),
         Arc::new(jump::JumpCommand),
-        Arc::new(login::LoginCommand),
-        Arc::new(logout::LogoutCommand),
-        Arc::new(import_claude::ImportClaudeCommand),
         Arc::new(usage::UsageCommand),
         Arc::new(queue::QueueCommand),
         Arc::new(tasks::TasksCommand),
-        Arc::new(release_notes::ReleaseNotesCommand),
         Arc::new(tutorial::TutorialCommand),
         Arc::new(config_agents::ConfigAgentsCommand),
         Arc::new(personas::PersonasCommand),
         Arc::new(preset::PresetCommand),
-        // Hidden easter egg: never listed, runs on bare `/gboom`.
-        Arc::new(gboom::GboomCommand),
         // Hidden diagnostic: never listed, toggles the scroll-debug HUD.
         Arc::new(scroll_debug::ScrollDebugCommand),
         // Debug toggles: always registered, listed only on debug binaries.
@@ -642,29 +615,6 @@ mod tests {
         assert!(reg.get("debug").is_some(), "/debug must be executable");
     }
     #[test]
-    fn gboom_is_registered_and_executable() {
-        let reg = CommandRegistry::new(builtin_commands());
-        assert!(reg.get("gboom").is_some(), "/gboom must be executable");
-    }
-    #[test]
-    fn gboom_is_invisible() {
-        let models = ModelState::default();
-        let ctx = crate::slash::command::AppCtx {
-            models: &models,
-            cwd: std::path::Path::new("."),
-            has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: true,
-            workflows_available: true,
-            screen_mode: crate::app::ScreenMode::Fullscreen,
-            current_title: None,
-        };
-        assert!(
-            !gboom::GboomCommand.visible(&ctx),
-            "/gboom must never appear in the dropdown"
-        );
-    }
-    #[test]
     fn minimal_and_fullscreen_registered_in_builtin_commands() {
         let reg = CommandRegistry::new(builtin_commands());
         assert!(reg.get("minimal").is_some());
@@ -674,75 +624,6 @@ mod tests {
             reg.get("full").unwrap().name(),
             reg.get("fullscreen").unwrap().name()
         );
-    }
-    #[test]
-    fn recap_registered_in_builtin_commands() {
-        let mut reg = CommandRegistry::new(builtin_commands());
-        assert!(reg.get("recap").is_none());
-        assert!(reg.get("summarize").is_none());
-        reg.set_recap_visible(true);
-        assert!(
-            reg.get("recap").is_some(),
-            "/recap should be registered in builtins"
-        );
-        assert_eq!(
-            reg.get("summarize").map(|c| c.name()),
-            Some("recap"),
-            "/summarize should alias /recap"
-        );
-    }
-    #[test]
-    fn gboom_bare_invocation_opens_game() {
-        let models = ModelState::default();
-        let mut ctx = make_ctx(&models);
-        let result = gboom::GboomCommand.run(&mut ctx, "");
-        assert!(matches!(result, CommandResult::Action(Action::OpenGboom)));
-        let result = gboom::GboomCommand.run(&mut ctx, "   ");
-        assert!(matches!(result, CommandResult::Action(Action::OpenGboom)));
-    }
-    #[test]
-    fn gboom_with_args_passes_through_to_shell() {
-        let models = ModelState::default();
-        let mut ctx = make_ctx(&models);
-        match gboom::GboomCommand.run(&mut ctx, "guide me") {
-            CommandResult::PassThrough(text) => assert_eq!(text, "/gboom guide me"),
-            other => panic!("expected PassThrough, got {other:?}"),
-        }
-    }
-    #[test]
-    fn recap_returns_manual_send_recap_action() {
-        let models = ModelState::default();
-        let mut ctx = make_ctx(&models);
-        let cmd = recap::RecapCommand;
-        let result = cmd.run(&mut ctx, "");
-        assert!(matches!(
-            result,
-            CommandResult::Action(Action::SendRecap { auto: false })
-        ));
-    }
-    #[test]
-    fn recap_hidden_by_default_in_registry_until_revealed() {
-        let mut reg = CommandRegistry::new(builtin_commands());
-        assert!(
-            reg.get("recap").is_none(),
-            "/recap must be fail-closed until shell advertises sessionRecap"
-        );
-        reg.set_recap_visible(true);
-        assert!(reg.get("recap").is_some());
-        reg.set_recap_visible(false);
-        assert!(reg.get("recap").is_none());
-    }
-    #[test]
-    fn voice_hidden_by_default_in_registry_until_revealed() {
-        let mut reg = CommandRegistry::new(builtin_commands());
-        assert!(
-            reg.get("voice").is_none(),
-            "/voice must be fail-closed until set_voice_visible(true)"
-        );
-        reg.set_voice_visible(true);
-        assert!(reg.get("voice").is_some());
-        reg.set_voice_visible(false);
-        assert!(reg.get("voice").is_none());
     }
     /// Every pager builtin trigger key must appear in the shell's
     /// `PAGER_COMMAND_KEYS`. Add new names there when adding a pager builtin.

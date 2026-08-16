@@ -50,8 +50,6 @@ mod quote_block_drag_copy_excludes_bars_pty;
 mod quote_block_raw_mode_copy_keeps_source_pty;
 #[path = "pty_e2e/read_tool_header_selection_copies_path_only_pty.rs"]
 mod read_tool_header_selection_copies_path_only_pty;
-#[path = "pty_e2e/recap_header_not_in_selection_pty.rs"]
-mod recap_header_not_in_selection_pty;
 #[path = "pty_e2e/resize_preserves_scroll_position.rs"]
 mod resize_preserves_scroll_position;
 #[path = "pty_e2e/response_top_indicator_pty.rs"]

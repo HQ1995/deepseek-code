@@ -1155,9 +1155,9 @@ fn restricted_command_submit_opens_three_option_upsell() {
     app.agents
         .get_mut(&id)
         .unwrap()
-        .set_restricted_commands(&["imagine".to_string()]);
+        .set_restricted_commands(&["usage".to_string()]);
 
-    let effects = dispatch(Action::SendPrompt("/imagine a sunset".into()), &mut app);
+    let effects = dispatch(Action::SendPrompt("/usage".into()), &mut app);
 
     assert!(
         effects.is_empty(),
@@ -1218,21 +1218,21 @@ fn restricted_command_with_open_modal_keeps_composer_text() {
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.set_restricted_commands(&["imagine".to_string()]);
+        agent.set_restricted_commands(&["usage".to_string()]);
         // A question modal is already up (credit-limit upsell).
         open_credit_limit_upsell(agent, CreditLimitUpsellMode::UnifiedCredits, false);
         assert!(agent.question_view.is_some());
         // The user typed the restricted command into the composer.
-        agent.prompt.set_text("/imagine a sunset");
+        agent.prompt.set_text("/usage");
     }
 
-    let effects = dispatch(Action::SendPrompt("/imagine a sunset".into()), &mut app);
+    let effects = dispatch(Action::SendPrompt("/usage".into()), &mut app);
 
     assert!(effects.is_empty(), "no passthrough / send: {effects:?}");
     let agent = &app.agents[&id];
     assert_eq!(
         agent.prompt.text(),
-        "/imagine a sunset",
+        "/usage",
         "composer text must be preserved for a later resubmit"
     );
     assert!(
@@ -1260,7 +1260,7 @@ fn unknown_non_restricted_command_still_passes_through() {
     app.agents
         .get_mut(&id)
         .unwrap()
-        .set_restricted_commands(&["imagine".to_string()]);
+        .set_restricted_commands(&["usage".to_string()]);
 
     let effects = dispatch(Action::SendPrompt("/frobnicate arg".into()), &mut app);
 

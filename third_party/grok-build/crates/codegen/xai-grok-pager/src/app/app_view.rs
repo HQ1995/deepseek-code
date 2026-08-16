@@ -553,13 +553,11 @@ fn parse_esc_ttl(raw: Option<String>) -> Duration {
 ///
 /// Current set:
 /// - `usage` — coding credit / billing UI (alias: `/cost`)
-/// - `imagine` — image generation entry point
-/// - `imagine-video` — video generation entry point
 /// - `voice` — voice dictation entry point (the Ctrl+Space / F8 keybinding is
 ///   gated separately in [`crate::app::dispatch::voice`], since it bypasses the
-///   slash registry)
-pub(crate) const TIER_RESTRICTED_COMMANDS: &[&str] =
-    &["usage", "imagine", "imagine-video", "voice"];
+///   slash registry; `/voice` has no slash command anymore and only feeds the
+///   keybinding gate)
+pub(crate) const TIER_RESTRICTED_COMMANDS: &[&str] = &["usage", "voice"];
 /// Whether a subscription-tier display name is a tier with restricted
 /// commands: the free tier (no subscription ⇒ `None`, or an explicit
 /// "Free") and X Basic (CCP display name "X Basic"; JWT claim fallback
