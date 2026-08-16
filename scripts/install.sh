@@ -8,6 +8,9 @@ set -euo pipefail
 DEST="${DEEPSEEK_CODE_HOME:-$HOME/deepseek-code}"
 # Pinned release tag. Tracking main is opt-in via DEEPSEEK_CODE_BRANCH=main.
 RELEASE="${DEEPSEEK_CODE_RELEASE:-v0.1.0}"
+# The prebuilt TUI is unchanged by harness migrations, so it keeps its own
+# release tag (v0.0.1) rather than tracking the repo release.
+TUI_RELEASE="${DEEPSEEK_CODE_TUI_RELEASE:-v0.0.1}"
 BRANCH="${DEEPSEEK_CODE_BRANCH:-}"
 REPO="${DEEPSEEK_CODE_REPO:-https://github.com/HQ1995/deepseek-code.git}"
 
@@ -68,10 +71,14 @@ echo "  installing the bridge into the deepseek-leader profile..."
 # Prebuilt TUI binary (unchanged by this migration).
 mkdir -p "$DEST/third_party/grok-build/target/release"
 if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
-  echo "  downloading prebuilt dscode ($RELEASE)..."
-  curl -fL -o "$DEST/third_party/grok-build/target/release/dscode" \
-    "https://github.com/HQ1995/deepseek-code/releases/download/$RELEASE/dscode-linux-x86_64"
-  chmod +x "$DEST/third_party/grok-build/target/release/dscode"
+  if [[ -x "$DEST/third_party/grok-build/target/release/dscode" ]]; then
+    echo "  prebuilt dscode already present; skipping download"
+  else
+    echo "  downloading prebuilt dscode ($TUI_RELEASE)..."
+    curl -fL -o "$DEST/third_party/grok-build/target/release/dscode" \
+      "https://github.com/HQ1995/deepseek-code/releases/download/$TUI_RELEASE/dscode-linux-x86_64"
+    chmod +x "$DEST/third_party/grok-build/target/release/dscode"
+  fi
 else
   echo "  no prebuilt binary for this platform; building TUI with cargo (takes minutes)..."
   ( cd "$DEST/third_party/grok-build" && cargo build --release -p xai-grok-pager-bin )
