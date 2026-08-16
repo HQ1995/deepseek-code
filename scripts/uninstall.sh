@@ -11,8 +11,23 @@ FLAG="$1"
 
 note() { echo "  $1"; }
 
-# 1. Launcher symlinks that point into this repo.
-for name in dscode dsh; do
+# 1. Launcher symlinks that point into this repo. dscode links straight to the
+# prebuilt TUI binary; the $ROOT/bin/dscode target is accepted too so setups
+# installed by the pre-selfcontained installer still clean up.
+dscode_link="$HOME/.local/bin/dscode"
+if [[ -L "$dscode_link" ]]; then
+  target="$(readlink "$dscode_link" 2>/dev/null || true)"
+  if [[ "$target" == "$ROOT/third_party/grok-build/target/release/dscode" \
+      || "$target" == "$ROOT/bin/dscode" ]]; then
+    unlink "$dscode_link"
+    echo "  removed $dscode_link"
+  else
+    note "kept $dscode_link (points elsewhere: $target)"
+  fi
+elif [[ -e "$dscode_link" ]]; then
+  note "kept $dscode_link (not our symlink)"
+fi
+for name in dsh; do
   link="$HOME/.local/bin/$name"
   if [[ -L "$link" ]]; then
     target="$(readlink "$link" 2>/dev/null || true)"

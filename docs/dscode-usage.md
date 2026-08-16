@@ -13,8 +13,8 @@ scripts/build-deepseek-tui.sh   # (dev) cargo build --release of the vendored TU
 ## Launch
 
 ```sh
-./bin/dscode                     # open the TUI (starts the harness leader server automatically)
-./bin/dscode "run the tests"    # with an initial prompt
+dscode                            # after install; the TUI binary bootstraps the dsh leader itself
+third_party/grok-build/target/release/dscode "run the tests"   # dev: direct binary, with an initial prompt
 ```
 
 ## Keys

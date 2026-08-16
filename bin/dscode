@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-# Resolve through symlinks (users invoke this via ~/.local/bin/dscode) so the
-# repo root is the real script location, never the link's directory.
-exec "$(cd "$(dirname "$(readlink -f "$BASH_SOURCE")")/.." && pwd)/scripts/dscode.sh" "$@"

@@ -78,10 +78,12 @@ else
   ( cd "$ROOT/third_party/grok-build" && cargo build --release -p xai-grok-pager-bin )
 fi
 
-# Launchers. dsh is linked only when no working dsh is reachable on PATH (the
-# official CLI usually owns that name); a foreign regular file is left alone.
+# Launchers. dscode links DIRECTLY to the prebuilt TUI binary - it bootstraps
+# the dsh leader itself (no shell wrapper). dsh is linked only when no working
+# dsh is reachable on PATH (the official CLI usually owns that name); a foreign
+# regular file is left alone.
 mkdir -p "$HOME/.local/bin"
-ln -sf "$ROOT/bin/dscode" "$HOME/.local/bin/dscode"
+ln -sf "$ROOT/third_party/grok-build/target/release/dscode" "$HOME/.local/bin/dscode"
 if dsh --version >/dev/null 2>&1; then
   echo "  dsh already reachable on PATH; leaving it in place"
 elif [[ -e "$HOME/.local/bin/dsh" && ! -L "$HOME/.local/bin/dsh" ]]; then
