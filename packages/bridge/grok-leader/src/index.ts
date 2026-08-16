@@ -479,7 +479,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       async ask(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer> {
         const record = request.agent === undefined ? undefined : ownedRecord(request.agent)
         const conn = record === undefined ? undefined : connections.get(record.clientId)
-        if (conn === undefined) {
+        if (record === undefined || conn === undefined) {
           throw new UserQuestionError('no connected grok client owns this agent', 'NO_CLIENT')
         }
         // grok keys accepted answers by question text, so remember each text's dsh id.
