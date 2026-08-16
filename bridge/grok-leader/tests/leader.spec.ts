@@ -349,9 +349,9 @@ describe('grok leader over a unix socket', () => {
         modelState: {
           currentModelId: '',
           availableModels: [
-            { modelId: 'deepseek-chat', name: 'DeepSeek Chat' },
-            { modelId: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
-            { modelId: 'pi-code', name: 'Pi Code' },
+            { modelId: 'deepseek-chat', name: 'DeepSeek Chat', _meta: { provider: 'deepseek' } },
+            { modelId: 'deepseek-reasoner', name: 'DeepSeek Reasoner', _meta: { provider: 'deepseek' } },
+            { modelId: 'pi-code', name: 'Pi Code', _meta: { provider: 'pi' } },
           ],
         },
       },
@@ -392,9 +392,9 @@ describe('grok leader over a unix socket', () => {
     expect(models.result).toEqual({
       currentModelId: '',
       availableModels: [
-        { modelId: 'deepseek-chat', name: 'DeepSeek Chat' },
-        { modelId: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
-        { modelId: 'pi-code', name: 'Pi Code' },
+        { modelId: 'deepseek-chat', name: 'DeepSeek Chat', _meta: { provider: 'deepseek' } },
+        { modelId: 'deepseek-reasoner', name: 'DeepSeek Reasoner', _meta: { provider: 'deepseek' } },
+        { modelId: 'pi-code', name: 'Pi Code', _meta: { provider: 'pi' } },
       ],
     })
 
@@ -612,9 +612,9 @@ describe('grok leader over a unix socket', () => {
       _meta: { modelState: { currentModelId: string; availableModels: Array<{ modelId: string; name: string }> } }
     })._meta.modelState
     expect(modelState.availableModels).toEqual([
-      { modelId: 'shared', name: 'Shared A' },
-      { modelId: 'only-a', name: 'Only A' },
-      { modelId: 'only-b', name: 'Only B' },
+      { modelId: 'shared', name: 'Shared A', _meta: { provider: 'a' } },
+      { modelId: 'only-a', name: 'Only A', _meta: { provider: 'a' } },
+      { modelId: 'only-b', name: 'Only B', _meta: { provider: 'b' } },
     ])
     expect(modelState.currentModelId).toEqual('shared')
 
@@ -622,9 +622,9 @@ describe('grok leader over a unix socket', () => {
     expect(models.result).toEqual({
       currentModelId: 'shared',
       availableModels: [
-        { modelId: 'shared', name: 'Shared A' },
-        { modelId: 'only-a', name: 'Only A' },
-        { modelId: 'only-b', name: 'Only B' },
+        { modelId: 'shared', name: 'Shared A', _meta: { provider: 'a' } },
+        { modelId: 'only-a', name: 'Only A', _meta: { provider: 'a' } },
+        { modelId: 'only-b', name: 'Only B', _meta: { provider: 'b' } },
       ],
     })
   })

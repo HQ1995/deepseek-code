@@ -86,3 +86,17 @@ Append-only through the owning tool result.
 - Provider-scoped model ids flattened — grok expects one global catalog of bare modelId strings; the leader keeps the modelId-to-provider mapping privately for session/set_model, so the bare-id wire contract costs no provider ownership on switch.
 - Replay buffering — live notifications racing a session/load are dropped by the high-water mark instead of buffered for a gap-free flush (server.rs MAX_BUFFERED_LIVE_PER_LOAD).
 - Unverified surfaces — the x.ai/ask_user_question request and answer shapes, capability injection into session/new, the grok built-in agentProfile name mapping (grok-build-plan and friends have no dsh preset counterparts), and the lock-file singleton guard carry TODO(verify) markers with grok file:line citations.
+
+## Running the tests out-of-tree
+
+The bridge resolves its @deepseek-ai/* peers from the built deepseek-harness
+submodule. Link them once, then run vitest from the harness install:
+
+```sh
+# from bridge/grok-leader
+mkdir -p node_modules/@deepseek-ai
+ln -sfn ../../deepseek-harness/vendor/cordis node_modules/@deepseek-ai/cordis
+ln -sfn ../../deepseek-harness/vendor/schemastery node_modules/@deepseek-ai/schemastery
+ln -sfn ../../deepseek-harness/packages/core/agent node_modules/@deepseek-ai/dsh-agent
+../../deepseek-harness/node_modules/.bin/vitest run
+```
