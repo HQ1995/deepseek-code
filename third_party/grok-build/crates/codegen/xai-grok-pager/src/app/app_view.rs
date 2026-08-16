@@ -1222,20 +1222,6 @@ pub struct AppView {
     /// `AppView::voice_*` transition methods.
     pub voice_state: VoiceState,
 }
-/// Reshow window elapsed? None/0 = never. Unparseable ack fails open (show).
-fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bool {
-    let Some(days) = reshow_days.filter(|d| *d > 0) else {
-        return false;
-    };
-    let Ok(acked) = chrono::DateTime::parse_from_rfc3339(acked_at) else {
-        return true;
-    };
-    let acked_utc = acked.with_timezone(&chrono::Utc);
-    let Some(next) = acked_utc.checked_add_signed(chrono::Duration::days(days as i64)) else {
-        return false;
-    };
-    chrono::Utc::now() >= next
-}
 impl AppView {
     /// Finishes startup if this view still holds the obligation; does nothing after.
     pub(crate) fn finish_startup(&mut self, outcome: xai_grok_telemetry::startup::StartupOutcome) {
@@ -1281,32 +1267,9 @@ impl AppView {
         }
     }
     /// Welcome privacy banner visibility gates.
-    pub fn privacy_banner_should_show(&self) -> bool {
-        if self.screen_mode.is_minimal() {
-            return false;
-        }
-        if !self.privacy_notice_rollout {
-            return false;
-        }
-        if self.is_zdr || self.is_team_non_admin() {
-            return false;
-        }
-        if !self.coding_data_retention_opt_out {
-            return false;
-        }
-        if !matches!(self.auth_state, AuthState::Done)
-            || !self.has_access()
-            || self.is_zdr_blocked()
-            || !matches!(self.trust_state, TrustState::Done)
-        {
-            return false;
-        }
-        match self.privacy_banner_acked.as_deref() {
-            None => true,
-            Some(acked_at) => {
-                privacy_banner_reshow_elapsed(acked_at, self.privacy_banner_reshow_days)
-            }
-        }
+        pub fn privacy_banner_should_show(&self) -> bool {
+        // dscode: no data-collection upsell; the banner is never shown.
+        false
     }
     /// Whether deferred session-startup actions may run: both auth AND folder
     /// trust must be resolved. Mirrors the auth gate at the session-creating
@@ -3965,20 +3928,8 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 {
                     return InputOutcome::Action(Action::PrivacyBannerOptOut);
                 }
-                if let Some(rect) = ctx.privacy_banner_terms_rect
-                    && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
-                {
-                    return InputOutcome::Action(Action::OpenUrl(
-                        crate::views::privacy_banner::PRIVACY_BANNER_TERMS_URL.to_string(),
-                    ));
-                }
-                if let Some(rect) = ctx.privacy_banner_policy_rect
-                    && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
-                {
-                    return InputOutcome::Action(Action::OpenUrl(
-                        crate::views::privacy_banner::PRIVACY_BANNER_POLICY_URL.to_string(),
-                    ));
-                }
+                // dscode: privacy banner removed
+                // dscode: privacy banner removed
                 if let Some(rect) = ctx.changelog_cta_rect
                     && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
                     && let Some(md) = ctx.changelog_markdown.as_deref()
@@ -4847,9 +4798,8 @@ impl AppView {
                             let show_session_tip =
                                 !privacy_banner && self.tip.is_some() && agent.should_show_tip();
                             let has_mode_banner = agent.mode_switch_banner.is_some();
-                            let banner_height = if privacy_banner {
-                                crate::views::privacy_banner::MIN_HEIGHT
-                            } else if has_mode_banner {
+                            // dscode: privacy banner removed
+                            let banner_height = if has_mode_banner {
                                 1
                             } else if announcement_banner_h > 0 {
                                 announcement_banner_h

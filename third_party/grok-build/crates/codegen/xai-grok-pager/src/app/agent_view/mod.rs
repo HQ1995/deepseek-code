@@ -310,6 +310,8 @@ pub struct BannerSlotParams<'a> {
     /// below critical announcements; gated by the caller).
     pub(crate) privacy_banner: bool,
     /// Last mouse position, for mouse-pos-driven hover styling.
+    /// dscode: privacy banner (the only consumer) was removed; kept for API shape.
+    #[allow(dead_code)]
     pub(crate) mouse_pos: Option<(u16, u16)>,
     /// Session tip, only when it owns the slot.
     pub(crate) tip: Option<&'a str>,

@@ -899,7 +899,7 @@ impl AgentView {
             announcements: banner_announcements,
             hidden_ids: hidden_announcement_ids,
             privacy_banner,
-            mouse_pos,
+            mouse_pos: _,
             tip,
         } = banner;
         self.session_banner_active = crate::views::announcements::first_session_announcement(
@@ -1084,11 +1084,7 @@ impl AgentView {
         } else {
             banner_height
         };
-        let banner_height = if privacy_banner {
-            banner_height.max(crate::views::privacy_banner::height(inner_width))
-        } else {
-            banner_height
-        };
+        // dscode: privacy banner removed
         let tip_row_visible =
             self.ephemeral_tip_renderable(area.height) && self.ephemeral_tip.is_active();
         let banner_height = banner_height.max(u16::from(tip_row_visible));
@@ -2280,28 +2276,9 @@ impl AgentView {
             self.hit_watching_cue.clear();
             self.hit_plan_approval_status.clear();
         }
-        let privacy_banner_owns_slot =
-            privacy_banner && layout.banner.height >= crate::views::privacy_banner::MIN_HEIGHT;
-        if !privacy_banner_owns_slot {
-            self.privacy_banner.clear_hits();
-        }
-        if privacy_banner_owns_slot {
-            self.hit_announcement_hide.clear();
-            self.hit_announcement_cta.clear();
-            let rects = crate::views::privacy_banner::render(layout.banner, buf, &theme, mouse_pos);
-            self.privacy_banner
-                .hit_opt_in
-                .set_unless_dropdown(Some(rects.opt_in), dropdown_open);
-            self.privacy_banner
-                .hit_opt_out
-                .set_unless_dropdown(Some(rects.opt_out), dropdown_open);
-            self.privacy_banner
-                .hit_terms
-                .set_unless_dropdown(Some(rects.terms), dropdown_open);
-            self.privacy_banner
-                .hit_policy
-                .set_unless_dropdown(Some(rects.policy), dropdown_open);
-        } else if let Some((ref msg, remaining)) = self.mode_switch_banner {
+        // dscode: privacy banner removed; hits stay cleared
+        self.privacy_banner.clear_hits();
+        if let Some((ref msg, remaining)) = self.mode_switch_banner {
             self.hit_announcement_hide.clear();
             self.hit_announcement_cta.clear();
             if layout.banner.height > 0 && layout.banner.width > 4 {

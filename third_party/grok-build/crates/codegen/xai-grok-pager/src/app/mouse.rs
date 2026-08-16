@@ -148,26 +148,8 @@ impl AgentView {
                 {
                     return InputOutcome::Action(Action::PrivacyBannerOptOut);
                 }
-                if self
-                    .privacy_banner
-                    .hit_terms
-                    .contains(mouse.column, mouse.row)
-                    && !self.pos_occluded(mouse.column, mouse.row)
-                {
-                    return InputOutcome::Action(Action::OpenUrl(
-                        crate::views::privacy_banner::PRIVACY_BANNER_TERMS_URL.to_string(),
-                    ));
-                }
-                if self
-                    .privacy_banner
-                    .hit_policy
-                    .contains(mouse.column, mouse.row)
-                    && !self.pos_occluded(mouse.column, mouse.row)
-                {
-                    return InputOutcome::Action(Action::OpenUrl(
-                        crate::views::privacy_banner::PRIVACY_BANNER_POLICY_URL.to_string(),
-                    ));
-                }
+                // dscode: privacy banner removed
+                // dscode: privacy banner removed
                 if self.hit_watching_cue.contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {

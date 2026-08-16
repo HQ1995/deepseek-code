@@ -1702,11 +1702,7 @@ fn render_welcome_done(
     let tip_height = if !show_picker {
         if has_update_tip {
             1u16
-        } else if p.privacy_banner {
-            // Same inset the banner paint below uses, so the reserved rows
-            // and the wrapped row count can't drift.
-            let inset = prompt::prompt_inset(p.compact);
-            crate::views::privacy_banner::height(content_area.width.saturating_sub(inset * 2))
+        // dscode: privacy banner removed
         } else if has_resume_tip {
             1u16
         } else if let Some(tip_text) = p.tip {
@@ -1971,10 +1967,10 @@ fn render_welcome_done(
     // shortcuts are rendered inside the picker content area.
     let mut refresh_hit_rect: Option<Rect> = None;
     let mut gate_url_hit_rect: Option<Rect> = None;
-    let mut privacy_banner_opt_in_rect: Option<Rect> = None;
-    let mut privacy_banner_opt_out_rect: Option<Rect> = None;
-    let mut privacy_banner_terms_rect: Option<Rect> = None;
-    let mut privacy_banner_policy_rect: Option<Rect> = None;
+    let privacy_banner_opt_in_rect: Option<Rect> = None;
+    let privacy_banner_opt_out_rect: Option<Rect> = None;
+    let privacy_banner_terms_rect: Option<Rect> = None;
+    let privacy_banner_policy_rect: Option<Rect> = None;
     let (cursor_pos, post_flush_escapes) = if show_picker {
         (None, None)
     } else if !p.has_access {
@@ -2086,27 +2082,8 @@ fn render_welcome_done(
     } else {
         // Privacy banner owns the tip slot when visible (above the prompt),
         // except a pending-update notification, which outranks it.
-        if p.privacy_banner && p.pending_update_version.is_none() && layout.tip.height > 0 {
-            let [_, tip_centered, _] = Layout::horizontal([
-                Constraint::Min(0),
-                Constraint::Length(content_area.width),
-                Constraint::Min(0),
-            ])
-            .flex(Flex::Center)
-            .areas(layout.tip);
-            let inset = prompt::prompt_inset(p.compact);
-            let tip_inset = Rect {
-                x: tip_centered.x + inset,
-                y: tip_centered.y,
-                width: tip_centered.width.saturating_sub(inset * 2),
-                height: tip_centered.height,
-            };
-            let rects = crate::views::privacy_banner::render(tip_inset, buf, theme, p.mouse_pos);
-            privacy_banner_opt_in_rect = Some(rects.opt_in);
-            privacy_banner_opt_out_rect = Some(rects.opt_out);
-            privacy_banner_terms_rect = Some(rects.terms);
-            privacy_banner_policy_rect = Some(rects.policy);
-        } else if let Some(ver) = p.pending_update_version
+        // dscode: privacy banner removed
+        if let Some(ver) = p.pending_update_version
             && layout.tip.height > 0
         {
             // Background update notification in the tip area.

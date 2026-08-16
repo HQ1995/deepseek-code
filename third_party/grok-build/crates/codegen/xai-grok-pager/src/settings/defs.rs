@@ -133,18 +133,6 @@ const PERMISSION_MODE_CHOICES: &[EnumChoice] = &[
 
 // The setting's own description carries the full explanation, so the choices
 // are bare labels — an empty description collapses each to a single line.
-const CODING_DATA_SHARING_CHOICES: &[EnumChoice] = &[
-    EnumChoice {
-        canonical: "opt-in",
-        display: "Opt in",
-        description: "",
-    },
-    EnumChoice {
-        canonical: "opt-out",
-        display: "Opt out",
-        description: "",
-    },
-];
 
 // ---------------------------------------------------------------------------
 // Plan-mode catalog.
@@ -1195,40 +1183,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
             kind: SettingKind::Enum {
                 default: TextSelection::Flash.as_canonical(),
                 choices: TEXT_SELECTION_CHOICES,
-                supports_preview: false,
-            },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        // SHELL-owned. Persisted in auth metadata (not config.toml).
-        // Reads from `PagerLocalSnapshot.coding_data_sharing_opt_out`.
-        // Default "opt-out" matches `AuthEntry::coding_data_retention_opt_out = true`
-        // (safer consumer default; server enrichment may still opt the user in).
-        // ZDR / non-admin guards are enforced at dispatch time.
-        // Do not put "telemetry" in keywords — that word is the config-file
-        // analytics toggle (Monitoring / Configuration docs).
-        SettingMeta {
-            key: "coding_data_sharing",
-            category: SettingCategory::Privacy,
-            owner: SettingOwner::Shell,
-            label: "Coding data, retention, and training",
-            description: "Opt-in to provide DeepSeek the ability to retain and train on \
-                          coding data, e.g., prompts, traces, & metrics, for training and \
-                          debugging purposes. We may still collect simple user metrics, \
-                          e.g. how many times you use the product or a feature.",
-            keywords: &[
-                "privacy",
-                "data",
-                "sharing",
-                "coding",
-                "retention",
-                "training",
-                "opt-in",
-                "opt-out",
-            ],
-            kind: SettingKind::Enum {
-                default: "opt-out",
-                choices: CODING_DATA_SHARING_CHOICES,
                 supports_preview: false,
             },
             restart_required: false,

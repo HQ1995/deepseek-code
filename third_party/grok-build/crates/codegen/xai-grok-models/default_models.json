@@ -8,7 +8,7 @@
       "id": "grok-4.6",
       "model": "grok-4.6",
       "name": "Grok 4.6",
-      "description": "SpaceXAI's latest frontier model",
+      "description": "DeepSeek's latest frontier model",
       "context_window": 500000,
       "api_backend": "responses",
       "supports_backend_search": true,
