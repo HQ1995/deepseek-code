@@ -1429,11 +1429,11 @@ export function sessionEventToUpdates(
         rawInput: event.data.arguments,
       }]
     case 'tool/result': {
-      const block = event.data.message.content[0] as { type?: string; callId?: unknown; content?: unknown } | undefined
+      const block = event.data.message.content[0] as { type?: string; toolCallId?: unknown; content?: unknown } | undefined
       const contents = textBlocks(block?.content)
       return [{
         sessionUpdate: 'tool_call_update',
-        toolCallId: String(block?.callId),
+        toolCallId: String(block?.toolCallId),
         status: event.data.error === undefined ? 'completed' : 'error',
         ...contents.length > 0 ? { content: contents } : {},
         ...event.data.error === undefined ? {} : { error: { name: event.data.error.name, code: event.data.error.code } },

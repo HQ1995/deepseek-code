@@ -1,42 +1,17 @@
 {
-  "extends": "../../../tsconfig.base.json",
+  // Out-of-tree build: the bridge compiles against the deepseek-harness
+  // submodule's source via the base config's paths map, so the bridge and the
+  // dsh CLI share one resolution. peerDependencies stay external (bare import
+  // specifiers) and resolve from the built tree at runtime.
+  "extends": "../../deepseek-harness/tsconfig.base.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "lib/types"
+    "outDir": "lib",
+    "composite": false,
+    "incremental": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "noEmit": false
   },
-  "include": [
-    "src"
-  ],
-  "references": [
-    {
-      "path": "../../../vendor/cosmokit"
-    },
-    {
-      "path": "../../../vendor/cordis"
-    },
-    {
-      "path": "../../../vendor/schemastery"
-    },
-    {
-      "path": "../../core/session"
-    },
-    {
-      "path": "../../core/agent"
-    },
-    {
-      "path": "../../interaction/user-approval"
-    },
-    {
-      "path": "../../interaction/user-questions"
-    },
-    {
-      "path": "../../preset/agent-presets"
-    },
-    {
-      "path": "../../session/session-persistence"
-    },
-    {
-      "path": "../../runtime-diagnostics/invariants"
-    }
-  ]
+  "include": ["src"]
 }
