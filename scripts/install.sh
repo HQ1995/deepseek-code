@@ -59,14 +59,14 @@ fi
 # contains the EMFILE/ENOSPC watch-capacity degradation (npm 0.1.0-rc.6 lacks
 # it). This also materializes the packages the bridge's peers resolve to.
 echo "  building dsh from deepseek-harness (pnpm; several minutes)..."
-( cd "$DEST/deepseek-harness" && pnpm install --frozen-lockfile && pnpm run build:lib:host )
+( cd "$DEST/deepseek-harness" && pnpm install --frozen-lockfile && pnpm run build:lib )
 
 # Build the bridge against the same harness tree, then install it as a plugin
 # into the deepseek-leader profile.
 echo "  building the grok-leader bridge..."
 ( cd "$DEST/bridge/grok-leader" && pnpm install && pnpm run build )
 echo "  installing the bridge into the deepseek-leader profile..."
-"$DEST/bin/dsh" plugin --profile deepseek-leader add "$DEST/bridge/grok-leader"
+"$DEST/bin/dsh" plugin --profile deepseek-leader add "file:$DEST/bridge/grok-leader"
 
 # Prebuilt TUI binary (unchanged by this migration).
 mkdir -p "$DEST/third_party/grok-build/target/release"
