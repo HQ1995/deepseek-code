@@ -85,6 +85,9 @@ use tracing::{debug, info, warn};
 pub use transport::listener_is_ready;
 const SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// dscode external-leader bootstrap: the dsh CLI boots slower than a
+/// self-spawn, and a hung one must fail fast so the TUI can point at its log.
+const EXTERNAL_SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Same source the leader reports, so adoption compares versions like-for-like.
 const CLIENT_LEADER_VERSION: &str = xai_grok_version::VERSION;
 /// Max wait for an evicted leader to exit before force-killing (relaunch drain ~5s).
@@ -947,6 +950,8 @@ pub struct LeaderReconnector {
     /// [`status_channel`](Self::status_channel). Atomic because
     /// `notify_connected` takes `&self`.
     next_generation: std::sync::atomic::AtomicU64,
+    /// dscode: external-leader spawner; None means grok self-spawn.
+    spawner: Option<std::sync::Arc<dyn Fn(&Path) -> Result<u32, ConnectionError> + Send + Sync>>,
 }
 impl LeaderReconnector {
     /// Create a new reconnector with the given connection parameters.
@@ -966,7 +971,23 @@ impl LeaderReconnector {
             env_urls,
             capabilities,
             status_tx,
+            spawner: None,
             next_generation: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+    /// dscode variant: on reconnect, (re)spawn the external dsh leader instead
+    /// of self-spawning. See connect_or_spawn_external.
+    pub fn new_external(
+        client_type: impl Into<String>,
+        mode: ClientMode,
+        env_urls: LeaderEnvUrls,
+        capabilities: ClientCapabilities,
+        status_tx: watch::Sender<ConnectionStatus>,
+        spawn: impl Fn(&Path) -> Result<u32, ConnectionError> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            spawner: Some(std::sync::Arc::new(spawn)),
+            ..Self::new(client_type, mode, env_urls, capabilities, status_tx)
         }
     }
     /// Publish `ConnectionStatus::Connected` with the next reconnect generation.
@@ -1013,12 +1034,26 @@ impl LeaderReconnector {
         ConnectionError,
     > {
         self.reconnect_with(policy, cancel, || {
-            connect_or_spawn(
-                &self.client_type,
-                self.mode,
-                &self.env_urls,
-                self.capabilities.clone(),
-            )
+            Box::pin(async {
+                if let Some(spawner) = &self.spawner {
+                    connect_or_spawn_external(
+                        &self.client_type,
+                        self.mode,
+                        &self.env_urls,
+                        self.capabilities.clone(),
+                        move |path| spawner(path),
+                    )
+                    .await
+                } else {
+                    connect_or_spawn(
+                        &self.client_type,
+                        self.mode,
+                        &self.env_urls,
+                        self.capabilities.clone(),
+                    )
+                    .await
+                }
+            })
         })
         .await
     }
@@ -1446,6 +1481,67 @@ pub async fn connect_or_spawn(
     env_urls: &LeaderEnvUrls,
     capabilities: ClientCapabilities,
 ) -> Result<LeaderConnection, ConnectionError> {
+    connect_or_spawn_inner(
+        client_type,
+        mode,
+        env_urls,
+        capabilities,
+        SpawnSpec::SelfSpawn,
+        SPAWN_WAIT_TIMEOUT,
+        MAX_SELF_SPAWN_ATTEMPTS,
+    )
+    .await
+}
+
+/// What connect_or_spawn launches when no live leader is adoptable.
+enum SpawnSpec<'a> {
+    /// grok default: respawn the current binary in 'agent leader' mode.
+    SelfSpawn,
+    /// dscode: an external command (the official dsh CLI) provides the
+    /// leader. The callback removes any stale socket file, starts the
+    /// external leader bound to sock_path, and returns its PID.
+    External(&'a (dyn Fn(&Path) -> Result<u32, ConnectionError> + Send + Sync + 'a)),
+}
+
+/// Connect to an existing leader or spawn an external command that provides it.
+///
+/// Identical adoption/lock semantics to connect_or_spawn - connect-first,
+/// flock-serialized single spawner, siblings adopt via the connectable wait -
+/// except the replacement leader is started by spawn instead of a self-spawn.
+/// The external leader never takes the flock itself, so the spawner keeps the
+/// lock from spawn until the socket is connectable (racing sessions wait
+/// instead of double-spawning onto one socket), releases it on handoff, and
+/// gives up after a single ~5s wait (an external boot failure is a config/log
+/// problem, not a transient race).
+pub async fn connect_or_spawn_external(
+    client_type: &str,
+    mode: ClientMode,
+    env_urls: &LeaderEnvUrls,
+    capabilities: ClientCapabilities,
+    spawn: impl Fn(&Path) -> Result<u32, ConnectionError> + Send + Sync,
+) -> Result<LeaderConnection, ConnectionError> {
+    connect_or_spawn_inner(
+        client_type,
+        mode,
+        env_urls,
+        capabilities,
+        SpawnSpec::External(&spawn),
+        EXTERNAL_SPAWN_WAIT_TIMEOUT,
+        1,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn connect_or_spawn_inner(
+    client_type: &str,
+    mode: ClientMode,
+    env_urls: &LeaderEnvUrls,
+    capabilities: ClientCapabilities,
+    spawn_spec: SpawnSpec<'_>,
+    spawn_wait_timeout: Duration,
+    max_spawn_attempts: u32,
+) -> Result<LeaderConnection, ConnectionError> {
     if let Some(profile) = xai_grok_sandbox::requested_confinement_profile() {
         return Err(ConnectionError::SandboxConfinement(profile));
     }
@@ -1524,12 +1620,26 @@ pub async fn connect_or_spawn(
                     replacing_stale = true;
                 }
                 info!("Acquired lock, spawning leader subprocess");
-                if let Err(e) = lock.release() {
-                    warn!(error = %e, "Failed to release lock before spawning leader");
+                let external = matches!(spawn_spec, SpawnSpec::External(_));
+                match spawn_spec {
+                    SpawnSpec::SelfSpawn => {
+                        if let Err(e) = lock.release() {
+                            warn!(error = %e, "Failed to release lock before spawning leader");
+                        }
+                        spawn_leader_subprocess(env_urls)?;
+                    }
+                    SpawnSpec::External(spawn) => {
+                        // The external leader never takes the flock: keep it
+                        // until the socket is connectable so racing sessions
+                        // wait (and adopt) instead of double-spawning onto one
+                        // socket. On spawn error the lock stays held and Drop
+                        // cleans the files we were replacing.
+                        spawn(&sock_path)?;
+                    }
                 }
-                spawn_leader_subprocess(env_urls)?;
                 let conn = match wait_for_socket_connectable(
                     &sock_path,
+                    spawn_wait_timeout,
                     client_type,
                     mode,
                     capabilities.clone(),
@@ -1539,10 +1649,13 @@ pub async fn connect_or_spawn(
                     Ok(conn) => conn,
                     Err(ConnectionError::Timeout) => {
                         self_spawn_attempts += 1;
-                        if self_spawn_attempts >= MAX_SELF_SPAWN_ATTEMPTS {
+                        if external {
+                            let _ = lock.release();
+                        }
+                        if self_spawn_attempts >= max_spawn_attempts {
                             return Err(ConnectionError::SpawnFailed(format!(
                                 "spawned leader did not become connectable after \
-                                 {MAX_SELF_SPAWN_ATTEMPTS} attempts"
+                                 {max_spawn_attempts} attempts"
                             )));
                         }
                         debug!(
@@ -1551,8 +1664,20 @@ pub async fn connect_or_spawn(
                         );
                         continue;
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        if external {
+                            let _ = lock.release();
+                        }
+                        return Err(e);
+                    }
                 };
+                if external {
+                    // Handoff complete: clear was_leader so Drop never unlinks
+                    // the live external leader's socket.
+                    if let Err(e) = lock.release() {
+                        warn!(error = %e, "Failed to release lock after external leader connect");
+                    }
+                }
                 let elapsed_ms = start.elapsed().as_millis() as u64;
                 info!(elapsed_ms, "Spawned and connected to leader");
                 if replacing_stale {
@@ -1575,7 +1700,14 @@ pub async fn connect_or_spawn(
                 return Err(e.into());
             }
         }
-        match wait_for_socket_connectable(&sock_path, client_type, mode, capabilities.clone()).await
+        match wait_for_socket_connectable(
+            &sock_path,
+            SPAWN_WAIT_TIMEOUT,
+            client_type,
+            mode,
+            capabilities.clone(),
+        )
+        .await
         {
             Ok(conn) => {
                 zombie_timer = None;
@@ -1758,11 +1890,12 @@ async fn connect_to_leader(
 /// Uses exponential backoff starting from SPAWN_POLL_INTERVAL.
 pub(crate) async fn wait_for_socket_connectable(
     sock_path: &Path,
+    timeout: Duration,
     client_type: &str,
     mode: ClientMode,
     capabilities: ClientCapabilities,
 ) -> Result<LeaderConnection, ConnectionError> {
-    let deadline = tokio::time::Instant::now() + SPAWN_WAIT_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + timeout;
     let mut last_error = None;
     while tokio::time::Instant::now() < deadline {
         if crate::leader::transport::listener_is_ready(sock_path) {
@@ -2195,6 +2328,96 @@ mod tests {
             drop(conn);
             fake.cancel();
         }
+    }
+    /// dscode external-leader path: the spawn callback runs under the flock,
+    /// the socket it brings up is adopted, and the handoff leaves both files
+    /// in place (released, not cleaned).
+    #[tokio::test]
+    async fn connect_or_spawn_external_runs_callback_and_adopts() {
+        let temp = TempDir::new().unwrap();
+        let sock_path = temp.path().join("external.sock");
+        let _env = crate::env::EnvVarGuard::set(LEADER_SOCKET_ENV, sock_path.to_str().unwrap());
+        let env_urls = LeaderEnvUrls {
+            grok_ws_url: "wss://test.invalid".into(),
+            grok_ws_origin: "https://test.invalid".into(),
+        };
+        let (called_tx, called_rx) = std::sync::mpsc::channel::<PathBuf>();
+        let spawn_sock = sock_path.clone();
+        let conn = connect_or_spawn_external(
+            "test",
+            ClientMode::Stdio,
+            &env_urls,
+            ClientCapabilities::default(),
+            move |path| {
+                let _ = called_tx.send(path.to_path_buf());
+                let handle = tokio::runtime::Handle::current();
+                handle.spawn(spawn_fake_leader(
+                    spawn_sock.clone(),
+                    FakeLeaderBehavior::Normal {
+                        versions: FakeVersions::current(),
+                        caps: fake_caps(true, false),
+                    },
+                ));
+                Ok(std::process::id())
+            },
+        )
+        .await
+        .expect("external spawn must connect to the spawned socket");
+        assert_eq!(
+            called_rx.recv().unwrap(),
+            sock_path,
+            "spawn callback receives the lock's socket path"
+        );
+        assert!(sock_path.exists(), "socket survives the handoff");
+        assert!(
+            sock_path.with_extension("lock").exists(),
+            "lock file survives the handoff (released, not cleaned)"
+        );
+        drop(conn);
+    }
+    /// A hung external leader is not retried: exactly one spawn callback, one
+    /// ~5s connectable wait, then SpawnFailed - and the flock is released so
+    /// the next session can try again.
+    #[tokio::test(start_paused = true)]
+    async fn connect_or_spawn_external_gives_up_after_one_attempt() {
+        let temp = TempDir::new().unwrap();
+        let sock_path = temp.path().join("external-hung.sock");
+        let _env = crate::env::EnvVarGuard::set(LEADER_SOCKET_ENV, sock_path.to_str().unwrap());
+        let env_urls = LeaderEnvUrls {
+            grok_ws_url: "wss://test.invalid".into(),
+            grok_ws_origin: "https://test.invalid".into(),
+        };
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_spawn = attempts.clone();
+        let err_result = connect_or_spawn_external(
+            "test",
+            ClientMode::Stdio,
+            &env_urls,
+            ClientCapabilities::default(),
+            move |_path| {
+                attempts_spawn.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(u32::MAX) // spawner "succeeds" but never binds a socket
+            },
+        )
+        .await;
+        let err = match err_result {
+            Ok(_) => panic!("hung external leader must fail"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a hung external leader is never re-spawned"
+        );
+        assert!(
+            matches!(&err, ConnectionError::SpawnFailed(_)),
+            "unexpected error: {err:?}"
+        );
+        let mut lock = LeaderLock::new(&env_urls.grok_ws_url);
+        assert!(
+            lock.try_acquire().unwrap(),
+            "flock must be released after a failed external spawn"
+        );
     }
     /// A leader that closes right after `Registered` still yields a usable
     /// registration (version metadata for the eviction decision) — the
