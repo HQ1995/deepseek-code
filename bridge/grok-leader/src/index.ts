@@ -1152,6 +1152,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const conn = connections.get(clientId)
     if (conn !== undefined) {
       for (const event of inspection.events) {
+        // Keep turnStartMs current so replayed updates carry streamStartMs
+        // and the pager renders ThinkingBlock durations on resume.
+        if (event.type === 'turn/start') record.turnStartMs = event.time
         for (const item of mapEvent(record, event, true)) {
           emitUpdate(conn, record, event.seq, item, true, event.time)
         }
