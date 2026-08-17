@@ -1091,11 +1091,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (llm !== undefined && llm.listProviders().some(provider => provider.id === id)) {
       throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" already exists')
     }
+    // An empty optional field means "unset": the official schema resolves an
+    // absent key to the catalog default, while an empty string is refused.
+    const nonEmpty = (value: unknown): value is string => typeof value === 'string' && value.length > 0
     const profile: Record<string, unknown> = {
-      ...typeof p.displayName === 'string' ? { displayName: p.displayName } : {},
-      ...typeof p.apiKeyEnv === 'string' ? { apiKeyEnv: p.apiKeyEnv } : {},
-      ...typeof p.api === 'string' ? { api: p.api } : {},
-      ...typeof p.baseURL === 'string' ? { baseURL: p.baseURL } : {},
+      ...nonEmpty(p.displayName) ? { displayName: p.displayName } : {},
+      ...nonEmpty(p.apiKeyEnv) ? { apiKeyEnv: p.apiKeyEnv } : {},
+      ...nonEmpty(p.api) ? { api: p.api } : {},
+      ...nonEmpty(p.baseURL) ? { baseURL: p.baseURL } : {},
     }
     const op = [{ op: 'set', path: ['providers', id], value: profile }]
     try {
