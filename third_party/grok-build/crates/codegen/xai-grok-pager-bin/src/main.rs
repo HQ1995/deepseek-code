@@ -1820,15 +1820,17 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
 fn main() {
     // dscode isolation: keep the TUI local state (session list, changelog,
     // logs, caches) out of ~/.grok so a real grok-build install on the same
-    // machine never shares them. It lives under the dsh home (DSH_HOME
-    // redirects with it). GROK_HOME is upstream's own override seam; an
-    // explicit user value always wins.
+    // machine never shares them. Precedence: GROK_HOME (upstream seam,
+    // explicit always wins) > DSC_HOME > $DSH_HOME/dsc-tui > ~/.dsh/dsc-tui.
     if std::env::var_os("GROK_HOME").is_none_or(|v| v.is_empty()) {
-        let dsh_home = std::env::var_os("DSH_HOME").filter(|v| !v.is_empty())
-            .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty()).map(|h| std::path::Path::new(&h).join(".dsh").into_os_string()));
-        if let Some(dsh_home) = dsh_home {
+        let tui_home = std::env::var_os("DSC_HOME").filter(|v| !v.is_empty())
+            .or_else(|| std::env::var_os("DSH_HOME").filter(|v| !v.is_empty())
+                .map(|h| std::path::Path::new(&h).join("dsc-tui").into_os_string()))
+            .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty())
+                .map(|h| std::path::Path::new(&h).join(".dsh").join("dsc-tui").into_os_string()));
+        if let Some(tui_home) = tui_home {
             // SAFETY: startup is single-threaded here.
-            unsafe { std::env::set_var("GROK_HOME", std::path::Path::new(&dsh_home).join("dsc-tui")) };
+            unsafe { std::env::set_var("GROK_HOME", tui_home) };
         }
     }
     xai_grok_telemetry::startup::mark_process_start();

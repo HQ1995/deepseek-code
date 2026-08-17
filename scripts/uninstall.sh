@@ -55,7 +55,20 @@ else
   note "no profile at $PROFILE"
 fi
 
-# 3. The official dsh CLI, only with --remove-dsh (it is the upstream
+# 3. The TUI local state (session list mirror, changelog, logs). DSC_HOME
+#    overrides the default; only remove what the identity check proves ours.
+TUI_HOME="$DSC_HOME"
+if [ -z "$TUI_HOME" ]; then TUI_HOME="$HOME/.dsh/dsc-tui"; fi
+if [[ -d "$TUI_HOME" ]]; then
+  if [[ "$(basename "$TUI_HOME")" == "dsc-tui" ]]; then
+    rm -rf "$TUI_HOME"
+    echo "  removed $TUI_HOME"
+  else
+    note "kept $TUI_HOME (not named dsc-tui)"
+  fi
+fi
+
+# 4. The official dsh CLI, only with --remove-dsh (it is the upstream
 #    package, not deepseek-code's own artifact).
 if [[ "$FLAG" == "--remove-dsh" ]] && command -v npm >/dev/null 2>&1; then
   npm uninstall -g @deepseek-ai/dsh >/dev/null 2>&1 || note "npm uninstall -g @deepseek-ai/dsh failed"
