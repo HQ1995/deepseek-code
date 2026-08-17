@@ -118,3 +118,11 @@ gates remain, so the banner CTA still advertises /announcements hide.
 `DisplayMode::Truncated` (upstream: `Collapsed`) so finished thought blocks
 show the one-line reasoning preview under the duration header by default,
 matching grok's visible behavior. Ctrl+E still switches the sticky mode.
+
+### Idle queue snapshot retires optimistic echoes
+
+`app/app_view.rs apply_queue_changed` retires every optimistic prompt echo
+when the broadcast is the idle empty snapshot (no entries, no running
+prompt). Upstream only retires on the RPC cancel/delete path, so a
+successfully-run queued prompt left a ghost held row (#N) after the queue
+drained. Divergence is a strict bug fix; candidate for upstreaming.

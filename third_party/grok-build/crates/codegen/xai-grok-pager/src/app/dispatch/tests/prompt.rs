@@ -2306,6 +2306,39 @@ fn cancel_hands_queue_to_agent_without_reordering() {
     );
 }
 
+/// Regression: a successfully-run queued prompt's optimistic echo must not
+/// resurrect as a ghost held row when the idle empty snapshot arrives
+/// (entries: [] and no running prompt). The completion path never calls
+/// retire_optimistic_echo, so apply_queue_changed must retire it itself.
+#[test]
+fn idle_empty_queue_changed_retires_optimistic_echoes() {
+    use crate::app::prompt_queue::QueueChanged;
+
+    let mut app = test_app_with_agent();
+    let sid = "test-session".to_string();
+
+    app.push_optimistic_prompt_echo(&sid, "q1", "now what time is it", "prompt");
+
+    // The queue drained: nothing pending, nothing running.
+    app.apply_queue_changed(QueueChanged {
+        session_id: sid.clone(),
+        entries: vec![],
+        running_prompt_id: None,
+        running_text: None,
+        running_kind: None,
+        running_combined_texts: None,
+    });
+
+    assert!(
+        app.optimistic_prompt_echoes.get(&sid).is_none(),
+        "idle empty snapshot must retire the optimistic echo"
+    );
+    assert!(
+        app.shared_prompt_queue(&sid).is_none(),
+        "shared queue must be empty after the idle empty snapshot"
+    );
+}
+
 /// Regression for the "queued message renders 2×" dup: a shell/proxy that
 /// re-keys the prompt (the broadcast row and later `running_prompt_id` carry a
 /// DIFFERENT id than the pager's optimistic echo) must still reconcile the

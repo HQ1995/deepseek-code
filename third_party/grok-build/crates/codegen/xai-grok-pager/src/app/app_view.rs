@@ -2098,7 +2098,17 @@ impl AppView {
                 .map(|e| (e.kind.clone(), e.text.clone()))
         });
         if let Some(opt) = self.optimistic_prompt_echoes.get_mut(&session_id) {
+            // An idle empty snapshot (no entries, no running prompt) retires
+            // every optimistic echo: a prompt that ran to completion never
+            // reappears in a later broadcast, so re-pinning its echo here
+            // would resurrect a ghost held row (visible as #N after the
+            // queue drains). retire_optimistic_echo only covers the RPC
+            // cancel/delete path, so this is the completion path.
+            let idle_empty = entries.is_empty() && running_prompt_id.is_none();
             opt.retain(|e| {
+                if idle_empty {
+                    return false;
+                }
                 let id_matches_running = running_prompt_id.as_deref() == Some(e.id.as_str());
                 let id_matches_entry = entries.iter().any(|x| x.id == e.id);
                 let content_match_id = running_row
