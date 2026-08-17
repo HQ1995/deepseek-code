@@ -4,6 +4,7 @@
  * (tests/fixtures/grok-tui-messages.jsonl, docs/grok-tui-connect.md).
  */
 import { randomUUID } from 'node:crypto'
+import { statSync } from 'node:fs'
 import { createConnection, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
@@ -11,7 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type UserMessage } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -21,6 +22,7 @@ import * as GrokLeader from '../src/index.ts'
 interface MockAgentInternals {
   cancelCalls: number
   followups: string[]
+  messages: unknown[]
   disposed: boolean
   idleWaiters: Array<() => void>
 }
@@ -41,7 +43,7 @@ function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry {
   const resumed: Array<{ sessionId: string }> = []
   const byId = new Map<string, MockAgent>()
   const makeAgent = (sessionId: SessionId, cwd: string | undefined): MockAgent => {
-    const internals: MockAgentInternals = { cancelCalls: 0, followups: [], disposed: false, idleWaiters: [] }
+    const internals: MockAgentInternals = { cancelCalls: 0, followups: [], messages: [], disposed: false, idleWaiters: [] }
     const agent = {
       id: sessionId,
       options: {} as AgentOptions,
@@ -62,6 +64,7 @@ function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry {
       runMaintenance(task: (signal: AbortSignal) => Promise<unknown>) { return task(new AbortController().signal) },
       send() {},
       followup(message: unknown) {
+        internals.messages.push(message)
         const content = (message as { content?: Array<{ type?: string; text?: string }> }).content ?? []
         for (const block of content) {
           if (block.type === 'text' && block.text !== undefined) internals.followups.push(block.text)
@@ -169,6 +172,7 @@ const mockSessionsStore = {
 
 interface LeaderHarness {
   ctx: Context
+  pluginCtx: Context
   socketPath: string
   registry: MockRegistry
   persistence: ReturnType<typeof makeMockPersistence>
@@ -301,12 +305,16 @@ async function makeHarness(
   if (presets !== undefined) ctx.provide('agentPresets', presets as unknown as Context['agentPresets'])
   ctx.provide('agentDefaultModel', mockDefaultModel as unknown as Context['agentDefaultModel'])
   const socketPath = resolve(tmpdir(), 'dsh-grok-leader-' + String(process.pid) + '-' + randomUUID() + '.sock')
+  let pluginCtx: Context | undefined
   await ctx.plugin({
     name: 'grok-leader-test',
     inject: [...GrokLeader.inject],
-    apply: (inner: Context) => { GrokLeader.apply(inner, { socketPath, ...options.model === undefined ? {} : { model: options.model }, ...options.combineQueuedPrompts === undefined ? {} : { combineQueuedPrompts: options.combineQueuedPrompts } }) },
+    apply: (inner: Context) => {
+      pluginCtx = inner
+      GrokLeader.apply(inner, { socketPath, ...options.model === undefined ? {} : { model: options.model }, ...options.combineQueuedPrompts === undefined ? {} : { combineQueuedPrompts: options.combineQueuedPrompts } })
+    },
   })
-  return { ctx, socketPath, registry, persistence, presets }
+  return { ctx, pluginCtx: pluginCtx!, socketPath, registry, persistence, presets }
 }
 
 const register = (client: ClientHandle): void => {
@@ -619,6 +627,120 @@ describe('grok leader over a unix socket', () => {
     expect(imagePrompt.error).toEqual({ code: -32602, message: 'only text and resource_link prompt content is supported' })
   })
 
+  it('rejects a session/new that pins an already-live session id', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { sessionId: 'pinned-session' } })
+    expect(created.result).toEqual({ sessionId: 'pinned-session' })
+    const dup = await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { sessionId: 'pinned-session' } })
+    expect(dup.error).toMatchObject({ code: -32602 })
+    // The first session still works: its record was not replaced.
+    const prompted = await c.request(3, 'session/prompt', { sessionId: 'pinned-session', prompt: [{ type: 'text', text: 'still here' }] })
+    expect(prompted.result).toEqual({ stopReason: 'cancelled' })
+  })
+
+  it('a second client cannot touch the first client sessions', async () => {
+    const { registry, client: c, socketPath } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+    const other = await makeClient(socketPath)
+    register(other)
+    await other.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const denied = { code: -32602, message: 'unknown session: ' + sessionId }
+
+    // Every session-scoped request reads as unknown to the foreign client.
+    expect((await other.request(10, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'steal' }] })).error).toEqual(denied)
+    expect((await other.request(11, 'session/set_model', { sessionId, modelId: 'pi-code' })).error).toEqual(denied)
+    expect((await other.request(12, 'x.ai/prompt_history', { filter_session_id: sessionId })).error).toEqual(denied)
+    expect((await other.request(13, 'x.ai/session/info', { sessionId })).error).toEqual(denied)
+    expect((await other.request(14, 'session/close', { sessionId })).error).toEqual(denied)
+
+    // Foreign notifications must not reach the owned session either.
+    const agent = registry.byId.get(sessionId)!
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 1))
+    other.notify('session/cancel', { sessionId })
+    other.notify('x.ai/queue/clear', { sessionId })
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
+    expect(agent.internals.cancelCalls).toBe(0)
+    expect(((c.broadcasts[c.broadcasts.length - 1]!.params) as { entries?: unknown[] }).entries).toHaveLength(1)
+
+    // The owner's flow is untouched: the parked prompt settles and the queued
+    // row still runs (a foreign queue/clear would have removed it).
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 2)).result).toEqual({ stopReason: 'cancelled' })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.followups.includes('second'))
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
+    expect(agent.internals.followups).toEqual(['first', 'second'])
+    expect(agent.internals.cancelCalls).toBe(0)
+    expect(registry.byId.has(sessionId)).toBe(true)
+    other.socket.destroy()
+  })
+
+  it('chmods the socket 0600 once listening', async () => {
+    const made = await makeHarness()
+    try {
+      await waitFor(() => (statSync(made.socketPath).mode & 0o777) === 0o600)
+    } finally {
+      await made.ctx.fiber.dispose()
+    }
+  })
+
+  it('rejects a prompt only when agent/error names its in-flight turn', async () => {
+    const { registry, pluginCtx, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'one' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    pluginCtx.emit('agent/inbox/claimed', {
+      agent,
+      message: agent.internals.messages[0] as UserMessage,
+      turn: 1,
+    })
+    // An error for a different turn is ignored...
+    pluginCtx.emit('agent/error', { agent, turn: 2, step: 0, error: new Error('other turn') })
+    // ...and the in-flight turn's own error rejects the prompt.
+    pluginCtx.emit('agent/error', { agent, turn: 1, step: 0, error: new Error('boom') })
+    expect((await waitForId(c, 2)).error).toEqual({ code: -32603, message: 'turn failed: boom' })
+
+    // The rejected turn left the session clean: the next prompt still runs.
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'two' }] })
+    await waitFor(() => agent.internals.idleWaiters.length >= 1)
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.followups.includes('two'))
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
+  })
+
+  it('treats a null _meta as absent on session/new, session/prompt, and session/load', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: null })
+    expect(created.error).toBeUndefined()
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const prompted = await c.request(2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'null meta' }], _meta: null })
+    expect(prompted.error).toBeUndefined()
+    expect(prompted.result).toEqual({ stopReason: 'cancelled' })
+    await c.next() // consume the echoed user_message_chunk before the next request
+    const loaded = await c.request(3, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [], _meta: null })
+    expect(loaded.error).toBeUndefined()
+    expect(loaded.result).toEqual({})
+  })
+
   it('enforces registration and rejects a second registration', async () => {
     const { client: c } = await start()
 
@@ -908,7 +1030,9 @@ describe('x.ai/providers/add', () => {
   /** llm mock whose roster grows as the settings mock records writes. */
   const makeLlm = (settings: SettingsMock) => {
     const providerRows = [{ id: 'deepseek', name: 'DeepSeek' }]
+    const discoveries: Array<{ provider?: string; baseURL?: string; api?: string; apiKey?: string }> = []
     return {
+      discoveries,
       listProviders: () => {
         const rows = [...providerRows]
         for (const id of Object.keys(settings.providers)) rows.push({ id, name: (settings.providers[id] as { displayName?: string }).displayName ?? id })
@@ -917,10 +1041,9 @@ describe('x.ai/providers/add', () => {
       listModels: async (provider: string) => provider === 'deepseek'
         ? [{ provider: 'deepseek', id: 'deepseek-chat', name: 'DeepSeek Chat' }]
         : [{ provider, id: provider + '-model', name: provider + ' Model' }],
-      discoverModels: async (_ns: string, request: { provider?: string; baseURL?: string }) => {
-        if (request.baseURL === 'https://gateway.test/v1') {
-          return [{ id: 'gw-model', name: 'GW Model', contextWindow: 8192 }]
-        }
+      discoverModels: async (_ns: string, request: { provider?: string; baseURL?: string; api?: string; apiKey?: string }) => {
+        discoveries.push(request)
+        if (request.baseURL?.startsWith('https://')) return [{ id: 'gw-model', name: 'GW Model', contextWindow: 8192 }]
         return []
       },
     }
@@ -943,7 +1066,7 @@ describe('x.ai/providers/add', () => {
     client = await makeClient(made.socketPath)
     register(client)
     await client.next() // registered
-    return { client, settings }
+    return { client, settings, llm }
   }
 
   it('writes through ctx.settings.mutate and returns the refreshed roster', async () => {
@@ -1023,6 +1146,60 @@ describe('x.ai/providers/add', () => {
     expect(res.error).toMatchObject({ code: -32603 })
     expect(String(res.error.message)).toContain('has an empty baseURL')
     expect(settings.calls).toHaveLength(1)
+  })
+
+  it('ships the apiKeyEnv NAME, never the resolved secret, to a brand-new baseURL', async () => {
+    const settings = makeSettings()
+    settings.firstWriteError = 'llm-pi-ai: provider "evil-gw" resolves no models; the installed catalog does not describe this route, so its models must be listed in configuration'
+    const { client, llm } = await startWithSettings(settings)
+    process.env.EXFIL_EVIL_KEY = 'resolved-super-secret'
+    try {
+      const res = await client.request(1, 'x.ai/providers/add', {
+        id: 'evil-gw',
+        apiKeyEnv: 'EXFIL_EVIL_KEY',
+        api: 'openai-completions',
+        baseURL: 'https://evil.test/v1',
+      })
+      expect(res.error).toBeUndefined()
+    } finally {
+      delete process.env.EXFIL_EVIL_KEY
+    }
+    expect(llm.discoveries).toEqual([{
+      provider: 'evil-gw',
+      api: 'openai-completions',
+      baseURL: 'https://evil.test/v1',
+      apiKey: 'EXFIL_EVIL_KEY', // the env NAME, never 'resolved-super-secret'
+    }])
+  })
+
+  it('resolves the env key only when the draft baseURL matches a persisted route', async () => {
+    const settings = makeSettings(true)
+    settings.providers = { 'acme-gateway': { displayName: 'Acme', baseURL: 'https://acme.test/v1' } }
+    settings.firstWriteError = 'llm-pi-ai: provider "acme-copy" resolves no models; the installed catalog does not describe this route, so its models must be listed in configuration'
+    const { client, llm } = await startWithSettings(settings)
+    process.env.EXFIL_ACME_KEY = 'resolved-acme-secret'
+    try {
+      const res = await client.request(1, 'x.ai/providers/add', {
+        id: 'acme-copy',
+        apiKeyEnv: 'EXFIL_ACME_KEY',
+        api: 'openai-completions',
+        baseURL: 'https://acme.test/v1',
+      })
+      expect(res.error).toBeUndefined()
+    } finally {
+      delete process.env.EXFIL_ACME_KEY
+    }
+    expect(llm.discoveries[0]?.apiKey).toBe('resolved-acme-secret')
+  })
+
+  it('refuses a baseURL with userinfo or a non-http scheme before any write', async () => {
+    const settings = makeSettings()
+    const { client } = await startWithSettings(settings)
+    const userinfo = await client.request(1, 'x.ai/providers/add', { id: 'evil', api: 'openai-completions', baseURL: 'https://user:pass@evil.test/v1' })
+    expect(userinfo.error).toMatchObject({ code: -32602 })
+    const ftp = await client.request(2, 'x.ai/providers/add', { id: 'evil-ftp', baseURL: 'ftp://evil.test/v1' })
+    expect(ftp.error).toMatchObject({ code: -32602 })
+    expect(settings.calls).toHaveLength(0)
   })
 })
 

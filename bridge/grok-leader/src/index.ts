@@ -13,7 +13,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { unlinkSync } from 'node:fs'
+import { chmodSync, unlinkSync } from 'node:fs'
 import { createServer, type Server, type Socket } from 'node:net'
 import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -338,6 +338,20 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return profile !== null && typeof profile === 'object' ? profile as Record<string, unknown> : {}
   }
 
+  /** baseURLs of the provider routes already persisted in the user settings
+   * section: the only endpoints a resolved env secret may be sent to. */
+  const knownRouteBaseUrls = (): string[] => {
+    const providers = providerUserSection(settings())?.providers
+    if (providers === null || typeof providers !== 'object') return []
+    const urls: string[] = []
+    for (const profile of Object.values(providers as Record<string, unknown>)) {
+      if (profile === null || typeof profile !== 'object') continue
+      const baseURL = (profile as { baseURL?: unknown }).baseURL
+      if (typeof baseURL === 'string' && baseURL.length > 0) urls.push(baseURL)
+    }
+    return urls
+  }
+
   /** Rebuild the flattened wire catalog plus the provider ownership the bare ids hide. */
   const refreshCatalog = async (): Promise<ModelCatalog> => {
     const userSection = providerUserSection(settings())
@@ -398,9 +412,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     ? refreshCatalog()
     : Promise.resolve(catalog)
 
-  const ownedRecord = (agent: Agent): SessionRecord | undefined => {
+  const ownedAgentRecord = (agent: Agent): SessionRecord | undefined => {
     const record = sessions.get(agent.session.id)
     return record?.agent === agent ? record : undefined
+  }
+
+  /** One client may only touch sessions it created or loaded; foreign ids
+   * resolve exactly like unknown ids so a session's existence never leaks. */
+  const ownedRecord = (clientId: number, sessionId: SessionId | undefined): SessionRecord | undefined => {
+    const record = sessionId === undefined ? undefined : sessions.get(sessionId)
+    return record?.clientId === clientId ? record : undefined
   }
 
   const assertOpen = (): void => {
@@ -566,15 +587,17 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   })
 
   ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
-    const record = ownedRecord(agent)
+    const record = ownedAgentRecord(agent)
     const inflight = record?.inflight
     if (inflight !== undefined && inflight.messageId === message.id) inflight.turn = turn
   })
 
   ctx.on('agent/error', ({ agent, turn, error }) => {
-    const record = ownedRecord(agent)
+    const record = ownedAgentRecord(agent)
     const inflight = record?.inflight
-    if (record === undefined || inflight === undefined || inflight.turn === turn) return
+    // Reject only when this error names the in-flight turn; an error for any
+    // other turn (or before a turn was claimed) must not settle this prompt.
+    if (record === undefined || inflight === undefined || inflight.turn !== turn) return
     record.inflight = undefined
     inflight.reject(internalError('turn failed: ' + errorChain(error)))
   })
@@ -583,7 +606,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   // and an unknown client response never becomes a durable grant. YOLO
   // sessions pre-approve without a client roundtrip.
   ctx.on('approval/request', (request, next) => {
-    const record = ownedRecord(request.agent)
+    const record = ownedAgentRecord(request.agent)
     if (record === undefined || request.callId === undefined) return next()
     if (record.yolo) return Promise.resolve('allowed-once' as const)
     const conn = connections.get(record.clientId)
@@ -607,7 +630,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   if (questions !== undefined) {
     const disposeProvider = questions.registerProvider({
       async ask(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer> {
-        const record = request.agent === undefined ? undefined : ownedRecord(request.agent)
+        const record = request.agent === undefined ? undefined : ownedAgentRecord(request.agent)
         const conn = record === undefined ? undefined : connections.get(record.clientId)
         if (record === undefined || conn === undefined) {
           throw new UserQuestionError('no connected grok client owns this agent', 'NO_CLIENT')
@@ -743,8 +766,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
    * @param meta - session/new or session/load _meta.
    * @returns the requested preset id, or undefined for the roster default.
    */
-  const presetRequestFromMeta = (meta: Record<string, unknown> | undefined): string | undefined => {
-    if (meta === undefined) return undefined
+  const presetRequestFromMeta = (meta: Record<string, unknown> | null | undefined): string | undefined => {
+    if (meta === undefined || meta === null) return undefined
     const native = meta.agentPreset
     if (native !== undefined) {
       if (typeof native !== 'string') throw invalidParams('_meta.agentPreset must be a string preset id')
@@ -818,10 +841,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (Array.isArray(mcpServers) && mcpServers.length > 0) throw invalidParams('mcpServers is not supported')
     const additionalDirectories = p.additionalDirectories
     if (Array.isArray(additionalDirectories) && additionalDirectories.length > 0) throw invalidParams('additionalDirectories is not supported')
-    const meta = p._meta as Record<string, unknown> | undefined
+    const meta = p._meta as Record<string, unknown> | null | undefined
     // Clients may pin the session id through _meta.sessionId; absent one, mint it.
     const suppliedId = meta?.sessionId
     const sessionId = typeof suppliedId === 'string' && suppliedId.length > 0 ? SessionId(suppliedId) : SessionId(randomUUID())
+    // A pinned id that is already live must not silently replace the record:
+    // that would strand the old agent and re-route its reverse channels.
+    if (sessions.has(sessionId)) {
+      throw invalidParams('session id is already in use: ' + String(sessionId))
+    }
     // TODO(verify): the grok leader also injects autoMode, modelId,
     // clientIdentifier, codeNavEnabled, and client terminal/fs routing from the
     // registration capabilities (server.rs:671-770). Only yoloMode and
@@ -978,6 +1006,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       })
     } catch (error: unknown) {
       failure = error
+      // A throw from the echo/broadcast above rejects the promise with the
+      // inflight still set; clearing it here guarantees advancePromptQueue is
+      // never stalled behind a settled failure.
+      record.inflight = undefined
     }
     // Cleanup on BOTH paths: a followup rejection or a rejected turn must not
     // strand runningPromptId or stall the queued successors.
@@ -1033,18 +1065,18 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   /** Enqueue a validated prompt and run it as soon as the session is idle. */
   const enqueuePrompt = (record: SessionRecord, p: Record<string, unknown>, text: string): Promise<{ stopReason: StopReasonWire }> =>
     new Promise((resolve, reject) => {
-      const meta = p._meta as Record<string, unknown> | undefined
+      const meta = p._meta as Record<string, unknown> | null | undefined
       const id = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
       record.promptQueue.push({ p, resolve, reject, id, text, version: record.nextQueueVersion++ })
       advancePromptQueue(record)
       broadcastQueueChanged(record)
     })
 
-  const prompt = async (params: unknown): Promise<unknown> => {
+  const prompt = async (clientId: number, params: unknown): Promise<unknown> => {
     assertOpen()
     const p = paramRecord(params, 'session/prompt')
     const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
-    const record = sessionId === undefined ? undefined : sessions.get(sessionId)
+    const record = ownedRecord(clientId, sessionId)
     if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
     const blocks = p.prompt
     if (promptHasUnsupportedContent(blocks)) {
@@ -1058,12 +1090,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return await enqueuePrompt(record, p, text)
   }
 
-  const cancel = (params: unknown): void => {
+  const cancel = (clientId: number, params: unknown): void => {
     const p = typeof params === 'object' && params !== null && !Array.isArray(params)
       ? params as Record<string, unknown>
       : undefined
     const sessionId = p !== undefined && typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
-    const record = sessionId === undefined ? undefined : sessions.get(sessionId)
+    const record = ownedRecord(clientId, sessionId)
     if (record === undefined) return
     record.agent.cancel({ kind: 'user' })
     settlePrompt(record, 'cancelled')
@@ -1094,7 +1126,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // An explicitly requested preset id that names a real preset wins over
     // the persisted header preset (preset switch); otherwise the persisted
     // value wins, then the roster default for headers that predate presets.
-    const meta = p._meta as Record<string, unknown> | undefined
+    const meta = p._meta as Record<string, unknown> | null | undefined
     const explicit = presetRequestFromMeta(meta)
     const presetRequest = explicit === undefined
       ? inspection.meta.agentPreset
@@ -1178,14 +1210,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
-  const setSessionModel = async (params: unknown): Promise<unknown> => {
+  const setSessionModel = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'session/set_model')
     const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
-    const record = sessionId === undefined ? undefined : sessions.get(sessionId)
+    const record = ownedRecord(clientId, sessionId)
     if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
     const modelId = p.modelId
     if (typeof modelId !== 'string' || modelId.length === 0) throw invalidParams('modelId must be a non-empty string')
-    const meta = p._meta as Record<string, unknown> | undefined
+    const meta = p._meta as Record<string, unknown> | null | undefined
     const reasoningEffort = meta?.reasoningEffort
     // TODO(verify): grok modelId is a global catalog id (agent.rs
     // SetSessionModelRequest); dsh needs a provider+model pair, so the provider
@@ -1215,7 +1247,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
    * Interrogate the gateway for one draft provider's catalog, for the case the
    * official seam refused: a route the installed pi-ai catalog does not
    * describe must name its models. The key comes from the environment the
-   * form named (v1 auth is env-key only); a miss probes unauthenticated.
+   * form named (v1 auth is env-key only); a miss probes unauthenticated. A
+   * resolved secret only travels to a baseURL this bridge already knows; a
+   * brand-new endpoint receives the env NAME, never the resolved value.
    */
   const discoverProviderModels = async (
     id: string,
@@ -1227,13 +1261,23 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       throw internalError('cannot add provider "' + id + '": the installed catalog does not describe it and no model discovery is configured')
     }
     const apiKeyEnv = typeof p.apiKeyEnv === 'string' ? p.apiKeyEnv : undefined
-    const apiKey = apiKeyEnv === undefined ? undefined : process.env[apiKeyEnv]
+    const baseURL = typeof p.baseURL === 'string' ? p.baseURL : undefined
+    // Exfil guard: the resolved env value may only be handed to an endpoint
+    // whose baseURL is already a persisted provider route (re-provide under a
+    // known endpoint). Anything else — including a brand-new baseURL — gets
+    // the env NAME so the gateway can resolve it locally without shipping the
+    // secret to a client-chosen host.
+    const apiKey = apiKeyEnv === undefined
+      ? undefined
+      : baseURL !== undefined && knownRouteBaseUrls().includes(baseURL)
+        ? process.env[apiKeyEnv]
+        : apiKeyEnv
     let models
     try {
       models = await llm.discoverModels(PROVIDER_SETTINGS_NS, {
         provider: id,
         ...typeof p.api === 'string' ? { api: p.api } : {},
-        ...typeof p.baseURL === 'string' ? { baseURL: p.baseURL } : {},
+        ...baseURL === undefined ? {} : { baseURL },
         ...apiKey === undefined || apiKey === '' ? {} : { apiKey },
       })
     } catch (error: unknown) {
@@ -1301,6 +1345,18 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const api = p.api
     if (api !== undefined && api !== null && (typeof api !== 'string' || !PROVIDER_APIS.includes(api as (typeof PROVIDER_APIS)[number]))) {
       throw invalidParams('api must be one of ' + PROVIDER_APIS.join(', '))
+    }
+    const baseURL = p.baseURL
+    if (typeof baseURL === 'string' && baseURL.length > 0) {
+      let parsed: URL
+      try {
+        parsed = new URL(baseURL)
+      } catch {
+        throw invalidParams('baseURL must be an absolute http/https URL: ' + baseURL)
+      }
+      if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || parsed.username !== '' || parsed.password !== '') {
+        throw invalidParams('baseURL must be http/https with no userinfo: ' + baseURL)
+      }
     }
   }
 
@@ -1427,14 +1483,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   /** One session's accepted prompts, most-recent-first (scrollback/up-arrow). */
-  const promptHistory = (params: unknown): { prompts: string[] } => {
+  const promptHistory = (clientId: number, params: unknown): { prompts: string[] } => {
     const p = paramRecord(params, 'x.ai/prompt_history')
     const scoped = typeof p.filter_session_id === 'string'
       ? SessionId(p.filter_session_id)
       : typeof p.session_id === 'string'
         ? SessionId(p.session_id)
         : undefined
-    const record = scoped === undefined ? undefined : sessions.get(scoped)
+    const record = ownedRecord(clientId, scoped)
+    if (scoped !== undefined && record === undefined) throw invalidParams('unknown session: ' + String(scoped))
     return { prompts: record === undefined ? [] : [...record.prompts].reverse() }
   }
 
@@ -1467,10 +1524,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
-  const closeSession = async (params: unknown): Promise<unknown> => {
+  const closeSession = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'session/close')
     const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
-    const record = sessionId === undefined ? undefined : sessions.get(sessionId)
+    const record = ownedRecord(clientId, sessionId)
     if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
     record.agent.cancel({ kind: 'user' })
     settlePrompt(record, 'cancelled')
@@ -1491,15 +1548,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       case WIRE.sessionNew:
         return await newSession(clientId, params)
       case WIRE.sessionPrompt:
-        return await prompt(params)
+        return await prompt(clientId, params)
       case WIRE.sessionLoad:
         return await loadSession(clientId, params)
       case WIRE.sessionList:
         return await listSessions()
       case WIRE.sessionSetModel:
-        return await setSessionModel(params)
+        return await setSessionModel(clientId, params)
       case WIRE.sessionClose:
-        return await closeSession(params)
+        return await closeSession(clientId, params)
       case WIRE.modelsList:
         return await modelsList()
       case WIRE.providersAdd:
@@ -1511,7 +1568,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       case 'x.ai/commands/list':
         return { commands: await availableCommands() }
       case 'x.ai/prompt_history':
-        return promptHistory(params)
+        return promptHistory(clientId, params)
       case 'x.ai/marketplace/list':
         return { sources: [] }
       case 'x.ai/billing':
@@ -1523,7 +1580,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       case 'x.ai/session/info': {
         const p = paramRecord(params, 'x.ai/session/info')
         const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
-        const record = sessionId === undefined ? undefined : sessions.get(sessionId)
+        const record = ownedRecord(clientId, sessionId)
+        if (sessionId !== undefined && record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
         const total = 100000
         const used = record === undefined ? 0 : record.inputTokens + record.outputTokens
         return {
@@ -1600,7 +1658,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
-  const handleNotification = (method: string, params: unknown): void => {
+  const handleNotification = (clientId: number, method: string, params: unknown): void => {
     // Ext notifications ride as {method:'_x.ai/foo', params:{method:'x.ai/foo', params:{...}}}.
     const outer = params as Record<string, unknown> | undefined
     const unwrapped = outer !== undefined && typeof outer.params === 'object' && outer.params !== null
@@ -1609,14 +1667,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       : outer
     const queueRecord = (p: Record<string, unknown>): SessionRecord | undefined => {
       if (typeof p.sessionId !== 'string') return undefined
-      return sessions.get(SessionId(p.sessionId))
+      return ownedRecord(clientId, SessionId(p.sessionId))
     }
     const queueMutate = (record: SessionRecord): void => {
       broadcastQueueChanged(record)
     }
     switch (method) {
       case WIRE.sessionCancel:
-        cancel(params)
+        cancel(clientId, params)
         return
       case 'x.ai/queue/interject': {
         if (unwrapped === undefined) return
@@ -1717,7 +1775,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const normalized = normalizeMethod({ method, params: msg.params })
     const id = msg.id
     if (id === undefined) {
-      handleNotification(normalized, msg.params)
+      handleNotification(conn.clientId, normalized, msg.params)
       return
     }
     try {
@@ -1743,7 +1801,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       settlePrompt(record, 'cancelled')
       discardPromptQueue(record)
       sessions.delete(record.agent.session.id)
-      void record.dispose()
+      void record.dispose().catch((error: unknown) => {
+        logger.warn('grok-leader: session teardown failed for ' + String(record.agent.session.id) + ': ' + errorChain(error))
+      })
     }
   }
 
@@ -1894,23 +1954,44 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   const socketPath = config.socketPath ?? '/tmp/dsh-grok-leader.sock'
   const server: Server = createServer((socket) => { handleSocket(socket) })
+  let socketFailure: NodeJS.ErrnoException | undefined
   server.on('error', (error: NodeJS.ErrnoException) => {
     // Fail loud instead of unlinking a live leader's socket and stacking
     // orphaned listeners on the same path (that left TUIs connecting to dead
     // peers). The launcher owns the path: it removes stale files before start.
     process.stderr.write('grok-leader: socket error: ' + String(error) + '\n')
-    process.exit(1)
+    logger.warn('grok-leader: socket error: ' + String(error))
+    socketFailure = error
+    // Stop accepting work and drain the plugin, but keep the rest of the
+    // process alive; the failure re-throws from the effect on disposal.
+    void quiesce().catch((failure: unknown) => {
+      logger.warn('grok-leader: quiesce failed: ' + errorChain(failure))
+    })
   })
-  server.listen(socketPath)
+  server.listen(socketPath, () => {
+    // The launcher owns the socket's parent directory; the bridge only
+    // tightens the socket file itself so other local users cannot hijack it.
+    try {
+      chmodSync(socketPath, 0o600)
+    } catch (error: unknown) {
+      logger.warn('grok-leader: socket chmod failed: ' + String(error))
+    }
+  })
 
   ctx.effect(() => () => {
     server.close()
     void quiesce()
-    try {
-      unlinkSync(socketPath)
-    } catch {
-      // Socket file already removed; nothing to clean.
+    if (socketFailure?.code !== 'EADDRINUSE') {
+      try {
+        unlinkSync(socketPath)
+      } catch {
+        // Socket file already removed; nothing to clean.
+      }
     }
+    // Re-throw a fatal listener failure from the plugin effect so the cordis
+    // host fails this plugin cleanly instead of process.exit(1) taking the
+    // whole dsh process down.
+    if (socketFailure !== undefined) throw socketFailure
   }, 'grok-leader.socket')
 }
 
