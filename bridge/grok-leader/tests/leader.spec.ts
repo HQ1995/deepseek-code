@@ -268,7 +268,7 @@ async function collectIds(client: ClientHandle, ids: number[]): Promise<Map<numb
 }
 
 async function makeHarness(
-  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string } = {},
+  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; settings?: unknown } = {},
 ): Promise<LeaderHarness> {
   const ctx = new Context()
   const registry = makeMockRegistry(ctx, options.manualIdle === true)
@@ -276,6 +276,9 @@ async function makeHarness(
   const presets = options.presets === true ? makeMockPresets() : undefined
   ctx.provide('agents', registry as unknown as Context['agents'])
   ctx.provide('llm', options.llm ?? mockLlm as unknown as Context['llm'])
+  // Stub settings service: initialize awaits the real one for a bounded time,
+  // which tests must not spend when the harness composes no settings provider.
+  ctx.provide('settings', (options.settings ?? { mutate: async () => {} }) as unknown as Context['settings'])
   ctx.provide('sessionPersistence', persistence as unknown as Context['sessionPersistence'])
   ctx.provide('sessions', mockSessionsStore as unknown as Context['sessions'])
   if (presets !== undefined) ctx.provide('agentPresets', presets as unknown as Context['agentPresets'])
@@ -740,8 +743,7 @@ describe('x.ai/providers/add', () => {
 
   const startWithSettings = async (settings: SettingsMock) => {
     const llm = makeLlm(settings)
-    const made = await makeHarness({ llm })
-    made.ctx.provide('settings', settings as unknown as Context['settings'])
+    const made = await makeHarness({ llm, settings })
     harness = made
     client = await makeClient(made.socketPath)
     register(client)

@@ -3483,41 +3483,40 @@ pub(crate) fn execute(
                 );
                 match acp_send(request, &tx).await {
                     Ok(resp) => {
+                        // The bridge answers with the refreshed roster as the
+                        // JSON-RPC result value directly (same convention as
+                        // the other bridge ext methods, e.g. x.ai/billing).
                         let parsed: serde_json::Value =
                             serde_json::from_str(resp.0.get()).unwrap_or_default();
-                        if let Some(err) = parsed.get("error").filter(|e| !e.is_null()) {
-                            let message = err
-                                .get("message")
-                                .and_then(|m| m.as_str())
-                                .map(String::from)
-                                .unwrap_or_else(|| err.to_string());
-                            return TaskResult::AddProviderComplete {
-                                agent_id,
-                                providers: Vec::new(),
-                                error: Some(message),
-                            };
-                        }
-                        let providers = parsed
-                            .get("result")
-                            .and_then(|r| r.get("providers"))
-                            .and_then(|v| v.as_array())
-                            .map(|rows| {
-                                rows.iter()
+                        match parsed.get("providers").and_then(|v| v.as_array()) {
+                            Some(rows) => {
+                                let providers = rows
+                                    .iter()
                                     .filter_map(|row| {
                                         let id = row.get("id")?.as_str()?.to_string();
                                         let name = row
                                             .get("name")
                                             .and_then(|v| v.as_str())
                                             .map(str::to_string);
-                                        Some(crate::acp::model_state::ProviderInfo { id, name })
+                                        Some(crate::acp::model_state::ProviderInfo {
+                                            id,
+                                            name,
+                                        })
                                     })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        TaskResult::AddProviderComplete {
-                            agent_id,
-                            providers,
-                            error: None,
+                                    .collect();
+                                TaskResult::AddProviderComplete {
+                                    agent_id,
+                                    providers,
+                                    error: None,
+                                }
+                            }
+                            None => TaskResult::AddProviderComplete {
+                                agent_id,
+                                providers: Vec::new(),
+                                error: Some(
+                                    "the bridge answered without a provider roster".to_string(),
+                                ),
+                            },
                         }
                     }
                     Err(error) => TaskResult::AddProviderComplete {

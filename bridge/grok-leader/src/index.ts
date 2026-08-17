@@ -603,6 +603,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   const initializeResponse = async (): Promise<unknown> => {
+    await settingsReady()
     const current = await refreshCatalog()
     return {
       protocolVersion: 1,
@@ -1060,6 +1061,20 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
       ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
     }))
+  }
+
+  /**
+   * Wait (bounded) for the settings service, then one extra macrotask so a
+   * freshly published document's namespace owners (llm-pi-ai) can register
+   * their routes. The first catalog snapshot must not race the settings boot:
+   * an early initialize otherwise serves a roster missing every profile route.
+   */
+  const settingsReady = async (): Promise<void> => {
+    const deadline = Date.now() + 5000
+    while (settings() === undefined && Date.now() < deadline) {
+      await new Promise<void>((resolveWait) => { setTimeout(resolveWait, 10) })
+    }
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
   }
 
   /**
