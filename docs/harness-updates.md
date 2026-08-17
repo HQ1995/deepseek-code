@@ -27,8 +27,8 @@ bridge against the official npm dsh.
 Installation uses the official npm dsh (`@deepseek-ai/dsh@next`); the fork is
 never built or required by `scripts/install.sh`. It stays because the
 published 0.1.0-rc.6 set lacks the EMFILE/ENOSPC watch-capacity degradation,
-and the fork tracks that fix for an upstream PR; see the divergence list
-below.
+and the fork's `dev` branch carries that fix for an upstream PR; see the
+divergence list below.
 ## Fork divergences from upstream (review each fork update)
 
 - `packages/boot/app-boot/src/index.ts` — watch-capacity degradation

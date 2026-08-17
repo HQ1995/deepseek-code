@@ -1,8 +1,6 @@
 # @deepseek-ai/dsh-grok-leader
 
-English | [中文](README.zh.md)
-
-Grok leader-protocol unix-socket server that drives DeepSeek Harness agents for grok clients (the TUI, headless modes). It speaks the leader IPC envelope — 4-byte big-endian length plus JSON frames with a type discriminator — and carries ACP JSON-RPC 2.0 payloads inside acp frames, mapping them onto the harness services the ACP bridge drives. The wire facts are pinned by the real TUI capture in [tests/fixtures/grok-tui-messages.jsonl](tests/fixtures/grok-tui-messages.jsonl) and the protocol reference in [docs/grok-leader-protocol.md](../../../docs/grok-leader-protocol.md).
+Grok leader-protocol unix-socket server that drives DeepSeek Harness agents for grok clients (the TUI, headless modes). It speaks the leader IPC envelope — 4-byte big-endian length plus JSON frames with a type discriminator — and carries ACP JSON-RPC 2.0 payloads inside acp frames, mapping them onto the harness services the ACP bridge drives. The wire facts are pinned by the real TUI capture in [tests/fixtures/grok-tui-messages.jsonl](tests/fixtures/grok-tui-messages.jsonl) and the protocol reference in [docs/grok-leader-protocol.md](../../docs/grok-leader-protocol.md).
 
 This package is a transport adapter, not a UI integration. Interactive rendering stays with the grok client; dsh-side presentation features (plans, titles, usage cards) are not projected onto the wire yet.
 

@@ -1,7 +1,5 @@
 # Connecting the Grok TUI to an External Leader Socket
 
-English | [中文](grok-tui-connect.zh.md)
-
 The real `xai-grok-pager` TUI binary connects to an existing leader process over a unix socket instead of spawning an in-process agent. This page records the verified invocation, the wire handshake, and the build notes. The grok source snapshot, binary, scratch server, and message log live under `/tmp` and are not part of this repository.
 
 ## CLI invocation

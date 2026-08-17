@@ -15,10 +15,10 @@ automation (headless-semantics) transport. Evidence below.
 
 Sources analyzed (this worktree):
 
-- Official ACP server at the release pin from `SOURCE_REV`
-  (`deepseek-harness` @ `9cf50430f3d8871f09325681ca218a1334723162`);
-  the dev gitlink `47b5c455` was cross-checked and agrees on every point below
-  (it only adds image-prompt support).
+- Official ACP server at the upstream release `dsh-v0.1.0-rc.7`
+  (`deepseek-harness` @ `99f6f02fecdb7dff40c3fbc9470f5907c29f74ca`);
+  the current dev gitlink `47b5c455d4cd5f4923c0293fb7d5f9e2a57ad842` was
+  cross-checked and agrees on every point below.
 - Pager connection surfaces under
   `third_party/grok-build/crates/codegen/xai-grok-pager/src/`.
 - Bridge wire surface `bridge/grok-leader/src/index.ts`.

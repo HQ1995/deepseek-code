@@ -21,12 +21,10 @@ to `npx --yes @deepseek-ai/dsh` on demand.
 Requirements: Node `^22.19.0` (or `>=24`) with npm, pnpm (the official dsh
 plugin command drives it), and curl on Linux x86_64 (cargo build elsewhere).
 
-Known gap: the published dsh `0.1.0-rc.6` lacks the EMFILE/ENOSPC
-watch-capacity fix carried by the `deepseek-harness` fork. The
-deepseek-ai GitHub repo is a publish-only mirror (issues and PRs disabled), so
-the fix lives in our fork as branch `fix/emfile-watch-capacity`; re-evaluate
-on every upstream release. Affected users can build dsh from the fork instead
-of npm (see docs/harness-updates.md).
+Known gap: npm dsh `0.1.0-rc.6` lacks the EMFILE/ENOSPC watch-capacity fix;
+the `deepseek-harness` fork carries it on `dev`. Re-evaluate on every upstream
+release. Affected users can build dsh from the fork instead of npm (see
+docs/harness-updates.md).
 
 ## Use
 
@@ -40,8 +38,10 @@ set `DSC_HOME` to relocate it. `~/.grok` is never touched and a
 `GROK_HOME` in the environment is ignored, so a real grok-build install can
 coexist on the same machine.
 
-Keys: `Enter` send · `/preset` pick preset (session reloads instantly) ·
-`Ctrl+S` resume · `/model` pick provider/model · `Ctrl+Q` quit.
+Keys: `Enter` send · `Alt+Enter` newline · `Shift+Tab` mode ·
+`Ctrl+Y`/`/preset` pick preset (session reloads instantly) ·
+`Ctrl+S` resume · `Ctrl+W` worktree · `/model` pick provider/model ·
+`Ctrl+Q` quit.
 
 Presets: `minimal` (default), `code`, `standard`, `cordis`, plus your own in
 `~/.dsh/.agent-presets/`. Plugins:
