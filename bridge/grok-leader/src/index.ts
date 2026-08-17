@@ -159,7 +159,7 @@ interface ModelCatalog {
   providers: Array<{ id: string; name?: string; displayName?: string; apiKeyEnv?: string; api?: string; baseURL?: string }>
   /** Provider that owns currentModelId ('' when no current model). */
   currentProviderId: string
-  availableModels: Array<{ modelId: string; name: string; description?: string; _meta?: { provider: string } }>
+  availableModels: Array<{ modelId: string; name: string; description?: string; _meta?: { provider: string; supportsReasoningEffort?: boolean; reasoningEfforts?: string[] } }>
   providerByModel: Map<string, string>
 }
 
@@ -420,7 +420,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           modelId: model.id,
           name: model.name,
           ...model.description === undefined ? {} : { description: model.description },
-          _meta: { provider: row.provider },
+          // dsh's llm catalog carries no per-model effort capability, so the
+          // bridge advertises the canonical grok effort set and lets the
+          // provider reject unsupported tiers at call time.
+          _meta: {
+            provider: row.provider,
+            supportsReasoningEffort: true,
+            reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+          },
         })
       }
     }
