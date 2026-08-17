@@ -77,6 +77,8 @@ const WIRE = {
   sessionsList: 'x.ai/sessions/list',
   askUserQuestion: 'x.ai/ask_user_question',
   providersAdd: 'x.ai/providers/add',
+  providersUpdate: 'x.ai/providers/update',
+  providersRemove: 'x.ai/providers/remove',
 } as const
 
 /** The dsh settings namespace the llm-pi-ai plugin owns (packages/llm/llm-pi-ai). */
@@ -139,8 +141,9 @@ type AskUserQuestionExtResponse =
 /** Flattened wire catalog plus the provider ownership the bare model ids hide. */
 interface ModelCatalog {
   currentModelId: string
-  /** Provider roster as listed by the harness llm service ({id, name?}). */
-  providers: Array<{ id: string; name?: string }>
+  /** Provider roster as listed by the harness llm service ({id, name?}) plus
+   * the raw user-section profile fields the edit form prefills. */
+  providers: Array<{ id: string; name?: string; displayName?: string; apiKeyEnv?: string; api?: string; baseURL?: string }>
   /** Provider that owns currentModelId ('' when no current model). */
   currentProviderId: string
   availableModels: Array<{ modelId: string; name: string; description?: string; _meta?: { provider: string } }>
@@ -229,6 +232,8 @@ interface LlmLike {
 /** Structural write path of the official settings seam (ctx.settings.mutate). */
 interface SettingsLike {
   mutate(ns: string, ops: unknown, expectedRevision?: number): Promise<void>
+  /** Read the raw user sections (ctx.settings.describe); optional for harnesses without it. */
+  describe?(): Array<{ ns: string; user?: unknown }>
 }
 
 /** Structural read of the session store: this bridge needs only one flush entry point. */
@@ -273,9 +278,36 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   let closed = false
   let catalog: ModelCatalog | undefined
 
+  /** Raw user section of the llm-pi-ai namespace, when the settings service exposes it. */
+  const providerUserSection = (providerService?: SettingsLike): Record<string, unknown> | undefined => {
+    const descriptor = providerService?.describe?.().find(entry => entry.ns === PROVIDER_SETTINGS_NS)
+    const user = descriptor?.user
+    return user !== null && typeof user === 'object' ? user as Record<string, unknown> : undefined
+  }
+
+  /** One provider's raw user profile ({} when the section does not name it). */
+  const providerUserProfile = (userSection: Record<string, unknown> | undefined, id: string): Record<string, unknown> => {
+    const providers = userSection?.providers
+    const profile = providers !== null && typeof providers === 'object'
+      ? (providers as Record<string, unknown>)[id]
+      : undefined
+    return profile !== null && typeof profile === 'object' ? profile as Record<string, unknown> : {}
+  }
+
   /** Rebuild the flattened wire catalog plus the provider ownership the bare ids hide. */
   const refreshCatalog = async (): Promise<ModelCatalog> => {
-    const providers = llm === undefined ? [] : llm.listProviders().map(p => ({ id: p.id, ...p.name === undefined ? {} : { name: p.name } }))
+    const userSection = providerUserSection(settings())
+    const providers = llm === undefined ? [] : llm.listProviders().map(p => {
+      const profile = providerUserProfile(userSection, p.id)
+      return {
+        id: p.id,
+        ...p.name === undefined ? {} : { name: p.name },
+        ...typeof profile.displayName === 'string' ? { displayName: profile.displayName } : {},
+        ...typeof profile.apiKeyEnv === 'string' ? { apiKeyEnv: profile.apiKeyEnv } : {},
+        ...typeof profile.api === 'string' ? { api: profile.api } : {},
+        ...typeof profile.baseURL === 'string' ? { baseURL: profile.baseURL } : {},
+      }
+    })
     const rows = llm === undefined
       ? []
       : await Promise.all(llm.listProviders().map(async provider => ({
@@ -1092,6 +1124,19 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (typeof id !== 'string' || !PROVIDER_ID_PATTERN.test(id)) {
       throw invalidParams('provider id must be lowercase kebab-case (letters, digits, hyphens; starts with a letter)')
     }
+    validateProviderForm(p)
+    const providerService = settings()
+    if (providerService === undefined) throw internalError('the settings service is not configured')
+    if (llm !== undefined && llm.listProviders().some(provider => provider.id === id)) {
+      throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" already exists')
+    }
+    await mutateProviderRoute(providerService, id, editableProfile(p), p, 'add')
+    const current = await refreshCatalog()
+    return { providers: current.providers, currentProviderId: current.currentProviderId }
+  }
+
+  /** Reject malformed form fields before any settings write. */
+  const validateProviderForm = (p: Record<string, unknown>): void => {
     for (const field of ['displayName', 'apiKeyEnv', 'baseURL'] as const) {
       const value = p[field]
       if (value !== undefined && value !== null && typeof value !== 'string') {
@@ -1102,40 +1147,116 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (api !== undefined && api !== null && (typeof api !== 'string' || !PROVIDER_APIS.includes(api as (typeof PROVIDER_APIS)[number]))) {
       throw invalidParams('api must be one of ' + PROVIDER_APIS.join(', '))
     }
-    const providerService = settings()
-    if (providerService === undefined) throw internalError('the settings service is not configured')
-    if (llm !== undefined && llm.listProviders().some(provider => provider.id === id)) {
-      throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" already exists')
+  }
+
+  // An empty optional field means "unset": the official schema resolves an
+  // absent key to the catalog default, while an empty string is refused.
+  const nonEmpty = (value: unknown): value is string => typeof value === 'string' && value.length > 0
+
+  /** The four form fields as a fresh profile (empty fields omitted). */
+  const editableProfile = (p: Record<string, unknown>): Record<string, unknown> => ({
+    ...nonEmpty(p.displayName) ? { displayName: p.displayName } : {},
+    ...nonEmpty(p.apiKeyEnv) ? { apiKeyEnv: p.apiKeyEnv } : {},
+    ...nonEmpty(p.api) ? { api: p.api } : {},
+    ...nonEmpty(p.baseURL) ? { baseURL: p.baseURL } : {},
+  })
+
+  /** Merge the form fields over the current profile; empty fields unset. */
+  const mergeEditable = (current: Record<string, unknown>, p: Record<string, unknown>): Record<string, unknown> => {
+    const next: Record<string, unknown> = { ...current }
+    for (const field of ['displayName', 'apiKeyEnv', 'api', 'baseURL'] as const) {
+      const value = p[field]
+      if (typeof value === 'string' && value.length > 0) next[field] = value
+      else delete next[field]
     }
-    // An empty optional field means "unset": the official schema resolves an
-    // absent key to the catalog default, while an empty string is refused.
-    const nonEmpty = (value: unknown): value is string => typeof value === 'string' && value.length > 0
-    const profile: Record<string, unknown> = {
-      ...nonEmpty(p.displayName) ? { displayName: p.displayName } : {},
-      ...nonEmpty(p.apiKeyEnv) ? { apiKeyEnv: p.apiKeyEnv } : {},
-      ...nonEmpty(p.api) ? { api: p.api } : {},
-      ...nonEmpty(p.baseURL) ? { baseURL: p.baseURL } : {},
-    }
-    const op = [{ op: 'set', path: ['providers', id], value: profile }]
+    return next
+  }
+
+  /**
+   * Write one provider profile through the official seam. A refusal that
+   * names the no-models case retries once with the gateway-discovered
+   * catalog (same retry providers/add always had).
+   */
+  const mutateProviderRoute = async (
+    providerService: SettingsLike,
+    id: string,
+    profile: Record<string, unknown>,
+    draft: Record<string, unknown>,
+    verb: 'add' | 'update',
+  ): Promise<void> => {
     try {
-      await providerService.mutate(PROVIDER_SETTINGS_NS, op)
+      await providerService.mutate(PROVIDER_SETTINGS_NS, [{ op: 'set', path: ['providers', id], value: profile }])
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
       // A route the installed catalog does not describe must spell out its
       // models; the official validation names exactly that case. Ask the
       // gateway and retry the same write with the discovered catalog.
       if (!message.includes(NO_MODELS_MARKER)) {
-        throw internalError('failed to add provider "' + id + '": ' + message)
+        throw internalError('failed to ' + verb + ' provider "' + id + '": ' + message)
       }
-      const models = await discoverProviderModels(id, p)
+      const models = await discoverProviderModels(id, draft)
       try {
         await providerService.mutate(PROVIDER_SETTINGS_NS, [{ op: 'set', path: ['providers', id], value: { ...profile, models } }])
       } catch (retryError: unknown) {
-        throw internalError('failed to add provider "' + id + '": ' + (retryError instanceof Error ? retryError.message : String(retryError)))
+        throw internalError('failed to ' + verb + ' provider "' + id + '": ' + (retryError instanceof Error ? retryError.message : String(retryError)))
       }
     }
+  }
+
+  /**
+   * Update one provider route's editable fields through the same official
+   * seam. The current user profile is merged so fields the form does not
+   * edit (models) survive; empty optional fields revert to the catalog
+   * default, exactly as providers/add treats them.
+   */
+  const updateProvider = async (params: unknown): Promise<unknown> => {
+    assertOpen()
+    const p = paramRecord(params, 'x.ai/providers/update')
+    const providerId = p.providerId
+    if (typeof providerId !== 'string' || !PROVIDER_ID_PATTERN.test(providerId)) {
+      throw invalidParams('providerId must be lowercase kebab-case (letters, digits, hyphens; starts with a letter)')
+    }
+    validateProviderForm(p)
+    const providerService = settings()
+    if (providerService === undefined) throw internalError('the settings service is not configured')
+    if (llm === undefined || !llm.listProviders().some(provider => provider.id === providerId)) {
+      throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + providerId + '" does not exist')
+    }
+    const currentProfile = providerUserProfile(providerUserSection(providerService), providerId)
+    const next = mergeEditable(currentProfile, p)
+    await mutateProviderRoute(providerService, providerId, next, p, 'update')
     const current = await refreshCatalog()
     return { providers: current.providers, currentProviderId: current.currentProviderId }
+  }
+
+  /**
+   * Remove one provider route through the official seam. The provider that
+   * owns the current/default model is refused: the TUI must switch away
+   * first, so a removal can never orphan the active selection.
+   */
+  const removeProvider = async (params: unknown): Promise<unknown> => {
+    assertOpen()
+    const p = paramRecord(params, 'x.ai/providers/remove')
+    const id = p.id
+    if (typeof id !== 'string' || !PROVIDER_ID_PATTERN.test(id)) {
+      throw invalidParams('provider id must be lowercase kebab-case (letters, digits, hyphens; starts with a letter)')
+    }
+    const providerService = settings()
+    if (providerService === undefined) throw internalError('the settings service is not configured')
+    if (llm === undefined || !llm.listProviders().some(provider => provider.id === id)) {
+      throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" does not exist')
+    }
+    const current = await refreshCatalog()
+    if (current.currentProviderId === id) {
+      throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" is in use; switch to another provider first')
+    }
+    try {
+      await providerService.mutate(PROVIDER_SETTINGS_NS, [{ op: 'unset', path: ['providers', id] }])
+    } catch (error: unknown) {
+      throw internalError('failed to remove provider "' + id + '": ' + (error instanceof Error ? error.message : String(error)))
+    }
+    const refreshed = await refreshCatalog()
+    return { providers: refreshed.providers, currentProviderId: refreshed.currentProviderId }
   }
 
   const modelsList = async (): Promise<unknown> => {
@@ -1228,6 +1349,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return await modelsList()
       case WIRE.providersAdd:
         return await addProvider(params)
+      case WIRE.providersUpdate:
+        return await updateProvider(params)
+      case WIRE.providersRemove:
+        return await removeProvider(params)
       case 'x.ai/commands/list':
         return { commands: await availableCommands() }
       case 'x.ai/prompt_history':

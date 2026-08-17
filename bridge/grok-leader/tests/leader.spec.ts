@@ -688,9 +688,10 @@ describe('x.ai/providers/add', () => {
     providers: Record<string, unknown>
     firstWriteError?: string
     mutate(ns: string, ops: Array<{ op: string; path: string[]; value: unknown }>): Promise<void>
+    describe?(): Array<{ ns: string; user?: unknown }>
   }
 
-  const makeSettings = (): SettingsMock => {
+  const makeSettings = (describeUser = false): SettingsMock => {
     const mock: SettingsMock = {
       calls: [],
       providers: {},
@@ -702,10 +703,15 @@ describe('x.ai/providers/add', () => {
           throw new Error(error)
         }
         for (const op of ops) {
-          if (op.op !== 'set' || op.path.length !== 2) throw new Error('unexpected op')
-          mock.providers[op.path[1]] = op.value
+          if (op.path.length !== 2) throw new Error('unexpected op')
+          if (op.op === 'set') mock.providers[op.path[1]] = op.value
+          else if (op.op === 'unset') delete mock.providers[op.path[1]]
+          else throw new Error('unexpected op')
         }
       },
+    }
+    if (describeUser) {
+      mock.describe = () => [{ ns: 'llm-pi-ai', user: { providers: mock.providers } }]
     }
     return mock
   }
@@ -828,5 +834,135 @@ describe('x.ai/providers/add', () => {
     expect(res.error).toMatchObject({ code: -32603 })
     expect(String(res.error.message)).toContain('has an empty baseURL')
     expect(settings.calls).toHaveLength(1)
+  })
+})
+
+/** Shared mock harness for the provider update/remove suites. */
+interface ManageSettingsMock {
+  calls: Array<{ ns: string; ops: Array<{ op: string; path: string[]; value: unknown }> }>
+  providers: Record<string, unknown>
+  mutate(ns: string, ops: Array<{ op: string; path: string[]; value: unknown }>): Promise<void>
+  describe(): Array<{ ns: string; user?: unknown }>
+}
+
+const makeManageSettings = (): ManageSettingsMock => {
+  const mock: ManageSettingsMock = {
+    calls: [],
+    providers: {},
+    async mutate(ns, ops) {
+      mock.calls.push({ ns, ops })
+      for (const op of ops) {
+        if (op.path.length !== 2) throw new Error('unexpected op')
+        if (op.op === 'set') mock.providers[op.path[1]] = op.value
+        else if (op.op === 'unset') delete mock.providers[op.path[1]]
+        else throw new Error('unexpected op')
+      }
+    },
+    describe: () => [{ ns: 'llm-pi-ai', user: { providers: mock.providers } }],
+  }
+  return mock
+}
+
+const manageLlm = (settings: ManageSettingsMock) => ({
+  listProviders: () => {
+    const rows = [{ id: 'deepseek', name: 'DeepSeek' }]
+    for (const id of Object.keys(settings.providers)) rows.push({ id, name: (settings.providers[id] as { displayName?: string }).displayName ?? id })
+    return rows
+  },
+  listModels: async (provider: string) => provider === 'deepseek'
+    ? [{ provider: 'deepseek', id: 'deepseek-chat', name: 'DeepSeek Chat' }]
+    : [{ provider, id: provider + '-model', name: provider + ' Model' }],
+})
+
+async function startManageHarness(settings: ManageSettingsMock, model?: string): Promise<{ client: ClientHandle; settings: ManageSettingsMock }> {
+  const llm = manageLlm(settings)
+  const made = await makeHarness({ llm, settings: settings as unknown as Context['settings'], model })
+  const client = await makeClient(made.socketPath)
+  register(client)
+  await client.next() // registered
+  return { client, settings }
+}
+
+describe('x.ai/providers/update', () => {
+  it('merges the form over the current profile, preserving models and unsetting emptied fields', async () => {
+    const settings = makeManageSettings()
+    settings.providers['acme-gateway'] = {
+      displayName: 'Acme',
+      apiKeyEnv: 'ACME_KEY',
+      api: 'openai-completions',
+      baseURL: 'https://acme.test/v1',
+      models: [{ id: 'gw-model' }],
+    }
+    const { client } = await startManageHarness(settings)
+    const res = await client.request(1, 'x.ai/providers/update', {
+      providerId: 'acme-gateway',
+      displayName: '',
+      apiKeyEnv: 'ACME_KEY',
+      api: 'openai-responses',
+      baseURL: 'https://new.test/v1',
+    })
+    expect(res.error).toBeUndefined()
+    expect(settings.calls).toHaveLength(1)
+    expect(settings.calls[0].ns).toBe('llm-pi-ai')
+    expect(settings.calls[0].ops).toEqual([{
+      op: 'set',
+      path: ['providers', 'acme-gateway'],
+      value: {
+        apiKeyEnv: 'ACME_KEY',
+        api: 'openai-responses',
+        baseURL: 'https://new.test/v1',
+        models: [{ id: 'gw-model' }],
+      },
+    }])
+    expect(res.result).toMatchObject({
+      providers: [{ id: 'deepseek' }, { id: 'acme-gateway', api: 'openai-responses', baseURL: 'https://new.test/v1' }],
+    })
+  })
+
+  it('refuses an unknown provider without writing settings', async () => {
+    const settings = makeManageSettings()
+    const { client } = await startManageHarness(settings)
+    const res = await client.request(1, 'x.ai/providers/update', { providerId: 'nope', api: 'openai-completions' })
+    expect(res.error).toMatchObject({ code: -32602, message: 'provider "nope" does not exist' })
+    expect(settings.calls).toHaveLength(0)
+  })
+
+  it('refuses an invalid api before touching settings', async () => {
+    const settings = makeManageSettings()
+    settings.providers['acme-gateway'] = { displayName: 'Acme' }
+    const { client } = await startManageHarness(settings)
+    const res = await client.request(1, 'x.ai/providers/update', { providerId: 'acme-gateway', api: 'grpc' })
+    expect(res.error).toMatchObject({ code: -32602 })
+    expect(settings.calls).toHaveLength(0)
+  })
+})
+
+describe('x.ai/providers/remove', () => {
+  it('unsets the route and returns the refreshed roster', async () => {
+    const settings = makeManageSettings()
+    settings.providers['acme-gateway'] = { displayName: 'Acme' }
+    const { client } = await startManageHarness(settings, 'deepseek-chat')
+    const res = await client.request(1, 'x.ai/providers/remove', { id: 'acme-gateway' })
+    expect(res.error).toBeUndefined()
+    expect(settings.calls).toHaveLength(1)
+    expect(settings.calls[0].ops).toEqual([{ op: 'unset', path: ['providers', 'acme-gateway'] }])
+    expect('acme-gateway' in settings.providers).toBe(false)
+    expect(res.result).toEqual({ providers: [{ id: 'deepseek', name: 'DeepSeek' }], currentProviderId: 'deepseek' })
+  })
+
+  it('refuses the provider that owns the current model', async () => {
+    const settings = makeManageSettings()
+    const { client } = await startManageHarness(settings, 'deepseek-chat')
+    const res = await client.request(1, 'x.ai/providers/remove', { id: 'deepseek' })
+    expect(res.error).toMatchObject({ code: -32602, message: 'provider "deepseek" is in use; switch to another provider first' })
+    expect(settings.calls).toHaveLength(0)
+  })
+
+  it('refuses an unknown provider', async () => {
+    const settings = makeManageSettings()
+    const { client } = await startManageHarness(settings)
+    const res = await client.request(1, 'x.ai/providers/remove', { id: 'nope' })
+    expect(res.error).toMatchObject({ code: -32602, message: 'provider "nope" does not exist' })
+    expect(settings.calls).toHaveLength(0)
   })
 })
