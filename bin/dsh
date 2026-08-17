@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# The official npm dsh CLI (never the deepseek-harness submodule build);
-# npx on demand. Resolved through npm's global prefix so a stale PATH shim
-# cannot win.
-DSH_BIN=""
-if command -v npm >/dev/null 2>&1; then
-  DSH_BIN="$(npm prefix -g 2>/dev/null || true)/bin/dsh"
-fi
-if [[ -x "$DSH_BIN" ]]; then
-  exec "$DSH_BIN" "$@"
+# The dsh CLI from our internal dev fork (the deepseek-harness submodule,
+# dev branch: upstream rc.7 + our local fixes). Fresh clones without a fork
+# build fall back to the official npm release, which is what end users get.
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+FORK="$ROOT/deepseek-harness/apps/cli/lib/bin.js"
+if [[ -f "$FORK" ]]; then
+  exec node "$FORK" "$@"
 fi
 exec npx --yes @deepseek-ai/dsh "$@"
