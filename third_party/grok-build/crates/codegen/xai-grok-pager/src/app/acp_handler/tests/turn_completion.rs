@@ -1867,3 +1867,158 @@
             Some("Did the next thing")
         );
     }
+
+    #[test]
+    fn prompt_complete_finalize_drains_local_queue() {
+        // Viewer turn end is the ONLY finalize rail a viewer receives: its
+        // locally pending rows must drain here or they strand forever.
+        let mut app = make_app_with_agent("sess-qview");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.attached_as_viewer = true;
+            agent.session.start_turn(&mut agent.scrollback);
+            agent.session.current_prompt_id = Some("pid-view".into());
+            agent.turn_started_at = Some(std::time::Instant::now());
+            for text in ["one", "two"] {
+                let qid = agent.session.next_queue_id;
+                agent.session.next_queue_id += 1;
+                agent.session.pending_prompts.push_back(
+                    crate::app::agent::QueuedPrompt::plain(
+                        qid,
+                        text,
+                        crate::app::agent::QueueEntryKind::Prompt,
+                    ),
+                );
+            }
+        }
+
+        let affected = handle_ext_notification(
+            &prompt_complete_ext_with_prompt_id("sess-qview", "pid-view", "end_turn"),
+            &mut app,
+        );
+        assert!(affected, "viewer finalize must report a state change");
+
+        let effects = std::mem::take(&mut app.pending_effects);
+        let sent: Vec<&str> = effects
+            .iter()
+            .filter_map(|e| match e {
+                crate::app::actions::Effect::SendPrompt { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, vec!["one"], "exactly one local row drains per finalize");
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.session.state.is_turn_running());
+        assert_eq!(agent.session.pending_prompts.len(), 1);
+        assert_eq!(agent.session.pending_prompts[0].text, "two");
+    }
+
+    #[test]
+    fn prompt_complete_finalize_drains_local_queue_fifo_order() {
+        let mut app = make_app_with_agent("sess-qfifo");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.attached_as_viewer = true;
+            agent.session.start_turn(&mut agent.scrollback);
+            agent.session.current_prompt_id = Some("pid-view".into());
+            agent.turn_started_at = Some(std::time::Instant::now());
+            for text in ["one", "two", "three"] {
+                let qid = agent.session.next_queue_id;
+                agent.session.next_queue_id += 1;
+                agent.session.pending_prompts.push_back(
+                    crate::app::agent::QueuedPrompt::plain(
+                        qid,
+                        text,
+                        crate::app::agent::QueueEntryKind::Prompt,
+                    ),
+                );
+            }
+        }
+
+        let mut sent: Vec<String> = Vec::new();
+        let mut next_pid = "pid-view".to_string();
+        for _ in 0..3 {
+            // The drain "takes the wheel" (attached_as_viewer = false), so
+            // re-arm the viewer identity each iteration: this test drives the
+            // prompt_complete rail and asserts the front row drains first.
+            app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
+            let _ = handle_ext_notification(
+                &prompt_complete_ext_with_prompt_id("sess-qfifo", &next_pid, "end_turn"),
+                &mut app,
+            );
+            let effects = std::mem::take(&mut app.pending_effects);
+            let mut sends: Vec<(String, String)> = effects
+                .into_iter()
+                .filter_map(|e| match e {
+                    crate::app::actions::Effect::SendPrompt { text, prompt_id, .. } => {
+                        Some((text, prompt_id))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(sends.len(), 1, "one row per finalize");
+            let (text, pid) = sends.pop().unwrap();
+            sent.push(text);
+            next_pid = pid;
+        }
+        assert_eq!(sent, vec!["one".to_string(), "two".to_string(), "three".to_string()], "FIFO drain order");
+        assert!(app
+            .agents
+            .get(&AgentId(0))
+            .unwrap()
+            .session
+            .pending_prompts
+            .is_empty());
+    }
+
+    #[test]
+    fn prompt_complete_finalize_never_double_sends_queue_rows() {
+        let mut app = make_app_with_agent("sess-qdup");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.attached_as_viewer = true;
+            agent.session.start_turn(&mut agent.scrollback);
+            agent.session.current_prompt_id = Some("pid-view".into());
+            agent.turn_started_at = Some(std::time::Instant::now());
+            let qid = agent.session.next_queue_id;
+            agent.session.next_queue_id += 1;
+            agent.session.pending_prompts.push_back(
+                crate::app::agent::QueuedPrompt::plain(
+                    qid,
+                    "one",
+                    crate::app::agent::QueueEntryKind::Prompt,
+                ),
+            );
+        }
+
+        let _ = handle_ext_notification(
+            &prompt_complete_ext_with_prompt_id("sess-qdup", "pid-view", "end_turn"),
+            &mut app,
+        );
+        let first = std::mem::take(&mut app.pending_effects);
+        let sends = |effects: &[crate::app::actions::Effect]| {
+            effects
+                .iter()
+                .filter(|e| matches!(e, crate::app::actions::Effect::SendPrompt { .. }))
+                .count()
+        };
+        assert_eq!(sends(&first), 1);
+        assert!(!app
+            .agents
+            .get(&AgentId(0))
+            .unwrap()
+            .session
+            .pending_prompts
+            .iter()
+            .any(|p| p.text == "one"));
+
+        // A duplicate terminal for the already-drained turn must not re-send
+        // the row: the queue is empty, so the duplicate drain emits nothing.
+        let _ = handle_ext_notification(
+            &prompt_complete_ext_with_prompt_id("sess-qdup", "pid-view", "end_turn"),
+            &mut app,
+        );
+        let second = std::mem::take(&mut app.pending_effects);
+        assert_eq!(sends(&second), 0, "no double-send on a duplicate terminal");
+    }
