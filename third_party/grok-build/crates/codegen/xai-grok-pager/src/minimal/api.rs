@@ -650,6 +650,7 @@ pub fn dropdown_chrome_items(
         layout_cfg,
         compact,
         below,
+        None,
         theme,
     )
     .map(|chrome| chrome.items)

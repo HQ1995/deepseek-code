@@ -23,6 +23,7 @@ use crate::views::modal_window::{
 };
 
 pub const MODAL_TITLE: &str = "Add provider";
+pub const EDIT_MODAL_TITLE: &str = "Edit provider";
 
 /// Wire protocols the official dsh seam accepts (llm-pi-ai supportedProtocols).
 pub const APIS: [&str; 3] = ["openai-completions", "openai-responses", "anthropic-messages"];
@@ -138,8 +139,13 @@ pub struct AddProviderModalState {
     pub(crate) id: LineEditor,
     pub(crate) display_name: LineEditor,
     pub(crate) api_key_env: LineEditor,
+    /// Index into APIS, or APIS.len() for "(unset)" (empty api = catalog default).
     pub api_idx: usize,
     pub(crate) base_url: LineEditor,
+    /// Some(route id) while the form edits an existing provider: the id row
+    /// is locked (routes cannot be renamed) and submit goes to
+    /// x.ai/providers/update. None = the add flow.
+    pub editing: Option<String>,
     /// True while the ACP add is in flight (content keys are ignored).
     pub submitting: bool,
     /// Last bridge/local validation error, shown under the note.
@@ -157,6 +163,7 @@ impl AddProviderModalState {
             api_key_env: LineEditor::default(),
             api_idx: 0,
             base_url: LineEditor::default(),
+            editing: None,
             submitting: false,
             error: None,
         };
@@ -186,6 +193,30 @@ impl AddProviderModalState {
         self.error = None;
     }
 
+    /// Open the form in edit mode, prefilled from the provider's raw
+    /// settings profile. Unset fields prefill empty; an unset api selects
+    /// the "(unset)" picker slot so a no-op save writes nothing back.
+    pub fn prefilled(
+        id: &str,
+        display_name: &str,
+        api_key_env: &str,
+        api: Option<&str>,
+        base_url: &str,
+    ) -> Self {
+        let mut state = Self::new();
+        state.editing = Some(id.to_string());
+        state.preset = PRESETS.len();
+        state.field = Field::DisplayName;
+        Self::set_editor(&mut state.id, id);
+        Self::set_editor(&mut state.display_name, display_name);
+        Self::set_editor(&mut state.api_key_env, api_key_env);
+        Self::set_editor(&mut state.base_url, base_url);
+        state.api_idx = api
+            .and_then(|value| APIS.iter().position(|candidate| *candidate == value))
+            .unwrap_or(APIS.len());
+        state
+    }
+
     pub(crate) fn editor(&self, field: Field) -> &LineEditor {
         match field {
             Field::Id => &self.id,
@@ -211,9 +242,38 @@ impl AddProviderModalState {
             id: self.id.text().to_string(),
             display_name: self.display_name.text().to_string(),
             api_key_env: self.api_key_env.text().to_string(),
-            api: APIS[self.api_idx].to_string(),
+            api: APIS
+                .get(self.api_idx)
+                .map_or(String::new(), |value| (*value).to_string()),
             base_url: self.base_url.text().to_string(),
         }
+    }
+
+    /// Next focusable field: the id row is skipped while editing (routes
+    /// cannot be renamed), so the cycle is displayName -> apiKeyEnv -> api
+    /// -> baseURL.
+    fn next_field(field: Field, editing: bool) -> Field {
+        let mut next = field;
+        for _ in 0..Field::ALL.len() {
+            next = next.next();
+            if !editing || next != Field::Id {
+                return next;
+            }
+        }
+        field
+    }
+
+    /// Previous focusable field (mirror of next_field for BackTab).
+    fn prev_field(field: Field, editing: bool) -> Field {
+        let mut prev = field;
+        for _ in 0..Field::ALL.len() {
+            let idx = prev.index();
+            prev = Field::ALL[if idx == 0 { Field::ALL.len() - 1 } else { idx - 1 }];
+            if !editing || prev != Field::Id {
+                return prev;
+            }
+        }
+        field
     }
 }
 
@@ -277,21 +337,19 @@ pub fn handle_add_provider_key(
             AddProviderOutcome::Unchanged
         }
         KeyCode::Tab => {
-            state.field = state.field.next();
+            state.field = AddProviderModalState::next_field(state.field, state.editing.is_some());
             AddProviderOutcome::Changed
         }
         KeyCode::BackTab => {
-            let idx = state.field.index();
-            let prev = if idx == 0 { Field::ALL.len() - 1 } else { idx - 1 };
-            state.field = Field::ALL[prev];
+            state.field = AddProviderModalState::prev_field(state.field, state.editing.is_some());
             AddProviderOutcome::Changed
         }
         KeyCode::Left if state.field == Field::Api => {
-            state.api_idx = (state.api_idx + APIS.len() - 1) % APIS.len();
+            state.api_idx = (state.api_idx + APIS.len()) % (APIS.len() + 1);
             AddProviderOutcome::Changed
         }
         KeyCode::Right if state.field == Field::Api => {
-            state.api_idx = (state.api_idx + 1) % APIS.len();
+            state.api_idx = (state.api_idx + 1) % (APIS.len() + 1);
             AddProviderOutcome::Changed
         }
         KeyCode::Enter => {
@@ -357,7 +415,10 @@ fn row_specs(state: &AddProviderModalState) -> Vec<RowSpec> {
     let value = |field: Field| -> (String, usize, bool) {
         let focused = state.field == field;
         if field == Field::Api {
-            return (APIS[state.api_idx].to_string(), 0, focused);
+            let api = APIS
+                .get(state.api_idx)
+                .map_or("(unset)", |value| *value);
+            return (api.to_string(), 0, focused);
         }
         let editor = state.editor(field);
         (editor.text().to_string(), cursor(editor), focused)
@@ -391,9 +452,16 @@ fn preset_label(preset: usize) -> &'static str {
 
 pub fn render_add_provider_modal(buf: &mut Buffer, area: Rect, state: &mut AddProviderModalState) {
     let theme = Theme::current();
+    let editing = state.editing.is_some();
     let shortcuts: Vec<Shortcut> = vec![
         Shortcut {
-            label: if state.submitting { "Adding…" } else { "Enter add" },
+            label: if state.submitting {
+                "Saving…"
+            } else if editing {
+                "Enter save"
+            } else {
+                "Enter add"
+            },
             clickable: false,
             id: 0,
         },
@@ -418,7 +486,7 @@ pub fn render_add_provider_modal(buf: &mut Buffer, area: Rect, state: &mut AddPr
         footer_lines: 2,
     };
     let config = ModalWindowConfig {
-        title: MODAL_TITLE,
+        title: if editing { EDIT_MODAL_TITLE } else { MODAL_TITLE },
         tabs: None,
         shortcuts: &shortcuts,
         sizing,
@@ -437,14 +505,23 @@ pub fn render_add_provider_modal(buf: &mut Buffer, area: Rect, state: &mut AddPr
     let value_style = Style::default().fg(theme.text_primary);
     let dim = Style::default().fg(theme.gray_dim);
 
-    lines.push(Line::from(vec![
-        Span::styled("Preset ", Style::default().fg(theme.gray)),
-        Span::styled("↑/↓ ", dim),
-        Span::styled(preset_label(state.preset), focused_style),
-    ]));
+    if editing {
+        lines.push(Line::from(vec![
+            Span::styled("Editing provider ", Style::default().fg(theme.gray)),
+            Span::styled(state.id.text().to_string(), focused_style),
+            Span::styled(" (id is fixed)", dim),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("Preset ", Style::default().fg(theme.gray)),
+            Span::styled("↑/↓ ", dim),
+            Span::styled(preset_label(state.preset), focused_style),
+        ]));
+    }
     lines.push(Line::from(""));
 
     for row in row_specs(state) {
+        let id_locked = editing && row.label == Field::Id.label();
         let prefix = if row.focused { "› " } else { "  " };
         let label_w = "› ".width() + 12;
         let cursor_row = content.y + lines.len() as u16;
@@ -453,10 +530,12 @@ pub fn render_add_provider_modal(buf: &mut Buffer, area: Rect, state: &mut AddPr
             Span::styled(prefix, Style::default().fg(theme.accent_user)),
             Span::styled(
                 format!("{:<12}", row.label),
-                Style::default().fg(theme.gray),
+                Style::default().fg(if id_locked { theme.gray_dim } else { theme.gray }),
             ),
         ];
-        if row.focused && empty {
+        if id_locked {
+            spans.push(Span::styled(row.value, dim));
+        } else if row.focused && empty {
             spans.push(Span::styled("▏", value_style));
         } else if empty {
             spans.push(Span::styled("(unset)", dim));
@@ -466,7 +545,7 @@ pub fn render_add_provider_modal(buf: &mut Buffer, area: Rect, state: &mut AddPr
         lines.push(Line::from(spans));
 
         // Cursor cell for the focused text row.
-        if row.focused && !empty {
+        if row.focused && !empty && !id_locked {
             let x = content.x + (label_w + row.cursor_col) as u16;
             if x < content.x.saturating_add(content.width) {
                 if let Some(cell) = buf.cell_mut((x, cursor_row)) {
@@ -564,5 +643,44 @@ mod tests {
         assert!(!valid_provider_id("-lead"));
         assert!(!valid_provider_id("Acme"));
         assert!(!valid_provider_id("a_b"));
+    }
+
+    #[test]
+    fn prefilled_edit_locks_the_id_and_skips_it_in_the_tab_cycle() {
+        let mut state = AddProviderModalState::prefilled(
+            "acme-gw",
+            "Acme",
+            "ACME_KEY",
+            Some("openai-completions"),
+            "https://acme.test/v1",
+        );
+        assert_eq!(state.editing.as_deref(), Some("acme-gw"));
+        assert_eq!(state.form().id, "acme-gw");
+        assert_eq!(state.form().display_name, "Acme");
+        assert_eq!(state.form().api_key_env, "ACME_KEY");
+        assert_eq!(state.form().api, "openai-completions");
+        assert_eq!(state.form().base_url, "https://acme.test/v1");
+        // The form opens on DisplayName (Id is locked) and the cycle wraps
+        // back to DisplayName without ever focusing Id.
+        assert_eq!(state.field, Field::DisplayName);
+        handle_add_provider_key(&mut state, &key(KeyCode::Tab));
+        assert_eq!(state.field, Field::ApiKeyEnv);
+        for _ in 0..4 {
+            handle_add_provider_key(&mut state, &key(KeyCode::Tab));
+        }
+        assert_eq!(state.field, Field::ApiKeyEnv);
+    }
+
+    #[test]
+    fn unset_api_prefills_the_unset_picker_slot_and_submits_empty() {
+        let mut state = AddProviderModalState::prefilled("acme-gw", "", "", None, "");
+        assert_eq!(state.api_idx, APIS.len());
+        assert_eq!(state.form().api, "");
+        for _ in 0..2 {
+            handle_add_provider_key(&mut state, &key(KeyCode::Tab));
+        }
+        assert_eq!(state.field, Field::Api);
+        handle_add_provider_key(&mut state, &key(KeyCode::Right));
+        assert_eq!(state.form().api, APIS[0]);
     }
 }

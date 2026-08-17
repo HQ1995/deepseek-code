@@ -1045,7 +1045,13 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowContextInfo => dispatch_show_context_info(app),
         Action::ShowUsage => dispatch_show_usage(app),
         Action::OpenAddProvider => super::providers::open_add_provider_modal(app),
+        Action::OpenEditProvider { provider_id } => {
+            super::providers::open_edit_provider_modal(app, &provider_id)
+        }
         Action::AddProvider { form } => super::providers::add_provider(app, form),
+        Action::RemoveProvider { provider_id } => {
+            super::providers::remove_provider(app, provider_id)
+        }
         Action::ManageBilling => dispatch_manage_billing(app),
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),

@@ -3090,6 +3090,7 @@ impl AgentView {
                     layout_cfg,
                     compact,
                     false,
+                    self.prompt.slash_provider_footer().as_deref(),
                     &theme,
                 ) {
                     let hovered = self.prompt.slash_hovered();
@@ -3130,6 +3131,7 @@ impl AgentView {
                     layout_cfg,
                     compact,
                     false,
+                    None,
                     &theme,
                 ) {
                     render_completions(buf, chrome.items, dd, &theme);

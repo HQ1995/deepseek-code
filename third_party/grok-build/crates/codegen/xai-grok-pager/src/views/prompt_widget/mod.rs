@@ -553,6 +553,11 @@ pub struct PromptWidget {
     /// Stores the display text of the previously-active value so we can
     /// revert on Esc. `None` = no preview in progress.
     pub(crate) slash_preview_original: Option<String>,
+    /// A /provider row armed for deletion (Ctrl+D in the dropdown). Lives
+    /// here, not in the snapshot, so snapshot rebuilds cannot drop a live
+    /// confirm; cleared whenever the dropdown closes.
+    pub(crate) provider_pending_delete:
+        Option<crate::slash::commands::provider::ProviderPendingDelete>,
 
     /// Shell command suggestion controller (ghost text + progressive matching).
     pub(crate) suggestions: SuggestionController,
@@ -644,6 +649,7 @@ impl PromptWidget {
             slash_hovered: None,
             last_input_delta: crate::input_log::LastInputDelta::default(),
             slash_preview_original: None,
+            provider_pending_delete: None,
             suggestions: SuggestionController::new(),
             prompt_suggestion: crate::views::prompt_suggestion::PromptSuggestionController::new(),
             prompt_suggestion_active: false,
@@ -1224,6 +1230,40 @@ impl PromptWidget {
     /// Close the slash dropdown.
     pub fn slash_close(&mut self) {
         self.slash_state.close();
+        self.provider_pending_delete = None;
+    }
+
+    /// Whether the open slash dropdown is the /provider args list (the
+    /// surface whose rows carry the edit/delete row actions).
+    pub fn slash_provider_args(&self) -> bool {
+        let snap = self.slash_state.snapshot();
+        if !snap.open || snap.cursor_in_command {
+            return false;
+        }
+        self.slash_controller
+            .registry()
+            .get(&snap.query)
+            .is_some_and(|command| command.name() == "provider")
+    }
+
+    /// Footer override for the /provider dropdown: the row-action bindings,
+    /// or the armed delete confirm (block message while the row owns the
+    /// current model).
+    pub fn slash_provider_footer(&self) -> Option<String> {
+        if !self.slash_provider_args() {
+            return None;
+        }
+        if let Some(armed) = &self.provider_pending_delete {
+            return Some(if armed.blocked {
+                format!(
+                    "{} is in use — switch provider first (n dismiss)",
+                    armed.name
+                )
+            } else {
+                format!("delete {}? y confirm · n cancel", armed.name)
+            });
+        }
+        Some("↑/↓ navigate · enter switch · ^E edit · ^D delete · esc cancel".to_string())
     }
 
     /// Move the slash dropdown selection (Up = -1, Down = +1), wrapping around.

@@ -37,6 +37,8 @@ The package doubles as the deepseek-leader profile bundle: cordis.patch.yml moun
 | session/request_permission | Offers one-shot allow/reject choices for bridge-owned approval requests; YOLO sessions pre-approve without a roundtrip. |
 | x.ai/models/list | Returns the provider catalog as grok SessionModelState. |
 | x.ai/providers/add | Writes one provider route into the dsh settings document through the official settings seam (ctx.settings.mutate on the llm-pi-ai namespace); refuses duplicate ids; fills a non-catalog route's models from gateway discovery. Returns the refreshed provider roster. |
+| x.ai/providers/update | Merges the form fields over one route's user profile (empty fields unset, models preserved) through the same settings seam. Returns the refreshed roster. |
+| x.ai/providers/remove | Unsets one provider route through the settings seam; refuses the provider that owns the current model. Returns the refreshed roster. |
 | other methods | Unknown requests get JSON-RPC -32601; unknown notifications are dropped with a warning. |
 
 One connection may own several sessions. Each session has an independent prompt slot, workspace, cancellation path, model selection, and disposer; a disconnected client releases exactly its own sessions.

@@ -19,7 +19,7 @@ use super::prompt::{
     defer_to_open_reload_window, handle_compact_complete, handle_prompt_response,
     handle_suggestion_debounce_expired,
 };
-use super::providers::handle_add_provider_complete;
+use super::providers::{handle_add_provider_complete, handle_remove_provider_complete};
 use super::queue::push_and_page_flip;
 use super::rewind::{
     dispatch_rewind_success, handle_rewind_execute_failed, handle_rewind_points_loaded,
@@ -1169,6 +1169,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             providers,
             error,
         } => handle_add_provider_complete(app, agent_id, providers, error),
+        TaskResult::RemoveProviderComplete {
+            agent_id,
+            providers,
+            error,
+        } => handle_remove_provider_complete(app, agent_id, providers, error),
         TaskResult::FeedbackComplete { .. } => vec![],
         TaskResult::FeedbackFailed { agent_id, error } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {

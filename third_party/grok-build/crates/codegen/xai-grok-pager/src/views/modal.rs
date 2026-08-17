@@ -677,7 +677,13 @@ impl ActiveModal {
             ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
             ActiveModal::RememberNoteReview { .. } => "Memory Note",
             ActiveModal::UsageInfo { .. } => "Usage",
-            ActiveModal::AddProvider { .. } => crate::views::add_provider_modal::MODAL_TITLE,
+            ActiveModal::AddProvider { state } => {
+                if state.editing.is_some() {
+                    crate::views::add_provider_modal::EDIT_MODAL_TITLE
+                } else {
+                    crate::views::add_provider_modal::MODAL_TITLE
+                }
+            }
         }
     }
 }

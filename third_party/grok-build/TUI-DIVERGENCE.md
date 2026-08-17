@@ -63,6 +63,14 @@ branding (our identity). Keep this list current on every sync.
   bridge-side gateway discovery, catalog routes keep serving the installed
   catalog. Protocol ids are the official seam's: openai-completions /
   openai-responses / anthropic-messages.
+- Provider edit/delete: in the /provider dropdown, Ctrl+E opens the same
+  modal prefilled from the provider's settings profile (id locked, empty
+  fields mean unset) and submits x.ai/providers/update; Ctrl+D arms a
+  y/n delete confirm that submits x.ai/providers/remove. Both bridge methods
+  reuse the official settings seam (ctx.settings.mutate on llm-pi-ai), never
+  write settings.yaml directly, and return the refreshed roster. Deleting the
+  provider that owns the current model is blocked (switch provider first),
+  both in the dropdown footer and by the bridge.
 - /usage shows real per-session stats instead of grok.com billing. It opens the
   existing usage modal on the "Context usage" tab (session/info context
   breakdown: used/total/pct, turns, tool calls, messages, compactions) and
