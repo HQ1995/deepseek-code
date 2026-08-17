@@ -126,3 +126,14 @@ when the broadcast is the idle empty snapshot (no entries, no running
 prompt). Upstream only retires on the RPC cancel/delete path, so a
 successfully-run queued prompt left a ghost held row (#N) after the queue
 drained. Divergence is a strict bug fix; candidate for upstreaming.
+
+### Turn finalize kicks the local queue drain (viewer rails)
+
+`app/turn_completion.rs apply_terminal_outcome` now runs
+`maybe_drain_queue_and_note_peek` after a `ViewerFinalized` outcome, so the
+`prompt_complete` / durable `TurnCompleted` rails drain the viewer's locally
+pending prompts at turn end. Upstream's viewer finalize finishes the turn
+without draining, so prompts queued while the TUI's adoption/turn state lagged
+the running turn stayed stuck in the queue pane forever. The PromptResponse
+rail already drains; the idle-only / FIFO (server rows first) / editing-front
+gates are unchanged. Divergence is a strict bug fix; candidate for upstreaming.

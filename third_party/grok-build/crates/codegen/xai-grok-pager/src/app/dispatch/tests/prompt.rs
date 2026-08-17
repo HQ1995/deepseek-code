@@ -4790,3 +4790,45 @@ fn suggestion_debounce_routes_by_agent_id_not_active_view() {
         "expiry must fetch for the arming agent even off-screen: {effects:?}"
     );
 }
+
+#[test]
+fn prompt_response_finalize_drains_local_queue() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.start_turn(&mut agent.scrollback);
+        agent.session.current_prompt_id = Some("p1".into());
+        agent.turn_started_at = Some(Instant::now());
+    }
+    enqueue_local(&mut app, id, "one");
+    enqueue_local(&mut app, id, "two");
+
+    let mut meta = serde_json::Map::new();
+    meta.insert("promptId".into(), serde_json::Value::String("p1".into()));
+    let response = acp::PromptResponse::new(acp::StopReason::EndTurn).meta(meta);
+    let effects = super::super::prompt::handle_prompt_response(
+        &mut app,
+        id,
+        Ok(response),
+        None,
+        Some("p1".into()),
+    );
+
+    let sent: Vec<&str> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::SendPrompt { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        vec!["one"],
+        "the RPC finalize drains the next local row"
+    );
+
+    let agent = app.agents.get(&id).unwrap();
+    assert_eq!(agent.session.pending_prompts.len(), 1);
+    assert_eq!(agent.session.pending_prompts[0].text, "two");
+}

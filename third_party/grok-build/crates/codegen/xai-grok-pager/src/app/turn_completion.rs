@@ -391,6 +391,13 @@ pub(super) fn apply_terminal_outcome(
             {
                 agent.discard_pending_adoption_updates(&p.prompt_id);
             }
+            // Kick the local drip-feed queue. The viewer finalize rails
+            // (prompt_complete, durable TurnCompleted) are the only
+            // turn-end exits a viewer receives, so without this its locally
+            // pending prompts would never drain. maybe_drain_queue keeps
+            // the idle-only / FIFO (server rows first) / editing-front gates.
+            let drained = super::dispatch::maybe_drain_queue_and_note_peek(app, agent_id);
+            app.pending_effects.extend(drained);
             is_active
         }
     }
