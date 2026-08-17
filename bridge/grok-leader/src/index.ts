@@ -167,7 +167,12 @@ interface ClientConnection {
   readonly socket: Socket
   readonly clientId: number
   /** Pending reverse requests (permission, ask_user_question) keyed by JSON-RPC id. */
-  readonly pending: Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>
+  readonly pending: Map<string, {
+    resolve: (value: unknown) => void
+    reject: (error: Error) => void
+    /** Owning session when known; cancel/close/load reject only its entries. */
+    sessionId?: SessionId
+  }>
   nextRequestId: number
 }
 
@@ -203,12 +208,12 @@ interface SessionRecord {
   prompts: string[]
   /** FIFO of validated prompts waiting for the in-flight one to settle. */
   promptQueue: Array<{
-    p: Record<string, unknown>
     resolve: (value: { stopReason: StopReasonWire }) => void
     reject: (error: Error) => void
     /** Stable queue-row id: the request _meta.promptId or a minted uuid. */
     id: string
     text: string
+    /** Edit counter: fresh rows start at 0 (grok QueueEntryMeta), edits bump by one. */
     version: number
     /** Per-prompt display texts when combine folded followers into this row (len >= 2). */
     combinedTexts?: string[]
@@ -221,8 +226,10 @@ interface SessionRecord {
   runningCombinedTexts: string[] | undefined
   /** Stamps the next prompt_complete broadcast (send_now suppresses the cancelled marker). */
   cancelTrigger: string | undefined
-  /** Monotonic per-record counter backing queue row versions. */
-  nextQueueVersion: number
+  /** Queue rows parked under queue/hold_edit; advance and combine skip them. */
+  editHolds: Set<string>
+  /** Pending _x.ai/mcp_initialized notification timer; cleared on close/teardown. */
+  mcpInitTimer: ReturnType<typeof setTimeout> | undefined
   inflight: {
     resolve: (reason: StopReasonWire) => void
     reject: (error: Error) => void
@@ -310,8 +317,34 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   // grok's ui.combine_queued_prompts (default off); env override for dev shells.
   const combineQueued = config.combineQueuedPrompts === true || process.env.DEEPSEEK_LEADER_COMBINE_QUEUED === '1'
   const idleExitMs = config.idleExitMs ?? 2000
+  /** x.ai/session/list rows served when the request carries no (or an oversized) limit. */
+  const DEFAULT_SESSION_LIST_LIMIT = 50
   /** First user prompt per session id, memoized across x.ai/session/list calls. */
   const firstPromptCache = new Map<string, string>()
+  /** First-prompt loads in flight; concurrent list calls share them and never
+   * cache the '' placeholder as a successful title. */
+  const firstPromptInFlight = new Set<string>()
+  /** Cap the title cache: the oldest entry is evicted, read hits refresh recency. */
+  const FIRST_PROMPT_CACHE_LIMIT = 100
+  const cacheFirstPrompt = (sessionId: string, title: string): void => {
+    firstPromptCache.delete(sessionId)
+    // A '' miss is NOT a title: a session prompted after an empty list would
+    // otherwise serve the poisoned empty string forever. Misses retry.
+    if (title === '') return
+    firstPromptCache.set(sessionId, title)
+    while (firstPromptCache.size > FIRST_PROMPT_CACHE_LIMIT) {
+      const oldest = firstPromptCache.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      firstPromptCache.delete(oldest)
+    }
+  }
+  const cachedFirstPrompt = (sessionId: string): string | undefined => {
+    const title = firstPromptCache.get(sessionId)
+    if (title === undefined) return undefined
+    firstPromptCache.delete(sessionId)
+    firstPromptCache.set(sessionId, title)
+    return title
+  }
   const firstUserPrompt = (events: readonly SessionEvent[]): string => {
     for (const event of events) {
       if (event.type !== 'user/message') continue
@@ -428,6 +461,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return record?.clientId === clientId ? record : undefined
   }
 
+  /** Cancel the _x.ai/mcp_initialized notification timer a record still owns. */
+  const clearMcpInitTimer = (record: SessionRecord): void => {
+    if (record.mcpInitTimer !== undefined) {
+      clearTimeout(record.mcpInitTimer)
+      record.mcpInitTimer = undefined
+    }
+  }
+
   const assertOpen = (): void => {
     if (closed) throw new RpcError(JSONRPC_INTERNAL_ERROR, 'the grok leader has been disposed')
   }
@@ -454,13 +495,41 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     sendAcp(conn, { jsonrpc: '2.0', method, params })
   }
 
+  /** A client that never answers a reverse request is rejected after this long. */
+  const REVERSE_REQUEST_TIMEOUT_MS = 60_000
+
   /** Send a JSON-RPC request to one client and wait for its response. */
-  const requestClient = <T>(conn: ClientConnection, method: string, params: unknown): Promise<T> => {
+  const requestClient = <T>(conn: ClientConnection, method: string, params: unknown, sessionId?: SessionId): Promise<T> => {
     const id = conn.nextRequestId++
     sendAcp(conn, { jsonrpc: '2.0', id, method, params })
     return new Promise<T>((resolve, reject) => {
-      conn.pending.set(String(id), { resolve: resolve as (value: unknown) => void, reject })
+      const timer = setTimeout(() => {
+        conn.pending.delete(String(id))
+        reject(new RpcError(JSONRPC_INTERNAL_ERROR, 'client did not answer ' + method + ' within 60s'))
+      }, REVERSE_REQUEST_TIMEOUT_MS)
+      conn.pending.set(String(id), {
+        resolve: (value: unknown) => {
+          clearTimeout(timer)
+          resolve(value as T)
+        },
+        reject: (error: Error) => {
+          clearTimeout(timer)
+          reject(error)
+        },
+        ...sessionId === undefined ? {} : { sessionId },
+      })
     })
+  }
+
+  /** Reject the reverse requests a closed/cancelled session still waits on. */
+  const rejectPendingFor = (clientId: number, sessionId: SessionId): void => {
+    const conn = connections.get(clientId)
+    if (conn === undefined) return
+    for (const [id, pending] of conn.pending) {
+      if (pending.sessionId !== sessionId) continue
+      conn.pending.delete(id)
+      pending.reject(new RpcError(JSONRPC_INTERNAL_ERROR, 'session ' + String(sessionId) + ' is no longer active'))
+    }
   }
 
   const settlePending = (conn: ClientConnection, value: unknown): void => {
@@ -615,6 +684,17 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (record.yolo) return Promise.resolve('allowed-once' as const)
     const conn = connections.get(record.clientId)
     if (conn === undefined) return next()
+    // Validate instead of blind-casting: a malformed client payload must fail
+    // closed to a rejection, never crash the approval path.
+    const permissionDecision = (outcome: unknown): 'allowed-once' | 'cancelled' | 'rejected' => {
+      if (typeof outcome !== 'object' || outcome === null || Array.isArray(outcome)) return 'rejected'
+      const envelope = outcome as { outcome?: unknown }
+      if (typeof envelope.outcome !== 'object' || envelope.outcome === null || Array.isArray(envelope.outcome)) return 'rejected'
+      const inner = envelope.outcome as { outcome?: unknown; optionId?: unknown }
+      if (inner.outcome === 'cancelled') return 'cancelled'
+      if (inner.outcome !== 'selected') return 'rejected'
+      return inner.optionId === 'allow-once' ? 'allowed-once' : 'rejected'
+    }
     return requestClient<unknown>(conn, WIRE.requestPermission, {
       sessionId: record.agent.session.id,
       toolCall: { toolCallId: request.callId, displayName: request.toolName },
@@ -622,10 +702,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
         { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
       ],
-    }).then((outcome: unknown) => {
-      const decision = outcome as { outcome?: { outcome?: string; optionId?: string } }
-      if (decision.outcome?.outcome === 'cancelled') return 'cancelled'
-      return decision.outcome?.optionId === 'allow-once' ? 'allowed-once' : 'rejected'
+    }, record.agent.session.id).then(permissionDecision).catch((error: unknown) => {
+      // A disconnect/cancel/timeout rejects the pending request; fail closed
+      // instead of surfacing an unhandled rejection.
+      logger.warn('grok-leader: permission request failed: ' + errorChain(error))
+      return 'rejected'
     })
   })
 
@@ -665,17 +746,31 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
             questions: grokQuestions,
             mode: 'default',
           },
-        })
+        }, record.agent.session.id)
+        // Validate the tagged wire shape instead of blind casts: anything but
+        // a well-formed accepted payload reads as a user cancellation.
+        if (typeof response !== 'object' || response === null || Array.isArray(response)) {
+          throw new UserQuestionError('malformed ask_user_question response', 'ASK_CANCELLED')
+        }
         if (response.outcome !== 'accepted') {
           throw new UserQuestionError('the user cancelled ask_user_question', 'ASK_CANCELLED')
         }
+        if (typeof response.answers !== 'object' || response.answers === null || Array.isArray(response.answers)) {
+          throw new UserQuestionError('malformed ask_user_question answers', 'ASK_CANCELLED')
+        }
+        const annotationsRaw = response.annotations
+        const annotations = annotationsRaw !== undefined && typeof annotationsRaw === 'object' && !Array.isArray(annotationsRaw)
+          ? annotationsRaw as Record<string, { notes?: unknown }>
+          : undefined
         const answers: AskUserQuestionAnswer['answers'] = []
         for (const [text, labels] of Object.entries(response.answers)) {
           const id = textToId.get(text)
           if (id === undefined) continue
-          const notes = response.annotations?.[text]?.notes
-          const selected = labels.filter(label => label !== 'Other')
-          answers.push({ id, selected, ...(notes !== undefined && notes.length > 0 ? { custom: notes } : {}) })
+          // ACP accepts both "value" and ["value"] per answer entry.
+          const rawLabels = Array.isArray(labels) ? labels : labels === undefined ? [] : [labels]
+          const notes = annotations?.[text]?.notes
+          const selected = rawLabels.filter((label): label is string => typeof label === 'string' && label !== 'Other')
+          answers.push({ id, selected, ...(typeof notes === 'string' && notes.length > 0 ? { custom: notes } : {}) })
         }
         return { answers }
       },
@@ -894,7 +989,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       clientId,
       selection,
       yolo: meta?.yoloMode === true,
-      lastSeq: 0,
+      // -1 admits a first event at seq 0 through the seq <= lastSeq replay gate.
+      lastSeq: -1,
       turnStartMs: undefined,
       eventSeq: 1,
       inputTokens: 0,
@@ -910,7 +1006,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       runningText: undefined,
       runningCombinedTexts: undefined,
       cancelTrigger: undefined,
-      nextQueueVersion: 0,
+      editHolds: new Set(),
+      mcpInitTimer: undefined,
       inflight: undefined,
     }
     sessions.set(sessionId, record)
@@ -919,8 +1016,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // docs/grok-tui-connect.md).
     const conn = connections.get(clientId)
     if (conn !== undefined) {
-      setTimeout(() => {
-        if (connections.get(clientId) === conn) {
+      record.mcpInitTimer = setTimeout(() => {
+        record.mcpInitTimer = undefined
+        // Notify only while this record still owns the session and the client:
+        // a close/teardown clears the timer, and a reload re-parents the id.
+        if (ownedRecord(clientId, sessionId) === record && connections.get(clientId) === conn) {
           sendNotification(conn, '_x.ai/mcp_initialized', { sessionId })
         }
       }, 50)
@@ -965,10 +1065,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   /**
    * Run one validated prompt: admit it, stream the echo, and settle at turn
-   * end (or idle for a turnless slot). Reads the prompt content from p again
-   * because the queued entry stores the raw request, not a decoded message.
+   * end (or idle for a turnless slot).
    */
-  const runPrompt = async (record: SessionRecord, p: Record<string, unknown>, id: string, text: string, combinedTexts?: string[]): Promise<{ stopReason: StopReasonWire }> => {
+  const runPrompt = async (record: SessionRecord, id: string, text: string, combinedTexts?: string[]): Promise<{ stopReason: StopReasonWire }> => {
     if (agents.get(record.agent.id) !== record.agent) {
       throw internalError('prompt was not queued: the agent was disposed outside the bridge')
     }
@@ -1006,6 +1105,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         if (record.inflight !== inflight) return
         record.inflight = undefined
         inflight.resolve('cancelled')
+      }, (error: unknown) => {
+        if (record.inflight !== inflight) return
+        record.inflight = undefined
+        inflight.reject(internalError('agent idle wait failed: ' + errorChain(error)))
       })
       })
     } catch (error: unknown) {
@@ -1029,13 +1132,24 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       // pager's PromptResponse handler then runs the stashed adoption when
       // the promotion broadcast and echo arrive after this idle gate.
       void record.agent.whenIdle().then(() => {
+        // Invariant: this callback runs long after the prompt settled; only
+        // promote when this record still owns its session and the bridge is
+        // open. A closed/reloaded/re-parented session must not resurrect its
+        // queued prompts through a stale agent reference.
+        if (closed || sessions.get(record.agent.session.id) !== record) return
         advancePromptQueue(record)
+      }, (error: unknown) => {
+        logger.warn('grok-leader: idle wait failed for ' + String(record.agent.session.id) + ': ' + errorChain(error))
       })
     } else {
       broadcastQueueChanged(record)
     }
     if (failure !== undefined) throw failure
-    return { stopReason: stopReason! }
+    // A settled prompt must always carry a stop reason; an undefined one here
+    // means the settlement path broke, and a silent non-null assertion would
+    // lie to the pager about how the turn ended.
+    if (stopReason === undefined) throw internalError('prompt settled without a stop reason')
+    return { stopReason }
   }
 
   /** Start the next queued prompt once the in-flight one has settled. */
@@ -1043,22 +1157,27 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (record.inflight !== undefined) return
     const front = record.promptQueue[0]
     if (front === undefined) return
+    // A held front parks the whole queue (grok maybe_start_running_task):
+    // nothing promotes until queue/release_edit clears the hold.
+    if (record.editHolds.has(front.id)) return
     // grok combine: with 2+ queued prompts, fold the followers into the front
     // (text joined with blank lines; followers resolve as removed). Every bridge
     // entry is a validated text prompt, so the grok gates (images/bash/skills)
     // are satisfied trivially. ponytail: config-gated, default off.
     if (combineQueued && record.promptQueue.length >= 2) {
       const segments = [front.text]
-      const followers = record.promptQueue.splice(1)
-      for (const follower of followers) {
+      // Held followers never fold into the front; the run stops at the first
+      // held row (xai_prompt_queue::can_merge_follower).
+      while (record.promptQueue.length >= 2 && !record.editHolds.has(record.promptQueue[1]!.id)) {
+        const follower = record.promptQueue.splice(1, 1)[0]!
         segments.push(follower.text)
         follower.resolve({ stopReason: 'cancelled' })
       }
-      front.combinedTexts = segments
+      if (segments.length >= 2) front.combinedTexts = segments
     }
     const entry = record.promptQueue.shift()!
     const runText = entry.combinedTexts === undefined ? entry.text : entry.combinedTexts.join('\n\n')
-    void runPrompt(record, entry.p, entry.id, runText, entry.combinedTexts).then(entry.resolve, entry.reject)
+    void runPrompt(record, entry.id, runText, entry.combinedTexts).then(entry.resolve, entry.reject)
   }
 
   /** Settle every queued (not-yet-run) prompt as cancelled (cancel/close/teardown). */
@@ -1071,7 +1190,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     new Promise((resolve, reject) => {
       const meta = p._meta as Record<string, unknown> | null | undefined
       const id = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
-      record.promptQueue.push({ p, resolve, reject, id, text, version: record.nextQueueVersion++ })
+      // Fresh rows start at version 0 (grok QueueEntryMeta); edits bump by one.
+      record.promptQueue.push({ resolve, reject, id, text, version: 0 })
       advancePromptQueue(record)
       broadcastQueueChanged(record)
     })
@@ -1104,6 +1224,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     record.agent.cancel({ kind: 'user' })
     settlePrompt(record, 'cancelled')
     discardPromptQueue(record)
+    rejectPendingFor(clientId, record.agent.session.id)
     broadcastQueueChanged(record)
   }
 
@@ -1120,6 +1241,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       existing.agent.cancel({ kind: 'user' })
       settlePrompt(existing, 'cancelled')
       discardPromptQueue(existing)
+      rejectPendingFor(clientId, sessionId)
+      clearMcpInitTimer(existing)
       const store = ctx.get('sessions') as SessionsLike | undefined
       if (store !== undefined) await store.flush(existing.agent.session)
       await existing.dispose()
@@ -1161,7 +1284,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       selection,
       // TODO(verify): yoloMode/autoMode on session/load meta (server.rs:671-770).
       yolo: false,
-      lastSeq: 0,
+      // -1 admits a first replayed event at seq 0 through the seq <= lastSeq gate.
+      lastSeq: -1,
       turnStartMs: undefined,
       eventSeq: 1,
       inputTokens: 0,
@@ -1177,10 +1301,20 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       runningText: undefined,
       runningCombinedTexts: undefined,
       cancelTrigger: undefined,
-      nextQueueVersion: 0,
+      editHolds: new Set(),
+      mcpInitTimer: undefined,
       inflight: undefined,
     }
     sessions.set(sessionId, record)
+    // Rebuild the up-arrow history from the persisted user prompts so
+    // x.ai/prompt_history serves them after resume.
+    for (const event of inspection.events) {
+      if (event.type !== 'user/message') continue
+      const source = (event.data as { source?: { kind?: unknown } }).source as { kind?: unknown } | undefined
+      if (source?.kind !== 'user') continue
+      const text = textBlocks(event.data.content).map(block => block.text).join('')
+      if (text.trim().length > 0) record.prompts.push(text)
+    }
     // Replay the persisted transcript with isReplay stamps BEFORE the response,
     // so the client renders history ahead of any live deltas. Live notifications
     // racing the replay are dropped by the high-water mark; buffering them for a
@@ -1381,8 +1515,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const next: Record<string, unknown> = { ...current }
     for (const field of ['displayName', 'apiKeyEnv', 'api', 'baseURL'] as const) {
       const value = p[field]
+      if (value === undefined) continue // absent key keeps the current profile value
       if (typeof value === 'string' && value.length > 0) next[field] = value
-      else delete next[field]
+      else delete next[field] // an explicit empty field unsets
     }
     return next
   }
@@ -1536,6 +1671,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     record.agent.cancel({ kind: 'user' })
     settlePrompt(record, 'cancelled')
     discardPromptQueue(record)
+    rejectPendingFor(clientId, record.agent.session.id)
+    clearMcpInitTimer(record)
     sessions.delete(record.agent.session.id)
     const store = ctx.get('sessions') as SessionsLike | undefined
     if (store !== undefined) await store.flush(record.agent.session)
@@ -1608,36 +1745,42 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const lp = paramRecord(params, 'x.ai/session/list')
         const query = typeof lp.query === 'string' ? lp.query.toLowerCase() : undefined
         const cwd = typeof lp.cwd === 'string' ? lp.cwd : undefined
-        const limit = typeof lp.limit === 'number' && lp.limit > 0 ? Math.floor(lp.limit) : undefined
+        const requested = typeof lp.limit === 'number' && lp.limit > 0 ? Math.floor(lp.limit) : DEFAULT_SESSION_LIST_LIMIT
+        const limit = Math.min(requested, DEFAULT_SESSION_LIST_LIMIT)
         const store = ctx.get('sessionPersistence')
         const headers = store === undefined ? [] : await store.list()
+        // Backfill display titles BEFORE the query filter so picker search can
+        // match prompt text. Misses stay uncached (retried on the next list)
+        // and the in-flight set stops concurrent list calls stacking loads.
+        if (store !== undefined) {
+          await Promise.all(headers.map(async header => {
+            if (firstPromptCache.has(header.id) || firstPromptInFlight.has(header.id)) return
+            firstPromptInFlight.add(header.id)
+            try {
+              const inspection = await store.load(SessionId(header.id))
+              cacheFirstPrompt(header.id, firstUserPrompt(inspection.events))
+            } catch {
+              // A broken artifact must not sink the list; the miss is retried.
+            } finally {
+              firstPromptInFlight.delete(header.id)
+            }
+          }))
+        }
         let rows = headers.map(header => ({
           sessionId: header.id,
           cwd: header.cwd ?? '',
           createdAt: new Date(header.createdAt).toISOString(),
           // No cheap updatedAt on the header; createdAt keeps old rows within the picker window.
           updatedAt: new Date(header.createdAt).toISOString(),
-          firstPrompt: firstPromptCache.get(header.id) ?? '',
+          firstPrompt: cachedFirstPrompt(header.id) ?? '',
           // Chat-kind rows skip the TUI's local-store gate (grok's own session
           // docs, which dsh sessions never enter) and load straight via session/load.
           _meta: { 'x.ai/session': { kind: 'chat' } },
         }))
         if (cwd !== undefined) rows = rows.filter(row => row.cwd === cwd)
-        if (query !== undefined && query.length > 0) rows = rows.filter(row => (row.sessionId + ' ' + row.cwd).toLowerCase().includes(query))
+        if (query !== undefined && query.length > 0) rows = rows.filter(row => (row.sessionId + ' ' + row.cwd + ' ' + row.firstPrompt).toLowerCase().includes(query))
         rows.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-        if (limit !== undefined) rows = rows.slice(0, limit)
-        // Backfill display titles once per process lifetime (pick rows only).
-        await Promise.all(rows.map(async row => {
-          if (firstPromptCache.has(row.sessionId) || store === undefined) return
-          firstPromptCache.set(row.sessionId, '')
-          try {
-            const inspection = await store.load(SessionId(row.sessionId))
-            firstPromptCache.set(row.sessionId, firstUserPrompt(inspection.events))
-          } catch {
-            // Keep the '' placeholder; a broken artifact must not sink the list.
-          }
-        }))
-        rows = rows.map(row => ({ ...row, firstPrompt: firstPromptCache.get(row.sessionId) ?? '' }))
+        rows = rows.slice(0, limit)
         return { sessions: rows }
       }
       case 'x.ai/sessions/list': {
@@ -1673,6 +1816,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (typeof p.sessionId !== 'string') return undefined
       return ownedRecord(clientId, SessionId(p.sessionId))
     }
+    const queueEntry = (record: SessionRecord, id: unknown): { index: number; entry: SessionRecord['promptQueue'][number] } | undefined => {
+      if (typeof id !== 'string') return undefined
+      const index = record.promptQueue.findIndex(entry => entry.id === id)
+      return index < 0 ? undefined : { index, entry: record.promptQueue[index]! }
+    }
     const queueMutate = (record: SessionRecord): void => {
       broadcastQueueChanged(record)
     }
@@ -1685,15 +1833,23 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const p = unwrapped
         const record = queueRecord(p)
         if (record === undefined) return
-        const idx = record.promptQueue.findIndex(entry => entry.id === p.id)
-        if (idx < 0) return
-        const [entry] = record.promptQueue.splice(idx, 1)
-        if (typeof p.newText === 'string' && p.newText.length > 0) {
+        // The client supplies the version it last saw (absent = 0, the version
+        // of never-edited rows); a mismatch is a benign no-op + resync.
+        const expectedVersion = typeof p.expectedVersion === 'number' ? p.expectedVersion : 0
+        const located = queueEntry(record, p.id)
+        if (located === undefined || located.entry.version !== expectedVersion) {
+          if (typeof p.id === 'string') record.editHolds.delete(p.id)
+          queueMutate(record)
+          return
+        }
+        const [entry] = record.promptQueue.splice(located.index, 1)
+        if (typeof p.newText === 'string' && p.newText.trim().length > 0) {
           entry.text = p.newText
           entry.combinedTexts = undefined
-          entry.version = record.nextQueueVersion++
+          entry.version = entry.version + 1
         }
         record.promptQueue.unshift(entry)
+        record.editHolds.delete(entry.id)
         // grok send-now: cancel the running turn and run this prompt next.
         // cancelTrigger='send_now' suppresses the pager's Turn-cancelled marker.
         if (record.inflight !== undefined) {
@@ -1711,15 +1867,66 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const p = unwrapped
         const record = queueRecord(p)
         if (record === undefined) return
-        const idx = record.promptQueue.findIndex(entry => entry.id === p.id)
-        if (idx >= 0) {
-          const [entry] = record.promptQueue.splice(idx, 1)
+        const expectedVersion = typeof p.expectedVersion === 'number' ? p.expectedVersion : 0
+        const located = queueEntry(record, p.id)
+        if (located !== undefined && located.entry.version !== expectedVersion) {
+          // Stale version: leave the row untouched and resync the client.
+          record.editHolds.delete(located.entry.id)
+          queueMutate(record)
+          return
+        }
+        if (located !== undefined) {
+          const [entry] = record.promptQueue.splice(located.index, 1)
           entry.resolve({ stopReason: 'cancelled' })
+          record.editHolds.delete(entry.id)
         } else if (record.runningPromptId === p.id) {
           record.agent.cancel({ kind: 'user' })
           settlePrompt(record, 'cancelled')
+          record.editHolds.delete(String(p.id))
         }
         queueMutate(record)
+        return
+      }
+      case 'x.ai/queue/edit': {
+        if (unwrapped === undefined) return
+        const p = unwrapped
+        const record = queueRecord(p)
+        if (record === undefined) return
+        const located = queueEntry(record, p.id)
+        if (located === undefined) return
+        // The TUI sends no version for edit (grok edits LWW); honor one when a
+        // client pins it: a stale version no-ops + resyncs like remove/interject.
+        if (typeof p.expectedVersion === 'number' && located.entry.version !== p.expectedVersion) {
+          queueMutate(record)
+          return
+        }
+        // Every path drops the hold (grok handle_edit_queued_prompt): a stale
+        // or blank edit must not leave promotion parked.
+        record.editHolds.delete(located.entry.id)
+        if (typeof p.newText !== 'string' || p.newText.trim().length === 0) return
+        located.entry.text = p.newText
+        located.entry.combinedTexts = undefined
+        located.entry.version = located.entry.version + 1
+        queueMutate(record)
+        advancePromptQueue(record)
+        return
+      }
+      case 'x.ai/queue/hold_edit': {
+        if (unwrapped === undefined) return
+        const p = unwrapped
+        const record = queueRecord(p)
+        if (record === undefined) return
+        if (typeof p.id === 'string') record.editHolds.add(p.id)
+        return
+      }
+      case 'x.ai/queue/release_edit': {
+        if (unwrapped === undefined) return
+        const p = unwrapped
+        const record = queueRecord(p)
+        if (record === undefined) return
+        if (typeof p.id !== 'string' || !record.editHolds.delete(p.id)) return
+        // Unblocks a front parked under edit hold (grok SessionCommand::ReleaseEdit).
+        advancePromptQueue(record)
         return
       }
       case 'x.ai/queue/reorder': {
@@ -1810,7 +2017,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (connections.size > 0) return
     idleExitTimer = setTimeout(() => {
       idleExitTimer = undefined
-      void quiesce().finally(() => {
+      void quiesce().catch((failure: unknown) => {
+        logger.warn('grok-leader: quiesce failed: ' + errorChain(failure))
+      }).finally(() => {
         const exit = ctx.get('appExit') as ((code: number) => void) | undefined
         if (exit === undefined) {
           logger.warn('grok-leader: the host exposes no appExit; the leader will stay up with no clients')
@@ -1835,8 +2044,21 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       record.agent.cancel({ kind: 'user' })
       settlePrompt(record, 'cancelled')
       discardPromptQueue(record)
+      clearMcpInitTimer(record)
       sessions.delete(record.agent.session.id)
-      void record.dispose().catch((error: unknown) => {
+      // Flush persisted state before disposal, like closeSession; a flush
+      // failure is logged but must not strand the disposal.
+      const store = ctx.get('sessions') as SessionsLike | undefined
+      void (async () => {
+        if (store !== undefined) {
+          try {
+            await store.flush(record.agent.session)
+          } catch (error: unknown) {
+            logger.warn('grok-leader: session flush failed for ' + String(record.agent.session.id) + ': ' + errorChain(error))
+          }
+        }
+        await record.dispose()
+      })().catch((error: unknown) => {
         logger.warn('grok-leader: session teardown failed for ' + String(record.agent.session.id) + ': ' + errorChain(error))
       })
     }
@@ -1972,10 +2194,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       record.agent.cancel({ kind: 'user' })
       settlePrompt(record, 'cancelled')
       discardPromptQueue(record)
+      clearMcpInitTimer(record)
     }
     quiescing = (async () => {
       for (const conn of connections.values()) conn.socket.destroy()
-      const disposals = await Promise.allSettled(records.map(record => record.dispose()))
+      // Flush persisted state before disposal, like closeSession.
+      const store = ctx.get('sessions') as SessionsLike | undefined
+      const disposals = await Promise.allSettled(records.map(async record => {
+        if (store !== undefined) await store.flush(record.agent.session)
+        await record.dispose()
+      }))
       const failures: unknown[] = []
       for (const result of disposals) {
         if (result.status === 'rejected') failures.push(result.reason as unknown)
@@ -2017,7 +2245,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   ctx.effect(() => () => {
     cancelIdleExit()
     server.close()
-    void quiesce()
     if (socketFailure?.code !== 'EADDRINUSE') {
       try {
         unlinkSync(socketPath)
@@ -2025,10 +2252,17 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         // Socket file already removed; nothing to clean.
       }
     }
-    // Re-throw a fatal listener failure from the plugin effect so the cordis
-    // host fails this plugin cleanly instead of process.exit(1) taking the
-    // whole dsh process down.
-    if (socketFailure !== undefined) throw socketFailure
+    // Await the drain so disposal finishes flushing and disposing sessions,
+    // and catch its rejection with a logged warning. A fatal listener failure
+    // still re-throws from the returned promise so the cordis host fails this
+    // plugin cleanly instead of process.exit(1) taking the whole dsh down.
+    const failure = socketFailure
+    return quiesce().then(() => {
+      if (failure !== undefined) throw failure
+    }, (quiesceFailure: unknown) => {
+      logger.warn('grok-leader: quiesce failed: ' + errorChain(quiesceFailure))
+      if (failure !== undefined) throw failure
+    })
   }, 'grok-leader.socket')
 }
 
@@ -2165,7 +2399,7 @@ export function toolKindForName(name: string, args?: unknown): ToolKindWire {
   }
   if (n === 'bash' || n === 'pwsh' || n === 'run_code' || n === 'run_terminal_command') return 'execute'
   if (n === 'read' || n === 'read_image') return 'read'
-  if (n === 'write' || n === 'edit' || n === 'str_replace_editor') return 'edit'
+  if (n === 'write' || n === 'edit') return 'edit'
   if (n === 'grep' || n === 'glob') return 'search'
   if (n === 'web_search' || n === 'x_search' || n === 'search') return 'search'
   if (n === 'web_fetch' || n === 'fetch') return 'fetch'

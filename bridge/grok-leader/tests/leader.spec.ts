@@ -8,7 +8,7 @@ import { statSync } from 'node:fs'
 import { createConnection, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-llm'
@@ -575,6 +575,110 @@ describe('grok leader over a unix socket', () => {
     expect(echoIndex).toBeGreaterThan(promoIndex)
   })
 
+  it('queue/edit replaces the row text, bumps its version, and rebroadcasts', async () => {
+    const { registry, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 1))
+    const queued = c.broadcasts.find(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 1)!
+    const row = ((queued.params as { entries: Array<{ id: string; text: string; version: number }> }).entries[0]!)
+    expect(row).toMatchObject({ text: 'second', version: 0 })
+
+    const before = c.broadcasts.length
+    c.notify('x.ai/queue/edit', { sessionId, id: row.id, newText: 'edited second' })
+    await waitFor(() => c.broadcasts.length > before)
+    const edited = ((c.broadcasts[c.broadcasts.length - 1]!.params) as { entries: Array<{ id: string; text: string; version: number }> }).entries[0]!
+    expect(edited).toMatchObject({ id: row.id, text: 'edited second', version: 1 })
+
+    // The edited text is what the row runs once it promotes.
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    await waitFor(() => agent.internals.followups.includes('edited second'))
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 2)).result).toEqual({ stopReason: 'cancelled' })
+    expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
+  })
+
+  it('queue/hold_edit parks the front and queue/release_edit promotes it', async () => {
+    const { registry, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 1))
+    const secondId = ((c.broadcasts[c.broadcasts.length - 1]!.params as { entries: Array<{ id: string }> }).entries[0]!).id
+
+    c.notify('x.ai/queue/hold_edit', { sessionId, id: secondId })
+
+    // The running turn settles, but the held front must not promote.
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 2)).result).toEqual({ stopReason: 'cancelled' })
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
+    expect(agent.internals.followups).toEqual(['first'])
+
+    // Releasing the hold unblocks the parked row.
+    c.notify('x.ai/queue/release_edit', { sessionId, id: secondId })
+    await waitFor(() => agent.internals.followups.includes('second'))
+    agent.internals.idleWaiters.shift()!() // idle-triggered advance: no-op while second runs
+    agent.internals.idleWaiters.shift()!() // settle the promoted second
+    expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
+  })
+
+  it('a stale expectedVersion on edit/remove/interject is a no-op that resyncs', async () => {
+    const { registry, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 1))
+    const id = ((c.broadcasts[c.broadcasts.length - 1]!.params as { entries: Array<{ id: string }> }).entries[0]!).id
+    const latestRow = (): { text: string; version: number } | undefined => {
+      const params = c.broadcasts[c.broadcasts.length - 1]!.params as { entries?: Array<{ id: string; text: string; version: number }> }
+      return params.entries?.find(entry => entry.id === id)
+    }
+
+    // Stale edit: text/version untouched, still rebroadcast for the resync.
+    const beforeEdit = c.broadcasts.length
+    c.notify('x.ai/queue/edit', { sessionId, id, newText: 'changed', expectedVersion: 1 })
+    await waitFor(() => c.broadcasts.length > beforeEdit)
+    expect(latestRow()).toMatchObject({ text: 'second', version: 0 })
+
+    // Stale remove: the row stays queued.
+    const beforeRemove = c.broadcasts.length
+    c.notify('x.ai/queue/remove', { sessionId, id, expectedVersion: 1 })
+    await waitFor(() => c.broadcasts.length > beforeRemove)
+    expect(latestRow()).toMatchObject({ text: 'second', version: 0 })
+
+    // Stale interject: the row stays and the running turn is not cancelled.
+    const beforeInterject = c.broadcasts.length
+    c.notify('x.ai/queue/interject', { sessionId, id, expectedVersion: 1 })
+    await waitFor(() => c.broadcasts.length > beforeInterject)
+    expect(latestRow()).toMatchObject({ text: 'second', version: 0 })
+    expect(agent.internals.cancelCalls).toBe(0)
+  })
+
   it('combines 2+ queued plain prompts into one turn when enabled', async () => {
     const { registry, client: c } = await start({ manualIdle: true, combineQueuedPrompts: true })
     register(c)
@@ -760,6 +864,7 @@ describe('grok leader over a unix socket', () => {
   })
 
   it('tears down a disconnected client owned sessions', async () => {
+    mockSessionsStore.flushed.length = 0
     const { registry, client: c } = await start()
     register(c)
     await c.next()
@@ -770,9 +875,11 @@ describe('grok leader over a unix socket', () => {
 
     c.send({ type: 'disconnect' })
     await new Promise<void>((resolveClose) => { c.socket.once('close', () => { resolveClose() }) })
-    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
+    await waitFor(() => agent?.internals.disposed === true)
     expect(agent?.internals.disposed).toBe(true)
     expect(registry.byId.size).toBe(0)
+    // The client teardown flushed the session store before disposing.
+    expect(mockSessionsStore.flushed).toContain(agent?.session)
   })
 
   it('routes the grok agentProfile to the dsh preset roster', async () => {
@@ -995,6 +1102,140 @@ describe('grok leader over a unix socket', () => {
 
     const history = await c.request(4, 'x.ai/prompt_history', { cwd: process.cwd(), filter_session_id: sessionId })
     expect(history.result).toEqual({ prompts: ['hello'] })
+  })
+
+  it('x.ai/session/list backfills firstPrompt before the query filter', async () => {
+    const { persistence, client: c } = await start()
+    register(c)
+    await c.next()
+    persistence.load = (async () => ({
+      meta: persistence.header,
+      events: [{ type: 'user/message', seq: 0, time: 0, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Needle prompt title' }] } }],
+    })) as unknown as typeof persistence.load
+    const listed = await c.request(1, 'x.ai/session/list', { query: 'needle' })
+    expect(listed.result).toMatchObject({
+      sessions: [{
+        sessionId: 'persisted-session',
+        cwd: '/tmp/proj',
+        firstPrompt: 'Needle prompt title',
+        _meta: { 'x.ai/session': { kind: 'chat' } },
+      }],
+    })
+  })
+
+  it('x.ai/session/list retries an empty firstPrompt instead of caching the miss', async () => {
+    const { persistence, client: c } = await start()
+    register(c)
+    await c.next()
+    let prompted = false
+    persistence.load = (async () => ({
+      meta: persistence.header,
+      events: prompted
+        ? [{ type: 'user/message', seq: 0, time: 0, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Late title' }] } }]
+        : [],
+    })) as unknown as typeof persistence.load
+    const first = await c.request(1, 'x.ai/session/list', {})
+    expect((first.result as { sessions: Array<{ firstPrompt: string }> }).sessions[0]!.firstPrompt).toBe('')
+    prompted = true
+    const second = await c.request(2, 'x.ai/session/list', {})
+    expect((second.result as { sessions: Array<{ firstPrompt: string }> }).sessions[0]!.firstPrompt).toBe('Late title')
+  })
+
+  it('session/load replay repopulates the up-arrow prompt history', async () => {
+    const { persistence, client: c } = await start()
+    register(c)
+    await c.next()
+    persistence.load = (async () => ({
+      meta: persistence.header,
+      events: [
+        { type: 'user/message', seq: 0, time: 0, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'persisted one' }] } },
+        { type: 'user/message', seq: 1, time: 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'persisted two' }] } },
+      ],
+    })) as unknown as typeof persistence.load
+    const loaded = await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [] })
+    expect(loaded.error).toBeUndefined()
+    // Consume the two replayed user_message_chunk notifications so the next
+    // request is not stalled behind them in the client's message queue.
+    expect(await c.next()).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'persisted one' } } },
+    })
+    expect(await c.next()).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'persisted two' } } },
+    })
+    const history = await c.request(2, 'x.ai/prompt_history', { filter_session_id: 'persisted-session' })
+    expect(history.result).toEqual({ prompts: ['persisted two', 'persisted one'] })
+  })
+
+  it('emits a first projected event whose seq is 0 (lastSeq starts at -1)', async () => {
+    const { persistence, client: c } = await start()
+    register(c)
+    await c.next()
+    persistence.load = (async () => ({
+      meta: persistence.header,
+      events: [{ type: 'user/message', seq: 0, time: 0, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'seq zero replay' }] } }],
+    })) as unknown as typeof persistence.load
+    const loaded = await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [] })
+    expect(loaded.error).toBeUndefined()
+    const seen = (): boolean => c.all.some(msg => {
+      const params = msg.params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } }; _meta?: { isReplay?: boolean } }
+      return msg.method === 'session/update'
+        && params.update?.sessionUpdate === 'user_message_chunk'
+        && params.update.content?.type === 'text'
+        && params.update.content.text === 'seq zero replay'
+        && params._meta?.isReplay === true
+    })
+    await waitFor(seen)
+  })
+
+  it('closing a session before 50ms suppresses _x.ai/mcp_initialized', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const closed = await c.request(2, 'session/close', { sessionId })
+    expect(closed.error).toBeUndefined()
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 80) })
+    expect(c.all.some(msg => msg.method === '_x.ai/mcp_initialized')).toBe(false)
+  })
+
+  it('rejects a reverse request the client never answers within 60s', async () => {
+    vi.useFakeTimers()
+    try {
+      const { registry, pluginCtx, client: c } = await start()
+      register(c)
+      await c.next()
+      const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      const sessionId = (created.result as { sessionId: string }).sessionId
+      const agent = registry.byId.get(sessionId)!
+      const waterfall = pluginCtx.waterfall as unknown as (name: string, ...args: unknown[]) => unknown
+      const decision = waterfall('approval/request', { agent, callId: 'tool-1', toolName: 'bash' }, async () => 'rejected' as const) as Promise<string>
+      vi.advanceTimersByTime(60_000)
+      await expect(decision).resolves.toBe('rejected')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('session/cancel rejects a pending permission roundtrip', async () => {
+    const { registry, pluginCtx, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const waterfall = pluginCtx.waterfall as unknown as (name: string, ...args: unknown[]) => unknown
+    const decision = waterfall('approval/request', { agent, callId: 'tool-1', toolName: 'bash' }, async () => 'rejected' as const) as Promise<string>
+    // The reverse request reached the client before the cancel settles it.
+    await waitFor(() => c.all.some(msg => msg.method === 'session/request_permission'))
+    let settled = false
+    void decision.then(() => { settled = true })
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
+    expect(settled).toBe(false)
+    c.notify('session/cancel', { sessionId })
+    await expect(decision).resolves.toBe('rejected')
   })
 })
 
@@ -1339,6 +1580,30 @@ describe('x.ai/providers/update', () => {
     expect(res.result).toMatchObject({
       providers: [{ id: 'deepseek' }, { id: 'acme-gateway', api: 'openai-responses', baseURL: 'https://new.test/v1' }],
     })
+  })
+
+  it('an omitted field keeps the current profile value', async () => {
+    const settings = makeManageSettings()
+    settings.providers['acme-gateway'] = {
+      displayName: 'Acme',
+      apiKeyEnv: 'ACME_KEY',
+      api: 'openai-completions',
+      baseURL: 'https://acme.test/v1',
+    }
+    const { client } = await startManageHarness(settings)
+    const res = await client.request(1, 'x.ai/providers/update', { providerId: 'acme-gateway', displayName: 'Renamed' })
+    expect(res.error).toBeUndefined()
+    expect(settings.calls).toHaveLength(1)
+    expect(settings.calls[0].ops).toEqual([{
+      op: 'set',
+      path: ['providers', 'acme-gateway'],
+      value: {
+        displayName: 'Renamed',
+        apiKeyEnv: 'ACME_KEY',
+        api: 'openai-completions',
+        baseURL: 'https://acme.test/v1',
+      },
+    }])
   })
 
   it('refuses an unknown provider without writing settings', async () => {
