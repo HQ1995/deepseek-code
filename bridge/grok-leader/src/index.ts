@@ -159,7 +159,7 @@ interface ModelCatalog {
   providers: Array<{ id: string; name?: string; displayName?: string; apiKeyEnv?: string; api?: string; baseURL?: string }>
   /** Provider that owns currentModelId ('' when no current model). */
   currentProviderId: string
-  availableModels: Array<{ modelId: string; name: string; description?: string; _meta?: { provider: string; supportsReasoningEffort?: boolean; reasoningEfforts?: string[] } }>
+  availableModels: Array<{ modelId: string; name: string; description?: string; _meta?: { provider: string; supportsReasoningEffort?: boolean; reasoningEfforts?: string[]; reasoningEffort?: string } }>
   providerByModel: Map<string, string>
 }
 
@@ -432,7 +432,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       }
     }
     const requested = config.model
-      ?? (ctx.get('agentDefaultModel') as { currentSelection?: () => { model: string } } | undefined)?.currentSelection?.().model
+      ?? (ctx.get('agentDefaultModel') as { currentSelection?: () => { model: string } | undefined } | undefined)?.currentSelection?.()?.model
       ?? ''
     // A configured model absent from the catalog must not reach the client as
     // an unresolvable currentModelId; fall back to the catalog's first entry.
@@ -440,6 +440,17 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (currentModelId !== '' && !providerByModel.has(currentModelId)) {
       currentModelId = availableModels[0]?.modelId ?? ''
       logger.warn('grok-leader: model "' + requested + '" is not in the catalog; falling back to "' + currentModelId + '"')
+    }
+    // The pager reads the selected effort from the current model's
+    // _meta.reasoningEffort on every models/list, so a /effort choice must
+    // ride the catalog or it is forgotten across restarts.
+    const selectedEffort = (ctx.get('agentDefaultModel') as
+      { currentSelection?: () => { reasoningEffort?: string } | undefined } | undefined)?.currentSelection?.()?.reasoningEffort
+    if (typeof selectedEffort === 'string' && selectedEffort.length > 0) {
+      const current = availableModels.find(model => model.modelId === currentModelId)
+      if (current !== undefined && current._meta !== undefined) {
+        current._meta.reasoningEffort = selectedEffort
+      }
     }
     catalog = {
       currentModelId,
@@ -1200,6 +1211,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   /** Settle every queued (not-yet-run) prompt as cancelled (cancel/close/teardown). */
   const discardPromptQueue = (record: SessionRecord): void => {
+    // A discarded row can never be promoted, so its edit hold must not linger
+    // and accidentally park a future row that reuses the same id.
+    record.editHolds.clear()
     for (const entry of record.promptQueue.splice(0)) entry.resolve({ stopReason: 'cancelled' })
   }
 
@@ -1875,6 +1889,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         if (located === undefined || located.entry.version !== expectedVersion) {
           if (typeof p.id === 'string') record.editHolds.delete(p.id)
           queueMutate(record)
+          advancePromptQueue(record)
           return
         }
         const [entry] = record.promptQueue.splice(located.index, 1)
@@ -1908,13 +1923,19 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           // Stale version: leave the row untouched and resync the client.
           record.editHolds.delete(located.entry.id)
           queueMutate(record)
+          advancePromptQueue(record)
           return
         }
         if (located !== undefined) {
           const [entry] = record.promptQueue.splice(located.index, 1)
           entry.resolve({ stopReason: 'cancelled' })
           record.editHolds.delete(entry.id)
-        } else if (record.runningPromptId === p.id) {
+          queueMutate(record)
+          // Removing a held front must not strand the rows behind it.
+          advancePromptQueue(record)
+          return
+        }
+        if (record.runningPromptId === p.id) {
           record.agent.cancel({ kind: 'user' })
           settlePrompt(record, 'cancelled')
           record.editHolds.delete(String(p.id))
@@ -1938,7 +1959,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         // Every path drops the hold (grok handle_edit_queued_prompt): a stale
         // or blank edit must not leave promotion parked.
         record.editHolds.delete(located.entry.id)
-        if (typeof p.newText !== 'string' || p.newText.trim().length === 0) return
+        if (typeof p.newText !== 'string' || p.newText.trim().length === 0) {
+          // A blank edit is still a release of the edit hold; do not leave a
+          // now-unblocked front parked.
+          advancePromptQueue(record)
+          return
+        }
         located.entry.text = p.newText
         located.entry.combinedTexts = undefined
         located.entry.version = located.entry.version + 1
@@ -1983,6 +2009,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           record.promptQueue.splice(0, record.promptQueue.length, ...next)
         }
         queueMutate(record)
+        // Reordering can move a held front out of the lead; unblock the new front.
+        advancePromptQueue(record)
         return
       }
       case 'x.ai/queue/clear': {

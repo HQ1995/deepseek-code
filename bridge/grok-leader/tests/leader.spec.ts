@@ -168,8 +168,11 @@ const mockAppExit = {
 
 const mockDefaultModel = {
   saved: [] as Array<{ provider: string; model: string; reasoningEffort?: string }>,
+  current: undefined as { provider: string; model: string; reasoningEffort?: string } | undefined,
+  currentSelection: () => mockDefaultModel.current,
   saveSelection: async (next: { provider: string; model: string; reasoningEffort?: string }) => {
     mockDefaultModel.saved.push(next)
+    mockDefaultModel.current = next
   },
 }
 
@@ -340,6 +343,7 @@ describe('grok leader over a unix socket', () => {
     harness = undefined
     client = undefined
     mockDefaultModel.saved.length = 0
+    mockDefaultModel.current = undefined
   })
 
   const start = async (
@@ -655,6 +659,92 @@ describe('grok leader over a unix socket', () => {
     expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
   })
 
+  it('queue/remove of a held front promotes the next queued row', async () => {
+    const { registry, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    sendRequest(c, 4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'third' }] })
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 2))
+    const entries = ((c.broadcasts[c.broadcasts.length - 1]!.params) as { entries: Array<{ id: string }> }).entries
+    const secondId = entries[0]!.id
+    const thirdId = entries[1]!.id
+
+    c.notify('x.ai/queue/hold_edit', { sessionId, id: secondId })
+
+    // The running turn settles, but the held front must not promote.
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 2)).result).toEqual({ stopReason: 'cancelled' })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
+    expect(agent.internals.followups).toEqual(['first'])
+
+    // Removing the held front unblocks the next row instead of stranding it.
+    c.notify('x.ai/queue/remove', { sessionId, id: secondId, expectedVersion: 0 })
+    await waitFor(() => agent.internals.followups.includes('third'))
+    expect(agent.internals.followups).toEqual(['first', 'third'])
+    expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
+
+    // Drain the remaining idle waiter and settle the promoted third.
+    agent.internals.idleWaiters.shift()!() // idle-triggered advance: no-op while third runs
+    agent.internals.idleWaiters.shift()!() // settle the promoted third
+    expect((await waitForId(c, 4)).result).toEqual({ stopReason: 'cancelled' })
+    expect(thirdId).toEqual(expect.any(String) as string)
+  })
+
+  it('queue/reorder of a held front away from the lead promotes the new front', async () => {
+    const { registry, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    sendRequest(c, 4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'third' }] })
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 2))
+    const entries = ((c.broadcasts[c.broadcasts.length - 1]!.params) as { entries: Array<{ id: string }> }).entries
+    const secondId = entries[0]!.id
+    const thirdId = entries[1]!.id
+
+    c.notify('x.ai/queue/hold_edit', { sessionId, id: secondId })
+
+    // The running turn settles, but the held front must not promote.
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 2)).result).toEqual({ stopReason: 'cancelled' })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
+    expect(agent.internals.followups).toEqual(['first'])
+
+    // Moving the held row out of the lead lets the new front run; the held
+    // second stays queued behind it.
+    c.notify('x.ai/queue/reorder', { sessionId, orderedIds: [thirdId, secondId] })
+    await waitFor(() => agent.internals.followups.includes('third'))
+    expect(agent.internals.followups).toEqual(['first', 'third'])
+    const reorderBroadcast = () => c.broadcasts.find(b => {
+      const params = b.params as { entries?: Array<{ id: string }>; runningPromptId?: string }
+      return params.runningPromptId === thirdId && params.entries?.map(entry => entry.id).join(',') === secondId
+    })
+    await waitFor(() => reorderBroadcast() !== undefined)
+    const afterReorder = (reorderBroadcast()!.params as { entries?: Array<{ id: string }> }).entries
+    expect(afterReorder?.map(entry => entry.id)).toEqual([secondId])
+
+    agent.internals.idleWaiters.shift()!() // idle-triggered advance: no-op while third runs
+    agent.internals.idleWaiters.shift()!() // settle the promoted third
+    expect((await waitForId(c, 4)).result).toEqual({ stopReason: 'cancelled' })
+    expect(secondId).toEqual(expect.any(String) as string)
+  })
+
   it('a stale expectedVersion on edit/remove/interject is a no-op that resyncs', async () => {
     const { registry, client: c } = await start({ manualIdle: true })
     register(c)
@@ -777,6 +867,23 @@ describe('grok leader over a unix socket', () => {
     expect(loaded.result).toEqual({})
   })
 
+  it('reports the saved reasoning effort on the current model in models/list', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    mockDefaultModel.saved.length = 0
+    mockDefaultModel.current = undefined
+    mockDefaultModel.current = { provider: 'deepseek', model: 'deepseek-chat' }
+    const switched = await c.request(2, 'session/set_model', { sessionId, modelId: 'deepseek-chat', _meta: { reasoningEffort: 'max' } })
+    expect(switched.error).toBeUndefined()
+    expect(mockDefaultModel.saved).toEqual([{ provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'max' }])
+    const models = await c.request(3, 'x.ai/models/list', {})
+    const listed = (models.result as { availableModels: Array<{ modelId: string; _meta?: { reasoningEffort?: string } }> }).availableModels
+    expect(listed.find(m => m.modelId === 'deepseek-chat')?._meta?.reasoningEffort).toBe('max')
+  })
+
   it('session/set_model rejects a modelId outside the catalog without persisting', async () => {
     const { client: c } = await start()
     register(c)
@@ -784,6 +891,7 @@ describe('grok leader over a unix socket', () => {
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
     mockDefaultModel.saved.length = 0
+    mockDefaultModel.current = undefined
     const bad = await c.request(2, 'session/set_model', { sessionId, modelId: 'no-such-model' })
     expect(bad.error).toEqual({ code: -32602, message: 'modelId is not in the catalog: no-such-model' })
     // The unresolvable selection was never persisted as the default.
