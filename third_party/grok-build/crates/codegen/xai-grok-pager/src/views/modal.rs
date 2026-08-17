@@ -293,6 +293,10 @@ pub enum ActiveModal {
     UsageInfo {
         state: Box<crate::views::usage_modal::UsageInfoModalState>,
     },
+    /// Add-provider form modal (the /provider dropdown's final row).
+    AddProvider {
+        state: Box<crate::views::add_provider_modal::AddProviderModalState>,
+    },
     /// Reset-settings confirmation, stacked above Settings.
     ///
     /// The underlying `SettingsModalState` is moved in/out so cancel
@@ -640,6 +644,7 @@ impl ActiveModal {
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
+            | ActiveModal::AddProvider { .. }
             | ActiveModal::RememberNoteReview { .. } => vec![],
         }
     }
@@ -672,6 +677,7 @@ impl ActiveModal {
             ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
             ActiveModal::RememberNoteReview { .. } => "Memory Note",
             ActiveModal::UsageInfo { .. } => "Usage",
+            ActiveModal::AddProvider { .. } => crate::views::add_provider_modal::MODAL_TITLE,
         }
     }
 }

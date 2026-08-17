@@ -16,6 +16,12 @@ use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, Slas
 /// Select a provider for this session.
 pub struct ProviderCommand;
 
+/// The args token the dropdown's final row inserts: accepting it runs
+/// /provider --add, which opens the add-provider modal.
+const ADD_PROVIDER_ARG: &str = "--add";
+/// Final dropdown row label.
+const ADD_PROVIDER_LABEL: &str = "+ Add provider…";
+
 impl SlashCommand for ProviderCommand {
     fn name(&self) -> &str {
         "provider"
@@ -36,7 +42,7 @@ impl SlashCommand for ProviderCommand {
     }
 
     fn usage(&self) -> &str {
-        "/provider <id>"
+        "/provider <id> | --add"
     }
 
     fn takes_args(&self) -> bool {
@@ -57,8 +63,11 @@ impl SlashCommand for ProviderCommand {
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let query = args.trim();
+        if query == ADD_PROVIDER_ARG {
+            return CommandResult::Action(Action::OpenAddProvider);
+        }
         if query.is_empty() {
-            return CommandResult::Error("Usage: /provider <id>".into());
+            return CommandResult::Error("Usage: /provider <id> | --add".into());
         }
         let Some(provider) = resolve_provider(ctx.models, query) else {
             return CommandResult::Error(format!("Unknown provider: {query}"));
@@ -78,7 +87,7 @@ impl SlashCommand for ProviderCommand {
 /// case-insensitively).
 fn build_provider_items(models: &ModelState) -> Vec<ArgItem> {
     let scope = models.current_provider_scope();
-    models
+    let mut items: Vec<ArgItem> = models
         .providers
         .iter()
         .map(|provider| {
@@ -95,7 +104,16 @@ fn build_provider_items(models: &ModelState) -> Vec<ArgItem> {
                 description: String::new(),
             }
         })
-        .collect()
+        .collect();
+    // ponytail: the final row accepts as /provider --add (no trailing space,
+    // so Enter accepts and sends), which run() maps to OpenAddProvider.
+    items.push(ArgItem {
+        display: ADD_PROVIDER_LABEL.to_string(),
+        match_text: "add provider".to_string(),
+        insert_text: ADD_PROVIDER_ARG.to_string(),
+        description: "Add a provider to the dsh settings".to_string(),
+    });
+    items
 }
 
 /// Case-insensitive match on provider id first, then display name.
@@ -205,13 +223,23 @@ mod tests {
     }
 
     #[test]
-    fn suggests_one_row_per_provider() {
+    fn suggests_one_row_per_provider_plus_the_add_row() {
         let state = sample();
         let items = ProviderCommand.suggest_args(&app_ctx(&state), "").unwrap();
-        assert_eq!(items.len(), 2);
+        assert_eq!(items.len(), 3);
         assert_eq!(items[0].display, "DeepSeek (current)");
         assert_eq!(items[1].display, "Pi AI");
         assert_eq!(items[0].insert_text, "deepseek");
+        assert_eq!(items[2].display, ADD_PROVIDER_LABEL);
+        assert_eq!(items[2].insert_text, ADD_PROVIDER_ARG);
+    }
+
+    #[test]
+    fn run_add_opens_the_add_provider_modal() {
+        let state = sample();
+        let mut ctx = exec_ctx(&state);
+        let result = ProviderCommand.run(&mut ctx, ADD_PROVIDER_ARG);
+        assert!(matches!(result, CommandResult::Action(Action::OpenAddProvider)));
     }
 
     #[test]

@@ -710,6 +710,12 @@ pub enum Action {
     ShowContextInfo,
     /// `/usage` — session token/cost, plus consumer credits when visible.
     ShowUsage,
+    /// Open the add-provider form modal (the /provider dropdown's final row).
+    OpenAddProvider,
+    /// Submit the add-provider form over x.ai/providers/add.
+    AddProvider {
+        form: crate::views::add_provider_modal::AddProviderForm,
+    },
     /// `/usage manage` — open consumer billing (no-op if surface hidden).
     ManageBilling,
     /// Commit a read-only list of the queued prompts as a system block
@@ -2138,6 +2144,11 @@ pub enum Effect {
         /// Usage-modal fetch generation; echoed back on the task result.
         nonce: u64,
     },
+    /// Submit `x.ai/providers/add` and apply the refreshed provider roster.
+    AddProvider {
+        agent_id: AgentId,
+        form: crate::views::add_provider_modal::AddProviderForm,
+    },
     /// Re-fetch remote settings to check subscription gate.
     RefreshGate,
     /// Spawn a debounce sleep task for shell suggestions. `agent_id` rides
@@ -2771,6 +2782,13 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         error: String,
         nonce: u64,
+    },
+    /// `x.ai/providers/add` settled: refreshed roster on success, error text
+    /// on failure (the modal stays open to show it).
+    AddProviderComplete {
+        agent_id: AgentId,
+        providers: Vec<crate::acp::model_state::ProviderInfo>,
+        error: Option<String>,
     },
     /// Feedback submitted successfully (fire-and-forget).
     FeedbackComplete {
