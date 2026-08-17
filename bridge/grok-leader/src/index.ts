@@ -419,7 +419,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   const sendAcp = (conn: ClientConnection, value: unknown): void => {
-    if (process.env.DEEPSEEK_LEADER_DEBUG !== '0') {
+    if (process.env.DEEPSEEK_LEADER_DEBUG === '1') {
       process.stderr.write('grok-leader wire out acp: ' + JSON.stringify(value).slice(0, 400) + '\n')
     }
     conn.socket.write(encodeJsonFrame({ type: 'acp', payload: JSON.stringify(value) }))
@@ -705,7 +705,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       // auth gate treats the leader as authenticated; the harness providers
       // own credentials, so the bridge answers authenticate with no meta.
       authMethods: [{ id: 'xai.api_key', name: 'API key' }],
-      agentInfo: { name: 'deepseek-harness-grok-leader', version: '0.1.0-rc.5' },
+      agentInfo: { name: 'deepseek-harness-grok-leader', version: '0.1.0-rc.6' },
       // cancelRewind is false: the bridge cancels turns but does not implement
       // the client-side rewind composer restore, so it stays unadvertised.
       // modelState flattens provider-scoped dsh model ids into one global
@@ -942,17 +942,21 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     record.runningPromptId = id
     record.runningText = combinedTexts === undefined || combinedTexts[0] === undefined ? text : combinedTexts[0]
     record.runningCombinedTexts = combinedTexts
-    const stopReason = await new Promise<StopReasonWire>((resolve, reject) => {
-      const inflight: NonNullable<SessionRecord['inflight']> = {
-        resolve, reject, messageId: message.id, promptId: id, turn: undefined, endReason: undefined,
-      }
-      record.inflight = inflight
-      try {
-        record.agent.followup(message)
-      } catch (error: unknown) {
-        record.inflight = undefined
-        throw internalError('prompt was not queued: ' + (error instanceof Error ? error.message : String(error)))
-      }
+    let stopReason: StopReasonWire | undefined
+    let failure: unknown
+    try {
+      stopReason = await new Promise<StopReasonWire>((resolve, reject) => {
+        const inflight: NonNullable<SessionRecord['inflight']> = {
+          resolve, reject, messageId: message.id, promptId: id, turn: undefined, endReason: undefined,
+        }
+        record.inflight = inflight
+        try {
+          record.agent.followup(message)
+        } catch (error: unknown) {
+          record.inflight = undefined
+          reject(internalError('prompt was not queued: ' + (error instanceof Error ? error.message : String(error))))
+          return
+        }
       // Echo the accepted prompt so it enters the client transcript, then let
       // the turn stream. Settlement happens at the correlated turn/end; a
       // turnless slot (admission discarded the prompt) settles cancelled at idle.
@@ -969,11 +973,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         record.inflight = undefined
         inflight.resolve('cancelled')
       })
-    })
+      })
+    } catch (error: unknown) {
+      failure = error
+    }
+    // Cleanup on BOTH paths: a followup rejection or a rejected turn must not
+    // strand runningPromptId or stall the queued successors.
     record.runningPromptId = undefined
     record.runningText = undefined
     record.runningCombinedTexts = undefined
-    emitPromptComplete(record, id, stopReason)
+    if (failure === undefined && stopReason !== undefined) emitPromptComplete(record, id, stopReason)
     if (record.promptQueue.length > 0) {
       // Promote synchronously so the pager receives the running-prompt
       // adoption and the next echo BEFORE this prompt's RPC response; the
@@ -982,7 +991,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     } else {
       broadcastQueueChanged(record)
     }
-    return { stopReason }
+    if (failure !== undefined) throw failure
+    return { stopReason: stopReason! }
   }
 
   /** Start the next queued prompt once the in-flight one has settled. */

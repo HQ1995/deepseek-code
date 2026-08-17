@@ -17,6 +17,7 @@ The package doubles as the deepseek-leader profile bundle: cordis.patch.yml moun
 | socketPath | /tmp/dsh-grok-leader.sock | Unix socket path the grok clients connect to. |
 | provider | — | Initial provider route for every created agent. |
 | model | — | Initial model for every created agent. |
+| combineQueuedPrompts | false | grok ui.combine_queued_prompts parity; env DEEPSEEK_LEADER_COMBINE_QUEUED=1 also enables it. |
 
 ## Protocol contract
 
