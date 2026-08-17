@@ -25,7 +25,7 @@ branding (our identity). Keep this list current on every sync.
   run (no subcommand, no one-shot prompt, no --no-leader) defaults to leader
   mode against the EXTERNAL dsh CLI instead of grok's self-spawn:
   crates/codegen/xai-grok-pager/src/dsh_leader.rs resolves dsh (DSH_BIN env ->
-  "dsh" on PATH -> /home/hanqing/.local/share/pi-node/.../bin/dsh -> npx),
+  "dsh" on PATH -> npx),
   spawns "dsh --profile deepseek-leader" with DEEPSEEK_LEADER_SOCKET /
   DSH_TELEMETRY_DISABLED=1 and a numactl node-1 wrapper (host policy,
   conditional), logs to /tmp/deepseek-leader.log, and records the PID in the
