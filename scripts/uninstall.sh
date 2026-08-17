@@ -7,7 +7,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE="$HOME/.dsh/profiles/deepseek-leader"
-FLAG="$1"
+FLAG="${1:-}"
 
 note() { echo "  $1"; }
 
@@ -57,7 +57,7 @@ fi
 
 # 3. The TUI local state (session list mirror, changelog, logs). DSC_HOME
 #    overrides the default; only remove what the identity check proves ours.
-TUI_HOME="$DSC_HOME"
+TUI_HOME="${DSC_HOME:-}"
 if [ -z "$TUI_HOME" ]; then TUI_HOME="$HOME/.dsh/dsc-tui"; fi
 if [[ -d "$TUI_HOME" ]]; then
   if [[ "$(basename "$TUI_HOME")" == "dsc-tui" ]]; then
@@ -79,5 +79,5 @@ echo
 echo "kept on purpose:"
 echo "  this repository itself ($ROOT) - delete it if you no longer want the source"
 echo "  ~/.dsh/sessions and ~/.dsh/storages (owned by dsh, shared with other dsh use)"
-echo "  ~/.grok (the TUI's local state; shared with other grok/dscode installs)"
+echo "  ~/.grok (never touched by dscode: GROK_HOME is always overridden to the dsc-tui home)"
 echo "  the official @deepseek-ai/dsh npm package (rerun with --remove-dsh to drop it)"
