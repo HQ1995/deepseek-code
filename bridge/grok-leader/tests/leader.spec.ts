@@ -677,3 +677,154 @@ describe('grok leader over a unix socket', () => {
     expect(history.result).toEqual({ prompts: ['hello'] })
   })
 })
+
+
+describe('x.ai/providers/add', () => {
+  interface SettingsMock {
+    calls: Array<{ ns: string; ops: Array<{ op: string; path: string[]; value: unknown }> }>
+    providers: Record<string, unknown>
+    firstWriteError?: string
+    mutate(ns: string, ops: Array<{ op: string; path: string[]; value: unknown }>): Promise<void>
+  }
+
+  const makeSettings = (): SettingsMock => {
+    const mock: SettingsMock = {
+      calls: [],
+      providers: {},
+      async mutate(ns, ops) {
+        mock.calls.push({ ns, ops })
+        if (mock.firstWriteError !== undefined) {
+          const error = mock.firstWriteError
+          mock.firstWriteError = undefined
+          throw new Error(error)
+        }
+        for (const op of ops) {
+          if (op.op !== 'set' || op.path.length !== 2) throw new Error('unexpected op')
+          mock.providers[op.path[1]] = op.value
+        }
+      },
+    }
+    return mock
+  }
+
+  /** llm mock whose roster grows as the settings mock records writes. */
+  const makeLlm = (settings: SettingsMock) => {
+    const providerRows = [{ id: 'deepseek', name: 'DeepSeek' }]
+    return {
+      listProviders: () => {
+        const rows = [...providerRows]
+        for (const id of Object.keys(settings.providers)) rows.push({ id, name: (settings.providers[id] as { displayName?: string }).displayName ?? id })
+        return rows
+      },
+      listModels: async (provider: string) => provider === 'deepseek'
+        ? [{ provider: 'deepseek', id: 'deepseek-chat', name: 'DeepSeek Chat' }]
+        : [{ provider, id: provider + '-model', name: provider + ' Model' }],
+      discoverModels: async (_ns: string, request: { provider?: string; baseURL?: string }) => {
+        if (request.baseURL === 'https://gateway.test/v1') {
+          return [{ id: 'gw-model', name: 'GW Model', contextWindow: 8192 }]
+        }
+        return []
+      },
+    }
+  }
+
+  let harness: LeaderHarness | undefined
+  let client: ClientHandle | undefined
+
+  afterEach(async () => {
+    client?.socket.destroy()
+    await harness?.ctx.fiber.dispose()
+    harness = undefined
+    client = undefined
+  })
+
+  const startWithSettings = async (settings: SettingsMock) => {
+    const llm = makeLlm(settings)
+    const made = await makeHarness({ llm })
+    made.ctx.provide('settings', settings as unknown as Context['settings'])
+    harness = made
+    client = await makeClient(made.socketPath)
+    register(client)
+    await client.next() // registered
+    return { client, settings }
+  }
+
+  it('writes through ctx.settings.mutate and returns the refreshed roster', async () => {
+    const settings = makeSettings()
+    const { client } = await startWithSettings(settings)
+    const res = await client.request(1, 'x.ai/providers/add', {
+      id: 'acme-gateway',
+      displayName: 'Acme Gateway',
+      apiKeyEnv: 'ACME_KEY',
+      api: 'openai-completions',
+      baseURL: 'https://acme.test/v1',
+    })
+    expect(res.error).toBeUndefined()
+    expect(res.result).toEqual({
+      providers: [
+        { id: 'deepseek', name: 'DeepSeek' },
+        { id: 'acme-gateway', name: 'Acme Gateway' },
+      ],
+      currentProviderId: '',
+    })
+    expect(settings.calls).toHaveLength(1)
+    expect(settings.calls[0].ns).toBe('llm-pi-ai')
+    expect(settings.calls[0].ops).toEqual([{
+      op: 'set',
+      path: ['providers', 'acme-gateway'],
+      value: {
+        displayName: 'Acme Gateway',
+        apiKeyEnv: 'ACME_KEY',
+        api: 'openai-completions',
+        baseURL: 'https://acme.test/v1',
+      },
+    }])
+  })
+
+  it('refuses a duplicate id without writing settings', async () => {
+    const settings = makeSettings()
+    settings.providers = { 'acme-gateway': { displayName: 'Acme' } }
+    const { client } = await startWithSettings(settings)
+    const res = await client.request(1, 'x.ai/providers/add', { id: 'acme-gateway' })
+    expect(res.error).toMatchObject({ code: -32602, message: 'provider "acme-gateway" already exists' })
+    expect(settings.calls).toHaveLength(0)
+  })
+
+  it('refuses an invalid id before touching settings', async () => {
+    const settings = makeSettings()
+    const { client } = await startWithSettings(settings)
+    const res = await client.request(1, 'x.ai/providers/add', { id: 'Acme-Gateway!' })
+    expect(res.error).toMatchObject({ code: -32602 })
+    expect(settings.calls).toHaveLength(0)
+  })
+
+  it('fills a custom route with gateway-discovered models after the seam refuses', async () => {
+    const settings = makeSettings()
+    settings.firstWriteError = 'llm-pi-ai: provider "fake-gw" resolves no models; the installed catalog does not describe this route, so its models must be listed in configuration'
+    const { client } = await startWithSettings(settings)
+    const res = await client.request(1, 'x.ai/providers/add', {
+      id: 'fake-gw',
+      displayName: 'Fake GW',
+      apiKeyEnv: 'FAKE_KEY',
+      api: 'openai-completions',
+      baseURL: 'https://gateway.test/v1',
+    })
+    expect(res.error).toBeUndefined()
+    expect(settings.calls).toHaveLength(2)
+    expect(settings.calls[1].ops[0].value).toMatchObject({
+      displayName: 'Fake GW',
+      models: [{ id: 'gw-model', name: 'GW Model', contextWindow: 8192 }],
+    })
+    expect(res.result).toMatchObject({ providers: [{ id: 'deepseek' }, { id: 'fake-gw', name: 'Fake GW' }] })
+  })
+
+  it('reports the seam failure when it is not the no-models case', async () => {
+    const settings = makeSettings()
+    settings.firstWriteError = 'llm-pi-ai: provider "x" has an empty baseURL'
+    const { client } = await startWithSettings(settings)
+    const res = await client.request(1, 'x.ai/providers/add', { id: 'x', api: 'openai-completions' })
+    expect(res.error).toMatchObject({ code: -32603 })
+    expect(String(res.error.message)).toContain('has an empty baseURL')
+    expect(settings.calls).toHaveLength(1)
+  })
+})
