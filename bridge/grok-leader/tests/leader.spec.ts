@@ -746,9 +746,9 @@ describe('grok leader over a unix socket', () => {
     expect(agent!.internals.followups).toEqual(['first'])
 
     agent!.internals.idleWaiters.shift()!()
-    // The first prompt's JSON-RPC response must reach the client before the
-    // queued prompt starts streaming its echo; otherwise the TUI can append
-    // the second user message to the still-running first turn.
+    // grok ordering: the promotion broadcast adopts the next running prompt,
+    // then its echo streams, and the settling prompt's RPC response arrives
+    // LAST so the pager's PromptResponse handler runs the stashed adoption.
     const isEcho = (msg: Record<string, unknown>, text: string): boolean => {
       const params = msg.params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } } | undefined
       return params?.update?.sessionUpdate === 'user_message_chunk'
@@ -760,18 +760,16 @@ describe('grok leader over a unix socket', () => {
       const msg = await c.next()
       if (msg.id === 2) {
         expect(msg.result).toEqual({ stopReason: 'cancelled' })
+        expect(sawSecondEcho).toBe(true)
         break
       }
       if (isEcho(msg, 'second')) sawSecondEcho = true
     }
-    expect(sawSecondEcho).toBe(false)
 
     await waitFor(() => agent!.internals.followups.length === 2 && agent!.internals.idleWaiters.length === 1)
-    let gotSecondEcho = false
-    while (!gotSecondEcho) {
-      const msg = await c.next()
-      if (isEcho(msg, 'second')) gotSecondEcho = true
-    }
+    // The second echo preceded the first response (grok ordering) and was
+    // consumed by the loop above; the promotion shim paints the user block.
+    expect(sawSecondEcho).toBe(true)
     expect(agent!.internals.followups).toEqual(['first', 'second'])
 
     agent!.internals.idleWaiters.shift()!()

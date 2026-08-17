@@ -974,7 +974,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     record.runningText = undefined
     record.runningCombinedTexts = undefined
     emitPromptComplete(record, id, stopReason)
-    if (record.promptQueue.length === 0) broadcastQueueChanged(record)
+    if (record.promptQueue.length > 0) {
+      // Promote synchronously so the pager receives the running-prompt
+      // adoption and the next echo BEFORE this prompt's RPC response; the
+      // PromptResponse handler then runs the stashed turn-start shim.
+      advancePromptQueue(record)
+    } else {
+      broadcastQueueChanged(record)
+    }
     return { stopReason }
   }
 
@@ -998,13 +1005,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
     const entry = record.promptQueue.shift()!
     const runText = entry.combinedTexts === undefined ? entry.text : entry.combinedTexts.join('\n\n')
-    void runPrompt(record, entry.p, entry.id, runText, entry.combinedTexts).then(entry.resolve, entry.reject).finally(() => {
-      // Defer the queue pump until after the JSON-RPC response for the
-      // settling prompt has been written; advancing synchronously here makes
-      // the next queued prompt's user_message_chunk echo overtake the
-      // previous prompt's response.
-      setImmediate(() => advancePromptQueue(record))
-    })
+    void runPrompt(record, entry.p, entry.id, runText, entry.combinedTexts).then(entry.resolve, entry.reject)
   }
 
   /** Settle every queued (not-yet-run) prompt as cancelled (cancel/close/teardown). */
