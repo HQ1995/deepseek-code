@@ -3465,6 +3465,68 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::AddProvider { agent_id, form } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let payload = serde_json::json!({
+                    "id": form.id,
+                    "displayName": form.display_name,
+                    "apiKeyEnv": form.api_key_env,
+                    "api": form.api,
+                    "baseURL": form.base_url,
+                });
+                let request = acp::ExtRequest::new(
+                    "x.ai/providers/add",
+                    serde_json::value::to_raw_value(&payload)
+                        .expect("serialize providers/add params")
+                        .into(),
+                );
+                match acp_send(request, &tx).await {
+                    Ok(resp) => {
+                        // The bridge answers with the refreshed roster as the
+                        // JSON-RPC result value directly (same convention as
+                        // the other bridge ext methods, e.g. x.ai/billing).
+                        let parsed: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        match parsed.get("providers").and_then(|v| v.as_array()) {
+                            Some(rows) => {
+                                let providers = rows
+                                    .iter()
+                                    .filter_map(|row| {
+                                        let id = row.get("id")?.as_str()?.to_string();
+                                        let name = row
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .map(str::to_string);
+                                        Some(crate::acp::model_state::ProviderInfo {
+                                            id,
+                                            name,
+                                        })
+                                    })
+                                    .collect();
+                                TaskResult::AddProviderComplete {
+                                    agent_id,
+                                    providers,
+                                    error: None,
+                                }
+                            }
+                            None => TaskResult::AddProviderComplete {
+                                agent_id,
+                                providers: Vec::new(),
+                                error: Some(
+                                    "the bridge answered without a provider roster".to_string(),
+                                ),
+                            },
+                        }
+                    }
+                    Err(error) => TaskResult::AddProviderComplete {
+                        agent_id,
+                        providers: Vec::new(),
+                        error: Some(format!("couldn't add provider: {error}")),
+                    },
+                }
+            });
+        }
         Effect::SendFeedback { agent_id, session_id, feedback_text } => {
             use xai_grok_shell::session::ClientType;
             use xai_grok_shell::session::acp_types::ClientFeedbackInput;

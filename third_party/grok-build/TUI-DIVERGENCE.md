@@ -48,6 +48,21 @@ branding (our identity). Keep this list current on every sync.
   only a fallback), and /model's dropdown filters to that provider. The bridge
   owns provider auth/config (~/.dsh); the TUI never hardcodes provider auth
   assumptions.
+- Add-provider flow: the /provider dropdown's final row "+ Add provider…"
+  accepts as /provider --add, which opens a new add-provider modal
+  (crates/codegen/xai-grok-pager/src/views/add_provider_modal.rs, wired through
+  ActiveModal::AddProvider, Action::OpenAddProvider/AddProvider and
+  Effect::AddProvider). The modal offers the dsh provider presets (DeepSeek
+  official, OpenCodex gateway, OpenAI/Anthropic-compatible, OpenRouter) plus a
+  Custom empty form over id/displayName/apiKeyEnv/api/baseURL; auth is env-key
+  only (the form says so). Submit sends x.ai/providers/add to the bridge,
+  which writes the provider into the dsh settings document through the official
+  settings seam (ctx.settings.mutate on the llm-pi-ai namespace); the response
+  refreshes modelState.providers so /provider updates without a reload.
+  ponytail: no models field in v1 - custom routes get their models from
+  bridge-side gateway discovery, catalog routes keep serving the installed
+  catalog. Protocol ids are the official seam's: openai-completions /
+  openai-responses / anthropic-messages.
 - /usage shows real per-session stats instead of grok.com billing. It opens the
   existing usage modal on the "Context usage" tab (session/info context
   breakdown: used/total/pct, turns, tool calls, messages, compactions) and

@@ -468,6 +468,34 @@ impl AgentView {
             }
         }
 
+        // AddProvider: chrome (Esc/close) first, then the form.
+        if let ActiveModal::AddProvider { state } = modal {
+            let chrome_cfg = mw::ModalWindowConfig {
+                title: "",
+                tabs: None,
+                shortcuts: &[],
+                sizing: mw::ModalSizing::default(),
+                fold_info: None,
+            };
+            match mw::handle_modal_key(&mut state.window, key, &chrome_cfg) {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    return InputOutcome::Changed;
+                }
+                ModalWindowOutcome::Unhandled => {
+                    use crate::views::add_provider_modal::{self, AddProviderOutcome};
+                    return match add_provider_modal::handle_add_provider_key(state, key) {
+                        AddProviderOutcome::Submit(form) => {
+                            InputOutcome::Action(Action::AddProvider { form })
+                        }
+                        AddProviderOutcome::Changed => InputOutcome::Changed,
+                        AddProviderOutcome::Unchanged => InputOutcome::Unchanged,
+                    };
+                }
+                _ => return InputOutcome::Changed,
+            }
+        }
+
         // ResetSettingsConfirm: y/n routing. Handled before generic
         // char-match so Esc/F2/Ctrl+, route to Cancel (not modal close).
         if let Some(ActiveModal::ResetSettingsConfirm { modal, .. }) = self.active_modal.as_ref() {
@@ -519,6 +547,7 @@ impl AgentView {
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
+            | ActiveModal::AddProvider { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
             | ActiveModal::RememberNoteReview { .. } => unreachable!(),
         }
@@ -556,6 +585,14 @@ impl AgentView {
         }
         if let Some(ActiveModal::MemoryBrowser { state }) = self.active_modal.as_mut() {
             return crate::views::memory_modal::handle_memory_paste(state, text);
+        }
+        if let Some(ActiveModal::AddProvider { state }) = self.active_modal.as_mut() {
+            return match crate::views::add_provider_modal::handle_add_provider_paste(state, text) {
+                crate::views::add_provider_modal::AddProviderOutcome::Changed => {
+                    InputOutcome::Changed
+                }
+                _ => InputOutcome::Unchanged,
+            };
         }
         let settings_outcome = match self.active_modal.as_mut() {
             Some(ActiveModal::Settings { state }) => Some(
@@ -1690,6 +1727,21 @@ impl AgentView {
             }
         }
 
+        // AddProvider: chrome-only mouse (close button / click-outside);
+        // the form itself is keyboard-driven.
+        if let Some(ActiveModal::AddProvider { state }) = &mut self.active_modal {
+            return match mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row)
+            {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::Handled => InputOutcome::Changed,
+                ModalWindowOutcome::Unhandled => InputOutcome::Unchanged,
+                _ => InputOutcome::Changed,
+            };
+        }
+
         // ResetSettingsConfirm: route mouse events through the
         // modal-window chrome.
         if let Some(ActiveModal::ResetSettingsConfirm { settings_state, .. }) =
@@ -2474,6 +2526,8 @@ impl AgentView {
                     compact,
                     &theme,
                 );
+            } else if let modal::ActiveModal::AddProvider { state } = active_modal {
+                crate::views::add_provider_modal::render_add_provider_modal(buf, area, state);
             } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
             } else if let modal::ActiveModal::Settings {

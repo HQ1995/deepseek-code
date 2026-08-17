@@ -76,7 +76,21 @@ const WIRE = {
   modelsList: 'x.ai/models/list',
   sessionsList: 'x.ai/sessions/list',
   askUserQuestion: 'x.ai/ask_user_question',
+  providersAdd: 'x.ai/providers/add',
 } as const
+
+/** The dsh settings namespace the llm-pi-ai plugin owns (packages/llm/llm-pi-ai). */
+const PROVIDER_SETTINGS_NS = 'llm-pi-ai'
+/** Provider route ids are lowercase kebab-case, like settings namespace ids. */
+const PROVIDER_ID_PATTERN = /^[a-z][a-z0-9-]*$/
+/** Wire protocols a declared provider route may name (llm-pi-ai supportedProtocols). */
+const PROVIDER_APIS = ['openai-completions', 'openai-responses', 'anthropic-messages'] as const
+/**
+ * The official seam refuses a declared route that resolves no models; that
+ * error marks the retry path where the gateway is interrogated for its
+ * catalog (catalog routes never hit it: they resolve their models first).
+ */
+const NO_MODELS_MARKER = 'resolves no models'
 
 /**
  * English display copy for the four shipped (system) agent presets, mirrored
@@ -200,6 +214,21 @@ interface UserQuestionsLike {
 interface LlmLike {
   listProviders(): Array<{ id: string; name?: string }>
   listModels(provider: string): Promise<Array<{ id: string; name: string; description?: string }>>
+  /** Interrogate a draft provider for its model catalog (llm-pi-ai discovery). */
+  discoverModels?(
+    settingsNs: string,
+    request: {
+      provider?: string
+      baseURL?: string
+      api?: string
+      apiKey?: string
+    },
+  ): Promise<Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>>
+}
+
+/** Structural write path of the official settings seam (ctx.settings.mutate). */
+interface SettingsLike {
+  mutate(ns: string, ops: unknown, expectedRevision?: number): Promise<void>
 }
 
 /** Structural read of the session store: this bridge needs only one flush entry point. */
@@ -228,6 +257,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const agents = ctx.agents
   const llm = ctx.get('llm') as LlmLike | undefined
   const logger = ctx.logger
+  // Read lazily like the other optional services: the settings provider
+  // (dsh-settings-file) publishes asynchronously after apply.
+  const settings = (): SettingsLike | undefined => ctx.get('settings') as SettingsLike | undefined
   // Read lazily: the persistence service mounts asynchronously, so the eager
   // ctx.get at apply time captured undefined and every session/load failed
   // with "session persistence is not configured" (same fix as agentPresets).
@@ -571,6 +603,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   const initializeResponse = async (): Promise<unknown> => {
+    await settingsReady()
     const current = await refreshCatalog()
     return {
       protocolVersion: 1,
@@ -991,6 +1024,120 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return {}
   }
 
+  /**
+   * Interrogate the gateway for one draft provider's catalog, for the case the
+   * official seam refused: a route the installed pi-ai catalog does not
+   * describe must name its models. The key comes from the environment the
+   * form named (v1 auth is env-key only); a miss probes unauthenticated.
+   */
+  const discoverProviderModels = async (
+    id: string,
+    p: Record<string, unknown>,
+  ): Promise<Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>> => {
+    // Method call, not a detached const: the llm service method reads
+    // this.discoveries (a detached reference would lose the receiver).
+    if (llm === undefined || llm.discoverModels === undefined) {
+      throw internalError('cannot add provider "' + id + '": the installed catalog does not describe it and no model discovery is configured')
+    }
+    const apiKeyEnv = typeof p.apiKeyEnv === 'string' ? p.apiKeyEnv : undefined
+    const apiKey = apiKeyEnv === undefined ? undefined : process.env[apiKeyEnv]
+    let models
+    try {
+      models = await llm.discoverModels(PROVIDER_SETTINGS_NS, {
+        provider: id,
+        ...typeof p.api === 'string' ? { api: p.api } : {},
+        ...typeof p.baseURL === 'string' ? { baseURL: p.baseURL } : {},
+        ...apiKey === undefined || apiKey === '' ? {} : { apiKey },
+      })
+    } catch (error: unknown) {
+      throw internalError('cannot add provider "' + id + '": model discovery failed: ' + (error instanceof Error ? error.message : String(error)))
+    }
+    if (models.length === 0) {
+      throw internalError('cannot add provider "' + id + '": its endpoint listed no models')
+    }
+    return models.map(model => ({
+      id: model.id,
+      ...model.name === undefined ? {} : { name: model.name },
+      ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
+      ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
+    }))
+  }
+
+  /**
+   * Wait (bounded) for the settings service, then one extra macrotask so a
+   * freshly published document's namespace owners (llm-pi-ai) can register
+   * their routes. The first catalog snapshot must not race the settings boot:
+   * an early initialize otherwise serves a roster missing every profile route.
+   */
+  const settingsReady = async (): Promise<void> => {
+    const deadline = Date.now() + 5000
+    while (settings() === undefined && Date.now() < deadline) {
+      await new Promise<void>((resolveWait) => { setTimeout(resolveWait, 10) })
+    }
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
+  }
+
+  /**
+   * Add one provider route to the dsh settings document through the official
+   * settings seam (ctx.settings.mutate on the llm-pi-ai namespace), never by
+   * writing settings.yaml directly. A duplicate route id is refused; a route
+   * the installed catalog does not describe gets its models from gateway
+   * discovery. On success the refreshed provider roster comes back so the TUI
+   * can update /provider immediately.
+   */
+  const addProvider = async (params: unknown): Promise<unknown> => {
+    assertOpen()
+    const p = paramRecord(params, 'x.ai/providers/add')
+    const id = p.id
+    if (typeof id !== 'string' || !PROVIDER_ID_PATTERN.test(id)) {
+      throw invalidParams('provider id must be lowercase kebab-case (letters, digits, hyphens; starts with a letter)')
+    }
+    for (const field of ['displayName', 'apiKeyEnv', 'baseURL'] as const) {
+      const value = p[field]
+      if (value !== undefined && value !== null && typeof value !== 'string') {
+        throw invalidParams(field + ' must be a string')
+      }
+    }
+    const api = p.api
+    if (api !== undefined && api !== null && (typeof api !== 'string' || !PROVIDER_APIS.includes(api as (typeof PROVIDER_APIS)[number]))) {
+      throw invalidParams('api must be one of ' + PROVIDER_APIS.join(', '))
+    }
+    const providerService = settings()
+    if (providerService === undefined) throw internalError('the settings service is not configured')
+    if (llm !== undefined && llm.listProviders().some(provider => provider.id === id)) {
+      throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" already exists')
+    }
+    // An empty optional field means "unset": the official schema resolves an
+    // absent key to the catalog default, while an empty string is refused.
+    const nonEmpty = (value: unknown): value is string => typeof value === 'string' && value.length > 0
+    const profile: Record<string, unknown> = {
+      ...nonEmpty(p.displayName) ? { displayName: p.displayName } : {},
+      ...nonEmpty(p.apiKeyEnv) ? { apiKeyEnv: p.apiKeyEnv } : {},
+      ...nonEmpty(p.api) ? { api: p.api } : {},
+      ...nonEmpty(p.baseURL) ? { baseURL: p.baseURL } : {},
+    }
+    const op = [{ op: 'set', path: ['providers', id], value: profile }]
+    try {
+      await providerService.mutate(PROVIDER_SETTINGS_NS, op)
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      // A route the installed catalog does not describe must spell out its
+      // models; the official validation names exactly that case. Ask the
+      // gateway and retry the same write with the discovered catalog.
+      if (!message.includes(NO_MODELS_MARKER)) {
+        throw internalError('failed to add provider "' + id + '": ' + message)
+      }
+      const models = await discoverProviderModels(id, p)
+      try {
+        await providerService.mutate(PROVIDER_SETTINGS_NS, [{ op: 'set', path: ['providers', id], value: { ...profile, models } }])
+      } catch (retryError: unknown) {
+        throw internalError('failed to add provider "' + id + '": ' + (retryError instanceof Error ? retryError.message : String(retryError)))
+      }
+    }
+    const current = await refreshCatalog()
+    return { providers: current.providers, currentProviderId: current.currentProviderId }
+  }
+
   const modelsList = async (): Promise<unknown> => {
     const current = await refreshCatalog()
     return {
@@ -1079,6 +1226,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return await closeSession(params)
       case WIRE.modelsList:
         return await modelsList()
+      case WIRE.providersAdd:
+        return await addProvider(params)
       case 'x.ai/commands/list':
         return { commands: await availableCommands() }
       case 'x.ai/prompt_history':
