@@ -479,6 +479,8 @@ mod tests {
     fn run_usage_gated(args: &str, billing: bool, usage_cmd: bool) -> CommandResult {
         let models = ModelState::default();
         let mut ctx = make_ctx(&models);
+        let session = acp::SessionId::new("test-session");
+        ctx.session_id = Some(&session);
         ctx.billing_surface_visible = billing;
         ctx.usage_command_visible = usage_cmd;
         usage::UsageCommand.run(&mut ctx, args)
@@ -506,10 +508,13 @@ mod tests {
             CommandResult::Action(Action::ShowUsage)
         ));
         assert!(matches!(
+            run_usage("show", false),
+            CommandResult::Action(Action::ShowUsage)
+        ));
+        assert!(matches!(
             run_usage("manage", false),
             CommandResult::Error(_)
         ));
-        assert!(matches!(run_usage("show", false), CommandResult::Error(_)));
     }
     #[test]
     fn usage_takes_args_only_for_consumer() {
@@ -577,6 +582,16 @@ mod tests {
         assert!(matches!(
             run_usage_gated("", true, false),
             CommandResult::Error(msg) if msg.contains("not available")
+        ));
+    }
+    #[test]
+    fn usage_requires_an_active_session() {
+        let models = ModelState::default();
+        let mut ctx = make_ctx(&models);
+        ctx.billing_surface_visible = false;
+        assert!(matches!(
+            usage::UsageCommand.run(&mut ctx, ""),
+            CommandResult::Error(msg) if msg.contains("No active session")
         ));
     }
     #[test]

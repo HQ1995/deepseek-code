@@ -1619,7 +1619,10 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 ModalWindowOutcome::TabChanged(idx) => {
-                    state.set_tab(usage_modal::UsageInfoTab::from_index(idx));
+                    let tabs = usage_modal::UsageInfoTab::visible_tabs(state.ctx.usage_visible);
+                    if let Some(tab) = tabs.get(idx) {
+                        state.set_tab(*tab);
+                    }
                     return InputOutcome::Changed;
                 }
                 ModalWindowOutcome::ShortcutActivated(id) => {
