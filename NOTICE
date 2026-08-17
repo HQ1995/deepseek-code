@@ -1,0 +1,32 @@
+deepseek-code
+Copyright 2026 DeepSeek
+
+This product is licensed under the Apache License, Version 2.0. See LICENSE.
+
+This product includes or depends on the following software. Each project
+remains under its own license; nothing in this notice changes those terms.
+
+- xai-org/grok-build
+  Copyright 2023-2026 SpaceXAI
+  License: Apache License, Version 2.0
+  This distribution contains modified source code from grok-build.
+  The modification ledger is maintained in:
+    third_party/grok-build/TUI-DIVERGENCE.md
+    third_party/grok-build/VENDORING.md
+  The modified files remain under the Apache License, Version 2.0.
+
+- DeepSeek Harness (deepseek-harness/)
+  Copyright 2026 DeepSeek
+  License: MIT
+  See deepseek-harness/LICENSE.
+
+- grok-leader bridge (bridge/grok-leader/)
+  Copyright 2026 DeepSeek
+  License: Apache License, Version 2.0
+  See bridge/grok-leader/LICENSE.
+
+- Additional third-party dependencies and their notices are listed in:
+    THIRD_PARTY_NOTICES.md
+    deepseek-harness/THIRD_PARTY_NOTICES.md
+    third_party/grok-build/THIRD-PARTY-NOTICES
+    third_party/grok-build/third_party/NOTICE

@@ -64,3 +64,11 @@ The harness comes from npm (`npm i -g @deepseek-ai/dsh@next`); the
   submodule; dev/upgrade tracking only, never required by the installer
 
 See `docs/dscode-usage.md` for the full manual.
+
+## License
+
+The deepseek-code project is licensed under [Apache-2.0](LICENSE). See
+[NOTICE](NOTICE) for first-party attribution and the grok-build modification
+ledger, and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party
+notices. The vendored `third_party/grok-build/` remains Apache-2.0 and the
+`deepseek-harness/` submodule remains MIT.

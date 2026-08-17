@@ -127,8 +127,15 @@ export type GrokSessionUpdate =
   | { sessionUpdate: 'user_message_chunk'; content: { type: 'text'; text: string } }
   | { sessionUpdate: 'agent_message_chunk'; content: { type: 'text'; text: string } }
   | { sessionUpdate: 'agent_thought_chunk'; content: { type: 'text'; text: string } }
-  | { sessionUpdate: 'tool_call'; toolCallId: string; title: string; kind: 'generic'; status: 'in_progress'; rawInput: string }
-  | { sessionUpdate: 'tool_call_update'; toolCallId: string; status: 'completed' | 'error'; content?: Array<{ type: 'text'; text: string }>; error?: { name: string; code: string } }
+  | { sessionUpdate: 'tool_call'; toolCallId: string; title: string; kind: ToolKindWire; status: 'in_progress'; rawInput?: unknown }
+  | { sessionUpdate: 'tool_call_update'; toolCallId: string; status: 'completed' | 'error'; content?: Array<ToolResultContentBlock>; rawOutput?: unknown; error?: { name: string; code: string } }
+
+/** grok ACP ToolKind vocabulary the TUI renders for a tool call. */
+export type ToolKindWire = 'execute' | 'read' | 'edit' | 'search' | 'fetch' | 'other'
+/** grok ToolCallContent shapes the TUI understands (text or file diff). */
+export type ToolResultContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'diff'; path: string; oldText?: string; newText: string }
 
 /** grok AskUserQuestionExtResponse: tagged on `outcome`, snake_case variant names. */
 type AskUserQuestionExtResponse =
@@ -179,6 +186,8 @@ interface SessionRecord {
   turnCount: number
   toolCallCount: number
   messageCount: number
+  /** Pending tool-call facts keyed by callId, used to attach rawInput/rawOutput. */
+  pendingToolCalls: Map<string, { name: string; arguments: unknown }>
   /** True once the current step streamed a text-delta; suppresses the assembled-message re-emit. */
   textStreamed: boolean
   /** Accepted user prompts, oldest first; served by x.ai/prompt_history. */
@@ -418,6 +427,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       record.messageCount += 1
     } else if (event.type === 'tool/call') {
       record.toolCallCount += 1
+      record.pendingToolCalls.set(String(event.data.callId), {
+        name: event.data.name,
+        arguments: parseJsonObject(event.data.arguments),
+      })
     } else if (event.type === 'user/message' && (event.data.source as { kind?: unknown }).kind === 'user') {
       record.messageCount += 1
     } else if (event.type === 'turn/end') {
@@ -435,13 +448,21 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     noteEvent(record, event)
     const totalTokens = record.inputTokens + record.outputTokens
     const updates: Array<GrokSessionUpdate & { totalTokens?: number }> = []
-    for (const item of sessionEventToUpdates(event, { replay, textStreamed: record.textStreamed })) {
+    for (const item of sessionEventToUpdates(event, {
+      replay,
+      textStreamed: record.textStreamed,
+      toolCall: (callId) => record.pendingToolCalls.get(callId),
+    })) {
       if (item.sessionUpdate === 'agent_message_chunk') {
         record.textStreamed = true
         updates.push({ ...item, totalTokens })
       } else {
         updates.push(item)
       }
+    }
+    if (event.type === 'tool/result') {
+      const block = event.data.message.content[0] as { toolCallId?: unknown } | undefined
+      if (block !== undefined) record.pendingToolCalls.delete(String(block.toolCallId))
     }
     return updates
   }
@@ -780,6 +801,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       turnCount: 0,
       toolCallCount: 0,
       messageCount: 0,
+      pendingToolCalls: new Map(),
       textStreamed: false,
       prompts: [],
       promptQueue: [],
@@ -848,7 +870,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (record.inflight !== undefined) return
     const entry = record.promptQueue.shift()
     if (entry === undefined) return
-    void runPrompt(record, entry.p).then(entry.resolve, entry.reject).finally(() => advancePromptQueue(record))
+    void runPrompt(record, entry.p).then(entry.resolve, entry.reject).finally(() => {
+      // Defer the queue pump until after the JSON-RPC response for the
+      // settling prompt has been written; advancing synchronously here makes
+      // the next queued prompt's user_message_chunk echo overtake the
+      // previous prompt's response.
+      setImmediate(() => advancePromptQueue(record))
+    })
   }
 
   /** Settle every queued (not-yet-run) prompt as cancelled (cancel/close/teardown). */
@@ -955,6 +983,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       turnCount: 0,
       toolCallCount: 0,
       messageCount: 0,
+      pendingToolCalls: new Map(),
       textStreamed: false,
       prompts: [],
       promptQueue: [],
@@ -1561,7 +1590,11 @@ export function promptHasUnsupportedContent(prompt: unknown): boolean {
  */
 export function sessionEventToUpdates(
   event: SessionEvent,
-  options: { replay: boolean; textStreamed: boolean },
+  options: {
+    replay: boolean
+    textStreamed: boolean
+    toolCall?: (callId: string) => { name: string; arguments: unknown } | undefined
+  },
 ): Array<GrokSessionUpdate> {
   if (!options.replay && event.type === 'user/message') return []
   switch (event.type) {
@@ -1593,23 +1626,32 @@ export function sessionEventToUpdates(
         content,
       }))
     }
-    case 'tool/call':
+    case 'tool/call': {
+      const args = parseJsonObject(event.data.arguments)
       return [{
         sessionUpdate: 'tool_call',
         toolCallId: String(event.data.callId),
         title: event.data.name,
-        kind: 'generic',
+        kind: toolKindForName(event.data.name, args),
         status: 'in_progress',
-        rawInput: event.data.arguments,
+        rawInput: rawInputForTool(event.data.name, args),
       }]
+    }
     case 'tool/result': {
       const block = event.data.message.content[0] as { type?: string; toolCallId?: unknown; content?: unknown } | undefined
-      const contents = textBlocks(block?.content)
+      const callId = String(block?.toolCallId)
+      const prior = options.toolCall?.(callId)
+      const contents: ToolResultContentBlock[] = [
+        ...textBlocks(block?.content),
+        ...diffBlocksFromMeta(event.data.meta),
+      ]
+      const rawOutput = typedRawOutput(prior, event.data.meta, contents, event.data.error !== undefined)
       return [{
         sessionUpdate: 'tool_call_update',
-        toolCallId: String(block?.toolCallId),
+        toolCallId: callId,
         status: event.data.error === undefined ? 'completed' : 'error',
         ...contents.length > 0 ? { content: contents } : {},
+        ...rawOutput === undefined ? {} : { rawOutput },
         ...event.data.error === undefined ? {} : { error: { name: event.data.error.name, code: event.data.error.code } },
       }]
     }
@@ -1617,6 +1659,247 @@ export function sessionEventToUpdates(
       // TODO(verify): plan updates (grok SessionUpdate::Plan) and titles stay
       // off the wire until the dsh plan/title event mapping is specified.
       return []
+  }
+}
+
+/**
+ * Map a DeepSeek Harness tool name to the grok ACP ToolKind the TUI renders.
+ * Keeping the mapping here (instead of the presets) lets one bridge serve
+ * every preset without changing `dsh-agent-presets` tool names.
+ */
+export function toolKindForName(name: string, args?: unknown): ToolKindWire {
+  const n = name.toLowerCase()
+  if (n === 'str_replace_editor') {
+    const command = (args as { command?: unknown } | undefined)?.command
+    return command === 'view' ? 'read' : 'edit'
+  }
+  if (n === 'bash' || n === 'pwsh' || n === 'run_code' || n === 'run_terminal_command') return 'execute'
+  if (n === 'read' || n === 'read_image') return 'read'
+  if (n === 'write' || n === 'edit' || n === 'str_replace_editor') return 'edit'
+  if (n === 'grep' || n === 'glob') return 'search'
+  if (n === 'web_search' || n === 'x_search' || n === 'search') return 'search'
+  if (n === 'web_fetch' || n === 'fetch') return 'fetch'
+  return 'other'
+}
+
+/** Parse model-produced tool arguments JSON into an object when possible. */
+function parseJsonObject(raw: string): unknown {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (parsed !== null && typeof parsed === 'object') return parsed
+  } catch {
+    // Keep rawInput absent rather than a string: grok's typed tool blocks
+    // expect raw_input to be a JSON object.
+  }
+  return undefined
+}
+
+/** True when a value looks like a dsh tool-fs diff-meta envelope. */
+function isDiffMeta(meta: unknown): meta is { diffs: Array<{ path?: unknown; oldText?: unknown; newText?: unknown }> } {
+  if (typeof meta !== 'object' || meta === null) return false
+  const diffs = (meta as { diffs?: unknown }).diffs
+  return Array.isArray(diffs)
+}
+
+/** Convert dsh tool-fs `meta.diffs` into grok ACP diff content blocks. */
+function diffBlocksFromMeta(meta: unknown): Array<{ type: 'diff'; path: string; oldText?: string; newText: string }> {
+  if (!isDiffMeta(meta)) return []
+  const blocks: Array<{ type: 'diff'; path: string; oldText?: string; newText: string }> = []
+  for (const diff of meta.diffs) {
+    if (typeof diff !== 'object' || diff === null) continue
+    if (typeof diff.newText !== 'string') continue
+    blocks.push({
+      type: 'diff',
+      path: typeof diff.path === 'string' ? diff.path : '',
+      ...typeof diff.oldText === 'string' ? { oldText: diff.oldText } : {},
+      newText: diff.newText,
+    })
+  }
+  return blocks
+}
+
+/**
+ * Add grok-specific rawInput fields the typed TUI blocks need. `variant` is
+ * required for the TUI to route `Search`-kind calls to `WebSearch`/`XSearch`.
+ */
+function rawInputForTool(name: string, args: unknown): unknown {
+  if (args === undefined || args === null || typeof args !== 'object') return args
+  const lower = name.toLowerCase()
+  if (lower === 'web_search') return { ...args, variant: 'WebSearch' }
+  if (lower === 'x_search') return { ...args, variant: 'XSearch' }
+  return args
+}
+
+/** Join text content blocks into the model-facing result text. */
+function textFromContents(contents: Array<{ type: 'text'; text: string } | { type: 'diff'; path: string; oldText?: string; newText: string }>): string {
+  return contents
+    .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+    .map(block => block.text)
+    .join('')
+}
+
+/** Build grok `ToolOutput::Bash` from the model-facing text result. */
+function bashRawOutput(
+  prior: { name: string; arguments: unknown } | undefined,
+  text: string,
+  isError: boolean,
+): Record<string, unknown> | undefined {
+  if (prior === undefined) return undefined
+  const args = (prior.arguments ?? {}) as { command?: unknown; description?: unknown }
+  const output = Buffer.from(text, 'utf8')
+  return {
+    type: 'Bash',
+    output: Array.from(output),
+    output_for_prompt: text,
+    exit_code: isError ? 1 : 0,
+    command: typeof args.command === 'string' ? args.command : '',
+    truncated: false,
+    signal: null,
+    timed_out: false,
+    ...typeof args.description === 'string' && args.description.length > 0 ? { description: args.description } : {},
+    current_dir: '',
+    output_file: '',
+    total_bytes: output.length,
+  }
+}
+
+/** Build grok `ToolOutput::ReadFile` from dsh-tool-fs `presentationMeta`. */
+function readRawOutputFromMeta(meta: unknown): Record<string, unknown> | undefined {
+  if (typeof meta !== 'object' || meta === null) return undefined
+  const m = meta as { path?: unknown; offset?: unknown; lines?: unknown; totalLines?: unknown }
+  if (typeof m.path !== 'string' || !Array.isArray(m.lines)) return undefined
+  const lines = m.lines as Array<{ number?: unknown; text?: unknown }>
+  const rawOutput = lines
+    .filter(line => typeof line.text === 'string')
+    .map(line => line.text as string)
+    .join('\n')
+  const offset = typeof m.offset === 'number' ? m.offset : 1
+  return {
+    type: 'ReadFile',
+    FileContent: {
+      content: rawOutput,
+      absolute_path: m.path,
+      offset,
+      ...typeof m.totalLines === 'number' ? { total_lines: m.totalLines } : { total_lines: lines.length },
+      limit: lines.length,
+      raw_output: rawOutput,
+    },
+  }
+}
+
+/** Build grok `ToolOutput::GrepSearch` from dsh-tool-fs-search `presentationMeta`. */
+function searchRawOutputFromMeta(meta: unknown): Record<string, unknown> | undefined {
+  if (typeof meta !== 'object' || meta === null) return undefined
+  const m = meta as { shape?: unknown; files?: unknown; paths?: unknown; total?: unknown }
+  if (m.shape === 'matches') {
+    const files = Array.isArray(m.files)
+      ? (m.files as Array<{ path?: unknown; matches?: unknown }>)
+          .filter(file => typeof file.path === 'string' && Array.isArray(file.matches))
+          .map(file => ({
+            path: file.path as string,
+            matches: (file.matches as Array<{ lineNumber?: unknown; line?: unknown }>)
+              .filter(match => typeof match.lineNumber === 'number' && typeof match.line === 'string')
+              .map(match => ({ line_number: match.lineNumber as number, content: match.line as string })),
+          }))
+      : []
+    return {
+      type: 'GrepSearch',
+      stdout: [],
+      stderr: [],
+      exit_code: 0,
+      match_count: typeof m.total === 'number' ? m.total : 0,
+      file_matches: files,
+    }
+  }
+  if (m.shape === 'paths') {
+    const paths = Array.isArray(m.paths) ? (m.paths as string[]).filter(path => typeof path === 'string') : []
+    const stdout = Buffer.from(paths.join('\n'), 'utf8')
+    return {
+      type: 'GrepSearch',
+      stdout: Array.from(stdout),
+      stderr: [],
+      exit_code: 0,
+      match_count: typeof m.total === 'number' ? m.total : paths.length,
+      file_matches: [],
+    }
+  }
+  return undefined
+}
+
+/** Build grok `ToolOutput::WebSearch` from dsh-tool-web `presentationMeta`. */
+function webSearchRawOutput(
+  prior: { name: string; arguments: unknown } | undefined,
+  meta: unknown,
+  text: string,
+): Record<string, unknown> | undefined {
+  if (prior === undefined) return undefined
+  const args = (prior.arguments ?? {}) as { query?: unknown }
+  const m = (meta ?? {}) as { sources?: unknown }
+  const citations = Array.isArray(m.sources)
+    ? (m.sources as Array<{ url?: unknown }>)
+        .filter(source => typeof source.url === 'string')
+        .map(source => source.url as string)
+    : []
+  return {
+    type: 'WebSearch',
+    query: typeof args.query === 'string' ? args.query : '',
+    content: text,
+    citations,
+    allowed_domains: null,
+    inline_fallback: null,
+  }
+}
+
+/** Build grok `ToolOutput::WebFetch` from dsh-tool-web `presentationMeta`. */
+function webFetchRawOutput(
+  prior: { name: string; arguments: unknown } | undefined,
+  meta: unknown,
+  text: string,
+): Record<string, unknown> | undefined {
+  if (prior === undefined) return undefined
+  const args = (prior.arguments ?? {}) as { url?: unknown }
+  const m = (meta ?? {}) as { url?: unknown; statusCode?: unknown }
+  return {
+    type: 'WebFetch',
+    Content: {
+      url: typeof m.url === 'string' ? m.url : typeof args.url === 'string' ? args.url : '',
+      content: text,
+      content_type: 'text',
+      status_code: typeof m.statusCode === 'number' ? m.statusCode : 200,
+      bytes: Buffer.byteLength(text, 'utf8'),
+    },
+  }
+}
+
+/**
+ * Build the structured grok `rawOutput` for the TUI's typed tool blocks.
+ * dsh-session only carries model-facing text plus tool-private `meta`, so the
+ * bridge reconstructs the wire shape the grok TUI already understands.
+ */
+function typedRawOutput(
+  prior: { name: string; arguments: unknown } | undefined,
+  meta: unknown,
+  contents: Array<{ type: 'text'; text: string } | { type: 'diff'; path: string; oldText?: string; newText: string }>,
+  isError: boolean,
+): Record<string, unknown> | undefined {
+  if (prior === undefined) return undefined
+  const kind = toolKindForName(prior.name, prior.arguments)
+  if (isError) return kind === 'execute' ? bashRawOutput(prior, textFromContents(contents), true) : undefined
+  const text = textFromContents(contents)
+  switch (kind) {
+    case 'execute':
+      return bashRawOutput(prior, text, false)
+    case 'read':
+      return readRawOutputFromMeta(meta)
+    case 'search':
+      if (prior.name.toLowerCase() === 'web_search' || prior.name.toLowerCase() === 'x_search') {
+        return webSearchRawOutput(prior, meta, text)
+      }
+      return searchRawOutputFromMeta(meta)
+    case 'fetch':
+      return webFetchRawOutput(prior, meta, text)
+    default:
+      return undefined
   }
 }
 

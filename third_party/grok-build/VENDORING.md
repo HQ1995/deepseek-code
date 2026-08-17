@@ -1,3 +1,9 @@
+Apache-2.0 change notice:
+This tree is a modified distribution of
+[xai-org/grok-build](https://github.com/xai-org/grok-build).
+The modifications below are local changes made for deepseek-code.
+Modified files remain under the Apache License, Version 2.0; see [LICENSE](LICENSE).
+
 grok-build vendored from https://github.com/xai-org/grok-build at commit d6a22a1aed70b58d30a0f82a1a2a76ce1301631e (upstream SOURCE_REV file says 7140ec21cc4ec809131b0fa774f4b81d61667084)
 Local modification: crates/codegen/xai-grok-pager-bin/Cargo.toml renames the [[bin]] artifact from xai-grok-pager to deepseek.
 Vendored local modifications (rebrand + deepseek-build integration):
