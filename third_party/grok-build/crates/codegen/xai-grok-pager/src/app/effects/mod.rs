@@ -38,6 +38,64 @@ use agent::AgentId;
 use crate::unified_log as ulog;
 use xai_grok_shell::sampling::error::http_status_from_error;
 use xai_grok_shell::session::{ExtMethodResult, SessionInfoResponse};
+
+/// Parse the bridge's provider roster (the shared answer of
+/// x.ai/providers/add, /update, and /remove) into model-state rows.
+fn parse_provider_roster(
+    parsed: &serde_json::Value,
+) -> Option<Vec<crate::acp::model_state::ProviderInfo>> {
+    parsed.get("providers")?.as_array().map(|rows| {
+        rows.iter()
+            .filter_map(|row| {
+                let id = row.get("id")?.as_str()?.to_string();
+                let name = row
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let display_name = row
+                    .get("displayName")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let api_key_env = row
+                    .get("apiKeyEnv")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let api = row.get("api").and_then(|v| v.as_str()).map(str::to_string);
+                let base_url = row
+                    .get("baseURL")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                Some(crate::acp::model_state::ProviderInfo {
+                    id,
+                    name,
+                    display_name,
+                    api_key_env,
+                    api,
+                    base_url,
+                })
+            })
+            .collect()
+    })
+}
+
+/// Roster or the bridge's error message: the result value carries either
+/// the refreshed providers or a JSON-RPC error object.
+fn roster_or_error(
+    parsed: &serde_json::Value,
+) -> (Option<Vec<crate::acp::model_state::ProviderInfo>>, Option<String>) {
+    if let Some(providers) = parse_provider_roster(parsed) {
+        return (Some(providers), None);
+    }
+    let message = parsed
+        .get("error")
+        .filter(|error| !error.is_null())
+        .and_then(|error| error.get("message"))
+        .and_then(|message| message.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| "the bridge answered without a provider roster".to_string());
+    (None, Some(message))
+}
+
 pub(crate) fn execute(
     effect: Effect,
     tasks: &mut JoinSet<TaskResult>,
@@ -3465,20 +3523,39 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::AddProvider { agent_id, form } => {
+        Effect::AddProvider {
+            agent_id,
+            form,
+            provider_id,
+        } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {
-                let payload = serde_json::json!({
-                    "id": form.id,
-                    "displayName": form.display_name,
-                    "apiKeyEnv": form.api_key_env,
-                    "api": form.api,
-                    "baseURL": form.base_url,
-                });
+                let editing = provider_id.is_some();
+                let payload = match &provider_id {
+                    Some(provider_id) => serde_json::json!({
+                        "providerId": provider_id,
+                        "displayName": form.display_name,
+                        "apiKeyEnv": form.api_key_env,
+                        "api": form.api,
+                        "baseURL": form.base_url,
+                    }),
+                    None => serde_json::json!({
+                        "id": form.id,
+                        "displayName": form.display_name,
+                        "apiKeyEnv": form.api_key_env,
+                        "api": form.api,
+                        "baseURL": form.base_url,
+                    }),
+                };
+                let method = if provider_id.is_some() {
+                    "x.ai/providers/update"
+                } else {
+                    "x.ai/providers/add"
+                };
                 let request = acp::ExtRequest::new(
-                    "x.ai/providers/add",
+                    method,
                     serde_json::value::to_raw_value(&payload)
-                        .expect("serialize providers/add params")
+                        .expect("serialize provider form params")
                         .into(),
                 );
                 match acp_send(request, &tx).await {
@@ -3488,41 +3565,53 @@ pub(crate) fn execute(
                         // the other bridge ext methods, e.g. x.ai/billing).
                         let parsed: serde_json::Value =
                             serde_json::from_str(resp.0.get()).unwrap_or_default();
-                        match parsed.get("providers").and_then(|v| v.as_array()) {
-                            Some(rows) => {
-                                let providers = rows
-                                    .iter()
-                                    .filter_map(|row| {
-                                        let id = row.get("id")?.as_str()?.to_string();
-                                        let name = row
-                                            .get("name")
-                                            .and_then(|v| v.as_str())
-                                            .map(str::to_string);
-                                        Some(crate::acp::model_state::ProviderInfo {
-                                            id,
-                                            name,
-                                        })
-                                    })
-                                    .collect();
-                                TaskResult::AddProviderComplete {
-                                    agent_id,
-                                    providers,
-                                    error: None,
-                                }
-                            }
-                            None => TaskResult::AddProviderComplete {
-                                agent_id,
-                                providers: Vec::new(),
-                                error: Some(
-                                    "the bridge answered without a provider roster".to_string(),
-                                ),
-                            },
+                        let (providers, error) = roster_or_error(&parsed);
+                        TaskResult::AddProviderComplete {
+                            agent_id,
+                            providers: providers.unwrap_or_default(),
+                            error,
                         }
                     }
                     Err(error) => TaskResult::AddProviderComplete {
                         agent_id,
                         providers: Vec::new(),
-                        error: Some(format!("couldn't add provider: {error}")),
+                        error: Some(if editing {
+                            format!("couldn't update provider: {error}")
+                        } else {
+                            format!("couldn't add provider: {error}")
+                        }),
+                    },
+                }
+            });
+        }
+        Effect::RemoveProvider {
+            agent_id,
+            provider_id,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let payload = serde_json::json!({ "id": provider_id });
+                let request = acp::ExtRequest::new(
+                    "x.ai/providers/remove",
+                    serde_json::value::to_raw_value(&payload)
+                        .expect("serialize providers/remove params")
+                        .into(),
+                );
+                match acp_send(request, &tx).await {
+                    Ok(resp) => {
+                        let parsed: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        let (providers, error) = roster_or_error(&parsed);
+                        TaskResult::RemoveProviderComplete {
+                            agent_id,
+                            providers: providers.unwrap_or_default(),
+                            error,
+                        }
+                    }
+                    Err(error) => TaskResult::RemoveProviderComplete {
+                        agent_id,
+                        providers: Vec::new(),
+                        error: Some(format!("couldn't remove provider: {error}")),
                     },
                 }
             });

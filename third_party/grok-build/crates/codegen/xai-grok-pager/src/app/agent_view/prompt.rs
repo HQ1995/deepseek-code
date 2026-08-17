@@ -169,6 +169,81 @@ impl AgentView {
             slash_accepted_send = true;
         }
         if self.prompt.slash_open() && !self.prompt.file_search_visible() {
+            // /provider row actions: ^E edits the selected provider, ^D arms
+            // its delete confirm. While armed, y confirms (unless the
+            // provider is in use), n cancels, any other key disarms and
+            // falls through. Modifier keys never shadow the type-to-filter
+            // path (provider ids can contain plain e/d).
+            if self.prompt.slash_provider_args() {
+                if self.prompt.provider_pending_delete.is_some() {
+                    match crate::slash::commands::provider::handle_provider_pending_delete_key(
+                        &mut self.prompt.provider_pending_delete,
+                        key,
+                    ) {
+                        crate::slash::commands::provider::ProviderPendingDeleteKey::Confirm(
+                            provider_id,
+                        ) => {
+                            // A mouse click can reselect while armed; only
+                            // confirm the row the arm was raised on.
+                            let still_selected = self
+                                .prompt
+                                .slash_snapshot()
+                                .selection()
+                                .is_some_and(|row| row.insert_text == provider_id);
+                            if still_selected {
+                                self.prompt.slash_cancel_preview();
+                                self.prompt.slash_close();
+                                self.prompt.set_text("");
+                                return InputOutcome::Action(Action::RemoveProvider {
+                                    provider_id,
+                                });
+                            }
+                            return InputOutcome::Changed;
+                        }
+                        crate::slash::commands::provider::ProviderPendingDeleteKey::Cancel => {
+                            return InputOutcome::Changed;
+                        }
+                        crate::slash::commands::provider::ProviderPendingDeleteKey::Disarmed
+                        | crate::slash::commands::provider::ProviderPendingDeleteKey::NotArmed => {
+                        }
+                    }
+                } else if key.kind == KeyEventKind::Press {
+                    let edit = key.code == KeyCode::Char('e')
+                        && key.modifiers == KeyModifiers::CONTROL;
+                    let delete = key.code == KeyCode::Char('d')
+                        && key.modifiers == KeyModifiers::CONTROL;
+                    if edit || delete {
+                        let snap = self.prompt.slash_snapshot();
+                        if let Some(row) = snap.selection().cloned() {
+                            let add_row =
+                                row.insert_text == crate::slash::commands::provider::ADD_PROVIDER_ARG;
+                            if !add_row {
+                                if edit {
+                                    self.prompt.slash_cancel_preview();
+                                    self.prompt.slash_close();
+                                    self.prompt.set_text("");
+                                    return InputOutcome::Action(Action::OpenEditProvider {
+                                        provider_id: row.insert_text,
+                                    });
+                                }
+                                let name = row
+                                    .display
+                                    .trim_end_matches(" (current)")
+                                    .to_string();
+                                let blocked = self.session.models.current_provider_scope()
+                                    == row.insert_text;
+                                self.prompt.provider_pending_delete =
+                                    Some(crate::slash::commands::provider::ProviderPendingDelete {
+                                        provider_id: row.insert_text,
+                                        name,
+                                        blocked,
+                                    });
+                                return InputOutcome::Changed;
+                            }
+                        }
+                    }
+                }
+            }
             if prompt_paging && registry.matches_id(ActionId::PageUp, key) {
                 self.prompt
                     .slash_scroll_selection(-(crate::slash::MAX_VISIBLE_SUGGESTIONS as isize));

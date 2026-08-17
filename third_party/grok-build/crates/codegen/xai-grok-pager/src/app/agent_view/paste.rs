@@ -1770,6 +1770,7 @@ pub(super) mod paste_key_tests {
             &layout_cfg,
             false,
             false,
+            None,
             &theme,
         )
         .expect("above chrome fits");
@@ -1790,6 +1791,7 @@ pub(super) mod paste_key_tests {
             &layout_cfg,
             false,
             true,
+            None,
             &theme,
         )
         .expect("below chrome fits");
@@ -1832,6 +1834,7 @@ pub(super) mod paste_key_tests {
             &layout_cfg,
             false,
             false,
+            None,
             &theme,
         )
         .expect("full chrome fits");
@@ -1850,6 +1853,7 @@ pub(super) mod paste_key_tests {
             &layout_cfg,
             false,
             true,
+            None,
             &theme,
         )
         .expect("embedded chrome fits");

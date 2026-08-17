@@ -18,9 +18,70 @@ pub struct ProviderCommand;
 
 /// The args token the dropdown's final row inserts: accepting it runs
 /// /provider --add, which opens the add-provider modal.
-const ADD_PROVIDER_ARG: &str = "--add";
+pub(crate) const ADD_PROVIDER_ARG: &str = "--add";
 /// Final dropdown row label.
 const ADD_PROVIDER_LABEL: &str = "+ Add provider…";
+
+/// A provider row armed for deletion (Ctrl+D in the /provider dropdown). The
+/// armed state lives on the prompt widget, not the snapshot, so snapshot
+/// rebuilds cannot drop a live confirm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderPendingDelete {
+    pub provider_id: String,
+    /// Row display name (without the "(current)" suffix).
+    pub name: String,
+    /// The provider owns the current model: 'y' must not dispatch; the
+    /// footer explains the block instead.
+    pub blocked: bool,
+}
+
+/// Outcome of routing a key through an armed ProviderPendingDelete.
+pub(crate) enum ProviderPendingDeleteKey {
+    /// 'y': caller should remove this provider (never for a blocked arm).
+    Confirm(String),
+    /// Arm cleared ('n', or 'y' on a blocked arm); caller redraws.
+    Cancel,
+    /// Arm cleared, but the key should still be processed normally.
+    Disarmed,
+    /// Nothing armed, or not an unmodified key press.
+    NotArmed,
+}
+
+/// Route a key through an armed provider delete: 'y' confirms (unless the
+/// provider is in use), 'n' cancels, any other unmodified key disarms and
+/// falls through - the same contract the session picker's pending delete
+/// uses, so both surfaces read alike.
+pub(crate) fn handle_provider_pending_delete_key(
+    pending: &mut Option<ProviderPendingDelete>,
+    key: &crossterm::event::KeyEvent,
+) -> ProviderPendingDeleteKey {
+    use crossterm::event::{KeyCode, KeyEventKind};
+    if pending.is_none() {
+        return ProviderPendingDeleteKey::NotArmed;
+    }
+    if key.kind != KeyEventKind::Press || !key.modifiers.is_empty() {
+        return ProviderPendingDeleteKey::NotArmed;
+    }
+    match key.code {
+        KeyCode::Char('y') => {
+            if let Some(armed) = pending.take()
+                && !armed.blocked
+            {
+                ProviderPendingDeleteKey::Confirm(armed.provider_id)
+            } else {
+                ProviderPendingDeleteKey::Cancel
+            }
+        }
+        KeyCode::Char('n') => {
+            *pending = None;
+            ProviderPendingDeleteKey::Cancel
+        }
+        _ => {
+            *pending = None;
+            ProviderPendingDeleteKey::Disarmed
+        }
+    }
+}
 
 impl SlashCommand for ProviderCommand {
     fn name(&self) -> &str {
@@ -178,10 +239,12 @@ mod tests {
             crate::acp::model_state::ProviderInfo {
                 id: "deepseek".into(),
                 name: Some("DeepSeek".into()),
+                ..Default::default()
             },
             crate::acp::model_state::ProviderInfo {
                 id: "pi".into(),
                 name: Some("Pi AI".into()),
+                ..Default::default()
             },
         ];
         let (chat_id, chat) = model("deepseek-chat", "DeepSeek Chat", "deepseek");
@@ -263,5 +326,59 @@ mod tests {
             ProviderCommand.run(&mut ctx, "nope"),
             CommandResult::Error(_)
         ));
+    }
+
+    #[test]
+    fn pending_delete_y_confirms_n_cancels_other_disarms() {
+        let key = |code| crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
+        let arm = || ProviderPendingDelete {
+            provider_id: "pi".into(),
+            name: "Pi AI".into(),
+            blocked: false,
+        };
+        let mut pending = Some(arm());
+        assert!(matches!(
+            handle_provider_pending_delete_key(&mut pending, &key(crossterm::event::KeyCode::Char('y'))),
+            ProviderPendingDeleteKey::Confirm(id) if id == "pi"
+        ));
+        assert!(pending.is_none());
+
+        let mut pending = Some(arm());
+        assert!(matches!(
+            handle_provider_pending_delete_key(&mut pending, &key(crossterm::event::KeyCode::Char('n'))),
+            ProviderPendingDeleteKey::Cancel
+        ));
+        assert!(pending.is_none());
+
+        let mut pending = Some(arm());
+        assert!(matches!(
+            handle_provider_pending_delete_key(&mut pending, &key(crossterm::event::KeyCode::Down)),
+            ProviderPendingDeleteKey::Disarmed
+        ));
+        assert!(pending.is_none());
+
+        let mut pending = None;
+        assert!(matches!(
+            handle_provider_pending_delete_key(&mut pending, &key(crossterm::event::KeyCode::Char('y'))),
+            ProviderPendingDeleteKey::NotArmed
+        ));
+    }
+
+    #[test]
+    fn pending_delete_refuses_a_blocked_confirm() {
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('y'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        let mut pending = Some(ProviderPendingDelete {
+            provider_id: "deepseek".into(),
+            name: "DeepSeek".into(),
+            blocked: true,
+        });
+        assert!(matches!(
+            handle_provider_pending_delete_key(&mut pending, &key),
+            ProviderPendingDeleteKey::Cancel
+        ));
+        assert!(pending.is_none());
     }
 }

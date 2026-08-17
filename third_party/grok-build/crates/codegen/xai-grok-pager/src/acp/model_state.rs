@@ -65,10 +65,16 @@ pub struct ModelState {
 }
 
 /// One provider row from _meta.modelState.providers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProviderInfo {
     pub id: String,
     pub name: Option<String>,
+    /// Raw user-section profile fields (empty = unset in the dsh settings),
+    /// carried so the edit form can prefill without another round-trip.
+    pub display_name: Option<String>,
+    pub api_key_env: Option<String>,
+    pub api: Option<String>,
+    pub base_url: Option<String>,
 }
 
 impl ModelState {
@@ -371,7 +377,30 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                                         .get("name")
                                         .and_then(|v| v.as_str())
                                         .map(str::to_string);
-                                    Some(ProviderInfo { id, name })
+                                    let display_name = row
+                                        .get("displayName")
+                                        .and_then(|v| v.as_str())
+                                        .map(str::to_string);
+                                    let api_key_env = row
+                                        .get("apiKeyEnv")
+                                        .and_then(|v| v.as_str())
+                                        .map(str::to_string);
+                                    let api = row
+                                        .get("api")
+                                        .and_then(|v| v.as_str())
+                                        .map(str::to_string);
+                                    let base_url = row
+                                        .get("baseURL")
+                                        .and_then(|v| v.as_str())
+                                        .map(str::to_string);
+                                    Some(ProviderInfo {
+                                        id,
+                                        name,
+                                        display_name,
+                                        api_key_env,
+                                        api,
+                                        base_url,
+                                    })
                                 })
                                 .collect()
                         })

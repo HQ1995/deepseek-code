@@ -712,9 +712,19 @@ pub enum Action {
     ShowUsage,
     /// Open the add-provider form modal (the /provider dropdown's final row).
     OpenAddProvider,
+    /// Open the add-provider form prefilled from the provider's settings
+    /// profile and submit it as an update (the dropdown's edit row action).
+    OpenEditProvider {
+        provider_id: String,
+    },
     /// Submit the add-provider form over x.ai/providers/add.
     AddProvider {
         form: crate::views::add_provider_modal::AddProviderForm,
+    },
+    /// Submit x.ai/providers/remove for one provider route (the dropdown's
+    /// delete row action, already confirmed).
+    RemoveProvider {
+        provider_id: String,
     },
     /// `/usage manage` — open consumer billing (no-op if surface hidden).
     ManageBilling,
@@ -2148,6 +2158,12 @@ pub enum Effect {
     AddProvider {
         agent_id: AgentId,
         form: crate::views::add_provider_modal::AddProviderForm,
+        provider_id: Option<String>,
+    },
+    /// Submit x.ai/providers/remove and apply the refreshed roster.
+    RemoveProvider {
+        agent_id: AgentId,
+        provider_id: String,
     },
     /// Re-fetch remote settings to check subscription gate.
     RefreshGate,
@@ -2786,6 +2802,13 @@ pub enum TaskResult {
     /// `x.ai/providers/add` settled: refreshed roster on success, error text
     /// on failure (the modal stays open to show it).
     AddProviderComplete {
+        agent_id: AgentId,
+        providers: Vec<crate::acp::model_state::ProviderInfo>,
+        error: Option<String>,
+    },
+    /// x.ai/providers/remove settled: refreshed roster on success, error
+    /// text on failure (a toast carries it; the dropdown already closed).
+    RemoveProviderComplete {
         agent_id: AgentId,
         providers: Vec<crate::acp::model_state::ProviderInfo>,
         error: Option<String>,

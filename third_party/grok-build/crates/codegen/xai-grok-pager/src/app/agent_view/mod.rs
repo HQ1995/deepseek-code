@@ -1896,6 +1896,7 @@ pub(crate) fn render_dropdown_chrome(
     layout_cfg: &crate::appearance::LayoutConfig,
     compact: bool,
     below: bool,
+    footer_override: Option<&str>,
     theme: &Theme,
 ) -> Option<DropdownChrome> {
     let mut panel_height = item_rows + 2;
@@ -1951,7 +1952,8 @@ pub(crate) fn render_dropdown_chrome(
         let divider_style = Style::default().fg(theme.gray_dim).bg(reset);
         let divider = Line::styled("\u{2500}".repeat(panel_width as usize), divider_style);
         buf.set_line_safe(panel_x, top_border_y, &divider, panel_width);
-        let footer = "\u{2191}/\u{2193} navigate \u{00b7} enter confirm \u{00b7} esc cancel";
+        let footer = footer_override
+            .unwrap_or("\u{2191}/\u{2193} navigate \u{00b7} enter confirm \u{00b7} esc cancel");
         let footer_line = Line::styled(
             footer.to_string(),
             Style::default().fg(theme.gray_dim).bg(reset),
@@ -1977,6 +1979,20 @@ pub(crate) fn render_dropdown_chrome(
             let hint_x = panel_x + panel_width - hint_w - 1;
             let hint_line = Line::styled(hint, Style::default().fg(theme.gray).bg(theme.bg_base));
             buf.set_line_safe(hint_x, top_border_y, &hint_line, hint_w);
+        }
+        // Row-action hints (the /provider edit/delete bindings) draw over
+        // the bottom border line in bordered mode.
+        if let Some(footer) = footer_override {
+            let footer_line = Line::styled(
+                footer.to_string(),
+                Style::default().fg(theme.gray).bg(theme.bg_base),
+            );
+            buf.set_line_safe(
+                panel_x + 1,
+                bottom_border_y,
+                &footer_line,
+                panel_width.saturating_sub(1),
+            );
         }
     }
     let content_inset = dropdown_content_inset(layout_cfg, compact);
@@ -3547,6 +3563,7 @@ mod dropdown_chrome_tests {
             &layout_cfg,
             false,
             false,
+            None,
             &theme,
         );
         if let Some(chrome) = chrome {
@@ -3565,6 +3582,7 @@ mod dropdown_chrome_tests {
             &layout_cfg,
             false,
             false,
+            None,
             &theme,
         );
         assert!(chrome.is_none());
@@ -3583,6 +3601,7 @@ mod dropdown_chrome_tests {
                     &layout_cfg,
                     false,
                     false,
+                    None,
                     &theme,
                 );
             }
