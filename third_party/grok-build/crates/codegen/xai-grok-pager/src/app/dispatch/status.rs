@@ -91,11 +91,15 @@ pub(super) fn open_usage_info_modal(
             show_resolved_model,
             nonce,
         });
-        effects.push(Effect::FetchSessionUsage {
-            agent_id: id,
-            session_id,
-            nonce,
-        });
+        // The session-usage RPC only feeds the billing tab; dscode (no
+        // billing surface) skips the doomed fetch entirely.
+        if billing_reachable {
+            effects.push(Effect::FetchSessionUsage {
+                agent_id: id,
+                session_id,
+                nonce,
+            });
+        }
     }
     // Silent refresh of the cached billing mirrors the modal renders from.
     if billing_reachable {
@@ -296,11 +300,17 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
     }]
 }
 
-/// `/usage` — open the usage modal on its "Usage limit" tab. Minimal mode
-/// keeps the scrollback flow: session token/cost, then consumer credits.
+/// `/usage` — open the usage modal. Consumer accounts land on "Usage limit";
+/// deployments without a billing surface (dscode / external auth) land on
+/// "Context usage" instead. Minimal mode keeps the scrollback flow.
 pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
+    let tab = if app.usage_visible {
+        crate::views::usage_modal::UsageInfoTab::UsageLimit
+    } else {
+        crate::views::usage_modal::UsageInfoTab::ContextUsage
+    };
     if !app.screen_mode.is_minimal() {
-        return open_usage_info_modal(app, crate::views::usage_modal::UsageInfoTab::UsageLimit);
+        return open_usage_info_modal(app, tab);
     }
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -312,7 +322,14 @@ pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
         agent.session.session_id.clone()
     };
     match session_id {
-        Some(session_id) => vec![Effect::FetchSessionUsage {
+        Some(session_id) if app.usage_visible => vec![Effect::FetchSessionUsage {
+            agent_id: id,
+            session_id,
+            nonce: 0,
+        }],
+        // No billing surface: show the real session stats instead of the
+        // unsupported x.ai/session/usage RPC.
+        Some(session_id) => vec![Effect::ShowContextInfo {
             agent_id: id,
             session_id,
             nonce: 0,
@@ -632,7 +649,28 @@ pub(super) fn handle_context_info_complete(
         {
             return vec![];
         }
-        let model = info.data.model.as_deref().unwrap_or("unknown").to_string();
+        let model = info
+            .data
+            .model
+            .as_deref()
+            .filter(|m| !m.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                // dscode/external auth: session/info carries model:null, so
+                // fall back to the live model catalog (name + provider).
+                let models = &agent.session.models;
+                match models.current_model_name() {
+                    Some(name) => {
+                        let provider = models.current_provider_id();
+                        if provider.is_empty() {
+                            name
+                        } else {
+                            format!("{name} ({provider})")
+                        }
+                    }
+                    None => "unknown".to_string(),
+                }
+            });
         let snapshot = info.data.context;
         agent.apply_full_context_info(snapshot.clone());
         if let Some(state) = usage_modal_state_mut(agent) {

@@ -1504,7 +1504,9 @@ fn external_auth_provider_keeps_billing_off_after_auth_meta() {
             .registry()
             .is_restricted("usage")
     );
-    assert!(!app.welcome_prompt.slash_controller.usage_command_visible());
+    // dscode serves real session stats, so /usage stays offered; only the
+    // billing surface is off.
+    assert!(app.welcome_prompt.slash_controller.usage_command_visible());
 }
 #[test]
 fn apply_auth_meta_disables_billing_surface_for_team_users() {

@@ -1280,6 +1280,30 @@ fn show_usage_opens_modal_on_usage_limit_tab_with_fetches() {
 }
 
 #[test]
+fn show_usage_without_billing_opens_context_tab_without_billing_fetches() {
+    let mut app = test_app_with_agent();
+    app.usage_visible = false;
+    let effects = dispatch(Action::ShowUsage, &mut app);
+    let state = usage_modal_state(&app);
+    assert_eq!(
+        state.active_tab,
+        crate::views::usage_modal::UsageInfoTab::ContextUsage
+    );
+    assert_eq!(state.ctx.session_id.as_deref(), Some("test-session"));
+    assert!(!state.billing_loading);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [
+                Effect::ShowContextInfo { .. },
+                Effect::ShowSessionInfo { .. },
+            ]
+        ),
+        "got: {effects:?}"
+    );
+}
+
+#[test]
 fn show_context_info_retabs_open_modal_without_refetching() {
     let mut app = test_app_with_agent();
     dispatch(Action::ShowUsage, &mut app);

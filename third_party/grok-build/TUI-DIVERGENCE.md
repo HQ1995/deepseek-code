@@ -48,6 +48,15 @@ branding (our identity). Keep this list current on every sync.
   only a fallback), and /model's dropdown filters to that provider. The bridge
   owns provider auth/config (~/.dsh); the TUI never hardcodes provider auth
   assumptions.
+- /usage shows real per-session stats instead of grok.com billing. It opens the
+  existing usage modal on the "Context usage" tab (session/info context
+  breakdown: used/total/pct, turns, tool calls, messages, compactions) and
+  hides the "Usage limit" billing tab when there is no billing surface
+  (bridge billing config:null). The context block's model caption falls back
+  to the live model catalog (name + provider) because the bridge serves
+  session/info model:null. The x.ai/session/usage RPC is skipped (bridge has
+  no such method); /usage is session-scoped and "manage" stays gated by
+  billing_surface_visible (never true in dscode).
 
 ## Feature
 
@@ -55,7 +64,7 @@ branding (our identity). Keep this list current on every sync.
   matching concept): /personas and /config-agents (agents-modal authoring UI),
   /login, /logout, /share, /feedback, /imagine, /imagine_video, /import_claude,
   /gboom, /voice, /release_notes, /announcements, /recap, /timeline. /preset
-  remains the only preset picker; /usage is kept pending provider billing.
+  remains the only preset picker; /usage is adapted to session stats (above).
 ## Patch
 
 - crates/codegen/xai-grok-shell/src/session/acp_session_tests/tool_layer_images_bridge_tests.rs:
@@ -67,7 +76,7 @@ imagine_video, import_claude, gboom, voice, release_notes, announcements,
 recap, timeline.
 Why: these x.ai-cloud-only commands have no dsh-adaptable equivalent; the
 TUI is a frontend over the dsh bridge.
-Kept: usage (provider billing adaptation pending), mcps, plugin, doctor,
+Kept: usage (adapted to session stats, above), mcps, plugin, doctor,
 debug, settings_cmd, compact, rewind, tasks, plan, workflows, model,
 preset, personas, and the TUI-own UI commands.
 Only the commands were removed: the announcement banner view, the voice

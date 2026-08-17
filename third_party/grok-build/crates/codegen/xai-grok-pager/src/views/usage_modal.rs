@@ -45,6 +45,11 @@ impl UsageInfoTab {
         UsageInfoTab::SessionInfo,
     ];
 
+    /// Tabs without the billing surface (dscode / external auth): session
+    /// stats only — no Usage-limit tab.
+    pub const NO_BILLING: [UsageInfoTab; 2] =
+        [UsageInfoTab::ContextUsage, UsageInfoTab::SessionInfo];
+
     pub fn label(self) -> &'static str {
         match self {
             UsageInfoTab::ContextUsage => "Context usage",
@@ -53,12 +58,14 @@ impl UsageInfoTab {
         }
     }
 
-    pub fn index(self) -> usize {
-        Self::ALL.iter().position(|t| *t == self).unwrap_or(0)
-    }
-
-    pub fn from_index(i: usize) -> Self {
-        *Self::ALL.get(i).unwrap_or(&Self::ALL[0])
+    /// The tab set offered for this modal, depending on whether the
+    /// billing surface exists.
+    pub fn visible_tabs(usage_visible: bool) -> &'static [UsageInfoTab] {
+        if usage_visible {
+            &Self::ALL
+        } else {
+            &Self::NO_BILLING
+        }
     }
 }
 
@@ -251,14 +258,18 @@ impl UsageInfoModalState {
     }
 
     fn step_tab(&mut self, forward: bool) {
-        let n = UsageInfoTab::ALL.len();
-        let i = self.active_tab.index();
+        let tabs = UsageInfoTab::visible_tabs(self.ctx.usage_visible);
+        let n = tabs.len();
+        let i = tabs
+            .iter()
+            .position(|t| *t == self.active_tab)
+            .unwrap_or(0);
         let next = if forward {
             (i + 1) % n
         } else {
             (i + n - 1) % n
         };
-        self.set_tab(UsageInfoTab::from_index(next));
+        self.set_tab(tabs[next]);
     }
 }
 
@@ -298,7 +309,10 @@ pub fn handle_usage_modal_key(
             UsageModalOutcome::Changed
         }
         KeyCode::Char(c @ '1'..='3') => {
-            state.set_tab(UsageInfoTab::from_index(c as usize - '1' as usize));
+            let tabs = UsageInfoTab::visible_tabs(state.ctx.usage_visible);
+            if let Some(tab) = tabs.get(c as usize - '1' as usize) {
+                state.set_tab(*tab);
+            }
             UsageModalOutcome::Changed
         }
         KeyCode::Up | KeyCode::Char('k') => {
@@ -488,8 +502,12 @@ pub fn render_usage_modal(
     compact: bool,
     theme: &Theme,
 ) {
-    let labels: Vec<&str> = UsageInfoTab::ALL.iter().map(|t| t.label()).collect();
-    state.window.active_tab = state.active_tab.index();
+    let tabs = UsageInfoTab::visible_tabs(state.ctx.usage_visible);
+    let labels: Vec<&str> = tabs.iter().map(|t| t.label()).collect();
+    state.window.active_tab = tabs
+        .iter()
+        .position(|t| *t == state.active_tab)
+        .unwrap_or(0);
 
     let mut shortcuts: Vec<Shortcut> = vec![
         Shortcut {
@@ -1131,6 +1149,47 @@ mod tests {
         }
         assert_eq!(state.window.tab_rects.len(), 3);
         assert!(state.window.close_button_rect.is_some());
+    }
+
+    #[test]
+    fn no_billing_hides_usage_limit_tab_and_cycles_two_tabs() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let mut state = UsageInfoModalState::new(
+            UsageInfoTab::ContextUsage,
+            UsageInfoContext {
+                session_id: Some("sid-123".to_string()),
+                usage_visible: false,
+                chat_kind: false,
+                billing_redirect_url: None,
+                subscription_tier: None,
+            },
+        );
+        let theme = Theme::current();
+        render_usage_modal(&mut buf, area, &mut state, None, false, &theme);
+        let text: String = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert_eq!(state.window.tab_rects.len(), 2);
+        assert!(!text.contains("Usage limit"), "billing tab must hide:\n{text}");
+        assert!(text.contains("Context usage") && text.contains("Session info"));
+
+        // Cycling skips the hidden billing tab.
+        assert_eq!(
+            handle_usage_modal_key(&mut state, &key(KeyCode::Tab)),
+            UsageModalOutcome::Changed
+        );
+        assert_eq!(state.active_tab, UsageInfoTab::SessionInfo);
+        assert_eq!(
+            handle_usage_modal_key(&mut state, &key(KeyCode::Tab)),
+            UsageModalOutcome::Changed
+        );
+        assert_eq!(state.active_tab, UsageInfoTab::ContextUsage, "wraps over 2 tabs");
     }
 
     #[test]

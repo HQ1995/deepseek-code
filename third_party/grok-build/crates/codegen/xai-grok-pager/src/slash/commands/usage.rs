@@ -1,8 +1,8 @@
-//! `/usage` — session token/cost; consumer accounts can also manage billing.
+//! `/usage` — current session's real usage (context window, turns, tool calls).
 //!
-//! External-auth deployments (`auth_provider_command`) never reach grok.com
-//! billing, so the command is hidden and refused via
-//! [`AppCtx::usage_command_visible`].
+//! Consumer accounts can additionally manage billing; that surface is gated by
+//! [`AppCtx::billing_surface_visible`]. External-auth deployments (dscode) get
+//! the session-stats view only — no grok.com billing, no `manage` subcommand.
 
 use crate::app::actions::Action;
 use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
@@ -59,10 +59,14 @@ impl SlashCommand for UsageCommand {
     }
 
     fn usage(&self) -> &str {
-        "/usage [show|manage]"
+        "/usage"
     }
 
     fn takes_args(&self) -> bool {
+        true
+    }
+
+    fn session_scoped(&self) -> bool {
         true
     }
 
@@ -99,10 +103,13 @@ impl SlashCommand for UsageCommand {
         if !ctx.usage_command_visible {
             return CommandResult::Error("/usage is not available.".into());
         }
+        if ctx.session_id.is_none() {
+            return CommandResult::Error("No active session".to_string());
+        }
         let arg = args.trim();
         if !ctx.billing_surface_visible {
             return match arg {
-                "" => CommandResult::Action(Action::ShowUsage),
+                "" | "show" => CommandResult::Action(Action::ShowUsage),
                 _ => CommandResult::Error(format!("Unknown argument: {arg}. Use /usage")),
             };
         }

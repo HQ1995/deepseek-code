@@ -1348,7 +1348,9 @@ impl AppView {
     /// welcome, dashboard dispatch / peek-reply).
     pub(crate) fn sync_billing_surface_to_agents(&mut self) {
         let billing = self.usage_visible;
-        let usage_cmd = !self.has_external_auth_provider;
+        // dscode (external auth) still serves real session stats, so /usage is
+        // always offered; only the billing surface is gated.
+        let usage_cmd = true;
         for agent in self.agents.values_mut() {
             agent.set_billing_surface_visible(billing);
             agent.set_usage_command_visible(usage_cmd);
