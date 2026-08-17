@@ -12,7 +12,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The prebuilt TUI is unchanged by harness migrations, so it keeps its own
 # release tag rather than tracking the repo release.
-TUI_RELEASE="${DEEPSEEK_CODE_TUI_RELEASE:-v0.0.3}"
+TUI_RELEASE="${DEEPSEEK_CODE_TUI_RELEASE:-v0.0.4}"
 
 echo "deepseek-code installer"
 echo "  repo: $ROOT"
@@ -68,7 +68,7 @@ if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
   if [[ -x "$ROOT/third_party/grok-build/target/release/dscode" ]]; then
     echo "  prebuilt dscode already present; verifying its SHA-256 before use"
     case "$TUI_RELEASE" in
-      v0.0.3) expected_sha256='d2f58a637a707672f83dfed2487b3c6f259ce1a9c789ea4d68e65b5906725c16' ;;
+      v0.0.4) expected_sha256='70e2541281b1f4afdab7d0d18cc2ceaf192d822370004cfee5b2fc4120a1f11f' ;;
       *) expected_sha256='' ;;
     esac
     if [[ -n "$expected_sha256" ]] && ! command -v sha256sum >/dev/null 2>&1; then
@@ -77,18 +77,29 @@ if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
     fi
     if [[ -n "$expected_sha256" ]]; then
       actual_sha256="$(sha256sum "$ROOT/third_party/grok-build/target/release/dscode" | cut -d' ' -f1)"
-      if [[ "$actual_sha256" != "$expected_sha256" ]]; then
-        echo "error: prebuilt dscode failed its SHA-256 check (got $actual_sha256); re-download it or rebuild" >&2
-        exit 1
+      if [[ "$actual_sha256" == "$expected_sha256" ]]; then
+        echo "  prebuilt dscode verified"
+      else
+        echo "  prebuilt dscode differs from the pinned release (got $actual_sha256); re-downloading $TUI_RELEASE"
+        rm -f "$ROOT/third_party/grok-build/target/release/dscode"
+        echo "  downloading prebuilt dscode ($TUI_RELEASE)..."
+        curl -fL -o "$ROOT/third_party/grok-build/target/release/dscode" \
+          "https://github.com/HQ1995/deepseek-code/releases/download/$TUI_RELEASE/dscode-linux-x86_64"
+        actual_sha256="$(sha256sum "$ROOT/third_party/grok-build/target/release/dscode" | cut -d' ' -f1)"
+        if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+          echo "error: downloaded dscode failed its SHA-256 check (got $actual_sha256)" >&2
+          exit 1
+        fi
       fi
     fi
+    chmod +x "$ROOT/third_party/grok-build/target/release/dscode"
   else
     echo "  downloading prebuilt dscode ($TUI_RELEASE)..."
     curl -fL -o "$ROOT/third_party/grok-build/target/release/dscode" \
       "https://github.com/HQ1995/deepseek-code/releases/download/$TUI_RELEASE/dscode-linux-x86_64"
     # SHA-256 pin for THIS release; update the pin whenever TUI_RELEASE bumps.
     case "$TUI_RELEASE" in
-      v0.0.3) expected_sha256='d2f58a637a707672f83dfed2487b3c6f259ce1a9c789ea4d68e65b5906725c16' ;;
+      v0.0.4) expected_sha256='70e2541281b1f4afdab7d0d18cc2ceaf192d822370004cfee5b2fc4120a1f11f' ;;
       *) expected_sha256='' ;;
     esac
     actual_sha256="$(sha256sum "$ROOT/third_party/grok-build/target/release/dscode" | cut -d' ' -f1)"
