@@ -928,6 +928,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       // Echo the accepted prompt so it enters the client transcript, then let
       // the turn stream. Settlement happens at the correlated turn/end; a
       // turnless slot (admission discarded the prompt) settles cancelled at idle.
+      broadcastQueueChanged(record)
       const conn = connections.get(record.clientId)
       if (conn !== undefined) {
         emitUpdate(conn, record, undefined, {
@@ -935,7 +936,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           content: { type: 'text', text },
         }, false)
       }
-      broadcastQueueChanged(record)
       void record.agent.whenIdle().then(() => {
         if (record.inflight !== inflight) return
         record.inflight = undefined
@@ -944,7 +944,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     })
     record.runningPromptId = undefined
     record.runningText = undefined
-    broadcastQueueChanged(record)
+    if (record.promptQueue.length === 0) broadcastQueueChanged(record)
     return { stopReason }
   }
 

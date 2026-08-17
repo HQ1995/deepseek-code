@@ -180,6 +180,8 @@ interface ClientHandle {
   next(): Promise<Record<string, unknown>>
   /** x.ai/queue/changed broadcasts, captured instead of queueing. */
   broadcasts: Array<Record<string, unknown>>
+  /** Every parsed message in arrival order, for order-sensitive assertions. */
+  all: Array<Record<string, unknown>>
   send(msg: unknown): void
   request(id: number, method: string, params?: unknown): Promise<Record<string, unknown>>
   notify(method: string, params?: unknown): void
@@ -194,6 +196,7 @@ async function makeClient(socketPath: string): Promise<ClientHandle> {
   const decoder = new FrameDecoder()
   const queue: Record<string, unknown>[] = []
   const broadcasts: Array<Record<string, unknown>> = []
+  const all: Array<Record<string, unknown>> = []
   const waiters: Array<(value: Record<string, unknown>) => void> = []
   socket.on('data', (chunk) => {
     for (const frame of decoder.push(chunk)) {
@@ -202,6 +205,7 @@ async function makeClient(socketPath: string): Promise<ClientHandle> {
       const msg = raw.type === 'acp' && typeof raw.payload === 'string'
         ? JSON.parse(raw.payload) as Record<string, unknown>
         : raw
+      all.push(msg)
       // Ambient queue broadcasts interleave with every response; capture them
       // separately so order-sensitive assertions keep their exact messages.
       if (msg.method === 'x.ai/queue/changed') { broadcasts.push(msg); continue }
@@ -218,6 +222,7 @@ async function makeClient(socketPath: string): Promise<ClientHandle> {
   return {
     socket,
     broadcasts,
+    all,
     next,
     send(msg: unknown) { socket.write(encodeJsonFrame(msg)) },
     async request(id: number, method: string, params?: unknown) {
@@ -494,6 +499,12 @@ describe('grok leader over a unix socket', () => {
     agent.internals.idleWaiters.shift()!()
     await waitFor(() => agent.internals.followups.length === 2 && agent.internals.idleWaiters.length === 1)
     await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 0 && (b.params as { runningPromptId?: string }).runningPromptId !== undefined))
+    // The promotion broadcast must precede the promoted prompt's echo: the
+    // pager routes user_message_chunk by runningPromptId.
+    const promoIndex = c.all.findIndex(m => m.method === 'x.ai/queue/changed' && (m.params as { entries?: unknown[] }).entries?.length === 0 && (m.params as { runningPromptId?: string }).runningPromptId !== undefined)
+    const echoIndex = c.all.findIndex(m => m.method === 'session/update' && ((m.params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } }).update?.content?.text) === 'second')
+    expect(promoIndex).toBeGreaterThanOrEqual(0)
+    expect(echoIndex).toBeGreaterThan(promoIndex)
   })
 
   it('rejects invalid session requests with JSON-RPC errors', async () => {
