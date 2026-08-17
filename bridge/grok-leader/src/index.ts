@@ -984,10 +984,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     record.runningCombinedTexts = undefined
     if (failure === undefined && stopReason !== undefined) emitPromptComplete(record, id, stopReason)
     if (record.promptQueue.length > 0) {
-      // Promote synchronously so the pager receives the running-prompt
-      // adoption and the next echo BEFORE this prompt's RPC response; the
-      // PromptResponse handler then runs the stashed turn-start shim.
-      advancePromptQueue(record)
+      // Promote only once the agent is truly idle: the harness discards a
+      // followup admitted from inside the turn/end event handler (its loop
+      // has not finished the turn yet), which settled the queued prompt as
+      // cancelled without a turn. The RPC response still goes out first; the
+      // pager's PromptResponse handler then runs the stashed adoption when
+      // the promotion broadcast and echo arrive after this idle gate.
+      void record.agent.whenIdle().then(() => {
+        advancePromptQueue(record)
+      })
     } else {
       broadcastQueueChanged(record)
     }

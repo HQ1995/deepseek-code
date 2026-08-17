@@ -503,7 +503,9 @@ describe('grok leader over a unix socket', () => {
 
     // Release the first turn; the queue promotes and empties.
     agent.internals.idleWaiters.shift()!()
-    await waitFor(() => agent.internals.followups.length === 2 && agent.internals.idleWaiters.length === 1)
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.followups.length === 2)
     const secondId = hp.entries![0]!.id
     await waitFor(() => c.broadcasts.some(b => {
       const params = b.params as { entries?: unknown[]; runningPromptId?: string; runningText?: string }
@@ -547,7 +549,11 @@ describe('grok leader over a unix socket', () => {
       if (msg.id === 2) { expect(msg.result).toEqual({ stopReason: 'cancelled' }); break }
     }
 
-    // ...and the interjected row runs next as its own turn.
+    // ...and the interjected row runs next as its own turn (after the agent idles).
+    await waitFor(() => agent.internals.idleWaiters.length >= 1)
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.idleWaiters.length >= 1)
+    agent.internals.idleWaiters.shift()!()
     await waitFor(() => agent.internals.followups.includes('second') && c.broadcasts.some(b => (b.params as { runningPromptId?: string }).runningPromptId === secondId))
     const promoIndex = c.all.findIndex(m => m.method === 'x.ai/queue/changed' && (m.params as { runningPromptId?: string }).runningPromptId === secondId)
     const echoIndex = c.all.findIndex(m => m.method === 'session/update' && ((m.params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } }).update?.content?.text) === 'second')
@@ -570,6 +576,8 @@ describe('grok leader over a unix socket', () => {
     sendRequest(c, 4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'third' }] })
     await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 2))
 
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
     agent.internals.idleWaiters.shift()!()
     // Followers fold into the front: the front RUNS the combined turn (its
     // response settles with the turn); the follower resolves as removed now.
@@ -746,9 +754,8 @@ describe('grok leader over a unix socket', () => {
     expect(agent!.internals.followups).toEqual(['first'])
 
     agent!.internals.idleWaiters.shift()!()
-    // grok ordering: the promotion broadcast adopts the next running prompt,
-    // then its echo streams, and the settling prompt's RPC response arrives
-    // LAST so the pager's PromptResponse handler runs the stashed adoption.
+    // With the idle gate, the settling response goes out first; the promotion
+    // broadcast and the promoted echo follow once the agent idles again.
     const isEcho = (msg: Record<string, unknown>, text: string): boolean => {
       const params = msg.params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } } | undefined
       return params?.update?.sessionUpdate === 'user_message_chunk'
@@ -760,16 +767,20 @@ describe('grok leader over a unix socket', () => {
       const msg = await c.next()
       if (msg.id === 2) {
         expect(msg.result).toEqual({ stopReason: 'cancelled' })
-        expect(sawSecondEcho).toBe(true)
+        expect(sawSecondEcho).toBe(false)
         break
       }
       if (isEcho(msg, 'second')) sawSecondEcho = true
     }
 
-    await waitFor(() => agent!.internals.followups.length === 2 && agent!.internals.idleWaiters.length === 1)
-    // The second echo preceded the first response (grok ordering) and was
-    // consumed by the loop above; the promotion shim paints the user block.
-    expect(sawSecondEcho).toBe(true)
+    await waitFor(() => agent!.internals.idleWaiters.length === 1)
+    agent!.internals.idleWaiters.shift()!()
+    await waitFor(() => agent!.internals.followups.includes('second'))
+    // The promotion broadcast adopts the next turn before its echo streams.
+    const promoIndex = c.all.findIndex(m => m.method === 'x.ai/queue/changed' && (m.params as { runningPromptId?: string }).runningPromptId !== undefined && (m.params as { runningText?: string }).runningText === 'second')
+    const echoIndex = c.all.findIndex(m => isEcho(m, 'second'))
+    expect(promoIndex).toBeGreaterThanOrEqual(0)
+    expect(echoIndex).toBeGreaterThan(promoIndex)
     expect(agent!.internals.followups).toEqual(['first', 'second'])
 
     agent!.internals.idleWaiters.shift()!()
