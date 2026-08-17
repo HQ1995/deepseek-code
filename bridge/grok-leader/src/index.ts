@@ -931,13 +931,24 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
-  const newSession = async (clientId: number, params: unknown): Promise<unknown> => {
-    assertOpen()
-    const p = paramRecord(params, 'session/new')
+  /** session/new and session/load share the workspace gate: an absolute cwd
+   * and no MCP servers (an empty array only; any other mcpServers value is
+   * invalid, never silently ignored). Returns the validated cwd. */
+  const validateWorkspaceParams = (p: Record<string, unknown>): string => {
     const cwd = p.cwd
     if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw invalidParams('cwd must be an absolute path: ' + String(cwd))
     const mcpServers = p.mcpServers
-    if (Array.isArray(mcpServers) && mcpServers.length > 0) throw invalidParams('mcpServers is not supported')
+    if (mcpServers !== undefined) {
+      if (!Array.isArray(mcpServers)) throw invalidParams('mcpServers must be an array')
+      if (mcpServers.length > 0) throw invalidParams('mcpServers is not supported')
+    }
+    return cwd
+  }
+
+  const newSession = async (clientId: number, params: unknown): Promise<unknown> => {
+    assertOpen()
+    const p = paramRecord(params, 'session/new')
+    const cwd = validateWorkspaceParams(p)
     const additionalDirectories = p.additionalDirectories
     if (Array.isArray(additionalDirectories) && additionalDirectories.length > 0) throw invalidParams('additionalDirectories is not supported')
     const meta = p._meta as Record<string, unknown> | null | undefined
@@ -1233,15 +1244,27 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const p = paramRecord(params, 'session/load')
     const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
     if (sessionId === undefined) throw invalidParams('session/load requires a sessionId')
+    validateWorkspaceParams(p)
     const existing = sessions.get(sessionId)
     if (existing !== undefined) {
-      // Live reload (preset switch re-mount): dispose the existing record
-      // first so the same id can be re-attached under a different preset.
+      // A live session has exactly one owning connection. The owner's own
+      // load is the preset-switch live reload; a foreign client never
+      // displaces a live owner and reads exactly like an unknown id (the
+      // session's existence must not leak). Once the owner's socket is gone
+      // the session is re-attachable: that is the TUI reconnect path, where a
+      // leader respawn hands the client a fresh clientId before it re-loads.
+      if (existing.clientId !== clientId && connections.get(existing.clientId) !== undefined) {
+        throw invalidParams('unknown session: ' + String(sessionId))
+      }
+      // Dispose the existing record first so the same id can be re-attached
+      // under a different preset (or by the reconnecting owner).
       sessions.delete(sessionId)
       existing.agent.cancel({ kind: 'user' })
       settlePrompt(existing, 'cancelled')
       discardPromptQueue(existing)
-      rejectPendingFor(clientId, sessionId)
+      // The OLD owner's outstanding reverse requests must not outlive the
+      // takeover; the same-owner reload rejects its own pending roundtrips.
+      rejectPendingFor(existing.clientId, sessionId)
       clearMcpInitTimer(existing)
       const store = ctx.get('sessions') as SessionsLike | undefined
       if (store !== undefined) await store.flush(existing.agent.session)
@@ -1362,6 +1385,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // comes from the catalog's modelId -> provider mapping, then the agent's
     // own route, then config.provider.
     const current = await currentCatalog()
+    // Never persist an unresolvable selection: a modelId the client has not
+    // been offered cannot name a provider route.
+    if (!current.providerByModel.has(modelId)) {
+      throw invalidParams('modelId is not in the catalog: ' + modelId)
+    }
     const provider = current.providerByModel.get(modelId) ?? record.agent.options.provider ?? config.provider ?? ''
     const selection = {
       provider,
@@ -2005,6 +2033,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
    *  respawns a fresh leader on the next start, so nothing is lost.
    *  ponytail: 2s grace covers accidental reconnects; grok's 30s zombie
    *  timer is deliberately NOT reused here. */
+  /** In-flight per-client teardowns (flush + dispose); the idle exit awaits them. */
+  const teardowns = new Set<Promise<void>>()
   let idleExitTimer: ReturnType<typeof setTimeout> | undefined
   const cancelIdleExit = (): void => {
     if (idleExitTimer !== undefined) {
@@ -2017,7 +2047,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (connections.size > 0) return
     idleExitTimer = setTimeout(() => {
       idleExitTimer = undefined
-      void quiesce().catch((failure: unknown) => {
+      // appExit(0) takes the host down; it must not beat a teardown that is
+      // still flushing persisted state.
+      void (async () => {
+        if (teardowns.size > 0) await Promise.allSettled([...teardowns])
+        await quiesce()
+      })().catch((failure: unknown) => {
         logger.warn('grok-leader: quiesce failed: ' + errorChain(failure))
       }).finally(() => {
         const exit = ctx.get('appExit') as ((code: number) => void) | undefined
@@ -2047,9 +2082,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       clearMcpInitTimer(record)
       sessions.delete(record.agent.session.id)
       // Flush persisted state before disposal, like closeSession; a flush
-      // failure is logged but must not strand the disposal.
+      // failure is logged but must not strand the disposal. The promise is
+      // tracked so the idle exit waits for every teardown before appExit.
       const store = ctx.get('sessions') as SessionsLike | undefined
-      void (async () => {
+      const teardown = (async () => {
         if (store !== undefined) {
           try {
             await store.flush(record.agent.session)
@@ -2058,7 +2094,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           }
         }
         await record.dispose()
-      })().catch((error: unknown) => {
+      })()
+      teardowns.add(teardown)
+      void teardown.then(() => {
+        teardowns.delete(teardown)
+      }, (error: unknown) => {
+        teardowns.delete(teardown)
         logger.warn('grok-leader: session teardown failed for ' + String(record.agent.session.id) + ': ' + errorChain(error))
       })
     }
