@@ -195,13 +195,22 @@ interface SessionRecord {
   textStreamed: boolean
   /** Accepted user prompts, oldest first; served by x.ai/prompt_history. */
   prompts: string[]
-  /** FIFO of validated prompts waiting for the in-flight one to settle.
-   *  ponytail: plain per-session FIFO; no grok send-now/interject/reorder. */
+  /** FIFO of validated prompts waiting for the in-flight one to settle. */
   promptQueue: Array<{
     p: Record<string, unknown>
     resolve: (value: { stopReason: StopReasonWire }) => void
     reject: (error: Error) => void
+    /** Stable queue-row id: the request _meta.promptId or a minted uuid. */
+    id: string
+    text: string
+    version: number
   }>
+  /** Queue row id of the prompt the agent is currently draining. */
+  runningPromptId: string | undefined
+  /** Plain text of the running prompt (queue/changed carries it; the running row is omitted from entries). */
+  runningText: string | undefined
+  /** Monotonic per-record counter backing queue row versions. */
+  nextQueueVersion: number
   inflight: {
     resolve: (reason: StopReasonWire) => void
     reject: (error: Error) => void
@@ -286,6 +295,21 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   let clientSeq = 0
   let closed = false
   let catalog: ModelCatalog | undefined
+  /** First user prompt per session id, memoized across x.ai/session/list calls. */
+  const firstPromptCache = new Map<string, string>()
+  const firstUserPrompt = (events: readonly SessionEvent[]): string => {
+    for (const event of events) {
+      if (event.type !== 'user/message') continue
+      const data = event.data as { source?: unknown; content?: unknown }
+      if ((data.source as { kind?: unknown } | undefined)?.kind !== 'user') continue
+      if (!Array.isArray(data.content)) continue
+      for (const block of data.content) {
+        const b = block as { type?: unknown; text?: unknown }
+        if (b.type === 'text' && typeof b.text === 'string' && b.text.trim().length > 0) return b.text.trim()
+      }
+    }
+    return ''
+  }
 
   /** Raw user section of the llm-pi-ai namespace, when the settings service exposes it. */
   const providerUserSection = (providerService?: SettingsLike): Record<string, unknown> | undefined => {
@@ -837,6 +861,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       textStreamed: false,
       prompts: [],
       promptQueue: [],
+      runningPromptId: undefined,
+      runningText: undefined,
+      nextQueueVersion: 0,
       inflight: undefined,
     }
     sessions.set(sessionId, record)
@@ -854,22 +881,42 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return { sessionId }
   }
 
+  /** Broadcast the live queue to the pager: pending rows plus the running prompt. */
+  const broadcastQueueChanged = (record: SessionRecord): void => {
+    const conn = connections.get(record.clientId)
+    if (conn === undefined) return
+    sendNotification(conn, 'x.ai/queue/changed', {
+      sessionId: record.agent.session.id,
+      entries: record.promptQueue.map((entry, index) => ({
+        id: entry.id,
+        version: entry.version,
+        kind: 'prompt',
+        text: entry.text,
+        position: index,
+      })),
+      ...record.runningPromptId === undefined ? {} : {
+        runningPromptId: record.runningPromptId,
+        runningText: record.runningText,
+        runningKind: 'prompt',
+      },
+    })
+  }
+
   /**
    * Run one validated prompt: admit it, stream the echo, and settle at turn
    * end (or idle for a turnless slot). Reads the prompt content from p again
    * because the queued entry stores the raw request, not a decoded message.
    */
-  const runPrompt = async (record: SessionRecord, p: Record<string, unknown>): Promise<{ stopReason: StopReasonWire }> => {
-    const text = acpPromptToText(p.prompt)
+  const runPrompt = async (record: SessionRecord, p: Record<string, unknown>, id: string, text: string): Promise<{ stopReason: StopReasonWire }> => {
     if (agents.get(record.agent.id) !== record.agent) {
       throw internalError('prompt was not queued: the agent was disposed outside the bridge')
     }
     const message = createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
-    const meta = p._meta as Record<string, unknown> | undefined
-    const promptId = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : message.id
+    record.runningPromptId = id
+    record.runningText = text
     const stopReason = await new Promise<StopReasonWire>((resolve, reject) => {
       const inflight: NonNullable<SessionRecord['inflight']> = {
-        resolve, reject, messageId: message.id, promptId, turn: undefined, endReason: undefined,
+        resolve, reject, messageId: message.id, promptId: id, turn: undefined, endReason: undefined,
       }
       record.inflight = inflight
       try {
@@ -888,12 +935,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           content: { type: 'text', text },
         }, false)
       }
+      broadcastQueueChanged(record)
       void record.agent.whenIdle().then(() => {
         if (record.inflight !== inflight) return
         record.inflight = undefined
         inflight.resolve('cancelled')
       })
     })
+    record.runningPromptId = undefined
+    record.runningText = undefined
+    broadcastQueueChanged(record)
     return { stopReason }
   }
 
@@ -902,7 +953,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (record.inflight !== undefined) return
     const entry = record.promptQueue.shift()
     if (entry === undefined) return
-    void runPrompt(record, entry.p).then(entry.resolve, entry.reject).finally(() => {
+    void runPrompt(record, entry.p, entry.id, entry.text).then(entry.resolve, entry.reject).finally(() => {
       // Defer the queue pump until after the JSON-RPC response for the
       // settling prompt has been written; advancing synchronously here makes
       // the next queued prompt's user_message_chunk echo overtake the
@@ -917,10 +968,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   /** Enqueue a validated prompt and run it as soon as the session is idle. */
-  const enqueuePrompt = (record: SessionRecord, p: Record<string, unknown>): Promise<{ stopReason: StopReasonWire }> =>
+  const enqueuePrompt = (record: SessionRecord, p: Record<string, unknown>, text: string): Promise<{ stopReason: StopReasonWire }> =>
     new Promise((resolve, reject) => {
-      record.promptQueue.push({ p, resolve, reject })
+      const meta = p._meta as Record<string, unknown> | undefined
+      const id = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
+      record.promptQueue.push({ p, resolve, reject, id, text, version: record.nextQueueVersion++ })
       advancePromptQueue(record)
+      broadcastQueueChanged(record)
     })
 
   const prompt = async (params: unknown): Promise<unknown> => {
@@ -938,7 +992,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // A prompt joins the session history at acceptance, mirroring the grok
     // shell's queue-time history append.
     record.prompts.push(text)
-    return await enqueuePrompt(record, p)
+    return await enqueuePrompt(record, p, text)
   }
 
   const cancel = (params: unknown): void => {
@@ -951,6 +1005,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     record.agent.cancel({ kind: 'user' })
     settlePrompt(record, 'cancelled')
     discardPromptQueue(record)
+    broadcastQueueChanged(record)
   }
 
   const loadSession = async (clientId: number, params: unknown): Promise<unknown> => {
@@ -1019,6 +1074,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       textStreamed: false,
       prompts: [],
       promptQueue: [],
+      runningPromptId: undefined,
+      runningText: undefined,
+      nextQueueVersion: 0,
       inflight: undefined,
     }
     sessions.set(sessionId, record)
@@ -1416,6 +1474,42 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           },
         }
       }
+      case 'x.ai/session/list': {
+        const lp = paramRecord(params, 'x.ai/session/list')
+        const query = typeof lp.query === 'string' ? lp.query.toLowerCase() : undefined
+        const cwd = typeof lp.cwd === 'string' ? lp.cwd : undefined
+        const limit = typeof lp.limit === 'number' && lp.limit > 0 ? Math.floor(lp.limit) : undefined
+        const store = ctx.get('sessionPersistence')
+        const headers = store === undefined ? [] : await store.list()
+        let rows = headers.map(header => ({
+          sessionId: header.id,
+          cwd: header.cwd ?? '',
+          createdAt: new Date(header.createdAt).toISOString(),
+          // No cheap updatedAt on the header; createdAt keeps old rows within the picker window.
+          updatedAt: new Date(header.createdAt).toISOString(),
+          firstPrompt: firstPromptCache.get(header.id) ?? '',
+          // Chat-kind rows skip the TUI's local-store gate (grok's own session
+          // docs, which dsh sessions never enter) and load straight via session/load.
+          _meta: { 'x.ai/session': { kind: 'chat' } },
+        }))
+        if (cwd !== undefined) rows = rows.filter(row => row.cwd === cwd)
+        if (query !== undefined && query.length > 0) rows = rows.filter(row => (row.sessionId + ' ' + row.cwd).toLowerCase().includes(query))
+        rows.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+        if (limit !== undefined) rows = rows.slice(0, limit)
+        // Backfill display titles once per process lifetime (pick rows only).
+        await Promise.all(rows.map(async row => {
+          if (firstPromptCache.has(row.sessionId) || store === undefined) return
+          firstPromptCache.set(row.sessionId, '')
+          try {
+            const inspection = await store.load(SessionId(row.sessionId))
+            firstPromptCache.set(row.sessionId, firstUserPrompt(inspection.events))
+          } catch {
+            // Keep the '' placeholder; a broken artifact must not sink the list.
+          }
+        }))
+        rows = rows.map(row => ({ ...row, firstPrompt: firstPromptCache.get(row.sessionId) ?? '' }))
+        return { sessions: rows }
+      }
       case 'x.ai/sessions/list': {
         const persistence = ctx.get('sessionPersistence')
         const headers = persistence === undefined ? [] : await persistence.list()
@@ -1439,10 +1533,86 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   const handleNotification = (method: string, params: unknown): void => {
+    // Ext notifications ride as {method:'_x.ai/foo', params:{method:'x.ai/foo', params:{...}}}.
+    const outer = params as Record<string, unknown> | undefined
+    const unwrapped = outer !== undefined && typeof outer.params === 'object' && outer.params !== null
+      && (outer.method === undefined || outer.method === method)
+      ? outer.params as Record<string, unknown>
+      : outer
+    const queueRecord = (p: Record<string, unknown>): SessionRecord | undefined => {
+      if (typeof p.sessionId !== 'string') return undefined
+      return sessions.get(SessionId(p.sessionId))
+    }
+    const queueMutate = (record: SessionRecord): void => {
+      broadcastQueueChanged(record)
+    }
     switch (method) {
       case WIRE.sessionCancel:
         cancel(params)
         return
+      case 'x.ai/queue/interject': {
+        if (unwrapped === undefined) return
+        const p = unwrapped
+        const record = queueRecord(p)
+        if (record === undefined) return
+        const idx = record.promptQueue.findIndex(entry => entry.id === p.id)
+        if (idx < 0) return
+        const [entry] = record.promptQueue.splice(idx, 1)
+        if (typeof p.newText === 'string' && p.newText.length > 0) {
+          entry.text = p.newText
+          entry.version = record.nextQueueVersion++
+        }
+        record.promptQueue.unshift(entry)
+        if (record.inflight === undefined) advancePromptQueue(record)
+        queueMutate(record)
+        return
+      }
+      case 'x.ai/queue/remove': {
+        if (unwrapped === undefined) return
+        const p = unwrapped
+        const record = queueRecord(p)
+        if (record === undefined) return
+        const idx = record.promptQueue.findIndex(entry => entry.id === p.id)
+        if (idx >= 0) {
+          const [entry] = record.promptQueue.splice(idx, 1)
+          entry.resolve({ stopReason: 'cancelled' })
+        } else if (record.runningPromptId === p.id) {
+          record.agent.cancel({ kind: 'user' })
+          settlePrompt(record, 'cancelled')
+        }
+        queueMutate(record)
+        return
+      }
+      case 'x.ai/queue/reorder': {
+        if (unwrapped === undefined) return
+        const p = unwrapped
+        const record = queueRecord(p)
+        if (record === undefined) return
+        const orderedIds = Array.isArray(p.orderedIds) ? p.orderedIds.filter((id): id is string => typeof id === 'string') : []
+        if (orderedIds.length > 0) {
+          const byId = new Map(record.promptQueue.map(entry => [entry.id, entry]))
+          const next: typeof record.promptQueue = []
+          for (const id of orderedIds) {
+            const entry = byId.get(id)
+            if (entry === undefined) continue
+            next.push(entry)
+            byId.delete(id)
+          }
+          for (const entry of record.promptQueue) if (byId.has(entry.id)) next.push(entry)
+          record.promptQueue.splice(0, record.promptQueue.length, ...next)
+        }
+        queueMutate(record)
+        return
+      }
+      case 'x.ai/queue/clear': {
+        if (unwrapped === undefined) return
+        const p = unwrapped
+        const record = queueRecord(p)
+        if (record === undefined) return
+        discardPromptQueue(record)
+        queueMutate(record)
+        return
+      }
       default:
         // Grok drops unknown ACP notifications (server.rs:1515).
         logger.warn('grok-leader: dropped notification ' + method)

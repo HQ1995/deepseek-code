@@ -178,6 +178,8 @@ interface LeaderHarness {
 interface ClientHandle {
   socket: Socket
   next(): Promise<Record<string, unknown>>
+  /** x.ai/queue/changed broadcasts, captured instead of queueing. */
+  broadcasts: Array<Record<string, unknown>>
   send(msg: unknown): void
   request(id: number, method: string, params?: unknown): Promise<Record<string, unknown>>
   notify(method: string, params?: unknown): void
@@ -191,6 +193,7 @@ async function makeClient(socketPath: string): Promise<ClientHandle> {
   })
   const decoder = new FrameDecoder()
   const queue: Record<string, unknown>[] = []
+  const broadcasts: Array<Record<string, unknown>> = []
   const waiters: Array<(value: Record<string, unknown>) => void> = []
   socket.on('data', (chunk) => {
     for (const frame of decoder.push(chunk)) {
@@ -199,6 +202,9 @@ async function makeClient(socketPath: string): Promise<ClientHandle> {
       const msg = raw.type === 'acp' && typeof raw.payload === 'string'
         ? JSON.parse(raw.payload) as Record<string, unknown>
         : raw
+      // Ambient queue broadcasts interleave with every response; capture them
+      // separately so order-sensitive assertions keep their exact messages.
+      if (msg.method === 'x.ai/queue/changed') { broadcasts.push(msg); continue }
       const waiter = waiters.shift()
       if (waiter !== undefined) waiter(msg)
       else queue.push(msg)
@@ -211,6 +217,7 @@ async function makeClient(socketPath: string): Promise<ClientHandle> {
   }
   return {
     socket,
+    broadcasts,
     next,
     send(msg: unknown) { socket.write(encodeJsonFrame(msg)) },
     async request(id: number, method: string, params?: unknown) {
@@ -438,6 +445,55 @@ describe('grok leader over a unix socket', () => {
     // The connection survives all of it: ping still answers.
     c.send({ type: 'ping' })
     expect(await c.next()).toEqual({ type: 'pong' })
+  })
+
+  it('broadcasts x.ai/queue/changed while a prompt runs and when it settles', async () => {
+    const { registry, client: c } = await start()
+    register(c)
+    await c.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    await c.request(2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hello there' }] })
+
+    expect(c.broadcasts.length).toBeGreaterThanOrEqual(3)
+    const first = c.broadcasts[0]!
+    expect(first.params).toMatchObject({
+      sessionId,
+      entries: [],
+    })
+    const fp = first.params as { runningPromptId?: string; runningText?: string; runningKind?: string }
+    expect(fp.runningPromptId).toEqual(expect.any(String) as string)
+    expect(fp.runningText).toBe('hello there')
+    expect(fp.runningKind).toBe('prompt')
+    const last = c.broadcasts[c.broadcasts.length - 1]!
+    expect((last.params as { runningPromptId?: string }).runningPromptId).toBeUndefined()
+  })
+
+  it('queues a second prompt and reports it in x.ai/queue/changed until promotion', async () => {
+    const { registry, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    // First prompt parks on an idle waiter (mock never claims the turn).
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    await waitFor(() => c.broadcasts.some(b => Array.isArray((b.params as { entries?: unknown }).entries) && ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 1))
+    const held = c.broadcasts[c.broadcasts.length - 1]!
+    const hp = held.params as { entries?: Array<{ id: string; text: string; kind: string; position: number }>; runningPromptId?: string }
+    expect(hp.entries).toHaveLength(1)
+    expect(hp.entries![0]).toMatchObject({ kind: 'prompt', text: 'second', position: 0 })
+    expect(hp.runningPromptId).toEqual(expect.any(String) as string)
+
+    // Release the first turn; the queue promotes and empties.
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.followups.length === 2 && agent.internals.idleWaiters.length === 1)
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 0 && (b.params as { runningPromptId?: string }).runningPromptId !== undefined))
   })
 
   it('rejects invalid session requests with JSON-RPC errors', async () => {
