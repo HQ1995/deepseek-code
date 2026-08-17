@@ -71,6 +71,17 @@ if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
     echo "  downloading prebuilt dscode ($TUI_RELEASE)..."
     curl -fL -o "$ROOT/third_party/grok-build/target/release/dscode" \
       "https://github.com/HQ1995/deepseek-code/releases/download/$TUI_RELEASE/dscode-linux-x86_64"
+    # SHA-256 pin for THIS release; update the pin whenever TUI_RELEASE bumps.
+    case "$TUI_RELEASE" in
+      v0.0.3) expected_sha256='d2f58a637a707672f83dfed2487b3c6f259ce1a9c789ea4d68e65b5906725c16' ;;
+      *) expected_sha256='' ;;
+    esac
+    actual_sha256="$(sha256sum "$ROOT/third_party/grok-build/target/release/dscode" | cut -d' ' -f1)"
+    if [[ -n "$expected_sha256" && "$actual_sha256" != "$expected_sha256" ]]; then
+      rm -f "$ROOT/third_party/grok-build/target/release/dscode"
+      echo "error: downloaded dscode failed its SHA-256 check (got $actual_sha256)" >&2
+      exit 1
+    fi
     chmod +x "$ROOT/third_party/grok-build/target/release/dscode"
   fi
 else
@@ -83,7 +94,21 @@ fi
 # dsh is reachable on PATH (the official CLI usually owns that name); a foreign
 # regular file is left alone.
 mkdir -p "$HOME/.local/bin"
-ln -sf "$ROOT/third_party/grok-build/target/release/dscode" "$HOME/.local/bin/dscode"
+dscode_link="$HOME/.local/bin/dscode"
+if [[ -e "$dscode_link" && ! -L "$dscode_link" ]]; then
+  echo "  warning: $dscode_link exists and is not a symlink; leaving it alone" >&2
+elif [[ -L "$dscode_link" ]]; then
+  target="$(readlink "$dscode_link" 2>/dev/null || true)"
+  if [[ "$target" == "$ROOT/third_party/grok-build/target/release/dscode" ]]; then
+    ln -sf "$ROOT/third_party/grok-build/target/release/dscode" "$dscode_link"
+    echo "  linked dscode"
+  else
+    echo "  warning: $dscode_link points elsewhere ($target); leaving it alone" >&2
+  fi
+else
+  ln -sf "$ROOT/third_party/grok-build/target/release/dscode" "$dscode_link"
+  echo "  linked dscode"
+fi
 if dsh --version >/dev/null 2>&1; then
   echo "  dsh already reachable on PATH; leaving it in place"
 elif [[ -e "$HOME/.local/bin/dsh" && ! -L "$HOME/.local/bin/dsh" ]]; then
