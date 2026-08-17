@@ -12,7 +12,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The prebuilt TUI is unchanged by harness migrations, so it keeps its own
 # release tag rather than tracking the repo release.
-TUI_RELEASE="${DEEPSEEK_CODE_TUI_RELEASE:-v0.0.2}"
+TUI_RELEASE="${DEEPSEEK_CODE_TUI_RELEASE:-v0.0.3}"
 
 echo "deepseek-code installer"
 echo "  repo: $ROOT"
