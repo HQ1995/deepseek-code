@@ -1033,15 +1033,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     id: string,
     p: Record<string, unknown>,
   ): Promise<Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>> => {
-    const discovery = llm?.discoverModels
-    if (discovery === undefined) {
+    // Method call, not a detached const: the llm service method reads
+    // this.discoveries (a detached reference would lose the receiver).
+    if (llm === undefined || llm.discoverModels === undefined) {
       throw internalError('cannot add provider "' + id + '": the installed catalog does not describe it and no model discovery is configured')
     }
     const apiKeyEnv = typeof p.apiKeyEnv === 'string' ? p.apiKeyEnv : undefined
     const apiKey = apiKeyEnv === undefined ? undefined : process.env[apiKeyEnv]
     let models
     try {
-      models = await discovery(PROVIDER_SETTINGS_NS, {
+      models = await llm.discoverModels(PROVIDER_SETTINGS_NS, {
         provider: id,
         ...typeof p.api === 'string' ? { api: p.api } : {},
         ...typeof p.baseURL === 'string' ? { baseURL: p.baseURL } : {},
