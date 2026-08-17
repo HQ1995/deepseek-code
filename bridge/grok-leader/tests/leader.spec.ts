@@ -552,6 +552,50 @@ describe('grok leader over a unix socket', () => {
     expect(echoIndex).toBeGreaterThan(promoIndex)
   })
 
+  it('settle emits prompt_complete, the promotion broadcast + echo, and the response LAST (grok wire order)', async () => {
+    // Auto idle: the promotion microtask beats the RPC response write, pinning
+    // the live/grok order — the TUI's stashed-adoption rail depends on it.
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    await waitForId(c, 2)
+    await waitForId(c, 3)
+
+    const idx = (predicate: (m: Record<string, unknown>) => boolean): number => {
+      const i = c.all.findIndex(predicate)
+      expect(i).toBeGreaterThanOrEqual(0)
+      return i
+    }
+    const completeOf = (promptId: string): number => idx(m => m.method === 'x.ai/session/prompt_complete' && (m.params as { promptId?: string }).promptId === promptId)
+    const responseOf = (id: number): number => idx(m => m.id === id && m.method === undefined)
+    const promotionOf = (text: string): number => idx(m => m.method === 'x.ai/queue/changed' && (m.params as { entries?: unknown[] }).entries?.length === 0 && (m.params as { runningText?: string }).runningText === text)
+    const echoOf = (text: string): number => idx(m => m.method === 'session/update' && (m.params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } }).update?.content?.text === text)
+
+    const firstId = (c.all.find(m => m.method === 'x.ai/queue/changed' && (m.params as { runningText?: string }).runningText === 'first')!.params as { runningPromptId: string }).runningPromptId
+    const secondId = (c.all.find(m => m.method === 'x.ai/queue/changed' && (m.params as { entries?: unknown[] }).entries?.length === 1)!.params as { entries: Array<{ id: string }> }).entries[0]!.id
+
+    const complete1 = completeOf(firstId)
+    const response1 = responseOf(2)
+    const promotion = promotionOf('second')
+    const echo = echoOf('second')
+    expect(complete1).toBeLessThan(response1)
+    // The promotion broadcast adopts the next turn before its echo streams.
+    expect(promotion).toBeLessThan(echo)
+    // ...and the whole promotion rides out BEFORE the settling prompt's
+    // JSON-RPC response (the response is last, as the TUI expects).
+    expect(echo).toBeLessThan(response1)
+    expect(complete1).toBeLessThan(promotion)
+    // The promoted row ran its own turn (a terminal exists for its id).
+    const complete2 = completeOf(secondId)
+    expect(complete2).toBeGreaterThanOrEqual(0)
+  })
+
   it('interject cancels the running turn (send-now) and promotes the row next', async () => {
     const { registry, client: c } = await start({ manualIdle: true })
     register(c)
@@ -619,11 +663,12 @@ describe('grok leader over a unix socket', () => {
 
     // The edited text is what the row runs once it promotes.
     agent.internals.idleWaiters.shift()!()
-    await waitFor(() => agent.internals.idleWaiters.length === 1)
-    agent.internals.idleWaiters.shift()!()
-    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    // Two promotion waiters now: the edit's own advance and the settle path's.
+    await waitFor(() => agent.internals.idleWaiters.length === 2)
+    agent.internals.idleWaiters.shift()!() // edit-triggered advance: runs the edited row
     await waitFor(() => agent.internals.followups.includes('edited second'))
-    agent.internals.idleWaiters.shift()!()
+    agent.internals.idleWaiters.shift()!() // settle-triggered advance: no-op while the row runs
+    agent.internals.idleWaiters.shift()!() // settle the promoted row
     expect((await waitForId(c, 2)).result).toEqual({ stopReason: 'cancelled' })
     expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
   })
@@ -653,8 +698,13 @@ describe('grok leader over a unix socket', () => {
 
     // Releasing the hold unblocks the parked row.
     c.notify('x.ai/queue/release_edit', { sessionId, id: secondId })
+    // The settle-triggered promotion fires before the release reaches the
+    // leader (microtask vs socket read): the front is still held, so it parks.
+    agent.internals.idleWaiters.shift()!()
+    // The release now registered its own idle-gated promotion; fire it.
+    await waitFor(() => agent.internals.idleWaiters.length >= 1)
+    agent.internals.idleWaiters.shift()!()
     await waitFor(() => agent.internals.followups.includes('second'))
-    agent.internals.idleWaiters.shift()!() // idle-triggered advance: no-op while second runs
     agent.internals.idleWaiters.shift()!() // settle the promoted second
     expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
   })

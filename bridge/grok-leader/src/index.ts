@@ -1157,19 +1157,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       // Promote only once the agent is truly idle: the harness discards a
       // followup admitted from inside the turn/end event handler (its loop
       // has not finished the turn yet), which settled the queued prompt as
-      // cancelled without a turn. The RPC response still goes out first; the
-      // pager's PromptResponse handler then runs the stashed adoption when
-      // the promotion broadcast and echo arrive after this idle gate.
-      void record.agent.whenIdle().then(() => {
-        // Invariant: this callback runs long after the prompt settled; only
-        // promote when this record still owns its session and the bridge is
-        // open. A closed/reloaded/re-parented session must not resurrect its
-        // queued prompts through a stale agent reference.
-        if (closed || sessions.get(record.agent.session.id) !== record) return
-        advancePromptQueue(record)
-      }, (error: unknown) => {
-        logger.warn('grok-leader: idle wait failed for ' + String(record.agent.session.id) + ': ' + errorChain(error))
-      })
+      // cancelled without a turn.
+      advanceWhenIdle(record)
     } else {
       broadcastQueueChanged(record)
     }
@@ -1207,6 +1196,23 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const entry = record.promptQueue.shift()!
     const runText = entry.combinedTexts === undefined ? entry.text : entry.combinedTexts.join('\n\n')
     void runPrompt(record, entry.id, runText, entry.combinedTexts).then(entry.resolve, entry.reject)
+  }
+
+  /** Promote the next queued prompt once the agent reports idle.
+   *
+   * The idle gate is load-bearing: the harness discards a followup admitted
+   * from inside its turn/end event handler, so a promotion must wait for the
+   * next idle signal. The live-record guard mirrors the settle path: a closed,
+   * reloaded, or re-parented session must not resurrect queued prompts through
+   * a stale agent reference. Every promotion (settle or queue-mutation) routes
+   * through here so no path can bypass the gate. */
+  const advanceWhenIdle = (record: SessionRecord): void => {
+    void record.agent.whenIdle().then(() => {
+      if (closed || sessions.get(record.agent.session.id) !== record) return
+      advancePromptQueue(record)
+    }, (error: unknown) => {
+      logger.warn('grok-leader: idle wait failed for ' + String(record.agent.session.id) + ': ' + errorChain(error))
+    })
   }
 
   /** Settle every queued (not-yet-run) prompt as cancelled (cancel/close/teardown). */
@@ -1888,6 +1894,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const located = queueEntry(record, p.id)
         if (located === undefined || located.entry.version !== expectedVersion) {
           if (typeof p.id === 'string') record.editHolds.delete(p.id)
+          advanceWhenIdle(record)
           queueMutate(record)
           advancePromptQueue(record)
           return
@@ -1907,7 +1914,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           record.agent.cancel({ kind: 'user' })
           settlePrompt(record, 'cancelled')
         } else {
-          advancePromptQueue(record)
+          advanceWhenIdle(record)
         }
         queueMutate(record)
         return
@@ -1922,6 +1929,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         if (located !== undefined && located.entry.version !== expectedVersion) {
           // Stale version: leave the row untouched and resync the client.
           record.editHolds.delete(located.entry.id)
+          advanceWhenIdle(record)
           queueMutate(record)
           advancePromptQueue(record)
           return
@@ -1940,6 +1948,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           settlePrompt(record, 'cancelled')
           record.editHolds.delete(String(p.id))
         }
+        advanceWhenIdle(record)
         queueMutate(record)
         return
       }
@@ -1950,26 +1959,24 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         if (record === undefined) return
         const located = queueEntry(record, p.id)
         if (located === undefined) return
-        // The TUI sends no version for edit (grok edits LWW); honor one when a
-        // client pins it: a stale version no-ops + resyncs like remove/interject.
-        if (typeof p.expectedVersion === 'number' && located.entry.version !== p.expectedVersion) {
-          queueMutate(record)
-          return
-        }
         // Every path drops the hold (grok handle_edit_queued_prompt): a stale
         // or blank edit must not leave promotion parked.
         record.editHolds.delete(located.entry.id)
-        if (typeof p.newText !== 'string' || p.newText.trim().length === 0) {
-          // A blank edit is still a release of the edit hold; do not leave a
-          // now-unblocked front parked.
-          advancePromptQueue(record)
+        // The TUI sends no version for edit (grok edits LWW); honor one when a
+        // client pins it: a stale version no-ops + resyncs like remove/interject.
+        if (typeof p.expectedVersion === 'number' && located.entry.version !== p.expectedVersion) {
+          advanceWhenIdle(record)
+          queueMutate(record)
           return
         }
-        located.entry.text = p.newText
-        located.entry.combinedTexts = undefined
-        located.entry.version = located.entry.version + 1
+        if (typeof p.newText === 'string' && p.newText.trim().length > 0) {
+          located.entry.text = p.newText
+          located.entry.combinedTexts = undefined
+          located.entry.version = located.entry.version + 1
+        }
+        advanceWhenIdle(record)
+
         queueMutate(record)
-        advancePromptQueue(record)
         return
       }
       case 'x.ai/queue/hold_edit': {
@@ -1987,7 +1994,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         if (record === undefined) return
         if (typeof p.id !== 'string' || !record.editHolds.delete(p.id)) return
         // Unblocks a front parked under edit hold (grok SessionCommand::ReleaseEdit).
-        advancePromptQueue(record)
+        advanceWhenIdle(record)
         return
       }
       case 'x.ai/queue/reorder': {
@@ -1996,6 +2003,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const record = queueRecord(p)
         if (record === undefined) return
         const orderedIds = Array.isArray(p.orderedIds) ? p.orderedIds.filter((id): id is string => typeof id === 'string') : []
+        let changed = false
         if (orderedIds.length > 0) {
           const byId = new Map(record.promptQueue.map(entry => [entry.id, entry]))
           const next: typeof record.promptQueue = []
@@ -2006,8 +2014,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
             byId.delete(id)
           }
           for (const entry of record.promptQueue) if (byId.has(entry.id)) next.push(entry)
+          changed = next.length === record.promptQueue.length
+            && next.some((entry, index) => entry !== record.promptQueue[index])
           record.promptQueue.splice(0, record.promptQueue.length, ...next)
         }
+        if (changed) advanceWhenIdle(record)
         queueMutate(record)
         // Reordering can move a held front out of the lead; unblock the new front.
         advancePromptQueue(record)
