@@ -4,7 +4,7 @@
  * (tests/fixtures/grok-tui-messages.jsonl, docs/grok-tui-connect.md).
  */
 import { randomUUID } from 'node:crypto'
-import { statSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { createConnection, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
@@ -18,6 +18,9 @@ import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { encodeJsonFrame, FrameDecoder } from '../src/codec.ts'
 import * as GrokLeader from '../src/index.ts'
+
+/** The package version the initialize response must advertise (drift guard). */
+const packageVersion = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
 
 interface MockAgentInternals {
   cancelCalls: number
@@ -400,6 +403,18 @@ describe('grok leader over a unix socket', () => {
     expect(registry.created).toHaveLength(0)
   })
 
+  it('advertises the package.json version in agentInfo', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const initialize = await c.request(0, 'initialize', { protocolVersion: 1, clientCapabilities: {} })
+    // Drift guard: the hardcoded agentInfo.version must track package.json.
+    expect((initialize.result as { agentInfo: { name: string; version: string } }).agentInfo).toEqual({
+      name: 'deepseek-harness-grok-leader',
+      version: packageVersion,
+    })
+  })
+
   it('runs the session flow: new, prompt, cancel, models, list, load, close', async () => {
     const { registry, persistence, client: c } = await start()
     register(c)
@@ -737,6 +752,44 @@ describe('grok leader over a unix socket', () => {
     expect(imagePrompt.error).toEqual({ code: -32602, message: 'only text and resource_link prompt content is supported' })
   })
 
+  it('session/new rejects any non-empty or non-array mcpServers value', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    // Objects, strings, and any other non-array type reject outright instead
+    // of being silently ignored; non-empty arrays keep their own error.
+    expect((await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: { name: 'fs' } })).error).toEqual({ code: -32602, message: 'mcpServers must be an array' })
+    expect((await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: 'fs' })).error).toEqual({ code: -32602, message: 'mcpServers must be an array' })
+    expect((await c.request(3, 'session/new', { cwd: process.cwd(), mcpServers: 7 })).error).toEqual({ code: -32602, message: 'mcpServers must be an array' })
+    expect((await c.request(4, 'session/new', { cwd: process.cwd(), mcpServers: [{}] })).error).toEqual({ code: -32602, message: 'mcpServers is not supported' })
+  })
+
+  it('session/load validates cwd and mcpServers like session/new', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const badCwd = await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: 'relative', mcpServers: [] })
+    expect(badCwd.error).toEqual({ code: -32602, message: 'cwd must be an absolute path: relative' })
+    const badMcp = await c.request(2, 'session/load', { sessionId: 'persisted-session', cwd: process.cwd(), mcpServers: { name: 'fs' } })
+    expect(badMcp.error).toEqual({ code: -32602, message: 'mcpServers must be an array' })
+    const loaded = await c.request(3, 'session/load', { sessionId: 'persisted-session', cwd: process.cwd(), mcpServers: [] })
+    expect(loaded.error).toBeUndefined()
+    expect(loaded.result).toEqual({})
+  })
+
+  it('session/set_model rejects a modelId outside the catalog without persisting', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    mockDefaultModel.saved.length = 0
+    const bad = await c.request(2, 'session/set_model', { sessionId, modelId: 'no-such-model' })
+    expect(bad.error).toEqual({ code: -32602, message: 'modelId is not in the catalog: no-such-model' })
+    // The unresolvable selection was never persisted as the default.
+    expect(mockDefaultModel.saved).toEqual([])
+  })
+
   it('rejects a session/new that pins an already-live session id', async () => {
     const { client: c } = await start()
     register(c)
@@ -794,6 +847,70 @@ describe('grok leader over a unix socket', () => {
     expect(agent.internals.cancelCalls).toBe(0)
     expect(registry.byId.has(sessionId)).toBe(true)
     other.socket.destroy()
+  })
+
+  it('a second live client cannot load the first client live session', async () => {
+    const { registry, client: c, socketPath } = await start()
+    register(c)
+    await c.next()
+    const other = await makeClient(socketPath)
+    register(other)
+    await other.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    // A live foreign owner is never displaced; the id reads as unknown so the
+    // session's existence does not leak.
+    const stolen = await other.request(2, 'session/load', { sessionId, cwd: process.cwd(), mcpServers: [] })
+    expect(stolen.error).toEqual({ code: -32602, message: 'unknown session: ' + sessionId })
+    expect(agent.internals.disposed).toBe(false)
+    expect(registry.byId.get(sessionId)).toBe(agent)
+    expect(mockSessionsStore.flushed).not.toContain(agent.session)
+    other.socket.destroy()
+  })
+
+  it('a reconnecting client re-loads its session after the first socket is gone', async () => {
+    const { registry, client: c, socketPath } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const first = registry.byId.get(sessionId)!
+
+    // TUI reconnect: the first socket dies and the respawned client registers
+    // under a NEW clientId before re-loading its session.
+    c.socket.destroy()
+    await waitFor(() => first.internals.disposed === true)
+    const again = await makeClient(socketPath)
+    register(again)
+    await again.next()
+    const loaded = await again.request(2, 'session/load', { sessionId, cwd: process.cwd(), mcpServers: [] })
+    expect(loaded.error).toBeUndefined()
+    expect(loaded.result).toEqual({})
+    expect(registry.resumed.map(entry => entry.sessionId)).toContain(sessionId)
+    again.socket.destroy()
+  })
+
+  it('session/load rejects the old owner pending permission before the reload', async () => {
+    const { registry, pluginCtx, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const waterfall = pluginCtx.waterfall as unknown as (name: string, ...args: unknown[]) => unknown
+    const decision = waterfall('approval/request', { agent, callId: 'tool-1', toolName: 'bash' }, async () => 'rejected' as const) as Promise<string>
+    await waitFor(() => c.all.some(msg => msg.method === 'session/request_permission'))
+
+    // waitForId, not request: the pending permission reverse request (its own
+    // JSON-RPC id) interleaves with the load response.
+    sendRequest(c, 2, 'session/load', { sessionId, cwd: process.cwd(), mcpServers: [] })
+    const loaded = await waitForId(c, 2)
+    expect(loaded.error).toBeUndefined()
+    // The old owner's outstanding permission roundtrip is rejected by the reload.
+    await expect(decision).resolves.toBe('rejected')
   })
 
   it('chmods the socket 0600 once listening', async () => {
@@ -1497,6 +1614,41 @@ describe('leader lifecycle', () => {
     await waitFor(() => mockAppExit.calls.length === 1)
     expect(mockAppExit.calls[0]).toBe(0)
     await made.ctx.fiber.dispose()
+  })
+
+  it('waits for the in-flight teardown flush before the idle exit', async () => {
+    mockAppExit.calls.length = 0
+    mockSessionsStore.flushed.length = 0
+    const made = await makeHarness({ idleExitMs: 5 })
+    const c = await makeClient(made.socketPath)
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = made.registry.byId.get(sessionId)!
+    // Slow the session-store flush: the exit must not beat it.
+    const originalFlush = mockSessionsStore.flush
+    let releaseFlush: () => void = () => {}
+    const flushGate = new Promise<void>((resolveFlush) => { releaseFlush = resolveFlush })
+    mockSessionsStore.flush = async (session: object) => {
+      mockSessionsStore.flushed.push(session)
+      await flushGate
+      return true
+    }
+    try {
+      c.socket.destroy()
+      await waitFor(() => mockSessionsStore.flushed.length === 1)
+      // Long past idleExitMs: the slow flush must hold the exit open.
+      await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 30) })
+      expect(mockAppExit.calls).toEqual([])
+      releaseFlush()
+      await waitFor(() => mockAppExit.calls.length === 1)
+      expect(mockAppExit.calls[0]).toBe(0)
+      expect(agent?.internals.disposed).toBe(true)
+    } finally {
+      mockSessionsStore.flush = originalFlush
+      await made.ctx.fiber.dispose()
+    }
   })
 })
 

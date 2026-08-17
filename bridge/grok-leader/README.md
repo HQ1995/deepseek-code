@@ -8,7 +8,7 @@ This package is a transport adapter, not a UI integration. Interactive rendering
 
 ## Plugin
 
-apply(ctx, config) binds a node:net unix socket, answers the registration handshake, and drives ctx.agents plus the optional sessionPersistence, userQuestions, agentDefaultModel, agentPresets, and sessions services through structural reads. The socket file is removed on disposal; a stale socket file from a crashed leader is unlinked once on EADDRINUSE.
+apply(ctx, config) binds a node:net unix socket, answers the registration handshake, and drives ctx.agents plus the optional sessionPersistence, userQuestions, agentDefaultModel, agentPresets, and sessions services through structural reads. The socket file is unlinked on disposal, but the bridge never unlinks on EADDRINUSE: it fails loud instead of orphaning a live leader. The launcher owns the path and removes stale files before spawning the leader.
 
 The package doubles as the deepseek-leader profile bundle: cordis.patch.yml mounts the server over dsh-base, disables HMR, and inserts the agent-presets roster (default: standard) exactly like the web profile. apps/cli profile-boot patches in the shipped preset root (apps/cli/config/agent-presets) for any composition whose rows include agent-presets.
 
@@ -27,13 +27,13 @@ The package doubles as the deepseek-leader profile bundle: cordis.patch.yml moun
 | ping / pong | Keepalive pair exchanged every 30 s. |
 | initialize | Advertises protocol version 1 and the xai.api_key auth method (the pager fails closed on an empty list), plus the flattened model catalog in _meta.modelState. |
 | authenticate | No-op because the server advertises no authentication methods. |
-| session/new | Creates a fresh agent with an absolute cwd; empty mcpServers are accepted, non-empty values reject. _meta.sessionId pins the session id and _meta.yoloMode marks the session for pre-approved permission requests. _meta.agentProfile (a string preset id) or the dsh-native _meta.agentPreset resolves through the preset roster and is recorded as meta.agentPreset; absent either, the roster default composes. Inline JSON agent definitions reject. |
+| session/new | Creates a fresh agent with an absolute cwd; mcpServers must be an empty array (any non-array or non-empty value rejects). _meta.sessionId pins the session id and _meta.yoloMode marks the session for pre-approved permission requests. _meta.agentProfile (a string preset id) or the dsh-native _meta.agentPreset resolves through the preset roster and is recorded as meta.agentPreset; absent either, the roster default composes. Inline JSON agent definitions reject. |
 | session/prompt | Flattens text and resource-link blocks, permits one in-flight request per session, echoes a user_message_chunk for the accepted prompt, then settles at the correlated turn end with the grok stopReason vocabulary; a turnless admission settles cancelled. |
 | session/cancel | Cancels the addressed agent and settles its pending prompt as cancelled; unknown ids are no-ops. |
 | session/update | Streams user_message_chunk, agent_message_chunk, agent_thought_chunk, tool_call, and tool_call_update notifications with per-session eventSeq and promptId stamps. |
-| session/load | Resumes the persisted session and replays its transcript as isReplay updates before responding. The preset recorded on the persisted header recomposes; a header that predates presets falls back to the TUI's agentProfile, then the roster default. |
+| session/load | Validates cwd/mcpServers like session/new, then resumes the persisted session and replays its transcript as isReplay updates before responding. Only the owning client may load a live session; a foreign live owner reads as an unknown session, and a reconnecting client re-attaches once its previous socket is gone. The preset recorded on the persisted header recomposes; a header that predates presets falls back to the TUI's agentProfile, then the roster default. |
 | session/list | Lists persisted session headers. |
-| session/set_model | Switches the live selection and saves the default through agentDefaultModel; the provider comes from the catalog's modelId-to-provider mapping, then the agent's own route. |
+| session/set_model | Switches the live selection and saves the default through agentDefaultModel; the provider comes from the catalog's modelId-to-provider mapping, then the agent's own route. A modelId outside the catalog rejects instead of persisting an unresolvable selection. |
 | session/close | Cancels, flushes through ctx.sessions, and disposes the session. |
 | session/request_permission | Offers one-shot allow/reject choices for bridge-owned approval requests; YOLO sessions pre-approve without a roundtrip. |
 | x.ai/models/list | Returns the provider catalog as grok SessionModelState. |
@@ -55,7 +55,7 @@ Client disconnect and Cordis disposal share the per-client teardown: owned agent
 
 ## Running
 
-Compose the plugin into a cordis.yml alongside the agent loop, LLM adapters, and session persistence (the same composition dsh-acp requires), then launch the grok TUI against the socket with --leader --leader-socket <socketPath> --sandbox off --no-auto-update. No bundled launcher exists yet; see the Known Limitations section.
+The dscode binary bootstraps the leader directly: it resolves dsh (DSH_BIN env, dsh on PATH, then npx --yes @deepseek-ai/dsh), spawns dsh --profile deepseek-leader bound to the socket, removes any stale socket file first, waits for the socket, and attaches through the normal --leader path (third_party/grok-build/crates/codegen/xai-grok-pager/src/dsh_leader.rs). The same composition underneath is the agent loop, LLM adapters, session persistence, and this plugin in the deepseek-leader profile.
 
 ## Model Experience
 

@@ -63,6 +63,6 @@ the full transcript and continues. On exit the TUI prints the resume command.
 
 ## Architecture
 
-See docs/deepseek-build.md and docs/grok-leader-protocol.md. Harness upgrades
-flow as a plain merge of upstream; the compatibility contract is
+See docs/upgrade-strategy.md and docs/grok-leader-protocol.md. Harness
+upgrades flow as a plain merge of upstream; the compatibility contract is
 docs/harness-updates.md.
