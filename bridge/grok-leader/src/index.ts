@@ -461,6 +461,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     sourceSeq: number | undefined,
     item: GrokSessionUpdate & { totalTokens?: number },
     isReplay: boolean,
+    agentTimestampMs?: number,
   ): void => {
     if (sourceSeq !== undefined) {
       if (sourceSeq <= record.lastSeq) return
@@ -478,7 +479,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         ...inflight === undefined ? {} : { promptId: inflight.promptId },
         ...isReplay ? { isReplay: true } : {},
         ...totalTokens === undefined ? {} : { totalTokens },
-        ...record.turnStartMs === undefined ? {} : { turnStartMs: record.turnStartMs },
+        ...agentTimestampMs === undefined ? {} : { agentTimestampMs },
+        ...record.turnStartMs === undefined ? {} : { streamStartMs: record.turnStartMs, turnStartMs: record.turnStartMs },
       },
     })
   }
@@ -547,7 +549,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         record.turnStartMs = event.time
       }
       for (const item of mapEvent(record, event, false)) {
-        emitUpdate(conn, record, event.seq, item, false)
+        emitUpdate(conn, record, event.seq, item, false, event.time)
       }
     } finally {
       const inflight = record.inflight
@@ -966,7 +968,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         emitUpdate(conn, record, undefined, {
           sessionUpdate: 'user_message_chunk',
           content: { type: 'text', text },
-        }, false)
+        }, false, Date.now())
       }
       void record.agent.whenIdle().then(() => {
         if (record.inflight !== inflight) return
@@ -1151,7 +1153,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (conn !== undefined) {
       for (const event of inspection.events) {
         for (const item of mapEvent(record, event, true)) {
-          emitUpdate(conn, record, event.seq, item, true)
+          emitUpdate(conn, record, event.seq, item, true, event.time)
         }
       }
     }
