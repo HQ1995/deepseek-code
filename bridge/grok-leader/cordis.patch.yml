@@ -74,6 +74,10 @@
         default: minimal
 
 - insert:
+    - id: cordis-host-runner
+      name: '@deepseek-ai/dsh-cordis-host-runner'
+
+- insert:
     - id: grok-leader
       name: '@deepseek-ai/dsh-grok-leader'
       config:
