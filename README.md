@@ -36,8 +36,9 @@ dscode "run tests"    # with a first prompt
 ```
 
 TUI local state lives under `$DSC_HOME` (default `~/.dsh/dsc-tui`);
-set `DSC_HOME` to relocate it. `~/.grok` is never touched, so a real
-grok-build install can coexist on the same machine.
+set `DSC_HOME` to relocate it. `~/.grok` is never touched and a
+`GROK_HOME` in the environment is ignored, so a real grok-build install can
+coexist on the same machine.
 
 Keys: `Enter` send · `/preset` pick preset (session reloads instantly) ·
 `Ctrl+S` resume · `/model` pick provider/model · `Ctrl+Q` quit.
