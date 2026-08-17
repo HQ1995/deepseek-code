@@ -547,10 +547,12 @@ fn show_usage_schedules_session_fetch_only() {
     )));
 
     app.usage_visible = false;
-    assert!(is_session_usage_fetch(&dispatch(
-        Action::ShowUsage,
-        &mut app
-    )));
+    // No billing surface (dscode): the bridge has no x.ai/session/usage RPC,
+    // so /usage shows the session/info context breakdown instead.
+    assert!(matches!(
+        dispatch(Action::ShowUsage, &mut app).as_slice(),
+        [Effect::ShowContextInfo { .. }]
+    ));
 }
 
 #[test]
@@ -1046,7 +1048,7 @@ fn free_usage_upsell_shows_three_options_with_exact_labels() {
         ),
         (
             "Upgrade to SuperGrok Heavy",
-            "Get the most out of Grok Build. Highest usage limits.",
+            "Get the most out of Deepseek Code. Highest usage limits.",
             Some(UPSELL_URL_UPGRADE),
         ),
     ];
