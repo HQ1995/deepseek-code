@@ -41,7 +41,9 @@ The package doubles as the deepseek-leader profile bundle: cordis.patch.yml moun
 | x.ai/providers/remove | Unsets one provider route through the settings seam; refuses the provider that owns the current model. Returns the refreshed roster. |
 | x.ai/session/list | Session-picker and dashboard list over persisted headers (cwd/query/limit filters, firstPrompt backfill cached per process, rows tagged chat-kind so the TUI bypasses its local-store gate and loads via session/load). |
 | x.ai/queue/changed | Broadcast on every queue mutation: pending rows (id, version, kind, text, position) plus the running prompt (runningPromptId/runningText/runningKind). The TUI adopts current_prompt_id from this. |
-| x.ai/queue/interject, /remove, /reorder, /clear | Queue edit notifications: promote with optional text edit, remove (running row falls back to cancel), reorder by orderedIds, and clear. |
+| x.ai/queue/interject, /remove, /reorder, /clear | Queue edit notifications. interject is grok send-now: the row jumps to front, the running turn is cancelled (prompt_complete carries cancelTrigger=send_now) and the row runs next. remove (running row falls back to cancel), reorder by orderedIds, clear. |
+| x.ai/session/prompt_complete | Terminal signal per settled turn (stopReason, promptId, optional cancelTrigger/cancellationCategory); emitted before the queue broadcast so the pager finalizes and reconciles the turn. |
+| combine | grok ui.combine_queued_prompts parity: with 2+ plain queued prompts, followers fold into the front (text joined with blank lines, runningCombinedTexts broadcast, followers settle cancelled). Config combineQueuedPrompts or env DEEPSEEK_LEADER_COMBINE_QUEUED=1; default off. |
 | other methods | Unknown requests get JSON-RPC -32601; unknown notifications are dropped with a warning. |
 
 One connection may own several sessions. Each session has an independent prompt slot, workspace, cancellation path, model selection, and disposer; a disconnected client releases exactly its own sessions.

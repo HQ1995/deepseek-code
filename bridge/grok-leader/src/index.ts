@@ -39,12 +39,15 @@ export interface GrokLeaderConfig {
   provider?: string
   /** Model name for created agents. */
   model?: string
+  /** Fold 2+ plain queued prompts into one turn (grok ui.combine_queued_prompts). */
+  combineQueuedPrompts?: boolean
 }
 
 export const Config: Schema<GrokLeaderConfig> = Schema.object({
   socketPath: Schema.string().default('/tmp/dsh-grok-leader.sock'),
   provider: Schema.string(),
   model: Schema.string(),
+  combineQueuedPrompts: Schema.boolean(),
 })
 
 // Probe-verified against the real TUI: docs/grok-tui-connect.md records that
@@ -204,11 +207,17 @@ interface SessionRecord {
     id: string
     text: string
     version: number
+    /** Per-prompt display texts when combine folded followers into this row (len >= 2). */
+    combinedTexts?: string[]
   }>
   /** Queue row id of the prompt the agent is currently draining. */
   runningPromptId: string | undefined
   /** Plain text of the running prompt (queue/changed carries it; the running row is omitted from entries). */
   runningText: string | undefined
+  /** Per-prompt display texts of a combined running turn (len >= 2). */
+  runningCombinedTexts: string[] | undefined
+  /** Stamps the next prompt_complete broadcast (send_now suppresses the cancelled marker). */
+  cancelTrigger: string | undefined
   /** Monotonic per-record counter backing queue row versions. */
   nextQueueVersion: number
   inflight: {
@@ -295,6 +304,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   let clientSeq = 0
   let closed = false
   let catalog: ModelCatalog | undefined
+  // grok's ui.combine_queued_prompts (default off); env override for dev shells.
+  const combineQueued = config.combineQueuedPrompts === true || process.env.DEEPSEEK_LEADER_COMBINE_QUEUED === '1'
   /** First user prompt per session id, memoized across x.ai/session/list calls. */
   const firstPromptCache = new Map<string, string>()
   const firstUserPrompt = (events: readonly SessionEvent[]): string => {
@@ -863,6 +874,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       promptQueue: [],
       runningPromptId: undefined,
       runningText: undefined,
+      runningCombinedTexts: undefined,
+      cancelTrigger: undefined,
       nextQueueVersion: 0,
       inflight: undefined,
     }
@@ -879,6 +892,19 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       }, 50)
     }
     return { sessionId }
+  }
+
+  /** Terminal signal for one settled turn (grok x.ai/session/prompt_complete rail). */
+  const emitPromptComplete = (record: SessionRecord, id: string, stopReason: StopReasonWire): void => {
+    const conn = connections.get(record.clientId)
+    if (conn === undefined) return
+    sendNotification(conn, 'x.ai/session/prompt_complete', {
+      sessionId: record.agent.session.id,
+      promptId: id,
+      stopReason,
+      ...record.cancelTrigger === undefined ? {} : { cancelTrigger: record.cancelTrigger },
+    })
+    record.cancelTrigger = undefined
   }
 
   /** Broadcast the live queue to the pager: pending rows plus the running prompt. */
@@ -898,6 +924,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         runningPromptId: record.runningPromptId,
         runningText: record.runningText,
         runningKind: 'prompt',
+        ...record.runningCombinedTexts === undefined ? {} : { runningCombinedTexts: record.runningCombinedTexts },
       },
     })
   }
@@ -907,13 +934,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
    * end (or idle for a turnless slot). Reads the prompt content from p again
    * because the queued entry stores the raw request, not a decoded message.
    */
-  const runPrompt = async (record: SessionRecord, p: Record<string, unknown>, id: string, text: string): Promise<{ stopReason: StopReasonWire }> => {
+  const runPrompt = async (record: SessionRecord, p: Record<string, unknown>, id: string, text: string, combinedTexts?: string[]): Promise<{ stopReason: StopReasonWire }> => {
     if (agents.get(record.agent.id) !== record.agent) {
       throw internalError('prompt was not queued: the agent was disposed outside the bridge')
     }
     const message = createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
     record.runningPromptId = id
-    record.runningText = text
+    record.runningText = combinedTexts === undefined || combinedTexts[0] === undefined ? text : combinedTexts[0]
+    record.runningCombinedTexts = combinedTexts
     const stopReason = await new Promise<StopReasonWire>((resolve, reject) => {
       const inflight: NonNullable<SessionRecord['inflight']> = {
         resolve, reject, messageId: message.id, promptId: id, turn: undefined, endReason: undefined,
@@ -944,6 +972,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     })
     record.runningPromptId = undefined
     record.runningText = undefined
+    record.runningCombinedTexts = undefined
+    emitPromptComplete(record, id, stopReason)
     if (record.promptQueue.length === 0) broadcastQueueChanged(record)
     return { stopReason }
   }
@@ -951,9 +981,24 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   /** Start the next queued prompt once the in-flight one has settled. */
   const advancePromptQueue = (record: SessionRecord): void => {
     if (record.inflight !== undefined) return
-    const entry = record.promptQueue.shift()
-    if (entry === undefined) return
-    void runPrompt(record, entry.p, entry.id, entry.text).then(entry.resolve, entry.reject).finally(() => {
+    const front = record.promptQueue[0]
+    if (front === undefined) return
+    // grok combine: with 2+ queued prompts, fold the followers into the front
+    // (text joined with blank lines; followers resolve as removed). Every bridge
+    // entry is a validated text prompt, so the grok gates (images/bash/skills)
+    // are satisfied trivially. ponytail: config-gated, default off.
+    if (combineQueued && record.promptQueue.length >= 2) {
+      const segments = [front.text]
+      const followers = record.promptQueue.splice(1)
+      for (const follower of followers) {
+        segments.push(follower.text)
+        follower.resolve({ stopReason: 'cancelled' })
+      }
+      front.combinedTexts = segments
+    }
+    const entry = record.promptQueue.shift()!
+    const runText = entry.combinedTexts === undefined ? entry.text : entry.combinedTexts.join('\n\n')
+    void runPrompt(record, entry.p, entry.id, runText, entry.combinedTexts).then(entry.resolve, entry.reject).finally(() => {
       // Defer the queue pump until after the JSON-RPC response for the
       // settling prompt has been written; advancing synchronously here makes
       // the next queued prompt's user_message_chunk echo overtake the
@@ -1076,6 +1121,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       promptQueue: [],
       runningPromptId: undefined,
       runningText: undefined,
+      runningCombinedTexts: undefined,
+      cancelTrigger: undefined,
       nextQueueVersion: 0,
       inflight: undefined,
     }
@@ -1560,10 +1607,19 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const [entry] = record.promptQueue.splice(idx, 1)
         if (typeof p.newText === 'string' && p.newText.length > 0) {
           entry.text = p.newText
+          entry.combinedTexts = undefined
           entry.version = record.nextQueueVersion++
         }
         record.promptQueue.unshift(entry)
-        if (record.inflight === undefined) advancePromptQueue(record)
+        // grok send-now: cancel the running turn and run this prompt next.
+        // cancelTrigger='send_now' suppresses the pager's Turn-cancelled marker.
+        if (record.inflight !== undefined) {
+          record.cancelTrigger = 'send_now'
+          record.agent.cancel({ kind: 'user' })
+          settlePrompt(record, 'cancelled')
+        } else {
+          advancePromptQueue(record)
+        }
         queueMutate(record)
         return
       }

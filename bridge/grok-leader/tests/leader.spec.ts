@@ -182,6 +182,8 @@ interface ClientHandle {
   broadcasts: Array<Record<string, unknown>>
   /** Every parsed message in arrival order, for order-sensitive assertions. */
   all: Array<Record<string, unknown>>
+  /** x.ai/session/prompt_complete terminal signals, captured like broadcasts. */
+  completes: Array<Record<string, unknown>>
   send(msg: unknown): void
   request(id: number, method: string, params?: unknown): Promise<Record<string, unknown>>
   notify(method: string, params?: unknown): void
@@ -196,6 +198,7 @@ async function makeClient(socketPath: string): Promise<ClientHandle> {
   const decoder = new FrameDecoder()
   const queue: Record<string, unknown>[] = []
   const broadcasts: Array<Record<string, unknown>> = []
+  const completes: Array<Record<string, unknown>> = []
   const all: Array<Record<string, unknown>> = []
   const waiters: Array<(value: Record<string, unknown>) => void> = []
   socket.on('data', (chunk) => {
@@ -206,9 +209,10 @@ async function makeClient(socketPath: string): Promise<ClientHandle> {
         ? JSON.parse(raw.payload) as Record<string, unknown>
         : raw
       all.push(msg)
-      // Ambient queue broadcasts interleave with every response; capture them
-      // separately so order-sensitive assertions keep their exact messages.
+      // Ambient queue broadcasts and terminal signals interleave with every
+      // response; capture them so order-sensitive assertions stay exact.
       if (msg.method === 'x.ai/queue/changed') { broadcasts.push(msg); continue }
+      if (msg.method === 'x.ai/session/prompt_complete') { completes.push(msg); continue }
       const waiter = waiters.shift()
       if (waiter !== undefined) waiter(msg)
       else queue.push(msg)
@@ -222,6 +226,7 @@ async function makeClient(socketPath: string): Promise<ClientHandle> {
   return {
     socket,
     broadcasts,
+    completes,
     all,
     next,
     send(msg: unknown) { socket.write(encodeJsonFrame(msg)) },
@@ -280,7 +285,7 @@ async function collectIds(client: ClientHandle, ids: number[]): Promise<Map<numb
 }
 
 async function makeHarness(
-  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; settings?: unknown } = {},
+  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; settings?: unknown; combineQueuedPrompts?: boolean } = {},
 ): Promise<LeaderHarness> {
   const ctx = new Context()
   const registry = makeMockRegistry(ctx, options.manualIdle === true)
@@ -299,7 +304,7 @@ async function makeHarness(
   await ctx.plugin({
     name: 'grok-leader-test',
     inject: [...GrokLeader.inject],
-    apply: (inner: Context) => { GrokLeader.apply(inner, { socketPath, ...options.model === undefined ? {} : { model: options.model } }) },
+    apply: (inner: Context) => { GrokLeader.apply(inner, { socketPath, ...options.model === undefined ? {} : { model: options.model }, ...options.combineQueuedPrompts === undefined ? {} : { combineQueuedPrompts: options.combineQueuedPrompts } }) },
   })
   return { ctx, socketPath, registry, persistence, presets }
 }
@@ -321,7 +326,7 @@ describe('grok leader over a unix socket', () => {
   })
 
   const start = async (
-    options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string } = {},
+    options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; combineQueuedPrompts?: boolean } = {},
   ): Promise<LeaderHarness & { client: ClientHandle }> => {
     harness = await makeHarness(options)
     client = await makeClient(harness.socketPath)
@@ -473,6 +478,7 @@ describe('grok leader over a unix socket', () => {
     expect(fp.runningKind).toBe('prompt')
     const last = c.broadcasts[c.broadcasts.length - 1]!
     expect((last.params as { runningPromptId?: string }).runningPromptId).toBeUndefined()
+    expect(c.completes.some(m => (m.params as { stopReason?: string }).stopReason === 'cancelled')).toBe(true)
   })
 
   it('queues a second prompt and reports it in x.ai/queue/changed until promotion', async () => {
@@ -498,13 +504,90 @@ describe('grok leader over a unix socket', () => {
     // Release the first turn; the queue promotes and empties.
     agent.internals.idleWaiters.shift()!()
     await waitFor(() => agent.internals.followups.length === 2 && agent.internals.idleWaiters.length === 1)
-    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 0 && (b.params as { runningPromptId?: string }).runningPromptId !== undefined))
+    const secondId = hp.entries![0]!.id
+    await waitFor(() => c.broadcasts.some(b => {
+      const params = b.params as { entries?: unknown[]; runningPromptId?: string; runningText?: string }
+      return params.entries?.length === 0 && params.runningPromptId === secondId
+    }))
     // The promotion broadcast must precede the promoted prompt's echo: the
     // pager routes user_message_chunk by runningPromptId.
-    const promoIndex = c.all.findIndex(m => m.method === 'x.ai/queue/changed' && (m.params as { entries?: unknown[] }).entries?.length === 0 && (m.params as { runningPromptId?: string }).runningPromptId !== undefined)
+    const promoIndex = c.all.findIndex(m => m.method === 'x.ai/queue/changed' && (m.params as { entries?: unknown[] }).entries?.length === 0 && (m.params as { runningPromptId?: string }).runningPromptId === secondId)
     const echoIndex = c.all.findIndex(m => m.method === 'session/update' && ((m.params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } }).update?.content?.text) === 'second')
     expect(promoIndex).toBeGreaterThanOrEqual(0)
     expect(echoIndex).toBeGreaterThan(promoIndex)
+  })
+
+  it('interject cancels the running turn (send-now) and promotes the row next', async () => {
+    const { registry, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { runningText?: string }).runningText) === 'first'))
+    const firstId = (c.broadcasts.find(b => ((b.params as { runningText?: string }).runningText) === 'first')!.params as { runningPromptId: string }).runningPromptId
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 1))
+    const held = c.broadcasts[c.broadcasts.length - 1]!
+    const secondId = ((held.params as { entries: Array<{ id: string }> }).entries[0]!).id
+
+    c.notify('x.ai/queue/interject', { sessionId, id: secondId, expectedVersion: 0 })
+
+    // The first turn settles cancelled with the send_now trigger...
+    await waitFor(() => c.completes.some(m => (m.params as { cancelTrigger?: string }).cancelTrigger === 'send_now'))
+    const complete = c.completes[c.completes.length - 1]!
+    expect(complete.params).toMatchObject({ sessionId, promptId: firstId, stopReason: 'cancelled', cancelTrigger: 'send_now' })
+    expect(agent.internals.cancelCalls).toBeGreaterThanOrEqual(1)
+    for (;;) {
+      const msg = await c.next()
+      if (msg.id === 2) { expect(msg.result).toEqual({ stopReason: 'cancelled' }); break }
+    }
+
+    // ...and the interjected row runs next as its own turn.
+    await waitFor(() => agent.internals.followups.includes('second') && c.broadcasts.some(b => (b.params as { runningPromptId?: string }).runningPromptId === secondId))
+    const promoIndex = c.all.findIndex(m => m.method === 'x.ai/queue/changed' && (m.params as { runningPromptId?: string }).runningPromptId === secondId)
+    const echoIndex = c.all.findIndex(m => m.method === 'session/update' && ((m.params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } }).update?.content?.text) === 'second')
+    expect(promoIndex).toBeGreaterThanOrEqual(0)
+    expect(echoIndex).toBeGreaterThan(promoIndex)
+  })
+
+  it('combines 2+ queued plain prompts into one turn when enabled', async () => {
+    const { registry, client: c } = await start({ manualIdle: true, combineQueuedPrompts: true })
+    register(c)
+    await c.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    sendRequest(c, 4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'third' }] })
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 2))
+
+    agent.internals.idleWaiters.shift()!()
+    // Followers fold into the front: the front RUNS the combined turn (its
+    // response settles with the turn); the follower resolves as removed now.
+    await waitFor(() => agent.internals.followups.includes('second\n\nthird'))
+    expect(agent.internals.followups).toEqual(['first', 'second\n\nthird'])
+    agent.internals.idleWaiters.shift()!()
+    const settled = new Set<unknown>()
+    for (;;) {
+      const msg = await c.next()
+      if (msg.id === 3 || msg.id === 4) {
+        expect(msg.result).toEqual({ stopReason: 'cancelled' })
+        settled.add(msg.id)
+        if (settled.size === 2) break
+      }
+    }
+    const promo = c.broadcasts.find(b => (b.params as { runningText?: string }).runningText === 'second')
+    expect(promo).toBeDefined()
+    expect((promo!.params as { runningCombinedTexts?: string[] }).runningCombinedTexts).toEqual(['second', 'third'])
   })
 
   it('rejects invalid session requests with JSON-RPC errors', async () => {
