@@ -1114,13 +1114,21 @@ pub(super) fn handle_prompt_response(
         // "session failed to respond" error would detonate an unrelated
         // in-flight turn with a spurious "Turn failed" (on the
         // submitter's screen, even when another client did the edit).
+        // The Ok arm falls back to the RPC-minted id too: the bridge's
+        // settle responses carry NO promptId in their result meta, so
+        // without the fallback every healthy response resolves to None --
+        // the lost-response reconcile is never disarmed (the stale arm then
+        // blocks the next turn's prompt_complete arm) and the
+        // not-the-running-turn gate never fires (a late response finalizes
+        // whatever turn is current, emptying a freshly adopted promotion).
         let response_pid = match &result {
             Ok(pr) => pr
                 .meta
                 .as_ref()
                 .and_then(|m| m.get("promptId"))
                 .and_then(|v| v.as_str())
-                .map(str::to_string),
+                .map(str::to_string)
+                .or_else(|| prompt_id.clone()),
             Err(_) => prompt_id.clone(),
         };
         // The turn-end RPC for this prompt arrived — disarm the

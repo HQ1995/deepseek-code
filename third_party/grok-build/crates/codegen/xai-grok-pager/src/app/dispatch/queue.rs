@@ -999,7 +999,17 @@ pub(crate) fn apply_turn_start_shim(
         None
     };
 
-    agent.turn_started_at = Some(Instant::now());
+    // Back-date the elapsed anchor from the turn's authoritative wire start
+    // when an update for THIS prompt already stamped it (the promoted turn's
+    // echo + stream arrive before the deferred shim): stamping now would make
+    // the final "Worked for X" marker read ~0 in the fast-handoff case.
+    agent.turn_started_at = Some(
+        (agent.turn_start_ms_prompt.as_deref() == Some(&prompt_id))
+            .then(|| {
+                super::super::acp_handler::prompt_origin::viewer_turn_anchor(agent.turn_start_ms)
+            })
+            .unwrap_or_else(Instant::now),
+    );
 
     // After the echo-skip above; mirror the live-arm transitions the flush bypasses.
     agent.flush_pending_adoption_updates(&prompt_id);

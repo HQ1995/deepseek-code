@@ -62,6 +62,8 @@ pub(crate) fn should_adopt_running_prompt(prompt_id: &str) -> bool {
 }
 
 /// Compute the monotonic anchor a VIEWER should use as its turn-start time.
+/// The adopted-turn shim (dispatch) reuses it when the promoted turn's
+/// authoritative start already arrived in an update's meta.
 ///
 /// A viewer adopts the driver's turn mid-stream, so stamping `Instant::now()`
 /// would make its elapsed counter — and the final "Worked for X" marker
@@ -72,7 +74,7 @@ pub(crate) fn should_adopt_running_prompt(prompt_id: &str) -> bool {
 /// elapsed then matches the driver's, both live and on completion. Falls back
 /// to `now` when `turnStartMs` is absent (older shell) or the wall clock is
 /// skewed forward.
-pub(super) fn viewer_turn_anchor(turn_start_ms: Option<i64>) -> std::time::Instant {
+pub(crate) fn viewer_turn_anchor(turn_start_ms: Option<i64>) -> std::time::Instant {
     let now = std::time::Instant::now();
     let Some(start_ms) = turn_start_ms else {
         return now;

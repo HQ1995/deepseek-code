@@ -43,7 +43,7 @@ mod follow_ups;
 mod interactions;
 mod mcp;
 mod permissions;
-mod prompt_origin;
+pub(crate) mod prompt_origin;
 mod queue;
 mod routing;
 mod session_notification;

@@ -2641,3 +2641,413 @@
             "a row draining to running keeps its painted block for the adoption"
         );
     }
+
+    /// Regression (bridge settle order): the bridge emits, when a held prompt
+    /// promotes at settle: `prompt_complete(old)` -> promotion
+    /// `queue/changed(running=new)` -> the promoted prompt's `user_message_chunk`
+    /// echo (STAMPED with `promptId` -- the bridge stamps it, unlike the grok
+    /// shell's unstamped echo) -> the new turn's `agent_thought_chunk` stream ->
+    /// and the settling prompt's JSON-RPC response LAST. The pager must stash
+    /// the adoption, buffer the stamped echo + early chunks, and apply the
+    /// turn-start shim + flush when the old turn's PromptResponse clears
+    /// `current_prompt_id` -- so the promoted turn renders its user block AND
+    /// its streamed content, and its queue row is gone.
+    #[test]
+    fn bridge_settle_order_promoted_turn_renders_full_stream() {
+        use crate::app::dispatch::dispatch;
+        use crate::app::actions::{Action, Effect, TaskResult};
+
+        fn stamped_update(
+            app: &mut AppView,
+            update: acp::SessionUpdate,
+            prompt_id: &str,
+            seq: u64,
+        ) {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            // Authoritative wire turn start (2s ago): the deferred shim must
+            // back-date its elapsed anchor from this instead of now(), or a
+            // fast handoff finalizes with a bogus 0.0s marker.
+            let turn_start_ms = chrono::Utc::now().timestamp_millis() - 2000;
+            handle(
+                AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+                    request: acp::SessionNotification::new(acp::SessionId::new("sess-1"), update)
+                        .meta(
+                            serde_json::json!({
+                                "promptId": prompt_id,
+                                "eventSeq": seq,
+                                "turnStartMs": turn_start_ms,
+                            })
+                                .as_object()
+                                .cloned(),
+                        ),
+                    response_tx: tx,
+                }),
+                app,
+            );
+        }
+        fn user_block_count(app: &AppView, id: AgentId, text: &str) -> usize {
+            let agent = app.agents.get(&id).unwrap();
+            agent
+                .scrollback
+                .entries_in_range(0..agent.scrollback.len())
+                .iter()
+                .filter(|e| matches!(&e.block, RenderBlock::UserPrompt(b) if b.text == text))
+                .count()
+        }
+
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+
+        // p-old: idle submit -> drains locally, turn running.
+        let effects = dispatch(Action::SendPrompt("first".into()), &mut app);
+        let pid_old = match &effects[0] {
+            Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
+            other => panic!("expected SendPrompt, got {other:?}"),
+        };
+
+        // p-new: running submit -> immediate server send + optimistic queue row.
+        let effects = dispatch(Action::SendPrompt("second".into()), &mut app);
+        let pid_new = match &effects[0] {
+            Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
+            other => panic!("expected immediate SendPrompt, got {other:?}"),
+        };
+        assert!(
+            app.optimistic_prompt_echoes
+                .get("sess-1")
+                .is_some_and(|v| v.iter().any(|e| e.id == pid_new)),
+            "the promoted prompt starts as an optimistic queue row"
+        );
+
+        // 1. prompt_complete(old) -- the bridge emits this BEFORE the promotion.
+        assert!(handle_ext_notification(
+            &prompt_complete_ext_with_prompt_id("sess-1", &pid_old, "end_turn"),
+            &mut app,
+        ));
+        // Driver: reconcile armed, the in-flight turn is untouched.
+        assert_eq!(
+            app.agents[&id].session.current_prompt_id.as_deref(),
+            Some(pid_old.as_str()),
+            "prompt_complete must not finish the driver's turn"
+        );
+
+        // 2. Promotion broadcast: entries empty, running=new with its text.
+        assert!(handle_queue_changed(
+            &queue_changed_running_ex(
+                "sess-1",
+                &[],
+                Some(&pid_new),
+                Some("second"),
+                Some("prompt"),
+                None,
+            ),
+            &mut app,
+        ));
+        assert!(
+            app.pending_running_adoptions.contains_key(&id),
+            "the adoption must be stashed while the old turn is still finishing"
+        );
+
+        // 3. The promoted prompt's echo, STAMPED with promptId (bridge shape).
+        stamped_update(
+            &mut app,
+            acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new("second"),
+            ))),
+            &pid_new,
+            1,
+        );
+        // 4. The new turn's thought stream arrives before the old response.
+        stamped_update(
+            &mut app,
+            acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(
+                acp::ContentBlock::Text(acp::TextContent::new("thinking")),
+            )),
+            &pid_new,
+            2,
+        );
+        assert_eq!(
+            app.agents[&id].pending_adoption_updates.len(),
+            2,
+            "the stamped echo and early chunks must be buffered, not dropped"
+        );
+
+        // 5. The settling prompt's JSON-RPC response arrives LAST, carrying NO
+        // promptId in its result (bridge shape) -- only the RPC fallback id.
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::PromptResponse {
+                agent_id: id,
+                result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+                http_status: None,
+                prompt_id: Some(pid_old.clone()),
+            }),
+            &mut app,
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { .. })),
+            "the already-sent promoted prompt must not be re-sent"
+        );
+
+        // The promoted turn is adopted: user block painted exactly once, the
+        // buffered echo swallowed, the stream content applied.
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some(pid_new.as_str()),
+            "the old response must hand off to the promoted turn"
+        );
+        assert!(agent.session.state.is_turn_running());
+        assert_eq!(
+            user_block_count(&app, id, "second"),
+            1,
+            "the promoted turn's user block must render exactly once"
+        );
+        assert!(agent.pending_adoption_updates.is_empty());
+        assert!(app.pending_running_adoptions.is_empty());
+
+        // 6. Chunks after the response render live into the adopted turn.
+        stamped_update(
+            &mut app,
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                acp::ContentBlock::Text(acp::TextContent::new("the answer")),
+            )),
+            &pid_new,
+            3,
+        );
+        assert_eq!(
+            agent_message_text(app.agents.get(&id).unwrap()),
+            "the answer",
+            "the promoted turn's answer must render"
+        );
+
+        // The promoted row left the queue.
+        assert!(
+            app.shared_prompt_queue("sess-1").is_none(),
+            "the promotion broadcast empties the shared queue"
+        );
+    }
+
+    /// Chained handoffs (live history shape): turn B promotes response-FIRST
+    /// (the idle-gated order), then turn C promotes broadcast-FIRST (the racy
+    /// order). Both promoted turns must render fully and the last handoff must
+    /// not finish the freshly adopted turn with a 0.0s marker.
+    #[test]
+    fn chained_promotions_mixed_wire_orders_render_every_turn() {
+        use crate::app::dispatch::dispatch;
+        use crate::app::actions::{Action, Effect};
+
+        fn stamped(
+            app: &mut AppView,
+            update: acp::SessionUpdate,
+            prompt_id: &str,
+            seq: u64,
+        ) {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let turn_start_ms = chrono::Utc::now().timestamp_millis() - 2000;
+            handle(
+                AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+                    request: acp::SessionNotification::new(acp::SessionId::new("sess-1"), update)
+                        .meta(
+                            serde_json::json!({
+                                "promptId": prompt_id,
+                                "eventSeq": seq,
+                                "turnStartMs": turn_start_ms,
+                            })
+                                .as_object()
+                                .cloned(),
+                        ),
+                    response_tx: tx,
+                }),
+                app,
+            );
+        }
+        fn chunk(text: &str) -> acp::SessionUpdate {
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new(text),
+            )))
+        }
+        fn echo(text: &str) -> acp::SessionUpdate {
+            acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new(text),
+            )))
+        }
+        // A bridge-shape response: Ok(end_turn) with NO promptId in the result.
+        fn response(app: &mut AppView, id: AgentId, prompt_id: Option<String>) {
+            use crate::app::actions::TaskResult;
+            dispatch(
+                Action::TaskComplete(TaskResult::PromptResponse {
+                    agent_id: id,
+                    result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+                    http_status: None,
+                    prompt_id,
+                }),
+                app,
+            );
+        }
+        fn send(app: &mut AppView, text: &str) -> String {
+            let effects = dispatch(Action::SendPrompt(text.into()), app);
+            match &effects[0] {
+                Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
+                other => panic!("expected SendPrompt, got {other:?}"),
+            }
+        }
+
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+        let mut seq = 0u64;
+
+        // A runs from an idle local drain.
+        let pid_a = send(&mut app, "first");
+
+        // B immediate-sends while A runs (server queues it).
+        let pid_b = send(&mut app, "second");
+
+        // A settles: prompt_complete, then the response FIRST (idle-gated order).
+        assert!(handle_ext_notification(
+            &prompt_complete_ext_with_prompt_id("sess-1", &pid_a, "end_turn"),
+            &mut app,
+        ));
+        response(&mut app, id, Some(pid_a.clone()));
+        assert_eq!(
+            app.agents[&id].session.current_prompt_id.as_deref(),
+            None,
+            "A's response finishes A"
+        );
+
+        // B promotes AFTER the response: adopt directly, echo + stream render.
+        assert!(handle_queue_changed(
+            &queue_changed_running_ex(
+                "sess-1",
+                &[],
+                Some(&pid_b),
+                Some("second"),
+                Some("prompt"),
+                None,
+            ),
+            &mut app,
+        ));
+        assert_eq!(
+            app.agents[&id].session.current_prompt_id.as_deref(),
+            Some(pid_b.as_str()),
+            "B adopted directly after A's response"
+        );
+        seq += 1;
+        stamped(&mut app, echo("second"), &pid_b, seq);
+        seq += 1;
+        stamped(&mut app, chunk("B answer"), &pid_b, seq);
+        assert_eq!(
+            agent_message_text(app.agents.get(&id).unwrap()),
+            "B answer",
+            "B's stream renders"
+        );
+
+        // C immediate-sends while B runs.
+        let pid_c = send(&mut app, "third");
+
+        // C promotes BROADCAST-FIRST: prompt_complete(B), promotion, echo, then
+        // B's response last (the racy order the live run hit).
+        assert!(handle_ext_notification(
+            &prompt_complete_ext_with_prompt_id("sess-1", &pid_b, "end_turn"),
+            &mut app,
+        ));
+        assert_eq!(
+            app.agents[&id].session.current_prompt_id.as_deref(),
+            Some(pid_b.as_str()),
+            "B's prompt_complete must not finish the driver turn"
+        );
+        assert!(handle_queue_changed(
+            &queue_changed_running_ex(
+                "sess-1",
+                &[],
+                Some(&pid_c),
+                Some("third"),
+                Some("prompt"),
+                None,
+            ),
+            &mut app,
+        ));
+        assert!(
+            app.pending_running_adoptions.contains_key(&id),
+            "C's adoption must be stashed while B is still finishing"
+        );
+        seq += 1;
+        stamped(&mut app, echo("third"), &pid_c, seq);
+        seq += 1;
+        stamped(&mut app, chunk("C early"), &pid_c, seq);
+        assert_eq!(
+            app.agents[&id].pending_adoption_updates.len(),
+            2,
+            "C's echo + early chunk must be buffered"
+        );
+
+        // B's response arrives last.
+        response(&mut app, id, Some(pid_b.clone()));
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some(pid_c.as_str()),
+            "B's response must hand off to C"
+        );
+        assert!(agent.session.state.is_turn_running());
+        assert!(agent.pending_adoption_updates.is_empty());
+        assert_eq!(
+            agent_message_text(agent),
+            "B answerC early",
+            "C's buffered content must render"
+        );
+
+        // C's own response finishes C with a real (non-zero) elapsed marker;
+        // the response is NOT allowed to finalize the freshly adopted turn
+        // while it is still streaming.
+        seq += 1;
+        stamped(&mut app, chunk("C late"), &pid_c, seq);
+        response(&mut app, id, Some(pid_c.clone()));
+        let agent = app.agents.get(&id).unwrap();
+        assert!(agent.session.state.is_idle());
+        assert_eq!(
+            agent_message_text(agent),
+            "B answerC earlyC late",
+            "C's full stream must render before its own response"
+        );
+        let last_event = (0..agent.scrollback.len())
+            .rev()
+            .find_map(|i| match agent.scrollback.get(i).map(|e| &e.block) {
+                Some(RenderBlock::SessionEvent(b)) => Some(b.event.clone()),
+                _ => None,
+            });
+        if let Some(crate::scrollback::blocks::SessionEvent::TurnCompleted {
+            elapsed: Some(elapsed),
+        }) = last_event
+        {
+            assert!(
+                elapsed.as_millis() > 0,
+                "a promoted turn must not finalize with a 0.0s marker"
+            );
+        }
+        // A stale re-delivery of B's response after C finished must NOT push
+        // another terminal marker (the response is attributed to B, whose
+        // turn is over, so the not-the-running-turn gate discards it).
+        let markers_before = (0..app.agents[&id].scrollback.len())
+            .filter(|i| {
+                matches!(
+                    app.agents[&id].scrollback.get(*i).map(|e| &e.block),
+                    Some(RenderBlock::SessionEvent(_))
+                )
+            })
+            .count();
+        response(&mut app, id, Some(pid_b.clone()));
+        let markers_after = (0..app.agents[&id].scrollback.len())
+            .filter(|i| {
+                matches!(
+                    app.agents[&id].scrollback.get(*i).map(|e| &e.block),
+                    Some(RenderBlock::SessionEvent(_))
+                )
+            })
+            .count();
+        assert_eq!(
+            markers_before, markers_after,
+            "a stale response for an already-finished turn must be discarded"
+        );
+        assert!(app.agents[&id].session.state.is_idle());
+    }

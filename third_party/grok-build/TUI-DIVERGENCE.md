@@ -137,3 +137,18 @@ without draining, so prompts queued while the TUI's adoption/turn state lagged
 the running turn stayed stuck in the queue pane forever. The PromptResponse
 rail already drains; the idle-only / FIFO (server rows first) / editing-front
 gates are unchanged. Divergence is a strict bug fix; candidate for upstreaming.
+
+### Bridge settle responses without a wire promptId are attributed by the RPC id
+
+app/dispatch/prompt.rs handle_prompt_response now falls back to the
+RPC-minted prompt_id for Ok responses too, not only Err. The dsh bridge
+settles session/prompt with a bare stopReason result (no promptId meta),
+which left every healthy response unattributed: the lost-response reconcile
+was never disarmed (the stale arm then refused the next turn's
+prompt_complete arm) and the not-the-running-turn gate never fired (a late
+response finished whatever turn was current, emptying a freshly adopted
+promoted turn). apply_turn_start_shim also back-dates the adopted turn's
+elapsed anchor from the wire turnStartMs (via
+acp_handler::prompt_origin::viewer_turn_anchor, now pub(crate)) instead of
+stamping now(), so a fast handoff does not finalize with a bogus 0.0s
+marker. Divergence is a strict bug fix; candidate for upstreaming.
