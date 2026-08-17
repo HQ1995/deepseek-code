@@ -41,6 +41,8 @@ export interface GrokLeaderConfig {
   model?: string
   /** Fold 2+ plain queued prompts into one turn (grok ui.combine_queued_prompts). */
   combineQueuedPrompts?: boolean
+  /** Grace before the host exits after the last client disconnects (ms). */
+  idleExitMs?: number
 }
 
 export const Config: Schema<GrokLeaderConfig> = Schema.object({
@@ -48,6 +50,7 @@ export const Config: Schema<GrokLeaderConfig> = Schema.object({
   provider: Schema.string(),
   model: Schema.string(),
   combineQueuedPrompts: Schema.boolean(),
+  idleExitMs: Schema.number().default(2000),
 })
 
 // Probe-verified against the real TUI: docs/grok-tui-connect.md records that
@@ -306,6 +309,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   let catalog: ModelCatalog | undefined
   // grok's ui.combine_queued_prompts (default off); env override for dev shells.
   const combineQueued = config.combineQueuedPrompts === true || process.env.DEEPSEEK_LEADER_COMBINE_QUEUED === '1'
+  const idleExitMs = config.idleExitMs ?? 2000
   /** First user prompt per session id, memoized across x.ai/session/list calls. */
   const firstPromptCache = new Map<string, string>()
   const firstUserPrompt = (events: readonly SessionEvent[]): string => {
@@ -1787,10 +1791,41 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
+  /** Grace timer that exits the host after the last client disconnects.
+   *  dsh is a foreground CLI process, not grok's daemon: with no clients the
+   *  leader has nothing to serve, so it quiesces and asks the launcher for a
+   *  bounded exit (ctx.appExit). Sessions persist on disk and the TUI
+   *  respawns a fresh leader on the next start, so nothing is lost.
+   *  ponytail: 2s grace covers accidental reconnects; grok's 30s zombie
+   *  timer is deliberately NOT reused here. */
+  let idleExitTimer: ReturnType<typeof setTimeout> | undefined
+  const cancelIdleExit = (): void => {
+    if (idleExitTimer !== undefined) {
+      clearTimeout(idleExitTimer)
+      idleExitTimer = undefined
+    }
+  }
+  const scheduleIdleExit = (): void => {
+    cancelIdleExit()
+    if (connections.size > 0) return
+    idleExitTimer = setTimeout(() => {
+      idleExitTimer = undefined
+      void quiesce().finally(() => {
+        const exit = ctx.get('appExit') as ((code: number) => void) | undefined
+        if (exit === undefined) {
+          logger.warn('grok-leader: the host exposes no appExit; the leader will stay up with no clients')
+        } else {
+          exit(0)
+        }
+      })
+    }, idleExitMs)
+  }
+
   const teardownClient = (clientId: number): void => {
     const conn = connections.get(clientId)
     if (conn !== undefined) {
       connections.delete(clientId)
+      scheduleIdleExit()
       for (const pending of conn.pending.values()) {
         pending.reject(new Error('grok client disconnected'))
       }
@@ -1889,6 +1924,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           }
           registered = true
           connections.set(conn.clientId, conn)
+          cancelIdleExit()
           socket.setTimeout(0)
           // Probe-verified reply (docs/grok-tui-connect.md): ready plus a
           // leader_binary_version at least the client version keeps the TUI
@@ -1902,7 +1938,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
             // TODO(verify): mirror of the captured stub; control commands all
             // answer ControlResult errors until GetLeaderInfo/CpuProfileStatus
             // are implemented (protocol.rs ControlCommand).
-            leaderCapabilities: { controlV1: true, workspaceExposure: false, relaunchV1: false },
+            leaderCapabilities: { controlV1: false, workspaceExposure: false, relaunchV1: false },
           })
           break
         }
@@ -1979,6 +2015,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   })
 
   ctx.effect(() => () => {
+    cancelIdleExit()
     server.close()
     void quiesce()
     if (socketFailure?.code !== 'EADDRINUSE') {

@@ -158,6 +158,11 @@ function makeMockPresets() {
   }
 }
 
+const mockAppExit = {
+  calls: [] as number[],
+  exit: (code: number): void => { mockAppExit.calls.push(code) },
+}
+
 const mockDefaultModel = {
   saved: [] as Array<{ provider: string; model: string; reasoningEffort?: string }>,
   saveSelection: async (next: { provider: string; model: string; reasoningEffort?: string }) => {
@@ -289,7 +294,7 @@ async function collectIds(client: ClientHandle, ids: number[]): Promise<Map<numb
 }
 
 async function makeHarness(
-  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; settings?: unknown; combineQueuedPrompts?: boolean } = {},
+  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; settings?: unknown; combineQueuedPrompts?: boolean; idleExitMs?: number } = {},
 ): Promise<LeaderHarness> {
   const ctx = new Context()
   const registry = makeMockRegistry(ctx, options.manualIdle === true)
@@ -304,6 +309,7 @@ async function makeHarness(
   ctx.provide('sessions', mockSessionsStore as unknown as Context['sessions'])
   if (presets !== undefined) ctx.provide('agentPresets', presets as unknown as Context['agentPresets'])
   ctx.provide('agentDefaultModel', mockDefaultModel as unknown as Context['agentDefaultModel'])
+  ctx.provide('appExit', mockAppExit.exit)
   const socketPath = resolve(tmpdir(), 'dsh-grok-leader-' + String(process.pid) + '-' + randomUUID() + '.sock')
   let pluginCtx: Context | undefined
   await ctx.plugin({
@@ -311,7 +317,7 @@ async function makeHarness(
     inject: [...GrokLeader.inject],
     apply: (inner: Context) => {
       pluginCtx = inner
-      GrokLeader.apply(inner, { socketPath, ...options.model === undefined ? {} : { model: options.model }, ...options.combineQueuedPrompts === undefined ? {} : { combineQueuedPrompts: options.combineQueuedPrompts } })
+      GrokLeader.apply(inner, { socketPath, ...options.model === undefined ? {} : { model: options.model }, ...options.combineQueuedPrompts === undefined ? {} : { combineQueuedPrompts: options.combineQueuedPrompts }, ...options.idleExitMs === undefined ? {} : { idleExitMs: options.idleExitMs } })
     },
   })
   return { ctx, pluginCtx: pluginCtx!, socketPath, registry, persistence, presets }
@@ -334,7 +340,7 @@ describe('grok leader over a unix socket', () => {
   })
 
   const start = async (
-    options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; combineQueuedPrompts?: boolean } = {},
+    options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; combineQueuedPrompts?: boolean; idleExitMs?: number } = {},
   ): Promise<LeaderHarness & { client: ClientHandle }> => {
     harness = await makeHarness(options)
     client = await makeClient(harness.socketPath)
@@ -358,7 +364,7 @@ describe('grok leader over a unix socket', () => {
       ready: true,
       leader_protocol_version: 1,
       leader_binary_version: '1.0.4',
-      leader_capabilities: { control_v1: true, workspace_exposure: false, relaunch_v1: false },
+      leader_capabilities: { control_v1: false, workspace_exposure: false, relaunch_v1: false },
     })
 
     c.send({ type: 'ping' })
@@ -1200,6 +1206,56 @@ describe('x.ai/providers/add', () => {
     const ftp = await client.request(2, 'x.ai/providers/add', { id: 'evil-ftp', baseURL: 'ftp://evil.test/v1' })
     expect(ftp.error).toMatchObject({ code: -32602 })
     expect(settings.calls).toHaveLength(0)
+  })
+})
+
+describe('leader lifecycle', () => {
+  it('requests a host exit shortly after the last client disconnects', async () => {
+    mockAppExit.calls.length = 0
+    const made = await makeHarness({ idleExitMs: 20 })
+    const c = await makeClient(made.socketPath)
+    register(c)
+    await c.next()
+    expect(mockAppExit.calls).toEqual([])
+    c.socket.destroy()
+    await waitFor(() => mockAppExit.calls.length === 1)
+    expect(mockAppExit.calls[0]).toBe(0)
+    await made.ctx.fiber.dispose()
+  })
+
+  it('reconnecting during the grace keeps the leader alive', async () => {
+    mockAppExit.calls.length = 0
+    const made = await makeHarness({ idleExitMs: 200 })
+    const c = await makeClient(made.socketPath)
+    register(c)
+    await c.next()
+    c.socket.destroy()
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 50) })
+    const second = await makeClient(made.socketPath)
+    register(second)
+    await second.next()
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 300) })
+    expect(mockAppExit.calls).toEqual([])
+    second.socket.destroy()
+    await made.ctx.fiber.dispose()
+  })
+
+  it('keeps the leader for remaining clients and exits after the last drop', async () => {
+    mockAppExit.calls.length = 0
+    const made = await makeHarness({ idleExitMs: 20 })
+    const a = await makeClient(made.socketPath)
+    register(a)
+    await a.next()
+    const b = await makeClient(made.socketPath)
+    register(b)
+    await b.next()
+    a.socket.destroy()
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 80) })
+    expect(mockAppExit.calls).toEqual([])
+    b.socket.destroy()
+    await waitFor(() => mockAppExit.calls.length === 1)
+    expect(mockAppExit.calls[0]).toBe(0)
+    await made.ctx.fiber.dispose()
   })
 })
 
