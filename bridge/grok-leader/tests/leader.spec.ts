@@ -583,6 +583,12 @@ describe('grok leader over a unix socket', () => {
     sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
     await waitFor(() => agent!.internals.idleWaiters.length === 1)
     expect(agent!.internals.followups).toEqual(['first'])
+    // The first prompt echoes before its response; consume it so the queued
+    // prompt's echo order below is unambiguous.
+    expect(await c.next()).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'first' } } },
+    })
 
     // The second prompt must queue instead of hard-erroring while the first runs.
     sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
@@ -590,8 +596,32 @@ describe('grok leader over a unix socket', () => {
     expect(agent!.internals.followups).toEqual(['first'])
 
     agent!.internals.idleWaiters.shift()!()
-    expect((await waitForId(c, 2)).result).toEqual({ stopReason: 'cancelled' })
+    // The first prompt's JSON-RPC response must reach the client before the
+    // queued prompt starts streaming its echo; otherwise the TUI can append
+    // the second user message to the still-running first turn.
+    const isEcho = (msg: Record<string, unknown>, text: string): boolean => {
+      const params = msg.params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } } | undefined
+      return params?.update?.sessionUpdate === 'user_message_chunk'
+        && params.update.content?.type === 'text'
+        && params.update.content.text === text
+    }
+    let sawSecondEcho = false
+    for (;;) {
+      const msg = await c.next()
+      if (msg.id === 2) {
+        expect(msg.result).toEqual({ stopReason: 'cancelled' })
+        break
+      }
+      if (isEcho(msg, 'second')) sawSecondEcho = true
+    }
+    expect(sawSecondEcho).toBe(false)
+
     await waitFor(() => agent!.internals.followups.length === 2 && agent!.internals.idleWaiters.length === 1)
+    let gotSecondEcho = false
+    while (!gotSecondEcho) {
+      const msg = await c.next()
+      if (isEcho(msg, 'second')) gotSecondEcho = true
+    }
     expect(agent!.internals.followups).toEqual(['first', 'second'])
 
     agent!.internals.idleWaiters.shift()!()

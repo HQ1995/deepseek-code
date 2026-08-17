@@ -103,3 +103,7 @@ ln -sfn ../../deepseek-harness/vendor/schemastery node_modules/@deepseek-ai/sche
 ln -sfn ../../deepseek-harness/packages/core/agent node_modules/@deepseek-ai/dsh-agent
 ../../deepseek-harness/node_modules/.bin/vitest run
 ```
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

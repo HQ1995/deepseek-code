@@ -1,5 +1,11 @@
 # TUI divergence ledger
 
+Apache-2.0 change notice:
+This tree is a modified distribution of
+[xai-org/grok-build](https://github.com/xai-org/grok-build).
+The differences listed below are local modifications made for deepseek-code.
+Modified files remain under the Apache License, Version 2.0; see [LICENSE](LICENSE).
+
 Every intentional difference between this tree and upstream grok-build.
 Class: patch (generic fix, should be offered upstream) / feature (product) /
 branding (our identity). Keep this list current on every sync.
