@@ -111,3 +111,10 @@ preset, personas, and the TUI-own UI commands.
 Only the commands were removed: the announcement banner view, the voice
 engine and keybinding, the gboom game, and the share/recap/voice registry
 gates remain, so the banner CTA still advertises /announcements hide.
+
+### Thinking blocks default to truncated preview
+
+`scrollback/state/mod.rs` initializes `thinking_display_mode` to
+`DisplayMode::Truncated` (upstream: `Collapsed`) so finished thought blocks
+show the one-line reasoning preview under the duration header by default,
+matching grok's visible behavior. Ctrl+E still switches the sticky mode.

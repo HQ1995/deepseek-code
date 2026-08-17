@@ -261,7 +261,10 @@ impl ScrollbackState {
             last_width: 0,
             layout_cache: None,
             structural_scroll_anchor: None,
-            thinking_display_mode: DisplayMode::Collapsed,
+            // dscode divergence: default to Truncated so finished thought
+            // blocks show the one-line preview under the duration header
+            // (grok's collapsed-by-default hides it until the user expands).
+            thinking_display_mode: DisplayMode::Truncated,
             tick: 0,
             appearance: AppearanceConfig::default(),
             batch_depth: 0,
