@@ -4,7 +4,7 @@
 //! socket, and hands off to the normal --leader startup path.
 //!
 //! Resolution order (mirrors the old shell):
-//!   DSH_BIN env -> "dsh" on PATH -> this host's pi-node dsh -> npx on demand.
+//!   DSH_BIN env -> "dsh" on PATH -> npx on demand.
 //! The spawned leader logs to /tmp/deepseek-leader.log (DEEPSEEK_LEADER_LOG
 //! overrides); on this host it is wrapped in numactl node-1 pinning when
 //! numactl is on PATH (conditional, host policy).
@@ -22,10 +22,6 @@ pub const DSH_BIN_ENV: &str = "DSH_BIN";
 pub const DSH_LEADER_SOCKET_ENV: &str = "DEEPSEEK_LEADER_SOCKET";
 /// Leader log path env; defaults to /tmp/deepseek-leader.log.
 pub const DSH_LEADER_LOG_ENV: &str = "DEEPSEEK_LEADER_LOG";
-/// Host fallback dsh install (pi-node). Dropped cleanly elsewhere: the next
-/// candidate (npx) covers other machines.
-const HOST_DSH: &str = "/home/hanqing/.local/share/pi-node/node-v22.23.1-linux-x64/bin/dsh";
-
 /// The leader socket path: DEEPSEEK_LEADER_SOCKET or /tmp/deepseek-leader-UID.sock.
 pub fn default_leader_socket() -> PathBuf {
     if let Some(socket) = std::env::var_os(DSH_LEADER_SOCKET_ENV).filter(|v| !v.is_empty()) {
@@ -53,19 +49,15 @@ fn uid() -> u32 {
     0
 }
 
-/// Resolve the dsh argv prefix: DSH_BIN env, "dsh" on PATH, the host pi-node
-/// install, then ["npx", "--yes", "@deepseek-ai/dsh"]. The env override is
-/// authoritative (taken verbatim); spawn failures point at the leader log.
+/// Resolve the dsh argv prefix: DSH_BIN env, "dsh" on PATH, then
+/// ["npx", "--yes", "@deepseek-ai/dsh"]. The env override is authoritative
+/// (taken verbatim); spawn failures point at the leader log.
 pub fn resolve_dsh_command() -> Result<Vec<OsString>, ConnectionError> {
     if let Some(bin) = std::env::var_os(DSH_BIN_ENV).filter(|v| !v.is_empty()) {
         return Ok(vec![bin]);
     }
     if let Some(dsh) = find_in_path("dsh") {
         return Ok(vec![dsh.into_os_string()]);
-    }
-    let host = Path::new(HOST_DSH);
-    if is_executable(host) {
-        return Ok(vec![host.as_os_str().to_owned()]);
     }
     if find_in_path("npx").is_some() {
         return Ok(vec![

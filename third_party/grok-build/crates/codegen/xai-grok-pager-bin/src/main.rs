@@ -156,7 +156,10 @@ async fn run_setup_command(json: bool) {
     if !managed_config::has_principal() {
         eprintln!("No deployment key or team sign-in found.");
         eprintln!();
-        eprintln!("To install managed configuration, sign in with a team using `dscode login`,");
+        eprintln!(
+            "To install managed configuration, sign in with a team using `{} login`,",
+            env!("CARGO_BIN_NAME")
+        );
         eprintln!("or set a deployment key:");
         eprintln!();
         if cfg!(unix) {
@@ -164,7 +167,7 @@ async fn run_setup_command(json: bool) {
         } else {
             eprintln!("  $env:GROK_DEPLOYMENT_KEY=\"<your-key>\"");
         }
-        eprintln!("  dscode setup");
+        eprintln!("  {} setup", env!("CARGO_BIN_NAME"));
         eprintln!();
         eprintln!("Or add the key to ~/.grok/config.toml:");
         eprintln!();
@@ -204,7 +207,8 @@ async fn run_setup_command(json: bool) {
         }
         SetupOutcome::Skipped => {
             eprintln!(
-                "Managed configuration was not applied this run (another process held the apply lock, or the credential changed during the fetch). Run `dscode setup` again."
+                "Managed configuration was not applied this run (another process held the apply lock, or the credential changed during the fetch). Run `{} setup` again.",
+                env!("CARGO_BIN_NAME")
             );
         }
         SetupOutcome::Failed(e) => {
@@ -273,7 +277,10 @@ async fn kill_leaders() -> Result<()> {
         };
         if !xai_grok_shell::util::is_grok_process(pid) {
             if let Some(ref lock) = d.lock_path {
-                eprintln!("  PID {pid} is not a dscode process, removing stale lock");
+                eprintln!(
+                    "  PID {pid} is not a {} process, removing stale lock",
+                    env!("CARGO_BIN_NAME")
+                );
                 let _ = std::fs::remove_file(lock);
                 cleaned += 1;
             }
@@ -426,10 +433,11 @@ async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
     ) && let Some(profile) = xai_grok_sandbox::requested_confinement_profile()
     {
         anyhow::bail!(
-            "`dscode workspace` start/restart/resume is unavailable under sandbox profile '{profile}': \
+            "`{} workspace` start/restart/resume is unavailable under sandbox profile '{profile}': \
              those commands (re)activate shared-leader workspace exposure that this session cannot \
              prove is confined by that profile. Disable the profile at the source that selected it \
-             (CLI, env, config, or a managed requirement)."
+             (CLI, env, config, or a managed requirement).",
+            env!("CARGO_BIN_NAME")
         );
     }
     let env_override = workspace_command_env_override();
@@ -442,15 +450,18 @@ async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
         WorkspaceGate::Enabled => {}
         WorkspaceGate::Disabled => {
             anyhow::bail!(
-                "`dscode workspace` is not enabled for this account \
-             (gated by a server-side feature flag that is currently off)."
+                "`{} workspace` is not enabled for this account \
+             (gated by a server-side feature flag that is currently off).",
+                env!("CARGO_BIN_NAME")
             )
         }
         WorkspaceGate::Unknown => {
             anyhow::bail!(
-                "Could not load your settings for `dscode workspace`. Check your \
-             network connection (run `dscode login` if you are signed out), then \
-             try again."
+                "Could not load your settings for `{} workspace`. Check your \
+             network connection (run `{} login` if you are signed out), then \
+             try again.",
+                env!("CARGO_BIN_NAME"),
+                env!("CARGO_BIN_NAME")
             )
         }
     }
@@ -505,7 +516,9 @@ async fn connect_workspace_control(
     .map_err(|e| {
         anyhow::anyhow!(
             "no running leader for this environment ({e}). \
-             Start a dscode session, or run `dscode workspace start`."
+             Start a {} session, or run `{} workspace start`.",
+            env!("CARGO_BIN_NAME"),
+            env!("CARGO_BIN_NAME")
         )
     })
 }
@@ -544,14 +557,19 @@ async fn workspace_start(
     );
     if !use_leader {
         anyhow::bail!(
-            "`dscode workspace` requires leader mode (the workspace is shared via the leader).\n\
-             Enable it with `[cli] use_leader = true` in ~/.grok/config.toml, or pass --leader."
+            "`{} workspace` requires leader mode (the workspace is shared via the leader).\n\
+             Enable it with `[cli] use_leader = true` in ~/.grok/config.toml, or pass --leader.",
+            env!("CARGO_BIN_NAME")
         );
     }
+    let no_creds_message = format!(
+        "No cached credentials found. Run `{} login` first.",
+        env!("CARGO_BIN_NAME")
+    );
     ensure_authenticated(
         &agent_config.grok_com_config,
         false,
-        Some("No cached credentials found. Run `dscode login` first."),
+        Some(&no_creds_message),
     )
     .await?;
     let env_urls = LeaderEnvUrls::from(&agent_config.grok_com_config);
@@ -1053,8 +1071,13 @@ async fn forward_stdio_line_to_leader(
 }
 /// Emitted by both leader guards (server mode and leader-connect) so the two sites
 /// can't drift.
-const PLUGIN_DIR_LEADER_WARNING: &str = "dscode: --plugin-dir is ignored in leader mode; run with --no-leader to \
-     load per-process plugins";
+fn plugin_dir_leader_warning() -> String {
+    format!(
+        "{}: --plugin-dir is ignored in leader mode; run with --no-leader to \
+     load per-process plugins",
+        env!("CARGO_BIN_NAME")
+    )
+}
 /// Run the `agent` subcommand, dispatching to the appropriate mode.
 async fn run_agent_command(
     agent_args: Box<xai_grok_pager::app::AgentArgs>,
@@ -1152,7 +1175,7 @@ async fn run_agent_command(
         .map(resolve_agent_profile_path);
     agent_config.client_version = Some(PAGER_CLIENT_VERSION.to_string());
     if is_leader && !agent_args.plugin_dirs.is_empty() {
-        eprintln!("{PLUGIN_DIR_LEADER_WARNING}");
+        eprintln!("{}", plugin_dir_leader_warning());
     } else {
         agent_config.plugins.cli_plugin_dirs = agent_args.canonical_plugin_dirs();
     }
@@ -1225,7 +1248,7 @@ async fn run_agent_command(
     }
     if use_leader {
         if !agent_args.plugin_dirs.is_empty() {
-            eprintln!("{PLUGIN_DIR_LEADER_WARNING}");
+            eprintln!("{}", plugin_dir_leader_warning());
         }
         use std::sync::Arc;
         use tokio::io::AsyncWriteExt;
@@ -1787,7 +1810,8 @@ fn install_heap_profile_hooks() {
 }
 fn version_text(channel_label: &str) -> String {
     format!(
-        "dscode {}\n",
+        "{} {}\n",
+        env!("CARGO_BIN_NAME"),
         xai_grok_version::display_version_with_commit(env!("VERSION_WITH_COMMIT"), channel_label,)
     )
 }
@@ -2280,7 +2304,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             if finish_update_on_exit(adopted, &update_config).await {
                 eprintln!("Update installed. Run `grok` to start.");
             } else {
-                eprintln!("Update did not complete. Run `dscode update` to retry.");
+                eprintln!(
+                    "Update did not complete. Run `{} update` to retry.",
+                    env!("CARGO_BIN_NAME")
+                );
             }
             Ok(())
         }
@@ -2645,7 +2672,7 @@ mod tests {
             let mut output = Vec::new();
             write_version(&mut output, label).unwrap();
             let output = String::from_utf8(output).unwrap();
-            assert!(output.starts_with("dscode "));
+            assert!(output.starts_with(&format!("{} ", env!("CARGO_BIN_NAME"))));
             assert!(output.contains(env!("VERSION_WITH_COMMIT")));
             assert!(output.ends_with(expected_suffix), "{output:?}");
         }
