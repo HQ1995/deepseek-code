@@ -59,13 +59,14 @@ fi
 #    overrides the default; only remove what the identity check proves ours.
 TUI_HOME="${DSC_HOME:-}"
 if [ -z "$TUI_HOME" ]; then TUI_HOME="$HOME/.dsh/dsc-tui"; fi
-if [[ -d "$TUI_HOME" ]]; then
-  if [[ "$(basename "$TUI_HOME")" == "dsc-tui" ]]; then
-    rm -rf "$TUI_HOME"
-    echo "  removed $TUI_HOME"
-  else
-    note "kept $TUI_HOME (not named dsc-tui)"
-  fi
+# Resolve symlinks and check ownership first: the identity check must never
+# recurse through a link, and the basename alone is not an identity.
+TUI_REAL="$(realpath "$TUI_HOME" 2>/dev/null || true)"
+if [[ -d "$TUI_HOME" && ! -L "$TUI_HOME" && "$(basename "$TUI_REAL")" == "dsc-tui" && "$(stat -c %u "$TUI_REAL" 2>/dev/null || true)" == "$UID" ]]; then
+  rm -rf "$TUI_HOME"
+  echo "  removed $TUI_HOME"
+else
+  note "kept $TUI_HOME (not ours: link, wrong name, or not owned by this user)"
 fi
 
 # 4. The official dsh CLI, only with --remove-dsh (it is the upstream

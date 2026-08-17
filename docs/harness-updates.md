@@ -55,6 +55,6 @@ below.
   it resolves its `@deepseek-ai/dsh-*` peers at the same pinned 0.1.0-rc.6
   line the npm dsh ships (installed as devDependencies for the standalone
   tsc build).
-- After a submodule bump, re-run the built-bin e2e (`scripts/e2e-deepseek.sh`)
+- After a submodule bump, re-run the TUI e2e suites (`scripts/e2e-add-provider.sh`, `scripts/e2e-provider-manage.sh`)
   and the bridge tests; if the protocol changed, re-check
   `docs/grok-leader-protocol.md`.

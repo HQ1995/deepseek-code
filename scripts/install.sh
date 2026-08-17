@@ -66,7 +66,22 @@ echo "  installing the bridge into the deepseek-leader profile..."
 mkdir -p "$ROOT/third_party/grok-build/target/release"
 if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
   if [[ -x "$ROOT/third_party/grok-build/target/release/dscode" ]]; then
-    echo "  prebuilt dscode already present; skipping download"
+    echo "  prebuilt dscode already present; verifying its SHA-256 before use"
+    case "$TUI_RELEASE" in
+      v0.0.3) expected_sha256='d2f58a637a707672f83dfed2487b3c6f259ce1a9c789ea4d68e65b5906725c16' ;;
+      *) expected_sha256='' ;;
+    esac
+    if [[ -n "$expected_sha256" ]] && ! command -v sha256sum >/dev/null 2>&1; then
+      echo "error: sha256sum is required to verify the prebuilt dscode" >&2
+      exit 1
+    fi
+    if [[ -n "$expected_sha256" ]]; then
+      actual_sha256="$(sha256sum "$ROOT/third_party/grok-build/target/release/dscode" | cut -d' ' -f1)"
+      if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+        echo "error: prebuilt dscode failed its SHA-256 check (got $actual_sha256); re-download it or rebuild" >&2
+        exit 1
+      fi
+    fi
   else
     echo "  downloading prebuilt dscode ($TUI_RELEASE)..."
     curl -fL -o "$ROOT/third_party/grok-build/target/release/dscode" \

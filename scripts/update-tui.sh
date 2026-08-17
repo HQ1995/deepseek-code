@@ -11,7 +11,12 @@ SCRATCH="$(mktemp -d /tmp/grok-upstream.XXXXXX)"
 REF="$1"
 if [ -z "$REF" ]; then REF=HEAD; fi
 echo "cloning upstream grok-build @ $REF into $SCRATCH"
-git clone --depth 1 https://github.com/xai-org/grok-build.git "$SCRATCH/upstream"
+git init "$SCRATCH/upstream" >/dev/null
+if ! git -C "$SCRATCH/upstream" fetch --depth 1 origin "$REF" >/dev/null 2>&1; then
+  echo "error: upstream ref not found: $REF" >&2
+  exit 1
+fi
+git -C "$SCRATCH/upstream" checkout --detach FETCH_HEAD >/dev/null
 git -C "$SCRATCH/upstream" rev-parse HEAD > "$TUI/UPSTREAM_REV.new"
 echo "=== upstream baseline ==="
 cat "$TUI/UPSTREAM_REV.new"
