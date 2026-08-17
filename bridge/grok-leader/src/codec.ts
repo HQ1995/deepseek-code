@@ -8,6 +8,11 @@
 /** Largest accepted frame payload, mirroring MAX_MESSAGE_SIZE in protocol.rs. */
 export const MAX_MESSAGE_SIZE = 64 * 1024 * 1024
 
+/** Cap on bytes buffered while one incomplete frame is trickling in; a peer
+ * pushing past it is dropped instead of pinning unbounded memory (and
+ * forcing quadratic re-concatenation of the pending buffer). */
+export const MAX_PENDING_BUFFER = 8 * 1024 * 1024
+
 /** A byte sequence violates the leader framing contract. */
 export class FrameError extends Error {
   constructor(message: string) {
@@ -64,7 +69,14 @@ export class FrameDecoder {
       if (length > MAX_MESSAGE_SIZE) {
         throw new FrameError('message too large: ' + String(length) + ' bytes (max: ' + String(MAX_MESSAGE_SIZE) + ')')
       }
-      if (this.#pending.byteLength < 4 + length) break
+      if (this.#pending.byteLength < 4 + length) {
+        // Incomplete frame: bound the pending buffer; the socket handler
+        // warns and destroys the connection when this FrameError surfaces.
+        if (this.#pending.byteLength > MAX_PENDING_BUFFER) {
+          throw new FrameError('incomplete frame exceeded the ' + String(MAX_PENDING_BUFFER) + '-byte pending cap')
+        }
+        break
+      }
       frames.push(this.#pending.slice(4, 4 + length))
       this.#pending = this.#pending.slice(4 + length)
     }

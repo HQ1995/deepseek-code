@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { FrameDecoder, FrameError, MAX_MESSAGE_SIZE, encodeFrame, encodeJsonFrame } from '../src/codec.ts'
+import { FrameDecoder, FrameError, MAX_MESSAGE_SIZE, MAX_PENDING_BUFFER, encodeFrame, encodeJsonFrame } from '../src/codec.ts'
 import { decodeClientMessage, encodeServerMessage, type ServerMessage } from '../src/protocol.ts'
 
 interface CaptureLine {
@@ -91,6 +91,14 @@ describe('grok leader frame codec', () => {
     const header = new Uint8Array(4)
     new DataView(header.buffer).setUint32(0, MAX_MESSAGE_SIZE + 1)
     expect(() => new FrameDecoder().push(header)).toThrow(FrameError)
+  })
+
+  it('drops a peer whose incomplete frame exceeds the pending cap', () => {
+    const header = new Uint8Array(4)
+    new DataView(header.buffer).setUint32(0, MAX_MESSAGE_SIZE)
+    const decoder = new FrameDecoder()
+    expect(() => decoder.push(header)).not.toThrow()
+    expect(() => decoder.push(new Uint8Array(MAX_PENDING_BUFFER))).toThrow(FrameError)
   })
 
   it('rejects encoding a payload larger than MAX_MESSAGE_SIZE', () => {
