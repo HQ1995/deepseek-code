@@ -738,12 +738,13 @@ describe('grok leader over a unix socket', () => {
 
     // Removing the held front unblocks the next row instead of stranding it.
     c.notify('x.ai/queue/remove', { sessionId, id: secondId, expectedVersion: 0 })
+    await waitFor(() => agent.internals.idleWaiters.length === 2)
+    agent.internals.idleWaiters.shift()!() // settle-path advance: promotes the new front
     await waitFor(() => agent.internals.followups.includes('third'))
     expect(agent.internals.followups).toEqual(['first', 'third'])
     expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
-
     // Drain the remaining idle waiter and settle the promoted third.
-    agent.internals.idleWaiters.shift()!() // idle-triggered advance: no-op while third runs
+    agent.internals.idleWaiters.shift()!() // remove-triggered advance: no-op while third runs
     agent.internals.idleWaiters.shift()!() // settle the promoted third
     expect((await waitForId(c, 4)).result).toEqual({ stopReason: 'cancelled' })
     expect(thirdId).toEqual(expect.any(String) as string)
@@ -777,8 +778,12 @@ describe('grok leader over a unix socket', () => {
     expect(agent.internals.followups).toEqual(['first'])
 
     // Moving the held row out of the lead lets the new front run; the held
-    // second stays queued behind it.
+    // second stays queued behind it. Both the settle path and the reorder
+    // register an idle-gated advance; the settle-path waiter fires first and
+    // promotes the reordered new front.
     c.notify('x.ai/queue/reorder', { sessionId, orderedIds: [thirdId, secondId] })
+    await waitFor(() => agent.internals.idleWaiters.length === 2)
+    agent.internals.idleWaiters.shift()!()
     await waitFor(() => agent.internals.followups.includes('third'))
     expect(agent.internals.followups).toEqual(['first', 'third'])
     const reorderBroadcast = () => c.broadcasts.find(b => {
@@ -789,7 +794,7 @@ describe('grok leader over a unix socket', () => {
     const afterReorder = (reorderBroadcast()!.params as { entries?: Array<{ id: string }> }).entries
     expect(afterReorder?.map(entry => entry.id)).toEqual([secondId])
 
-    agent.internals.idleWaiters.shift()!() // idle-triggered advance: no-op while third runs
+    agent.internals.idleWaiters.shift()!() // reorder-triggered advance: no-op while third runs
     agent.internals.idleWaiters.shift()!() // settle the promoted third
     expect((await waitForId(c, 4)).result).toEqual({ stopReason: 'cancelled' })
     expect(secondId).toEqual(expect.any(String) as string)

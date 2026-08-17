@@ -1896,7 +1896,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           if (typeof p.id === 'string') record.editHolds.delete(p.id)
           advanceWhenIdle(record)
           queueMutate(record)
-          advancePromptQueue(record)
           return
         }
         const [entry] = record.promptQueue.splice(located.index, 1)
@@ -1931,7 +1930,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           record.editHolds.delete(located.entry.id)
           advanceWhenIdle(record)
           queueMutate(record)
-          advancePromptQueue(record)
           return
         }
         if (located !== undefined) {
@@ -1940,7 +1938,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           record.editHolds.delete(entry.id)
           queueMutate(record)
           // Removing a held front must not strand the rows behind it.
-          advancePromptQueue(record)
+          advanceWhenIdle(record)
           return
         }
         if (record.runningPromptId === p.id) {
@@ -2020,8 +2018,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         }
         if (changed) advanceWhenIdle(record)
         queueMutate(record)
-        // Reordering can move a held front out of the lead; unblock the new front.
-        advancePromptQueue(record)
         return
       }
       case 'x.ai/queue/clear': {
