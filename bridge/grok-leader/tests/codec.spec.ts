@@ -67,6 +67,18 @@ describe('grok leader frame codec', () => {
     expect(JSON.parse(JSON.stringify(encodeServerMessage({ type: 'pong' })))).toEqual(capturedPong)
   })
 
+  it('pins the serde snake_case control_result wire tag', () => {
+    expect(encodeServerMessage({
+      type: 'controlResult',
+      requestId: 'r1',
+      result: { Err: { code: 'internal_error', message: 'not implemented' } },
+    })).toEqual({
+      type: 'control_result',
+      request_id: 'r1',
+      result: { Err: { code: 'internal_error', message: 'not implemented' } },
+    })
+  })
+
   it('decodes several frames from one chunk and across chunk splits', () => {
     const a = encodeFrame(new TextEncoder().encode('first'))
     const b = encodeFrame(new TextEncoder().encode('second'))
@@ -85,6 +97,24 @@ describe('grok leader frame codec', () => {
   it('decodes an empty payload frame', () => {
     const decoder = new FrameDecoder()
     expect(decoder.push(encodeFrame(new Uint8Array(0)))).toEqual([new Uint8Array(0)])
+  })
+
+  it('decodes the original bytes when the source chunk is mutated after a partial push', () => {
+    const payload = new TextEncoder().encode('original payload bytes')
+    const frame = encodeFrame(payload)
+    // The shared backing store the caller may still mutate: a byte larger than
+    // the frame so the DataView never touches foreign buffer bytes.
+    const buffer = new Uint8Array(frame.byteLength + 8)
+    buffer.set(frame, 4)
+    const chunk = buffer.subarray(4, 4 + frame.byteLength)
+    const decoder = new FrameDecoder()
+    // Partial push buffers the header + first bytes; the rest arrives later.
+    const rest = chunk.slice(7)
+    expect(decoder.push(chunk.slice(0, 7))).toEqual([])
+    buffer.fill(0x2a, 4) // caller reuses/mutates the source buffer
+    const frames = decoder.push(rest)
+    expect(frames).toHaveLength(1)
+    expect(textOf(frames[0]!)).toBe('original payload bytes')
   })
 
   it('rejects a frame declaring more than MAX_MESSAGE_SIZE bytes', () => {
@@ -110,6 +140,9 @@ describe('grok leader frame codec', () => {
     expect(() => decodeClientMessage({ type: 'nope' })).toThrow(FrameError)
     expect(() => decodeClientMessage({ type: 'register', clientType: 'x' })).toThrow(FrameError)
     expect(() => decodeClientMessage({ type: 'acp', payload: 1 })).toThrow(FrameError)
+    expect(() => decodeClientMessage({ type: 'register', client_type: 'x', mode: 'stdio', capabilities: null })).toThrow(FrameError)
+    expect(() => decodeClientMessage({ type: 'register', client_type: 'x', mode: 'stdio', capabilities: 7 })).toThrow(FrameError)
+    expect(() => decodeClientMessage({ type: 'register', client_type: 'x', mode: 'stdio', capabilities: 'yolo' })).toThrow(FrameError)
   })
 
   it('accepts the captured wrapped _x.ai/log notification shape', () => {

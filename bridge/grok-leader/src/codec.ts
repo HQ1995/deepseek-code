@@ -31,7 +31,7 @@ export function encodeFrame(payload: Uint8Array): Uint8Array {
     throw new FrameError('message too large: ' + String(payload.byteLength) + ' bytes (max: ' + String(MAX_MESSAGE_SIZE) + ')')
   }
   const frame = new Uint8Array(4 + payload.byteLength)
-  new DataView(frame.buffer).setUint32(0, payload.byteLength)
+  new DataView(frame.buffer, frame.byteOffset, frame.byteLength).setUint32(0, payload.byteLength)
   frame.set(payload, 4)
   return frame
 }
@@ -60,11 +60,13 @@ export class FrameDecoder {
    * @throws {FrameError} when a declared payload length exceeds MAX_MESSAGE_SIZE.
    */
   push(chunk: Uint8Array): Uint8Array[] {
-    this.#pending = this.#pending.byteLength === 0 ? chunk : concat(this.#pending, chunk)
+    // Always copy: the caller may reuse/mutate the chunk buffer while an
+    // incomplete frame stays pending.
+    this.#pending = this.#pending.byteLength === 0 ? chunk.slice() : concat(this.#pending, chunk)
     const frames: Uint8Array[] = []
     for (;;) {
       if (this.#pending.byteLength < 4) break
-      const view = new DataView(this.#pending.buffer, this.#pending.byteOffset)
+      const view = new DataView(this.#pending.buffer, this.#pending.byteOffset, this.#pending.byteLength)
       const length = view.getUint32(0)
       if (length > MAX_MESSAGE_SIZE) {
         throw new FrameError('message too large: ' + String(length) + ' bytes (max: ' + String(MAX_MESSAGE_SIZE) + ')')

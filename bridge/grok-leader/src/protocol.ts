@@ -136,7 +136,7 @@ export function encodeServerMessage(msg: ServerMessage): Record<string, unknown>
     case 'error':
       return { type: 'error', code: msg.code, message: msg.message }
     case 'controlResult':
-      return { type: 'controlResult', request_id: msg.requestId, result: msg.result }
+      return { type: 'control_result', request_id: msg.requestId, result: msg.result }
   }
 }
 
@@ -156,21 +156,25 @@ export function decodeClientMessage(value: unknown): ClientMessage {
     case 'register': {
       if (typeof msg.client_type !== 'string') throw new FrameError('register message must carry a string client_type')
       if (msg.mode !== 'headless' && msg.mode !== 'stdio') throw new FrameError('register message must carry a headless/stdio mode')
-      const raw = msg.capabilities as Record<string, unknown> | undefined
+      const raw = msg.capabilities
+      if (raw !== undefined && (typeof raw !== 'object' || raw === null || Array.isArray(raw))) {
+        throw new FrameError('register capabilities must be an object')
+      }
+      const capabilities = raw as Record<string, unknown> | undefined
       return {
         type: 'register',
         clientType: msg.client_type,
         mode: msg.mode,
-        ...raw === undefined ? {} : {
+        ...capabilities === undefined ? {} : {
           capabilities: {
-            ...raw.yolo_mode === undefined ? {} : { yoloMode: raw.yolo_mode === true },
-            ...raw.auto_mode === undefined ? {} : { autoMode: raw.auto_mode === true },
-            ...raw.default_model === undefined ? {} : { defaultModel: typeof raw.default_model === 'string' ? raw.default_model : null },
-            ...raw.client_version === undefined ? {} : { clientVersion: typeof raw.client_version === 'string' ? raw.client_version : null },
-            ...raw.code_nav_enabled === undefined ? {} : { codeNavEnabled: raw.code_nav_enabled === true },
-            ...raw.terminal === undefined ? {} : { terminal: raw.terminal === true },
-            ...raw.fs_read === undefined ? {} : { fsRead: raw.fs_read === true },
-            ...raw.fs_write === undefined ? {} : { fsWrite: raw.fs_write === true },
+            ...capabilities.yolo_mode === undefined ? {} : { yoloMode: capabilities.yolo_mode === true },
+            ...capabilities.auto_mode === undefined ? {} : { autoMode: capabilities.auto_mode === true },
+            ...capabilities.default_model === undefined ? {} : { defaultModel: typeof capabilities.default_model === 'string' ? capabilities.default_model : null },
+            ...capabilities.client_version === undefined ? {} : { clientVersion: typeof capabilities.client_version === 'string' ? capabilities.client_version : null },
+            ...capabilities.code_nav_enabled === undefined ? {} : { codeNavEnabled: capabilities.code_nav_enabled === true },
+            ...capabilities.terminal === undefined ? {} : { terminal: capabilities.terminal === true },
+            ...capabilities.fs_read === undefined ? {} : { fsRead: capabilities.fs_read === true },
+            ...capabilities.fs_write === undefined ? {} : { fsWrite: capabilities.fs_write === true },
           },
         },
       }
