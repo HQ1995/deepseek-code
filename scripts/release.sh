@@ -68,6 +68,20 @@ cp "$BIN" "$DIST/$ASSET"
 ( cd "$DIST" && sha256sum "$ASSET" > "$ASSET.sha256" )
 echo "  $(cat "$DIST/$ASSET.sha256")"
 
+# Apache-2.0 §4: a binary distribution must carry the license and NOTICE.
+# Bundle the repo notices plus the vendored grok-build license and its
+# §4(b) modification ledger so every release asset set is self-contained.
+LICENSES="$DIST/dscode-licenses.tar.gz"
+stage="$(mktemp -d)"
+mkdir -p "$stage/dscode-licenses/third_party/grok-build"
+cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$ROOT/THIRD_PARTY_NOTICES.md" "$stage/dscode-licenses/"
+cp "$ROOT/third_party/grok-build/LICENSE" \
+   "$ROOT/third_party/grok-build/TUI-DIVERGENCE.md" \
+   "$stage/dscode-licenses/third_party/grok-build/"
+tar -czf "$LICENSES" -C "$stage" dscode-licenses
+rm -rf "$stage"
+echo "  bundled $(basename "$LICENSES")"
+
 if [[ "$DRY_RUN" == 1 ]]; then
   echo "dry run: artifacts staged in $DIST; no tag or release created"
   exit 0
@@ -78,7 +92,9 @@ git -C "$ROOT" push origin "$TAG"
 gh release create "$TAG" \
   --repo "$RELEASE_REPO" \
   --title "deepseek-code $TAG" \
-  --notes "deepseek-code $TAG (channel: $([[ "$VERSION" == *-* ]] && echo beta || echo stable))" \
+  --notes "deepseek-code $TAG (channel: $([[ "$VERSION" == *-* ]] && echo beta || echo stable))
+
+License and attribution for this binary: dscode-licenses.tar.gz (Apache-2.0; includes the vendored grok-build license and modification ledger)." \
   "${PRERELEASE_FLAGS[@]}" \
-  "$DIST/$ASSET" "$DIST/$ASSET.sha256"
+  "$DIST/$ASSET" "$DIST/$ASSET.sha256" "$LICENSES"
 echo "published $TAG"
