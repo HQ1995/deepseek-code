@@ -132,8 +132,10 @@ it is the bridge-owned profile manager (install/remove/login), not a bucket
 for plugin commands. (Unrelated: the TUI's builtin `/plugin` manages grok-build's
 own pager plugins, not dsh plugins — use `/dsh` for those.)
 
-`/dsh add` runs the package's install scripts — only add plugins you trust.
-Restart dscode after add/remove (the leader exits with its last client and
+A dsh plugin runs with full process authority once loaded (there is no
+runtime containment in cordis) — only add plugins you trust; the trust
+decision happens at install time. Install scripts are blocked by pnpm by
+default. Restart dscode after add/remove (the leader exits with its last client and
 reloads the profile on the next launch). LLM-provider plugins surface
 automatically in `/provider` and `/model` through the bridge's model catalog.
 The CLI equivalent remains `dsh plugin --profile deepseek-leader add <spec>`.
