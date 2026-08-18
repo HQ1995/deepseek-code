@@ -365,6 +365,10 @@ async fn fetch_update_plan(
 pub async fn auto_update_target(update_config: &UpdateConfig) -> Option<(&'static str, String)> {
     let installer = get_installer().await?;
     let current = get_installed_grok_version();
+    if is_dev_build(&current) {
+        tracing::info!(%current, "dev build: automatic updates disabled");
+        return None;
+    }
     let policy = config::VersionPolicy::resolve();
     let UpdatePlan::Install { target, .. } = fetch_update_plan(installer, update_config, &policy)
         .await
@@ -418,6 +422,13 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
     let Some(installer) = get_installer().await else {
         return Ok(outcome);
     };
+    // Dev builds are developer-managed: the leader's hourly converge must
+    // not replace one with a release either (see is_dev_build).
+    let running = get_installed_grok_version();
+    if is_dev_build(&running) {
+        tracing::info!(%running, "dev build: skipping leader auto-update converge");
+        return Ok(outcome);
+    }
     heal_managed_install(installer).await;
     let allow_downgrade = installer_allows_downgrade(installer);
     let policy = config::VersionPolicy::resolve();
@@ -429,6 +440,12 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
 
     let effective_current =
         disk_version_for_installer(installer).unwrap_or_else(get_installed_grok_version);
+    // The disk can hold a dev build even when this process runs a release
+    // (a developer just built into the install path): leave it alone too.
+    if is_dev_build(&effective_current) {
+        tracing::info!(%effective_current, "dev build on disk: skipping leader auto-update converge");
+        return Ok(outcome);
+    }
     if needs_update(
         &effective_current,
         &target,
@@ -535,6 +552,19 @@ pub async fn get_installer() -> Option<&'static str> {
     }
 }
 
+/// True when `version` is a repo dev build (the VERSION file's `-dev`
+/// suffix, e.g. `0.0.5-dev`): developer-managed, so AUTOMATIC updates must
+/// never replace it. On this fork the install destination is wherever the
+/// launcher symlink resolves — for a dev setup that is the repo's
+/// target/release build output — and `needs_update` treats any prerelease
+/// current as behind stable, so without this gate a background download
+/// would silently clobber a freshly built binary with the older release.
+/// Explicit `dscode update` stays available as the escape hatch back to a
+/// managed release.
+fn is_dev_build(version: &str) -> bool {
+    semver::Version::parse(version).is_ok_and(|v| v.pre.as_str() == "dev")
+}
+
 fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: bool) -> Option<bool> {
     let current = semver::Version::parse(current).ok()?;
     let target = semver::Version::parse(target).ok()?;
@@ -622,6 +652,14 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
         return BackgroundUpdateCheck::none();
     };
 
+    // Dev builds are developer-managed: never background-replace one with a
+    // release (see is_dev_build — the install path IS the repo build output).
+    let running = get_installed_grok_version();
+    if is_dev_build(&running) {
+        tracing::info!(%running, "dev build: skipping background update check");
+        return BackgroundUpdateCheck::none();
+    }
+
     heal_managed_install(installer).await;
 
     if is_version_cache_fresh().await {
@@ -663,6 +701,9 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
     // installer maintaining the managed symlink — for npm a leftover symlink
     // would wrongly suppress the download (see `disk_version_for_installer`).
     let disk_needs_download = match disk_version_for_installer(installer) {
+        // A dev build on disk while this process runs a release (a developer
+        // just built into the install path): never download over it.
+        Some(disk) if is_dev_build(&disk) => false,
         Some(disk) => needs_update(
             &disk,
             &target_version,
@@ -712,6 +753,17 @@ pub async fn run_update_if_available(
         // Skip update check if no known installer.
         return Ok(false);
     };
+
+    // Dev builds are developer-managed: automatic triggers must never
+    // replace one with a release (see is_dev_build). An explicit
+    // `dscode update` (UserCommand) stays available as the escape hatch.
+    if matches!(trigger, CliUpdateTrigger::AutoBackground) {
+        let running = get_installed_grok_version();
+        if is_dev_build(&running) {
+            tracing::info!(%running, "dev build: skipping automatic update");
+            return Ok(false);
+        }
+    }
 
     heal_managed_install(inst).await;
 

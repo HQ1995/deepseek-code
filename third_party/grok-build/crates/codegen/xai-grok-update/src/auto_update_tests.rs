@@ -2558,3 +2558,17 @@ async fn test_windows_replace_exe_sweeps_accumulated_asides() {
         "other executables' leftovers must be untouched"
     );
 }
+
+#[test]
+fn dev_builds_are_developer_managed() {
+    // The repo VERSION `-dev` suffix marks a local build: automatic update
+    // paths gate on this so a background download never clobbers it with a
+    // release (the install destination is the repo build output).
+    assert!(is_dev_build("0.0.5-dev"));
+    assert!(!is_dev_build("0.0.5"));
+    assert!(!is_dev_build("0.0.6-beta.1"), "prereleases from the beta channel still update");
+    assert!(!is_dev_build("not-a-version"));
+    // Sanity: without the gate, needs_update would treat a dev build as
+    // behind the same-numbered stable release — the exact clobber this guards.
+    assert_eq!(needs_update("0.0.5-dev", "0.0.5", "stable", false), Some(true));
+}
