@@ -1653,6 +1653,53 @@ describe('grok leader over a unix socket', () => {
     await waitForId(c, 3)
   })
 
+  it('reports the services and effects a loaded plugin brought, generically', async () => {
+    const profileDir = resolve(tmpdir(), 'dsh-profile-inspect-' + randomUUID())
+    const { mkdirSync, writeFileSync, rmSync } = await import('node:fs')
+    mkdirSync(profileDir, { recursive: true })
+    writeFileSync(resolve(profileDir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-test',
+      dependencies: { 'dsh-plugin-example': '^1.0.0' },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-plugin-example'] } },
+    }))
+    process.env.DSH_PROFILE_DIR = profileDir
+    try {
+      const { pluginCtx, client: c } = await start()
+      register(c)
+      await c.next()
+      // Mount an arbitrary third-party-shaped plugin into the live context:
+      // the report must attribute its service and effects with zero
+      // plugin-specific knowledge (pure reflect.store + fiber parentage).
+      await pluginCtx.plugin({
+        name: 'dsh-plugin-example',
+        apply(inner: Context) {
+          inner.provide('exampleThing', { hello: true })
+          ;(inner as unknown as { on(event: string, listener: () => void): void }).on('commands/change', () => {})
+        },
+      } as never)
+
+      const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      const sessionId = (created.result as { sessionId: string }).sessionId
+      sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh inspect dsh-plugin-example' }], _meta: { promptId: 'ins-1' } })
+      const settled = await waitForId(c, 2)
+      expect(settled.result).toMatchObject({ stopReason: 'end_turn', _meta: { promptId: 'ins-1' } })
+      await waitFor(() => c.all.some(m => {
+        if (m.method !== 'session/update') return false
+        const text = String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '')
+        return text.includes('provides services: exampleThing') && text.includes('registered effects:')
+      }))
+
+      // Unknown plugin: actionable, not a crash.
+      sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh inspect dsh-plugin-ghost' }] })
+      await waitForId(c, 3)
+      await waitFor(() => c.all.some(m => m.method === 'session/update'
+        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('is not installed')))
+    } finally {
+      delete process.env.DSH_PROFILE_DIR
+      rmSync(profileDir, { recursive: true, force: true })
+    }
+  })
+
   it('advertises the /dsh command and interprets it in the bridge, never the model', async () => {
     const profileDir = resolve(tmpdir(), 'dsh-profile-test-' + randomUUID())
     const { mkdirSync, writeFileSync, rmSync } = await import('node:fs')
@@ -1917,7 +1964,7 @@ describe('grok leader over a unix socket', () => {
     })._meta
     expect(meta.cancelRewind).toBe(false)
     expect(meta.availableCommands).toEqual([
-      { name: 'dsh', description: 'Manage dsh plugins and subscription logins', input: { hint: 'plugins | add <package> | remove <name> | login <codex|claude|grok> | code <pasted-url>' } },
+      { name: 'dsh', description: 'Manage dsh plugins and subscription logins', input: { hint: 'plugins | add <package> | remove <name> | inspect <name> | login <codex|claude|grok> | code <pasted-url>' } },
       { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | code | minimal | cordis' } },
     ])
 
@@ -1929,7 +1976,7 @@ describe('grok leader over a unix socket', () => {
     const commands = await c.request(3, 'x.ai/commands/list', { sessionId })
     expect(commands.result).toEqual({
       commands: [
-        { name: 'dsh', description: 'Manage dsh plugins and subscription logins', input: { hint: 'plugins | add <package> | remove <name> | login <codex|claude|grok> | code <pasted-url>' } },
+        { name: 'dsh', description: 'Manage dsh plugins and subscription logins', input: { hint: 'plugins | add <package> | remove <name> | inspect <name> | login <codex|claude|grok> | code <pasted-url>' } },
         { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | code | minimal | cordis' } },
       ],
     })

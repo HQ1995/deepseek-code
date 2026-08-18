@@ -111,9 +111,18 @@ own commands.
 /dsh plugins                      list installed plugins
 /dsh add <package|git-url>        install a plugin into the leader profile
 /dsh remove <name>                uninstall a plugin
+/dsh inspect <name>               what a loaded plugin actually brought (services, effects)
 /dsh login <codex|claude|grok>    subscription OAuth login (subscriptions plugin)
 /dsh code <pasted-callback-url>   finish a login over SSH (manual code paste)
 ```
+
+`/dsh add` validates the bundle before registering it (a broken composition
+layer is rolled back instead of bricking the profile) and discloses what the
+layer does: rows inserted/overridden/disabled, touches to the
+sandbox/approval spine, and any `!!js` expressions (code that runs at leader
+boot). `/dsh inspect` is the runtime half: it attributes live services and
+effects to the plugin generically (cordis fiber parentage), naming even
+capabilities dscode has no rail for.
 
 Plugins that register human commands (the `@deepseek-ai/dsh-commands`
 registry, `ctx.commands.register(...)`) surface automatically as top-level

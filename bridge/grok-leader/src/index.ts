@@ -397,6 +397,86 @@ export function analyzeBundlePatch(patchText: string): BundlePatchAnalysis {
   return analysis
 }
 
+/** Structural view of cordis internals for runtime capability attribution.
+ *  All public in cordis 4.x (reflect.store, registry, fiber.getEffects) —
+ *  the same recipe the harness's own tool-cordis inspect helpers use. */
+interface FiberLike {
+  name?: string
+  state?: unknown
+  parent?: { fiber?: FiberLike }
+  getEffects?(): Array<{ label?: string; children?: unknown[] }>
+}
+interface CordisInternals {
+  reflect: { store: Record<symbol, { name: string; fiber: FiberLike; value: unknown }> }
+  registry: Map<unknown, { name?: string; fibers: Iterable<FiberLike> }>
+}
+
+/** Service names dscode has a rendering rail for, with the human meaning. */
+const KNOWN_RAILS: Record<string, string> = {
+  llm: 'LLM providers/models (surface in /provider and /model)',
+  commands: 'slash commands (auto-surface in the TUI)',
+  userQuestions: 'interactive questions (TUI pickers)',
+  tools: 'model-facing tools (approval-gated)',
+  agentPresets: 'agent presets (/preset)',
+}
+
+/** Fiber-parentage subtree test — object identity, never uid (uids collide
+ *  across registries; see agent-presets mount.ts). */
+function withinFiber(fiber: FiberLike, root: FiberLike): boolean {
+  let current: FiberLike | undefined = fiber
+  while (current !== undefined) {
+    if (current === root) return true
+    const parent: FiberLike | undefined = current.parent?.fiber
+    if (parent === undefined || parent === current) return false
+    current = parent
+  }
+  return false
+}
+
+/** Two-layer runtime capability report for one loaded plugin: the mechanical
+ *  layer lists every service its fibers provided (semantics unknown, named
+ *  as-is); the rail layer expands the subset dscode understands. Returns
+ *  undefined when no live fiber matches (not loaded yet, or a plain dep). */
+export function inspectPluginRuntime(ctx: Context, packageName: string): string | undefined {
+  const internals = ctx as unknown as CordisInternals
+  const roots: FiberLike[] = []
+  for (const runtime of internals.registry.values()) {
+    const name = runtime.name
+    if (name === undefined) continue
+    if (name !== packageName && !name.startsWith(packageName + '/')) continue
+    for (const fiber of runtime.fibers) roots.push(fiber)
+  }
+  if (roots.length === 0) return undefined
+  const store = internals.reflect.store
+  const provided: string[] = []
+  for (const key of Object.getOwnPropertySymbols(store)) {
+    const impl = store[key]
+    if (roots.some(root => withinFiber(impl.fiber, root))) provided.push(impl.name)
+  }
+  const effectLabels = new Map<string, number>()
+  for (const root of roots) {
+    for (const effect of root.getEffects?.() ?? []) {
+      const label = effect.label ?? '(unlabeled)'
+      effectLabels.set(label, (effectLabels.get(label) ?? 0) + 1)
+    }
+  }
+  const lines = [packageName + ' — live in this leader (' + String(roots.length) + ' plugin instance(s)):']
+  if (provided.length > 0) {
+    lines.push('  provides services: ' + provided.join(', '))
+    for (const name of provided) {
+      if (KNOWN_RAILS[name] !== undefined) lines.push('    · ' + name + ' → ' + KNOWN_RAILS[name])
+    }
+  } else {
+    lines.push('  provides no services (consumer-only plugin)')
+  }
+  if (effectLabels.size > 0) {
+    const shown = [...effectLabels.entries()].slice(0, 12)
+      .map(([label, count]) => count > 1 ? label + ' ×' + String(count) : label)
+    lines.push('  registered effects: ' + shown.join(', ') + (effectLabels.size > 12 ? ', …' : ''))
+  }
+  return lines.join('\n')
+}
+
 export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const agents = ctx.agents
   const llm = ctx.get('llm') as LlmLike | undefined
@@ -977,7 +1057,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const commands: Array<{ name: string; description: string; input?: { hint: string } }> = [{
       name: 'dsh',
       description: 'Manage dsh plugins and subscription logins',
-      input: { hint: 'plugins | add <package> | remove <name> | login <codex|claude|grok> | code <pasted-url>' },
+      input: { hint: 'plugins | add <package> | remove <name> | inspect <name> | login <codex|claude|grok> | code <pasted-url>' },
     }]
     const roster = agentPresets()
     const presets = roster === undefined ? [] : await roster.list()
@@ -1616,7 +1696,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       notifySession(record, message)
       return promptSettled(record, id, 'end_turn')
     }
-    const usage = 'Usage: /dsh plugins | /dsh add <package|git-url|file:path> | /dsh remove <name> | /dsh login <codex|claude|grok> | /dsh code <pasted-callback>'
+    const usage = 'Usage: /dsh plugins | /dsh add <package|git-url|file:path> | /dsh remove <name> | /dsh inspect <name> | /dsh login <codex|claude|grok> | /dsh code <pasted-callback>'
     const [verb, ...rest] = text.split(/\s+/).slice(1)
     const dir = dshProfileDir()
     if (dir === undefined) {
@@ -1664,6 +1744,17 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           }
           await writeProfileBundles(dir, manifest.raw, bundles)
           return settle('Installed ' + added.join(', ') + '.\n\n' + report.join('\n\n') + '\n\nRestart dscode to load it (the leader exits with its last client).')
+        }
+        case 'inspect': {
+          const name = rest[0]
+          if (name === undefined) return settle('Missing plugin name. ' + usage)
+          const runtime = inspectPluginRuntime(ctx, name)
+          if (runtime !== undefined) return settle(runtime)
+          const manifest = await readProfileManifest(dir)
+          if (manifest.dependencies[name] !== undefined) {
+            return settle(name + ' is installed but has no live plugin instance in this leader (restart dscode to load it, or it is a plain dependency / composition-only bundle).')
+          }
+          return settle(name + ' is not installed. Installed: ' + Object.keys(manifest.dependencies).join(', '))
         }
         case 'remove': {
           const name = rest[0]
