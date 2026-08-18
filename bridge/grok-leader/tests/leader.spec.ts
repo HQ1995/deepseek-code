@@ -25,9 +25,14 @@ const packageVersion = (JSON.parse(readFileSync(new URL('../package.json', impor
 interface MockAgentInternals {
   cancelCalls: number
   followups: string[]
+  /** Texts submitted as mid-turn steering (follow-up steer). */
+  steered: string[]
   messages: unknown[]
   disposed: boolean
   idleWaiters: Array<() => void>
+  /** Mirrors the real agent: 'running' from followup admission until the
+   *  test fires an idle waiter (manual-idle mode only). */
+  status: 'idle' | 'running'
 }
 
 type MockAgent = Agent & { internals: MockAgentInternals }
@@ -46,7 +51,7 @@ function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry {
   const resumed: Array<{ sessionId: string }> = []
   const byId = new Map<string, MockAgent>()
   const makeAgent = (sessionId: SessionId, cwd: string | undefined): MockAgent => {
-    const internals: MockAgentInternals = { cancelCalls: 0, followups: [], messages: [], disposed: false, idleWaiters: [] }
+    const internals: MockAgentInternals = { cancelCalls: 0, followups: [], steered: [], messages: [], disposed: false, idleWaiters: [], status: 'idle' }
     const agent = {
       id: sessionId,
       options: {} as AgentOptions,
@@ -56,24 +61,34 @@ function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry {
         events: [],
       },
       inbox: {},
-      status: 'idle',
+      get status() { return internals.status },
       ctx,
       internals,
       cancel() { internals.cancelCalls += 1 },
       whenIdle() {
         if (!manualIdle) return Promise.resolve()
-        return new Promise<void>((resolveIdle) => { internals.idleWaiters.push(resolveIdle) })
+        // Firing a waiter models the real driver retirement: the agent
+        // reports idle before any whenIdle continuation runs.
+        return new Promise<void>((resolveIdle) => {
+          internals.idleWaiters.push(() => { internals.status = 'idle'; resolveIdle() })
+        })
       },
       runMaintenance(task: (signal: AbortSignal) => Promise<unknown>) { return task(new AbortController().signal) },
       send() {},
       followup(message: unknown) {
+        if (manualIdle) internals.status = 'running'
         internals.messages.push(message)
         const content = (message as { content?: Array<{ type?: string; text?: string }> }).content ?? []
         for (const block of content) {
           if (block.type === 'text' && block.text !== undefined) internals.followups.push(block.text)
         }
       },
-      steer() {},
+      steer(message: unknown) {
+        const content = (message as { content?: Array<{ type?: string; text?: string }> }).content ?? []
+        for (const block of content) {
+          if (block.type === 'text' && block.text !== undefined) internals.steered.push(block.text)
+        }
+      },
       inject() {},
     } as unknown as MockAgent
     byId.set(sessionId, agent)
@@ -223,6 +238,11 @@ async function makeClient(socketPath: string): Promise<ClientHandle> {
       const msg = raw.type === 'acp' && typeof raw.payload === 'string'
         ? JSON.parse(raw.payload) as Record<string, unknown>
         : raw
+      // Mirror the pager's agent-client-protocol decode: extension methods
+      // ride the wire with a '_' prefix that is stripped before dispatch.
+      if (typeof msg.method === 'string' && msg.method.startsWith('_')) {
+        msg.method = msg.method.slice(1)
+      }
       all.push(msg)
       // Ambient queue broadcasts and terminal signals interleave with every
       // response; capture them so order-sensitive assertions stay exact.
@@ -300,7 +320,7 @@ async function collectIds(client: ClientHandle, ids: number[]): Promise<Map<numb
 }
 
 async function makeHarness(
-  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; settings?: unknown; combineQueuedPrompts?: boolean; idleExitMs?: number } = {},
+  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; settings?: unknown; combineQueuedPrompts?: boolean; followUpBehavior?: 'queue' | 'steer'; idleExitMs?: number } = {},
 ): Promise<LeaderHarness> {
   const ctx = new Context()
   const registry = makeMockRegistry(ctx, options.manualIdle === true)
@@ -323,7 +343,7 @@ async function makeHarness(
     inject: [...GrokLeader.inject],
     apply: (inner: Context) => {
       pluginCtx = inner
-      GrokLeader.apply(inner, { socketPath, ...options.model === undefined ? {} : { model: options.model }, ...options.combineQueuedPrompts === undefined ? {} : { combineQueuedPrompts: options.combineQueuedPrompts }, ...options.idleExitMs === undefined ? {} : { idleExitMs: options.idleExitMs } })
+      GrokLeader.apply(inner, { socketPath, ...options.model === undefined ? {} : { model: options.model }, ...options.combineQueuedPrompts === undefined ? {} : { combineQueuedPrompts: options.combineQueuedPrompts }, ...options.followUpBehavior === undefined ? {} : { followUpBehavior: options.followUpBehavior }, ...options.idleExitMs === undefined ? {} : { idleExitMs: options.idleExitMs } })
     },
   })
   return { ctx, pluginCtx: pluginCtx!, socketPath, registry, persistence, presets }
@@ -347,7 +367,7 @@ describe('grok leader over a unix socket', () => {
   })
 
   const start = async (
-    options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; combineQueuedPrompts?: boolean; idleExitMs?: number } = {},
+    options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; combineQueuedPrompts?: boolean; followUpBehavior?: 'queue' | 'steer'; idleExitMs?: number } = {},
   ): Promise<LeaderHarness & { client: ClientHandle }> => {
     harness = await makeHarness(options)
     client = await makeClient(harness.socketPath)
@@ -430,7 +450,7 @@ describe('grok leader over a unix socket', () => {
 
     const promptResult = await c.request(2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hello there' }] })
     // Turnless mock: admission never claims a turn, so the prompt settles cancelled at idle.
-    expect(promptResult.result).toEqual({ stopReason: 'cancelled' })
+    expect(promptResult.result).toMatchObject({ stopReason: 'cancelled' })
     expect(registry.byId.get(sessionId)?.internals.followups).toEqual(['hello there'])
 
     // The accepted prompt is echoed before the response so it enters the transcript.
@@ -499,7 +519,7 @@ describe('grok leader over a unix socket', () => {
     const sessionId = (created.result as { sessionId: string }).sessionId
     await c.request(2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hello there' }] })
 
-    expect(c.broadcasts.length).toBeGreaterThanOrEqual(3)
+    expect(c.broadcasts.length).toBeGreaterThanOrEqual(2)
     const first = c.broadcasts[0]!
     expect(first.params).toMatchObject({
       sessionId,
@@ -515,7 +535,7 @@ describe('grok leader over a unix socket', () => {
   })
 
   it('queues a second prompt and reports it in x.ai/queue/changed until promotion', async () => {
-    const { registry, client: c } = await start({ manualIdle: true })
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'queue' })
     register(c)
     await c.next()
 
@@ -555,15 +575,21 @@ describe('grok leader over a unix socket', () => {
   it('settle emits prompt_complete, the promotion broadcast + echo, and the response LAST (grok wire order)', async () => {
     // Auto idle: the promotion microtask beats the RPC response write, pinning
     // the live/grok order — the TUI's stashed-adoption rail depends on it.
-    const { client: c } = await start()
+    const { client: c } = await start({ followUpBehavior: 'queue' })
     register(c)
     await c.next()
 
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
 
-    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
-    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    // One write, one data event: both prompts enter the leader in the same
+    // synchronous frame loop, so 'second' queues while 'first' is in flight
+    // (split writes let 'first' settle before 'second' arrives).
+    const promptFrame = (id: number, text: string): Uint8Array => encodeJsonFrame({
+      type: 'acp',
+      payload: JSON.stringify({ jsonrpc: '2.0', id, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text }] } }),
+    })
+    c.socket.write(Buffer.concat([promptFrame(2, 'first'), promptFrame(3, 'second')]))
     await waitForId(c, 2)
     await waitForId(c, 3)
 
@@ -597,7 +623,7 @@ describe('grok leader over a unix socket', () => {
   })
 
   it('interject cancels the running turn (send-now) and promotes the row next', async () => {
-    const { registry, client: c } = await start({ manualIdle: true })
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'queue' })
     register(c)
     await c.next()
 
@@ -623,7 +649,7 @@ describe('grok leader over a unix socket', () => {
     expect(agent.internals.cancelCalls).toBeGreaterThanOrEqual(1)
     for (;;) {
       const msg = await c.next()
-      if (msg.id === 2) { expect(msg.result).toEqual({ stopReason: 'cancelled' }); break }
+      if (msg.id === 2) { expect(msg.result).toMatchObject({ stopReason: 'cancelled' }); break }
     }
 
     // ...and the interjected row runs next as its own turn (after the agent idles).
@@ -639,7 +665,7 @@ describe('grok leader over a unix socket', () => {
   })
 
   it('queue/edit replaces the row text, bumps its version, and rebroadcasts', async () => {
-    const { registry, client: c } = await start({ manualIdle: true })
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'queue' })
     register(c)
     await c.next()
 
@@ -661,20 +687,19 @@ describe('grok leader over a unix socket', () => {
     const edited = ((c.broadcasts[c.broadcasts.length - 1]!.params) as { entries: Array<{ id: string; text: string; version: number }> }).entries[0]!
     expect(edited).toMatchObject({ id: row.id, text: 'edited second', version: 1 })
 
-    // The edited text is what the row runs once it promotes.
-    agent.internals.idleWaiters.shift()!()
-    // Two promotion waiters now: the edit's own advance and the settle path's.
-    await waitFor(() => agent.internals.idleWaiters.length === 2)
-    agent.internals.idleWaiters.shift()!() // edit-triggered advance: runs the edited row
+    // The edited text is what the row runs once it promotes. One promotion
+    // wait exists (scheduled at enqueue; the edit and settle dedup into it).
+    agent.internals.idleWaiters.shift()!() // settle the running first
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    agent.internals.idleWaiters.shift()!() // the pending promotion: runs the edited row
     await waitFor(() => agent.internals.followups.includes('edited second'))
-    agent.internals.idleWaiters.shift()!() // settle-triggered advance: no-op while the row runs
     agent.internals.idleWaiters.shift()!() // settle the promoted row
-    expect((await waitForId(c, 2)).result).toEqual({ stopReason: 'cancelled' })
-    expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
+    expect((await waitForId(c, 3)).result).toMatchObject({ stopReason: 'cancelled' })
   })
 
   it('queue/hold_edit parks the front and queue/release_edit promotes it', async () => {
-    const { registry, client: c } = await start({ manualIdle: true })
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'queue' })
     register(c)
     await c.next()
 
@@ -692,25 +717,24 @@ describe('grok leader over a unix socket', () => {
 
     // The running turn settles, but the held front must not promote.
     agent.internals.idleWaiters.shift()!()
-    expect((await waitForId(c, 2)).result).toEqual({ stopReason: 'cancelled' })
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
     await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
     expect(agent.internals.followups).toEqual(['first'])
 
-    // Releasing the hold unblocks the parked row.
+    // Releasing the hold unblocks the parked row. Either order works: if the
+    // pending enqueue-time promotion fires before the release lands, it parks
+    // on the held front and the release then promotes synchronously on the
+    // idle agent; if the release lands first, its promotion request dedups
+    // into the pending wait.
     c.notify('x.ai/queue/release_edit', { sessionId, id: secondId })
-    // The settle-triggered promotion fires before the release reaches the
-    // leader (microtask vs socket read): the front is still held, so it parks.
-    agent.internals.idleWaiters.shift()!()
-    // The release now registered its own idle-gated promotion; fire it.
-    await waitFor(() => agent.internals.idleWaiters.length >= 1)
     agent.internals.idleWaiters.shift()!()
     await waitFor(() => agent.internals.followups.includes('second'))
     agent.internals.idleWaiters.shift()!() // settle the promoted second
-    expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
+    expect((await waitForId(c, 3)).result).toMatchObject({ stopReason: 'cancelled' })
   })
 
   it('queue/remove of a held front promotes the next queued row', async () => {
-    const { registry, client: c } = await start({ manualIdle: true })
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'queue' })
     register(c)
     await c.next()
 
@@ -731,27 +755,26 @@ describe('grok leader over a unix socket', () => {
 
     // The running turn settles, but the held front must not promote.
     agent.internals.idleWaiters.shift()!()
-    expect((await waitForId(c, 2)).result).toEqual({ stopReason: 'cancelled' })
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
     await waitFor(() => agent.internals.idleWaiters.length === 1)
     await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
     expect(agent.internals.followups).toEqual(['first'])
 
     // Removing the held front unblocks the next row instead of stranding it.
     c.notify('x.ai/queue/remove', { sessionId, id: secondId, expectedVersion: 0 })
-    await waitFor(() => agent.internals.idleWaiters.length === 2)
-    agent.internals.idleWaiters.shift()!() // settle-path advance: promotes the new front
+    // The removed row's RPC resolves as cancelled; its response proves the
+    // remove landed before the pending promotion wait is fired.
+    expect((await waitForId(c, 3)).result).toMatchObject({ stopReason: 'cancelled' })
+    agent.internals.idleWaiters.shift()!() // the pending promotion: promotes the new front
     await waitFor(() => agent.internals.followups.includes('third'))
     expect(agent.internals.followups).toEqual(['first', 'third'])
-    expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
-    // Drain the remaining idle waiter and settle the promoted third.
-    agent.internals.idleWaiters.shift()!() // remove-triggered advance: no-op while third runs
     agent.internals.idleWaiters.shift()!() // settle the promoted third
-    expect((await waitForId(c, 4)).result).toEqual({ stopReason: 'cancelled' })
+    expect((await waitForId(c, 4)).result).toMatchObject({ stopReason: 'cancelled' })
     expect(thirdId).toEqual(expect.any(String) as string)
   })
 
   it('queue/reorder of a held front away from the lead promotes the new front', async () => {
-    const { registry, client: c } = await start({ manualIdle: true })
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'queue' })
     register(c)
     await c.next()
 
@@ -772,17 +795,20 @@ describe('grok leader over a unix socket', () => {
 
     // The running turn settles, but the held front must not promote.
     agent.internals.idleWaiters.shift()!()
-    expect((await waitForId(c, 2)).result).toEqual({ stopReason: 'cancelled' })
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
     await waitFor(() => agent.internals.idleWaiters.length === 1)
     await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
     expect(agent.internals.followups).toEqual(['first'])
 
     // Moving the held row out of the lead lets the new front run; the held
-    // second stays queued behind it. Both the settle path and the reorder
-    // register an idle-gated advance; the settle-path waiter fires first and
+    // second stays queued behind it. The reorder's promotion request dedups
+    // into the promotion wait scheduled at enqueue time; firing that wait
     // promotes the reordered new front.
     c.notify('x.ai/queue/reorder', { sessionId, orderedIds: [thirdId, secondId] })
-    await waitFor(() => agent.internals.idleWaiters.length === 2)
+    await waitFor(() => c.broadcasts.some(b => {
+      const params = b.params as { entries?: Array<{ id: string }> }
+      return params.entries?.map(entry => entry.id).join(',') === `${thirdId},${secondId}`
+    }))
     agent.internals.idleWaiters.shift()!()
     await waitFor(() => agent.internals.followups.includes('third'))
     expect(agent.internals.followups).toEqual(['first', 'third'])
@@ -794,14 +820,13 @@ describe('grok leader over a unix socket', () => {
     const afterReorder = (reorderBroadcast()!.params as { entries?: Array<{ id: string }> }).entries
     expect(afterReorder?.map(entry => entry.id)).toEqual([secondId])
 
-    agent.internals.idleWaiters.shift()!() // reorder-triggered advance: no-op while third runs
     agent.internals.idleWaiters.shift()!() // settle the promoted third
-    expect((await waitForId(c, 4)).result).toEqual({ stopReason: 'cancelled' })
+    expect((await waitForId(c, 4)).result).toMatchObject({ stopReason: 'cancelled' })
     expect(secondId).toEqual(expect.any(String) as string)
   })
 
   it('a stale expectedVersion on edit/remove/interject is a no-op that resyncs', async () => {
-    const { registry, client: c } = await start({ manualIdle: true })
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'queue' })
     register(c)
     await c.next()
 
@@ -840,7 +865,7 @@ describe('grok leader over a unix socket', () => {
   })
 
   it('combines 2+ queued plain prompts into one turn when enabled', async () => {
-    const { registry, client: c } = await start({ manualIdle: true, combineQueuedPrompts: true })
+    const { registry, client: c } = await start({ manualIdle: true, combineQueuedPrompts: true, followUpBehavior: 'queue' })
     register(c)
     await c.next()
 
@@ -866,7 +891,7 @@ describe('grok leader over a unix socket', () => {
     for (;;) {
       const msg = await c.next()
       if (msg.id === 3 || msg.id === 4) {
-        expect(msg.result).toEqual({ stopReason: 'cancelled' })
+        expect(msg.result).toMatchObject({ stopReason: 'cancelled' })
         settled.add(msg.id)
         if (settled.size === 2) break
       }
@@ -963,11 +988,11 @@ describe('grok leader over a unix socket', () => {
     expect(dup.error).toMatchObject({ code: -32602 })
     // The first session still works: its record was not replaced.
     const prompted = await c.request(3, 'session/prompt', { sessionId: 'pinned-session', prompt: [{ type: 'text', text: 'still here' }] })
-    expect(prompted.result).toEqual({ stopReason: 'cancelled' })
+    expect(prompted.result).toMatchObject({ stopReason: 'cancelled' })
   })
 
   it('a second client cannot touch the first client sessions', async () => {
-    const { registry, client: c, socketPath } = await start({ manualIdle: true })
+    const { registry, client: c, socketPath } = await start({ manualIdle: true, followUpBehavior: 'queue' })
     register(c)
     await c.next()
     const other = await makeClient(socketPath)
@@ -1000,12 +1025,12 @@ describe('grok leader over a unix socket', () => {
     // The owner's flow is untouched: the parked prompt settles and the queued
     // row still runs (a foreign queue/clear would have removed it).
     agent.internals.idleWaiters.shift()!()
-    expect((await waitForId(c, 2)).result).toEqual({ stopReason: 'cancelled' })
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
     await waitFor(() => agent.internals.idleWaiters.length === 1)
     agent.internals.idleWaiters.shift()!()
     await waitFor(() => agent.internals.followups.includes('second'))
     agent.internals.idleWaiters.shift()!()
-    expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
+    expect((await waitForId(c, 3)).result).toMatchObject({ stopReason: 'cancelled' })
     expect(agent.internals.followups).toEqual(['first', 'second'])
     expect(agent.internals.cancelCalls).toBe(0)
     expect(registry.byId.has(sessionId)).toBe(true)
@@ -1112,7 +1137,7 @@ describe('grok leader over a unix socket', () => {
     agent.internals.idleWaiters.shift()!()
     await waitFor(() => agent.internals.followups.includes('two'))
     agent.internals.idleWaiters.shift()!()
-    expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
+    expect((await waitForId(c, 3)).result).toMatchObject({ stopReason: 'cancelled' })
   })
 
   it('treats a null _meta as absent on session/new, session/prompt, and session/load', async () => {
@@ -1124,7 +1149,7 @@ describe('grok leader over a unix socket', () => {
     const sessionId = (created.result as { sessionId: string }).sessionId
     const prompted = await c.request(2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'null meta' }], _meta: null })
     expect(prompted.error).toBeUndefined()
-    expect(prompted.result).toEqual({ stopReason: 'cancelled' })
+    expect(prompted.result).toMatchObject({ stopReason: 'cancelled' })
     await c.next() // consume the echoed user_message_chunk before the next request
     const loaded = await c.request(3, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [], _meta: null })
     expect(loaded.error).toBeUndefined()
@@ -1245,7 +1270,7 @@ describe('grok leader over a unix socket', () => {
   })
 
   it('queues a second prompt behind the in-flight one (FIFO)', async () => {
-    const { registry, client: c } = await start({ manualIdle: true })
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'queue' })
     register(c)
     await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
@@ -1281,7 +1306,7 @@ describe('grok leader over a unix socket', () => {
     for (;;) {
       const msg = await c.next()
       if (msg.id === 2) {
-        expect(msg.result).toEqual({ stopReason: 'cancelled' })
+        expect(msg.result).toMatchObject({ stopReason: 'cancelled' })
         expect(sawSecondEcho).toBe(false)
         break
       }
@@ -1292,6 +1317,10 @@ describe('grok leader over a unix socket', () => {
     agent!.internals.idleWaiters.shift()!()
     await waitFor(() => agent!.internals.followups.includes('second'))
     // The promotion broadcast adopts the next turn before its echo streams.
+    // Wait for the broadcast to cross the socket: the agent-side followup
+    // lands before the client reads the frames.
+    await waitFor(() => c.all.some(m => m.method === 'x.ai/queue/changed' && (m.params as { runningText?: string }).runningText === 'second'))
+    await waitFor(() => c.all.some(m => isEcho(m, 'second')))
     const promoIndex = c.all.findIndex(m => m.method === 'x.ai/queue/changed' && (m.params as { runningPromptId?: string }).runningPromptId !== undefined && (m.params as { runningText?: string }).runningText === 'second')
     const echoIndex = c.all.findIndex(m => isEcho(m, 'second'))
     expect(promoIndex).toBeGreaterThanOrEqual(0)
@@ -1299,11 +1328,351 @@ describe('grok leader over a unix socket', () => {
     expect(agent!.internals.followups).toEqual(['first', 'second'])
 
     agent!.internals.idleWaiters.shift()!()
-    expect((await waitForId(c, 3)).result).toEqual({ stopReason: 'cancelled' })
+    expect((await waitForId(c, 3)).result).toMatchObject({ stopReason: 'cancelled' })
+  })
+
+  it('does not bypass the idle gate for a prompt enqueued between turn-end and idle', async () => {
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'queue' })
+    register(c)
+    await c.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    expect(agent.internals.followups).toEqual(['first'])
+
+    // Queue a second prompt while the first turn is still in flight.
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
+    expect(agent.internals.followups).toEqual(['first'])
+
+    // End the first turn. The settle path schedules an idle-gated promotion
+    // for 'second', but the agent has not reported idle yet.
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+
+    // This prompt arrives in the turn-end -> idle window. It must join the
+    // queue instead of starting immediately and racing the harness.
+    sendRequest(c, 4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'third' }] })
+    await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
+    expect(agent.internals.followups).toEqual(['first'])
+
+    // Fire the pending idle-gated promotion; 'second' starts.
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.followups.includes('second'))
+    expect(agent.internals.followups).toEqual(['first', 'second'])
+
+    // Let 'second' settle and then 'third' runs through the same idle gate.
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.followups.includes('third'))
+    expect(agent.internals.followups).toEqual(['first', 'second', 'third'])
+  })
+
+  it('steers a prompt sent mid-turn into the running turn (followUpBehavior=steer)', async () => {
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'steer' })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+
+    // A follow-up during the turn folds in at the next step boundary instead
+    // of parking behind the whole (possibly minutes-long) turn.
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }], _meta: { promptId: 'steer-1' } })
+    await waitFor(() => agent.internals.steered.includes('second'))
+    expect(agent.internals.followups).toEqual(['first'])
+
+    // The row was confirmed once (so the pager's optimistic echo retires by
+    // id) and then left the queue as it joined the live turn.
+    await waitFor(() => {
+      const rowSeen = c.broadcasts.some(b => ((b.params as { entries?: Array<{ id: string }> }).entries ?? []).some(e => e.id === 'steer-1'))
+      const latest = c.broadcasts[c.broadcasts.length - 1]?.params as { entries?: Array<{ id: string }> } | undefined
+      return rowSeen && latest !== undefined && !(latest.entries ?? []).some(e => e.id === 'steer-1')
+    })
+    // Its text streams into the live turn as a user echo.
+    await waitFor(() => c.all.some(m => m.method === 'session/update' && ((m.params as { update?: { content?: { text?: string } } }).update?.content?.text) === 'second'))
+
+    // Both RPCs settle with the host turn's outcome, each with its own attribution.
+    agent.internals.idleWaiters.shift()!()
+    const responses = await collectIds(c, [2, 3])
+    expect(responses.get(2)!.result).toMatchObject({ stopReason: 'cancelled' })
+    expect(responses.get(3)!.result).toMatchObject({ stopReason: 'cancelled', _meta: { promptId: 'steer-1' } })
+    // The steered prompt never became its own turn.
+    expect(agent.internals.followups).toEqual(['first'])
+  })
+
+  it('routes per prompt: _meta.followUp=steer steers one message under the queue default', async () => {
+    const { registry, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+
+    // One flagged message steers into the running turn...
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'nudge' }], _meta: { promptId: 'route-steer', followUp: 'steer' } })
+    await waitFor(() => agent.internals.steered.includes('nudge'))
+    // ...while an unflagged one still parks in the queue.
+    sendRequest(c, 4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'later' }], _meta: { promptId: 'route-queue' } })
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: Array<{ id: string }> }).entries ?? []).some(e => e.id === 'route-queue')))
+    expect(agent.internals.followups).toEqual(['first'])
+
+    // The steered message settles with the host turn; the queued one runs next.
+    agent.internals.idleWaiters.shift()!()
+    const settled = await collectIds(c, [2, 3])
+    expect(settled.get(3)!.result).toMatchObject({ stopReason: 'cancelled', _meta: { promptId: 'route-steer' } })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.followups.includes('later'))
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 4)).result).toMatchObject({ stopReason: 'cancelled', _meta: { promptId: 'route-queue' } })
+  })
+
+  it('x.ai/interject merges text into the running turn without cancelling it', async () => {
+    const { registry, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+
+    sendRequest(c, 3, 'x.ai/interject', { sessionId, text: 'course correction', interjectionId: 'ij-1' })
+    expect((await waitForId(c, 3)).result).toEqual({})
+    expect(agent.internals.steered).toEqual(['course correction'])
+    expect(agent.internals.cancelCalls).toBe(0)
+    // The broadcast reaches the pane (the originator dedups by id).
+    await waitFor(() => c.all.some(m => m.method === 'x.ai/session/interjection'
+      && (m.params as { interjectionId?: string }).interjectionId === 'ij-1'
+      && (m.params as { text?: string }).text === 'course correction'))
+
+    // The host turn keeps running and settles normally.
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
+  })
+
+  it('session/prompt with _meta.sendNow cancels the running turn and runs next', async () => {
+    const { registry, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'urgent' }], _meta: { promptId: 'now-1', sendNow: true } })
+    // The running turn is cancelled with the send_now trigger...
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
+    await waitFor(() => c.completes.some(m => (m.params as { cancelTrigger?: string }).cancelTrigger === 'send_now'))
+    expect(agent.internals.cancelCalls).toBeGreaterThanOrEqual(1)
+    // ...and the send-now prompt runs next. Two waits are pending: the
+    // cancelled turn's stale idle detector (a no-op) and the promotion wait.
+    await waitFor(() => agent.internals.idleWaiters.length >= 2)
+    agent.internals.idleWaiters.shift()!()
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.followups.includes('urgent'))
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 3)).result).toMatchObject({ stopReason: 'cancelled', _meta: { promptId: 'now-1' } })
+  })
+
+  it('routes per prompt: _meta.followUp=queue parks one message under a steer default', async () => {
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'steer' })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'parked' }], _meta: { promptId: 'route-parked', followUp: 'queue' } })
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: Array<{ id: string }> }).entries ?? []).some(e => e.id === 'route-parked')))
+    expect(agent.internals.steered).toEqual([])
+
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.followups.includes('parked'))
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 3)).result).toMatchObject({ stopReason: 'cancelled' })
+  })
+
+  it('defaults to queue: a mid-turn prompt parks instead of steering', async () => {
+    const { registry, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 1))
+    expect(agent.internals.steered).toEqual([])
+
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.followups.includes('second'))
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 3)).result).toMatchObject({ stopReason: 'cancelled' })
+    expect(agent.internals.followups).toEqual(['first', 'second'])
+  })
+
+  it('steer mode still runs an idle-session prompt as its own turn', async () => {
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'steer' })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'solo' }] })
+    await waitFor(() => agent.internals.followups.includes('solo'))
+    expect(agent.internals.steered).toEqual([])
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
+  })
+
+  it('stamps a strictly increasing seq on queue/changed and promptId meta on settle results', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+
+    // A client-minted promptId rides back on the settle result, so the pager
+    // attributes the response without falling back to the RPC id.
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'one' }], _meta: { promptId: 'row-1' } })
+    const settledOne = await waitForId(c, 2)
+    expect(settledOne.result).toMatchObject({ stopReason: 'cancelled', _meta: { sessionId, promptId: 'row-1' } })
+
+    // A leader-minted id is still echoed on the result.
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'two' }] })
+    const settledTwo = await waitForId(c, 3)
+    expect((settledTwo.result as { _meta?: { promptId?: string } })._meta?.promptId).toEqual(expect.any(String) as string)
+
+    // Every snapshot carries a seq, strictly increasing in emission order, so
+    // the pager can drop a stale snapshot regardless of channel interleaving.
+    const seqs = c.broadcasts.map(b => (b.params as { seq?: number }).seq)
+    expect(seqs.length).toBeGreaterThanOrEqual(2)
+    for (const seq of seqs) expect(typeof seq).toBe('number')
+    for (let i = 1; i < seqs.length; i++) expect(seqs[i]!).toBeGreaterThan(seqs[i - 1]!)
+  })
+
+  it('random queue-op interleavings converge: one settle per prompt, seq-ordered snapshots, a drained queue', async () => {
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'queue' })
+    register(c)
+    await c.next()
+    let rpcId = 10
+    // Three seeded rounds; a failure reproduces exactly from its seed.
+    for (const seedBase of [0xC0FFEE, 0xBADD1E, 0x5EED]) {
+      let seed = seedBase >>> 0
+      const rnd = (): number => {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
+        return seed / 2 ** 32
+      }
+      const pick = <T,>(items: T[]): T => items[Math.floor(rnd() * items.length)]!
+
+      sendRequest(c, ++rpcId, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      const created = await waitForId(c, rpcId)
+      const sessionId = (created.result as { sessionId: string }).sessionId
+      const agent = registry.byId.get(sessionId)!
+      const sent: Array<{ rpc: number; promptId: string }> = []
+      const texts: string[] = []
+      const knownIds: string[] = []
+      const held: string[] = []
+      let counter = 0
+
+      for (let op = 0; op < 40; op++) {
+        const roll = rnd()
+        if (roll < 0.35) {
+          const promptId = 's' + String(seedBase) + '-p' + String(counter)
+          const text = 's' + String(seedBase) + '-t' + String(counter)
+          counter += 1
+          knownIds.push(promptId)
+          texts.push(text)
+          sent.push({ rpc: ++rpcId, promptId })
+          sendRequest(c, rpcId, 'session/prompt', { sessionId, prompt: [{ type: 'text', text }], _meta: { promptId } })
+        } else if (roll < 0.6) {
+          // Model the agent reaching idle at an arbitrary point.
+          agent.internals.idleWaiters.shift()?.()
+        } else if (roll < 0.68) {
+          if (knownIds.length > 0) c.notify('x.ai/queue/remove', { sessionId, id: pick(knownIds) })
+        } else if (roll < 0.76) {
+          if (knownIds.length > 0) {
+            const text = 's' + String(seedBase) + '-edit' + String(counter)
+            counter += 1
+            texts.push(text)
+            c.notify('x.ai/queue/edit', { sessionId, id: pick(knownIds), newText: text })
+          }
+        } else if (roll < 0.84) {
+          if (knownIds.length > 0) {
+            const id = pick(knownIds)
+            held.push(id)
+            c.notify('x.ai/queue/hold_edit', { sessionId, id })
+          }
+        } else if (roll < 0.9) {
+          if (held.length > 0) c.notify('x.ai/queue/release_edit', { sessionId, id: held.splice(Math.floor(rnd() * held.length), 1)[0]! })
+        } else if (roll < 0.96) {
+          if (knownIds.length > 1) c.notify('x.ai/queue/reorder', { sessionId, orderedIds: [...knownIds].sort(() => rnd() - 0.5) })
+        } else if (knownIds.length > 0) {
+          c.notify('x.ai/queue/interject', { sessionId, id: pick(knownIds) })
+        }
+        // Let the leader drain its socket and microtasks at arbitrary cuts.
+        if (op % 5 === 4) await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
+      }
+
+      // Stop mutating; discard what never ran and settle whatever is running.
+      c.notify('x.ai/queue/clear', { sessionId })
+      await waitFor(() => {
+        agent.internals.idleWaiters.splice(0).forEach((fire) => { fire() })
+        return sent.every(({ rpc }) => c.all.some(m => m.id === rpc && m.method === undefined))
+      }, 10_000)
+
+      // Exactly one settle per prompt, attributed to its queue row.
+      for (const { rpc, promptId } of sent) {
+        const responses = c.all.filter(m => m.id === rpc && m.method === undefined)
+        expect(responses).toHaveLength(1)
+        const result = responses[0]!.result as { stopReason?: string; _meta?: { promptId?: string } } | undefined
+        expect(result?.stopReason).toEqual(expect.any(String) as string)
+        expect(result?._meta?.promptId).toBe(promptId)
+      }
+      // Snapshots stay strictly seq-ordered.
+      const snaps = c.broadcasts.filter(b => (b.params as { sessionId?: string }).sessionId === sessionId)
+      const seqs = snaps.map(b => (b.params as { seq?: number }).seq)
+      for (let i = 1; i < seqs.length; i++) expect(seqs[i]!).toBeGreaterThan(seqs[i - 1]!)
+      // No prompt ran twice, and only texts this round produced ever ran.
+      const runs = agent.internals.followups
+      expect(new Set(runs).size).toBe(runs.length)
+      for (const run of runs) expect(texts).toContain(run)
+      // The queue drained to the idle empty snapshot.
+      const last = snaps[snaps.length - 1]!.params as { entries: unknown[]; runningPromptId?: string }
+      expect(last.entries).toEqual([])
+      expect(last.runningPromptId).toBeUndefined()
+    }
   })
 
   it('cancel settles the in-flight and queued prompts as cancelled', async () => {
-    const { registry, client: c } = await start({ manualIdle: true })
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'queue' })
     register(c)
     await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
@@ -1318,8 +1687,8 @@ describe('grok leader over a unix socket', () => {
 
     c.notify('session/cancel', { sessionId })
     const responses = await collectIds(c, [2, 3])
-    expect(responses.get(2)!.result).toEqual({ stopReason: 'cancelled' })
-    expect(responses.get(3)!.result).toEqual({ stopReason: 'cancelled' })
+    expect(responses.get(2)!.result).toMatchObject({ stopReason: 'cancelled' })
+    expect(responses.get(3)!.result).toMatchObject({ stopReason: 'cancelled' })
     expect(agent!.internals.followups).toEqual(['one']) // the queued prompt never ran
   })
 

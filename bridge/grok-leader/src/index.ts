@@ -13,9 +13,10 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { chmodSync, unlinkSync } from 'node:fs'
+import { chmodSync, statSync, unlinkSync } from 'node:fs'
 import { createServer, type Server, type Socket } from 'node:net'
 import { isAbsolute } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import { installModelSelection, type Agent, type AgentOptions, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
@@ -41,6 +42,12 @@ export interface GrokLeaderConfig {
   model?: string
   /** Fold 2+ plain queued prompts into one turn (grok ui.combine_queued_prompts). */
   combineQueuedPrompts?: boolean
+  /** What a prompt sent while a turn is running does (grok ui.follow_up_behavior):
+   *  'queue' (the default, grok parity) parks it until the turn ends — a queued
+   *  row's Enter is Send Now, which cancels the running turn and runs the row
+   *  next; 'steer' folds it into the running turn at the harness's next step
+   *  boundary without interrupting (Codex-style steering). */
+  followUpBehavior?: 'queue' | 'steer'
   /** Grace before the host exits after the last client disconnects (ms). */
   idleExitMs?: number
 }
@@ -50,6 +57,7 @@ export const Config: Schema<GrokLeaderConfig> = Schema.object({
   provider: Schema.string(),
   model: Schema.string(),
   combineQueuedPrompts: Schema.boolean(),
+  followUpBehavior: Schema.union(['queue', 'steer'] as const),
   idleExitMs: Schema.number().default(2000),
 })
 
@@ -208,7 +216,7 @@ interface SessionRecord {
   prompts: string[]
   /** FIFO of validated prompts waiting for the in-flight one to settle. */
   promptQueue: Array<{
-    resolve: (value: { stopReason: StopReasonWire }) => void
+    resolve: (value: PromptSettleResult) => void
     reject: (error: Error) => void
     /** Stable queue-row id: the request _meta.promptId or a minted uuid. */
     id: string
@@ -238,6 +246,20 @@ interface SessionRecord {
     turn: number | undefined
     endReason: TurnEndReason | undefined
   } | undefined
+  /** True while the one idle-gated promotion wait is outstanding on
+   *  `whenIdle`; dedups concurrent promotion requests. */
+  promotionScheduled: boolean
+  /** Prompts folded into the running turn as steering (follow-up steer).
+   *  They settle with the host turn's stop reason at its turn end. */
+  steered: Array<{ id: string; resolve: (value: PromptSettleResult) => void }>
+}
+
+/** RPC result of a settled session/prompt. `_meta.promptId` lets the pager
+ *  attribute the response to its queue row directly (the grok shell's
+ *  PromptResponse `_meta` shape) instead of inferring from RPC ids. */
+interface PromptSettleResult {
+  stopReason: StopReasonWire
+  _meta: { sessionId: string; promptId: string }
 }
 
 /** Structural read of the persistence service: list and load only. */
@@ -280,7 +302,27 @@ interface SessionsLike {
 
 /** Structural read of the default-model service. */
 interface AgentDefaultModelLike {
+  currentSelection?(): { provider: string; model: string; reasoningEffort?: string } | undefined
   saveSelection(next: { provider: string; model: string; reasoningEffort?: string }): Promise<unknown>
+}
+
+/** Build a session's initial model selection from the harness default. */
+function modelSelectionFromDefault(
+  config: Pick<GrokLeaderConfig, 'provider' | 'model'>,
+  defaultSelection: { provider: string; model: string; reasoningEffort?: string } | undefined,
+) {
+  const provider = config.provider ?? defaultSelection?.provider ?? 'deepseek-official'
+  const model = config.model ?? defaultSelection?.model ?? 'deepseek-v4-flash'
+  const fromDefault = defaultSelection !== undefined
+    && provider === defaultSelection.provider
+    && model === defaultSelection.model
+  return {
+    provider,
+    model,
+    ...fromDefault && defaultSelection.reasoningEffort !== undefined
+      ? { reasoningEffort: ReasoningEffortId(defaultSelection.reasoningEffort) }
+      : {},
+  }
 }
 
 /** Structural read of the preset roster: list, resolve, and mount. */
@@ -299,6 +341,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const agents = ctx.agents
   const llm = ctx.get('llm') as LlmLike | undefined
   const logger = ctx.logger
+  // Build provenance banner: three caches can pin stale bridge code (the
+  // profile's node_modules copy, a live leader process, a stale lib build),
+  // and "which build is actually serving" has been unanswerable from logs.
+  // The loaded file's own mtime IS its build time; stderr reaches the
+  // launcher's leader log unconditionally.
+  try {
+    const self = fileURLToPath(import.meta.url)
+    process.stderr.write('grok-leader: loaded ' + self + ' (built ' + statSync(self).mtime.toISOString() + ')\n')
+  } catch { /* provenance only; never block mounting */ }
   // Read lazily like the other optional services: the settings provider
   // (dsh-settings-file) publishes asynchronously after apply.
   const settings = (): SettingsLike | undefined => ctx.get('settings') as SettingsLike | undefined
@@ -306,7 +357,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   // ctx.get at apply time captured undefined and every session/load failed
   // with "session persistence is not configured" (same fix as agentPresets).
   const persistence = (): PersistenceLike | undefined => ctx.get('sessionPersistence')
-  const agentDefaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
+  // Read lazily too: agent-default-model depends on the settings provider and
+  // can mount after apply, so an eager capture would make session/set_model
+  // silently skip saveSelection (and /effort would not persist).
+  const agentDefaultModel = (): AgentDefaultModelLike | undefined => ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
   /** Read the preset roster on demand: it mounts asynchronously after apply. */
   const agentPresets = (): AgentPresetsLike | undefined => ctx.get('agentPresets') as AgentPresetsLike | undefined
   const sessions = new Map<SessionId, SessionRecord>()
@@ -316,6 +370,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   let catalog: ModelCatalog | undefined
   // grok's ui.combine_queued_prompts (default off); env override for dev shells.
   const combineQueued = config.combineQueuedPrompts === true || process.env.DEEPSEEK_LEADER_COMBINE_QUEUED === '1'
+  // Explicit config wins; the env override serves dev shells; the default is
+  // queue (grok parity). 'steer' folds follow-ups into the running turn.
+  const followUpSteer = (config.followUpBehavior ?? process.env.DEEPSEEK_LEADER_FOLLOW_UP ?? 'queue') === 'steer'
   const idleExitMs = config.idleExitMs ?? 2000
   /** x.ai/session/list rows served when the request carries no (or an oversized) limit. */
   const DEFAULT_SESSION_LIST_LIMIT = 50
@@ -510,7 +567,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   const sendNotification = (conn: ClientConnection, method: string, params: unknown): void => {
-    sendAcp(conn, { jsonrpc: '2.0', method, params })
+    // ACP extension methods ride the wire with a '_' prefix: the pager's
+    // agent-client-protocol decode strips it before dispatching to the
+    // x.ai/* handlers and DROPS unprefixed unknown methods as
+    // method_not_found. session/update is the sole typed (non-extension)
+    // notification this bridge emits.
+    const wire = method === WIRE.sessionUpdate || method.startsWith('_') ? method : '_' + method
+    sendAcp(conn, { jsonrpc: '2.0', method: wire, params })
   }
 
   /** A client that never answers a reverse request is rejected after this long. */
@@ -985,15 +1048,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const preset = await composePreset(presetRequestFromMeta(meta))
     // Seed the per-agent selection with the harness default so the persona
     // template ("powered by the {{model}} model") can assemble before the TUI
-    // ever sends session/set_model.
-    const defaultModel = ctx.get('agentDefaultModel') as
-      { currentSelection?: () => { provider: string; model: string } } | undefined
+    // ever sends session/set_model. The default's reasoning effort must ride
+    // along or a saved /effort choice is not applied to newly created agents.
+    const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
     const defaultSelection = defaultModel?.currentSelection?.()
     const selection: ModelSelectionRef = {
-      current: {
-        provider: config.provider ?? defaultSelection?.provider ?? 'deepseek-official',
-        model: config.model ?? defaultSelection?.model ?? 'deepseek-v4-flash',
-      },
+      current: modelSelectionFromDefault(config, defaultSelection),
       assembled: undefined,
     }
     const handle = await agents.create({
@@ -1038,6 +1098,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       editHolds: new Set(),
       mcpInitTimer: undefined,
       inflight: undefined,
+      promotionScheduled: false,
+      steered: [],
     }
     sessions.set(sessionId, record)
     // The pager parks on "Starting session…" until this arrives (the probe
@@ -1070,12 +1132,28 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     record.cancelTrigger = undefined
   }
 
+  /** Queue-snapshot sequence, strictly increasing across every broadcast the
+   *  leader emits. Epoch-seeded so a restarted leader outranks its
+   *  predecessor's snapshots without a pager-side reset handshake; the pager
+   *  drops any snapshot whose seq is not strictly newer for its session.
+   *  The x1024 scale means a successor could only fall behind if the
+   *  predecessor sustained over 1024 broadcasts per millisecond of its own
+   *  lifetime — far beyond what per-broadcast JSON encoding and socket writes
+   *  allow; the +1024 headstart covers even a same-millisecond succession.
+   *  A clock that steps backwards between leaders is out of this seed's
+   *  reach, so the pager also clears its watermarks whenever the leader
+   *  connection is re-established (watermarks are connection-scoped).
+   *  Stays integer-exact: 2^53 / (Date.now() * 1024) leaves millennia of
+   *  headroom. */
+  let queueSeq = Date.now() * 1024 + 1024
+
   /** Broadcast the live queue to the pager: pending rows plus the running prompt. */
   const broadcastQueueChanged = (record: SessionRecord): void => {
     const conn = connections.get(record.clientId)
     if (conn === undefined) return
     sendNotification(conn, 'x.ai/queue/changed', {
       sessionId: record.agent.session.id,
+      seq: ++queueSeq,
       entries: record.promptQueue.map((entry, index) => ({
         id: entry.id,
         version: entry.version,
@@ -1092,11 +1170,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     })
   }
 
+  /** The settle result a resolved prompt RPC carries back to the pager. */
+  const promptSettled = (record: SessionRecord, promptId: string, stopReason: StopReasonWire): PromptSettleResult =>
+    ({ stopReason, _meta: { sessionId: String(record.agent.session.id), promptId } })
+
   /**
    * Run one validated prompt: admit it, stream the echo, and settle at turn
    * end (or idle for a turnless slot).
    */
-  const runPrompt = async (record: SessionRecord, id: string, text: string, combinedTexts?: string[]): Promise<{ stopReason: StopReasonWire }> => {
+  const runPrompt = async (record: SessionRecord, id: string, text: string, combinedTexts?: string[]): Promise<PromptSettleResult> => {
     if (agents.get(record.agent.id) !== record.agent) {
       throw internalError('prompt was not queued: the agent was disposed outside the bridge')
     }
@@ -1153,12 +1235,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     record.runningText = undefined
     record.runningCombinedTexts = undefined
     if (failure === undefined && stopReason !== undefined) emitPromptComplete(record, id, stopReason)
+    // Steered follow-ups rode this turn: settle them with its outcome. They
+    // never had a turn of their own, so no prompt_complete is emitted for them.
+    for (const steered of record.steered.splice(0)) {
+      steered.resolve(promptSettled(record, steered.id, stopReason ?? 'cancelled'))
+    }
     if (record.promptQueue.length > 0) {
-      // Promote only once the agent is truly idle: the harness discards a
-      // followup admitted from inside the turn/end event handler (its loop
-      // has not finished the turn yet), which settled the queued prompt as
-      // cancelled without a turn.
-      advanceWhenIdle(record)
+      promoteWhenIdle(record)
     } else {
       broadcastQueueChanged(record)
     }
@@ -1167,12 +1250,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // means the settlement path broke, and a silent non-null assertion would
     // lie to the pager about how the turn ended.
     if (stopReason === undefined) throw internalError('prompt settled without a stop reason')
-    return { stopReason }
+    return promptSettled(record, id, stopReason)
   }
 
   /** Start the next queued prompt once the in-flight one has settled. */
   const advancePromptQueue = (record: SessionRecord): void => {
-    if (record.inflight !== undefined) return
+    // A settling prompt (inflight resolved, cleanup pending) still owns the
+    // running slot: promoting now would emit the promotion broadcast before
+    // the settling prompt's prompt_complete, breaking the grok wire order.
+    // The settle path re-requests promotion after its cleanup.
+    if (record.inflight !== undefined || record.runningPromptId !== undefined) return
     const front = record.promptQueue[0]
     if (front === undefined) return
     // A held front parks the whole queue (grok maybe_start_running_task):
@@ -1189,7 +1276,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       while (record.promptQueue.length >= 2 && !record.editHolds.has(record.promptQueue[1]!.id)) {
         const follower = record.promptQueue.splice(1, 1)[0]!
         segments.push(follower.text)
-        follower.resolve({ stopReason: 'cancelled' })
+        follower.resolve(promptSettled(record, follower.id, 'cancelled'))
       }
       if (segments.length >= 2) front.combinedTexts = segments
     }
@@ -1198,19 +1285,35 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     void runPrompt(record, entry.id, runText, entry.combinedTexts).then(entry.resolve, entry.reject)
   }
 
-  /** Promote the next queued prompt once the agent reports idle.
+  /** Promote the next queued prompt without racing the harness turn lifecycle.
    *
-   * The idle gate is load-bearing: the harness discards a followup admitted
-   * from inside its turn/end event handler, so a promotion must wait for the
-   * next idle signal. The live-record guard mirrors the settle path: a closed,
-   * reloaded, or re-parented session must not resurrect queued prompts through
-   * a stale agent reference. Every promotion (settle or queue-mutation) routes
-   * through here so no path can bypass the gate. */
-  const advanceWhenIdle = (record: SessionRecord): void => {
+   * The single promotion entry point: settle, enqueue, and every queue
+   * mutation route through here, so no path can start a followup from inside
+   * the harness's turn/end handling (the harness discards a followup admitted
+   * there). An agent reporting `status === 'idle'` has retired its driver —
+   * no turn/end handler can be on the stack — so the idle path promotes
+   * synchronously, keeping its enqueue → running broadcast order. (Load-
+   * bearing agent-loop ordering: kick() flips status to idle before the
+   * driver promise that whenIdle awaits resolves, so a settling prompt's
+   * cleanup always runs before anyone observes idle for that turn.) Any other
+   * state schedules exactly one `whenIdle` wait (`promotionScheduled` dedups;
+   * the settle path re-requests promotion, so a wait that fires while a turn
+   * is still in flight never strands the queue). The live-record guard
+   * mirrors the settle path: a closed, reloaded, or re-parented session must
+   * not resurrect queued prompts through a stale agent reference. */
+  const promoteWhenIdle = (record: SessionRecord): void => {
+    if (record.promotionScheduled) return
+    if (record.inflight === undefined && record.agent.status === 'idle') {
+      advancePromptQueue(record)
+      return
+    }
+    record.promotionScheduled = true
     void record.agent.whenIdle().then(() => {
+      record.promotionScheduled = false
       if (closed || sessions.get(record.agent.session.id) !== record) return
       advancePromptQueue(record)
     }, (error: unknown) => {
+      record.promotionScheduled = false
       logger.warn('grok-leader: idle wait failed for ' + String(record.agent.session.id) + ': ' + errorChain(error))
     })
   }
@@ -1220,18 +1323,68 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // A discarded row can never be promoted, so its edit hold must not linger
     // and accidentally park a future row that reuses the same id.
     record.editHolds.clear()
-    for (const entry of record.promptQueue.splice(0)) entry.resolve({ stopReason: 'cancelled' })
+    for (const entry of record.promptQueue.splice(0)) entry.resolve(promptSettled(record, entry.id, 'cancelled'))
   }
 
   /** Enqueue a validated prompt and run it as soon as the session is idle. */
-  const enqueuePrompt = (record: SessionRecord, p: Record<string, unknown>, text: string): Promise<{ stopReason: StopReasonWire }> =>
+  const enqueuePrompt = (record: SessionRecord, p: Record<string, unknown>, text: string): Promise<PromptSettleResult> =>
     new Promise((resolve, reject) => {
       const meta = p._meta as Record<string, unknown> | null | undefined
       const id = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
+      if (meta?.sendNow === true && record.inflight !== undefined) {
+        // grok send-now for a composer prompt (_meta.sendNow): cancel the
+        // running turn and run this prompt next, ahead of the queue —
+        // mirroring x.ai/queue/interject's front-jump for queued rows. The
+        // send_now trigger suppresses the pager's "Turn cancelled" marker.
+        record.promptQueue.unshift({ resolve, reject, id, text, version: 0 })
+        record.cancelTrigger = 'send_now'
+        record.agent.cancel({ kind: 'user' })
+        settlePrompt(record, 'cancelled')
+        broadcastQueueChanged(record)
+        return
+      }
+      // Per-prompt routing: _meta.followUp overrides the configured default,
+      // so one keystroke can steer a single follow-up while plain sends keep
+      // queueing (or vice versa). Unknown values fall back to the default.
+      const steerThis = meta?.followUp === 'steer' ? true : meta?.followUp === 'queue' ? false : followUpSteer
+      if (steerThis && record.inflight !== undefined) {
+        // Follow-up steer (grok ui.follow_up_behavior=steer): fold the prompt
+        // into the running turn at the harness's next step boundary instead of
+        // parking it behind a whole (possibly minutes-long) turn. The row is
+        // confirmed to the pager once — so its optimistic echo retires by id —
+        // and then leaves the queue as it joins the live turn; its RPC settles
+        // with the host turn (see the steered drain in runPrompt).
+        record.promptQueue.push({ resolve, reject, id, text, version: 0 })
+        broadcastQueueChanged(record)
+        record.promptQueue.pop()
+        try {
+          record.agent.steer(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
+        } catch (error: unknown) {
+          broadcastQueueChanged(record)
+          reject(internalError('prompt was not steered: ' + (error instanceof Error ? error.message : String(error))))
+          return
+        }
+        record.steered.push({ id, resolve })
+        // Echo into the live turn's stream: steered text belongs to the
+        // running transcript, mirroring runPrompt's admission echo.
+        const conn = connections.get(record.clientId)
+        if (conn !== undefined) {
+          emitUpdate(conn, record, undefined, {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text },
+          }, false, Date.now())
+        }
+        broadcastQueueChanged(record)
+        return
+      }
       // Fresh rows start at version 0 (grok QueueEntryMeta); edits bump by one.
       record.promptQueue.push({ resolve, reject, id, text, version: 0 })
-      advancePromptQueue(record)
-      broadcastQueueChanged(record)
+      const runningBefore = record.runningPromptId
+      promoteWhenIdle(record)
+      // The idle fast path already broadcast the promoted state from inside
+      // runPrompt (with this row included); a second identical snapshot would
+      // only burn a seq and a client wakeup.
+      if (record.runningPromptId === runningBefore) broadcastQueueChanged(record)
     })
 
   const prompt = async (clientId: number, params: unknown): Promise<unknown> => {
@@ -1309,14 +1462,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       ? inspection.meta.agentPreset
       : (await resolvePresetId(explicit)) ?? inspection.meta.agentPreset
     const preset = await composePreset(presetRequest)
-    const defaultModel = ctx.get('agentDefaultModel') as
-      { currentSelection?: () => { provider: string; model: string } } | undefined
+    const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
     const defaultSelection = defaultModel?.currentSelection?.()
     const selection: ModelSelectionRef = {
-      current: {
-        provider: config.provider ?? defaultSelection?.provider ?? 'deepseek-official',
-        model: config.model ?? defaultSelection?.model ?? 'deepseek-v4-flash',
-      },
+      current: modelSelectionFromDefault(config, defaultSelection),
       assembled: undefined,
     }
     const handle = await agents.resume({
@@ -1354,6 +1503,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       editHolds: new Set(),
       mcpInitTimer: undefined,
       inflight: undefined,
+      promotionScheduled: false,
+      steered: [],
     }
     sessions.set(sessionId, record)
     // Rebuild the up-arrow history from the persisted user prompts so
@@ -1426,7 +1577,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         : {},
     }
     record.selection.current = selection
-    if (agentDefaultModel !== undefined) await agentDefaultModel.saveSelection(selection)
+    const defaultModel = agentDefaultModel()
+    if (defaultModel !== undefined) await defaultModel.saveSelection(selection)
     // The catalog may have fallen back to a different provider's model (or the
     // persisted default may have moved providers); refresh so the next
     // models/list (and initialize _meta) reports the provider that now owns
@@ -1761,6 +1913,32 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return await updateProvider(params)
       case WIRE.providersRemove:
         return await removeProvider(params)
+      case 'x.ai/interject': {
+        // Mid-turn interjection (grok ext method): merge the text into the
+        // running turn at the harness's next step boundary WITHOUT cancelling
+        // it — the no-loss sibling of send-now. On an idle session the parked
+        // steering wakes a turn of its own (dsh steer semantics). The
+        // originator already painted a local block; the
+        // x.ai/session/interjection broadcast is deduped there by
+        // interjectionId and renders the text on every other attached pane.
+        const p = paramRecord(params, 'x.ai/interject')
+        const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
+        const record = ownedRecord(clientId, sessionId)
+        if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
+        const text = typeof p.text === 'string' ? p.text : ''
+        if (text.trim().length === 0) throw invalidParams('empty interjection')
+        record.prompts.push(text)
+        record.agent.steer(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
+        const conn = connections.get(record.clientId)
+        if (conn !== undefined) {
+          sendNotification(conn, 'x.ai/session/interjection', {
+            sessionId: String(record.agent.session.id),
+            text,
+            ...typeof p.interjectionId === 'string' ? { interjectionId: p.interjectionId } : {},
+          })
+        }
+        return {}
+      }
       case 'x.ai/commands/list':
         return { commands: await availableCommands() }
       case 'x.ai/prompt_history':
@@ -1894,7 +2072,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const located = queueEntry(record, p.id)
         if (located === undefined || located.entry.version !== expectedVersion) {
           if (typeof p.id === 'string') record.editHolds.delete(p.id)
-          advanceWhenIdle(record)
+          promoteWhenIdle(record)
           queueMutate(record)
           return
         }
@@ -1913,7 +2091,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           record.agent.cancel({ kind: 'user' })
           settlePrompt(record, 'cancelled')
         } else {
-          advanceWhenIdle(record)
+          promoteWhenIdle(record)
         }
         queueMutate(record)
         return
@@ -1928,17 +2106,17 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         if (located !== undefined && located.entry.version !== expectedVersion) {
           // Stale version: leave the row untouched and resync the client.
           record.editHolds.delete(located.entry.id)
-          advanceWhenIdle(record)
+          promoteWhenIdle(record)
           queueMutate(record)
           return
         }
         if (located !== undefined) {
           const [entry] = record.promptQueue.splice(located.index, 1)
-          entry.resolve({ stopReason: 'cancelled' })
+          entry.resolve(promptSettled(record, entry.id, 'cancelled'))
           record.editHolds.delete(entry.id)
           queueMutate(record)
           // Removing a held front must not strand the rows behind it.
-          advanceWhenIdle(record)
+          promoteWhenIdle(record)
           return
         }
         if (record.runningPromptId === p.id) {
@@ -1946,7 +2124,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           settlePrompt(record, 'cancelled')
           record.editHolds.delete(String(p.id))
         }
-        advanceWhenIdle(record)
+        promoteWhenIdle(record)
         queueMutate(record)
         return
       }
@@ -1963,7 +2141,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         // The TUI sends no version for edit (grok edits LWW); honor one when a
         // client pins it: a stale version no-ops + resyncs like remove/interject.
         if (typeof p.expectedVersion === 'number' && located.entry.version !== p.expectedVersion) {
-          advanceWhenIdle(record)
+          promoteWhenIdle(record)
           queueMutate(record)
           return
         }
@@ -1972,7 +2150,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           located.entry.combinedTexts = undefined
           located.entry.version = located.entry.version + 1
         }
-        advanceWhenIdle(record)
+        promoteWhenIdle(record)
 
         queueMutate(record)
         return
@@ -1992,7 +2170,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         if (record === undefined) return
         if (typeof p.id !== 'string' || !record.editHolds.delete(p.id)) return
         // Unblocks a front parked under edit hold (grok SessionCommand::ReleaseEdit).
-        advanceWhenIdle(record)
+        promoteWhenIdle(record)
         return
       }
       case 'x.ai/queue/reorder': {
@@ -2016,7 +2194,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
             && next.some((entry, index) => entry !== record.promptQueue[index])
           record.promptQueue.splice(0, record.promptQueue.length, ...next)
         }
-        if (changed) advanceWhenIdle(record)
+        if (changed) promoteWhenIdle(record)
         queueMutate(record)
         return
       }

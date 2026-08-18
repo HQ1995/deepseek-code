@@ -16,6 +16,7 @@ The package doubles as the deepseek-leader profile bundle: cordis.patch.yml moun
 | provider | — | Initial provider route for every created agent. |
 | model | — | Initial model for every created agent. |
 | combineQueuedPrompts | false | grok ui.combine_queued_prompts parity; env DEEPSEEK_LEADER_COMBINE_QUEUED=1 also enables it. |
+| followUpBehavior | queue | What a prompt sent while a turn runs does: queue (grok parity) parks it until the turn ends — Enter on the queued row is Send Now, which cancels the running turn; steer folds it into the running turn at the harness's next step boundary without interrupting (Codex-style steering). Explicit config wins over the DEEPSEEK_LEADER_FOLLOW_UP env override. |
 
 ## Protocol contract
 
@@ -39,10 +40,14 @@ The package doubles as the deepseek-leader profile bundle: cordis.patch.yml moun
 | x.ai/providers/update | Merges the form fields over one route's user profile (empty fields unset, models preserved) through the same settings seam. Returns the refreshed roster. |
 | x.ai/providers/remove | Unsets one provider route through the settings seam; refuses the provider that owns the current model. Returns the refreshed roster. |
 | x.ai/session/list | Session-picker and dashboard list over persisted headers (cwd/query/limit filters, firstPrompt backfill cached per process, rows tagged chat-kind so the TUI bypasses its local-store gate and loads via session/load). |
-| x.ai/queue/changed | Broadcast on every queue mutation: pending rows (id, version, kind, text, position) plus the running prompt (runningPromptId/runningText/runningKind). The TUI adopts current_prompt_id from this. |
+| notification wire form | Every extension notification (x.ai/*) rides the wire with the ACP '_' prefix (_x.ai/queue/changed, _x.ai/session/prompt_complete, …): the pager's agent-client-protocol decode strips the prefix before dispatching to its x.ai/* handlers and silently drops unprefixed unknown methods as method_not_found. session/update is the sole typed (unprefixed) notification. |
+| x.ai/queue/changed | Broadcast on every queue mutation: pending rows (id, version, kind, text, position) plus the running prompt (runningPromptId/runningText/runningKind). Each snapshot carries a strictly increasing seq (epoch-seeded, so a restarted leader outranks its predecessor); the TUI drops any snapshot whose seq is not strictly newer for the session and adopts current_prompt_id from the applied ones. |
 | x.ai/queue/interject, /remove, /reorder, /clear | Queue edit notifications. interject is grok send-now: the row jumps to front, the running turn is cancelled (prompt_complete carries cancelTrigger=send_now) and the row runs next. remove (running row falls back to cancel), reorder by orderedIds, clear. |
-| x.ai/session/prompt_complete | Terminal signal per settled turn (stopReason, promptId, optional cancelTrigger/cancellationCategory); emitted before the queue broadcast so the pager finalizes and reconciles the turn. |
+| x.ai/session/prompt_complete | Terminal signal per settled turn (stopReason, promptId, optional cancelTrigger/cancellationCategory); emitted before the queue broadcast so the pager finalizes and reconciles the turn. The session/prompt RPC result carries the same attribution in _meta (sessionId, promptId), so the pager never has to infer which queue row a settle response belongs to. |
 | combine | grok ui.combine_queued_prompts parity: with 2+ plain queued prompts, followers fold into the front (text joined with blank lines, runningCombinedTexts broadcast, followers settle cancelled). Config combineQueuedPrompts or env DEEPSEEK_LEADER_COMBINE_QUEUED=1; default off. |
+| follow-up steer | With followUpBehavior=steer (default queue) — or per prompt via session/prompt _meta.followUp: 'steer' \| 'queue' — a prompt arriving while a turn is in flight is folded into that turn at the harness's next step boundary: its queue row is broadcast once (the pager's optimistic echo retires by id) and then leaves the queue, its text streams as a user echo inside the live turn, and its RPC settles with the host turn's stop reason (own promptId in _meta, no separate prompt_complete). An idle session runs the prompt as its own turn as usual. |
+| x.ai/interject | Mid-turn interjection (the pager's Alt+Enter steer chord and plan review comments): merges the text into the running turn at the harness's next step boundary WITHOUT cancelling it, then broadcasts x.ai/session/interjection (sessionId, text, interjectionId) — the originator dedups by id, other panes render the block. An idle session's steering wakes a turn of its own. |
+| send now | session/prompt with _meta.sendNow: true (the pager's Ctrl+Enter chord) cancels the running turn (prompt_complete carries cancelTrigger=send_now, suppressing the cancelled marker) and runs this prompt next, ahead of the queue — the composer twin of x.ai/queue/interject. |
 | other methods | Unknown requests get JSON-RPC -32601; unknown notifications are dropped with a warning. |
 
 One connection may own several sessions. Each session has an independent prompt slot, workspace, cancellation path, model selection, and disposer; a disconnected client releases exactly its own sessions.
@@ -54,6 +59,8 @@ Client disconnect and Cordis disposal share the per-client teardown: owned agent
 ## Running
 
 The dscode binary bootstraps the leader directly: it resolves dsh (DSH_BIN env, dsh on PATH, then npx --yes @deepseek-ai/dsh), spawns dsh --profile deepseek-leader bound to the socket, removes any stale socket file first, waits for the socket, and attaches through the normal --leader path (third_party/grok-build/crates/codegen/xai-grok-pager/src/dsh_leader.rs). The same composition underneath is the agent loop, LLM adapters, session persistence, and this plugin in the deepseek-leader profile.
+
+After changing this package, run `scripts/update-bridge.sh` (repo root): building alone is not enough. The profile holds the plugin as a pnpm `file:` dependency materialized as hard links, and tsc replaces output inodes, so the profile keeps serving the old build until its node_modules is rebuilt from scratch — the script does that and verifies the copy. A leader that is already running keeps its loaded code either way; it exits with its last client, and the next dscode spawn picks up the refreshed profile.
 
 ## Model Experience
 
