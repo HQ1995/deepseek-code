@@ -74,6 +74,13 @@ needed:
 /dsh code <pasted-callback-url>   finish a login over SSH (manual code paste)
 ```
 
+Plugins that register human commands (the `@deepseek-ai/dsh-commands`
+registry, `ctx.commands.register(...)`) surface automatically as top-level
+slash commands in dscode — with completion and hints — and route back to the
+plugin's handler; nothing to configure per plugin. `/dsh` itself stays narrow:
+it is the bridge-owned profile manager (install/remove/login), not a bucket
+for plugin commands.
+
 `/dsh add` runs the package's install scripts — only add plugins you trust.
 Restart dscode after add/remove (the leader exits with its last client and
 reloads the profile on the next launch). LLM-provider plugins surface

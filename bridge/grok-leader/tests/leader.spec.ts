@@ -248,6 +248,13 @@ async function makeClient(socketPath: string): Promise<ClientHandle> {
       // response; capture them so order-sensitive assertions stay exact.
       if (msg.method === 'x.ai/queue/changed') { broadcasts.push(msg); continue }
       if (msg.method === 'x.ai/session/prompt_complete') { completes.push(msg); continue }
+      // Ambient command-roster refreshes (fired on session create/load and on
+      // registry changes) stay out of the request/next() queue; assertions
+      // read them from `all`.
+      if (msg.method === 'session/update'
+        && (msg.params as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate === 'available_commands_update') {
+        continue
+      }
       const waiter = waiters.shift()
       if (waiter !== undefined) waiter(msg)
       else queue.push(msg)
@@ -320,7 +327,7 @@ async function collectIds(client: ClientHandle, ids: number[]): Promise<Map<numb
 }
 
 async function makeHarness(
-  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; settings?: unknown; combineQueuedPrompts?: boolean; followUpBehavior?: 'queue' | 'steer'; idleExitMs?: number } = {},
+  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; settings?: unknown; commands?: unknown; combineQueuedPrompts?: boolean; followUpBehavior?: 'queue' | 'steer'; idleExitMs?: number } = {},
 ): Promise<LeaderHarness> {
   const ctx = new Context()
   const registry = makeMockRegistry(ctx, options.manualIdle === true)
@@ -331,6 +338,7 @@ async function makeHarness(
   // Stub settings service: initialize awaits the real one for a bounded time,
   // which tests must not spend when the harness composes no settings provider.
   ctx.provide('settings', (options.settings ?? { mutate: async () => {} }) as unknown as Context['settings'])
+  if (options.commands !== undefined) ctx.provide('commands', options.commands as never)
   ctx.provide('sessionPersistence', persistence as unknown as Context['sessionPersistence'])
   ctx.provide('sessions', mockSessionsStore as unknown as Context['sessions'])
   if (presets !== undefined) ctx.provide('agentPresets', presets as unknown as Context['agentPresets'])
@@ -367,7 +375,7 @@ describe('grok leader over a unix socket', () => {
   })
 
   const start = async (
-    options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; combineQueuedPrompts?: boolean; followUpBehavior?: 'queue' | 'steer'; idleExitMs?: number } = {},
+    options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; commands?: unknown; combineQueuedPrompts?: boolean; followUpBehavior?: 'queue' | 'steer'; idleExitMs?: number } = {},
   ): Promise<LeaderHarness & { client: ClientHandle }> => {
     harness = await makeHarness(options)
     client = await makeClient(harness.socketPath)
@@ -1550,6 +1558,46 @@ describe('grok leader over a unix socket', () => {
     expect(agent.internals.steered).toEqual([])
     agent.internals.idleWaiters.shift()!()
     expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
+  })
+
+  it('surfaces dsh-registry commands as slash commands and routes them to execute()', async () => {
+    const executed: string[] = []
+    const commandsService = {
+      list: () => [{ name: 'greet', description: 'Say hello', input: { hint: '<name>' } }],
+      execute: async (_agent: unknown, line: string) => {
+        const parsed = /^\/greet(\s+(.*))?$/.exec(line)
+        if (parsed === null) return undefined
+        executed.push(line)
+        return { commandId: 'c1', result: { kind: 'success', text: 'hello ' + (parsed[2] ?? 'world') } }
+      },
+    }
+    const { registry, client: c } = await start({ commands: commandsService })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    // The registry command is advertised to the session (ACP
+    // available_commands_update) alongside the builtin bridge commands.
+    await waitFor(() => c.all.some(m => m.method === 'session/update'
+      && (m.params as { update?: { sessionUpdate?: string; availableCommands?: Array<{ name: string }> } }).update?.sessionUpdate === 'available_commands_update'
+      && ((m.params as { update?: { availableCommands?: Array<{ name: string }> } }).update?.availableCommands ?? []).some(entry => entry.name === 'greet')))
+
+    // A registered command routes to execute() and never reaches the model.
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/greet dscode' }], _meta: { promptId: 'greet-1' } })
+    const settled = await waitForId(c, 2)
+    expect(settled.result).toMatchObject({ stopReason: 'end_turn', _meta: { promptId: 'greet-1' } })
+    expect(executed).toEqual(['/greet dscode'])
+    await waitFor(() => c.all.some(m => m.method === 'session/update'
+      && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '') === 'hello dscode'))
+    expect(agent.internals.followups).toEqual([])
+
+    // Unknown slash text falls through to the model unchanged.
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/nope do it' }] })
+    await waitFor(() => agent.internals.followups.includes('/nope do it'))
+    agent.internals.idleWaiters.shift()?.()
+    await waitForId(c, 3)
   })
 
   it('advertises the /dsh command and interprets it in the bridge, never the model', async () => {

@@ -276,6 +276,13 @@ interface PersistenceLike {
 interface UserQuestionsLike {
   registerProvider(provider: { ask(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer> }): () => void
 }
+/** Structural read of the dsh command registry (@deepseek-ai/dsh-commands):
+ *  plugin-registered human commands surfaced as pager slash commands. */
+interface CommandsLike {
+  list(agent: Agent): ReadonlyArray<{ name: string; description: string; input?: { hint: string } }>
+  execute(agent: Agent, line: string, signal: AbortSignal): Promise<{ result: { kind: string; text?: string } } | undefined>
+}
+
 /** Structural read of the llm service: provider and model catalogs only. */
 interface LlmLike {
   listProviders(): Array<{ id: string; name?: string }>
@@ -1113,6 +1120,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       steered: [],
     }
     sessions.set(sessionId, record)
+    void broadcastAvailableCommands(record)
     // The pager parks on "Starting session…" until this arrives (the probe
     // worker's scripted fake sends it 50 ms after the session/new result;
     // docs/grok-tui-connect.md).
@@ -1459,6 +1467,42 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return await import(pathToFileURL(path).href) as Record<string, any>
   }
 
+  /** The dsh plugin command registry, when the composition mounts it. */
+  const dshCommands = (): CommandsLike | undefined => ctx.get('commands') as CommandsLike | undefined
+
+  /** Advertise builtin + plugin-registered commands to one session (ACP
+   *  available_commands_update). Plugin commands come from the dsh command
+   *  registry, so any plugin's ctx.commands.register() surfaces as a pager
+   *  slash command with completion — no bridge or TUI change per plugin. */
+  const broadcastAvailableCommands = async (record: SessionRecord): Promise<void> => {
+    const conn = connections.get(record.clientId)
+    if (conn === undefined) return
+    const registry = dshCommands()
+    const fromPlugins = registry === undefined ? [] : registry.list(record.agent).map(command => ({
+      name: command.name,
+      description: command.description,
+      ...command.input === undefined ? {} : { input: { hint: command.input.hint } },
+    }))
+    // Sent directly, not through emitUpdate: a roster refresh is ambient, not
+    // a turn event, so it must not consume eventSeq or carry a promptId.
+    sendNotification(conn, WIRE.sessionUpdate, {
+      sessionId: record.agent.session.id,
+      update: {
+        sessionUpdate: 'available_commands_update',
+        availableCommands: [...await availableCommands(), ...fromPlugins],
+      },
+    })
+  }
+
+  // Live refresh: a plugin registering or removing commands re-advertises to
+  // every open session (observer failures never veto registry mutations).
+  // The event is declared by @deepseek-ai/dsh-commands, an optional
+  // composition member this bridge reads structurally; the cast keeps that
+  // optionality without importing its type augmentation.
+  ;(ctx as unknown as { on(event: string, listener: () => void): void }).on('commands/change', () => {
+    for (const record of sessions.values()) void broadcastAvailableCommands(record)
+  })
+
   const runDshCommand = async (record: SessionRecord, p: Record<string, unknown>, text: string): Promise<PromptSettleResult> => {
     const meta = p._meta as Record<string, unknown> | null | undefined
     const id = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
@@ -1589,6 +1633,22 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (/^\/dsh(\s|$)/.test(text.trim())) {
       return runDshCommand(record, p, text.trim())
     }
+    // Plugin-registered slash commands (dsh command registry): execute() runs
+    // only known names and returns undefined otherwise, so unknown slash text
+    // still reaches the model unchanged (grok pass-through semantics).
+    if (text.trim().startsWith('/')) {
+      const registry = dshCommands()
+      if (registry !== undefined) {
+        const execution = await registry.execute(record.agent, text.trim(), new AbortController().signal)
+        if (execution !== undefined) {
+          const meta = p._meta as Record<string, unknown> | null | undefined
+          const id = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
+          const body = execution.result.text ?? (execution.result.kind === 'success' ? 'done' : 'command failed')
+          notifySession(record, execution.result.kind === 'error' ? 'error: ' + body : body)
+          return promptSettled(record, id, 'end_turn')
+        }
+      }
+    }
     return await enqueuePrompt(record, p, text)
   }
 
@@ -1694,6 +1754,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       steered: [],
     }
     sessions.set(sessionId, record)
+    void broadcastAvailableCommands(record)
     // Rebuild the up-arrow history from the persisted user prompts so
     // x.ai/prompt_history serves them after resume.
     for (const event of inspection.events) {
