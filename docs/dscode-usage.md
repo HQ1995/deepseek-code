@@ -82,9 +82,19 @@ dsh plugin --profile deepseek-leader add dsh-plugin-subscriptions
 
 Its providers (ChatGPT (Codex), Claude (Subscription), Grok (Subscription))
 appear in the roster immediately; models appear after the one-time OAuth
-login, which lives in the dsh web profile's Settings page (`dsh plugin
---profile web add dsh-plugin-subscriptions`, run the web profile, log in —
-the token store is shared with the leader profile).
+login. Log in from the terminal — no web profile needed:
+
+```sh
+node scripts/subscriptions-login.mjs codex    # or claude / grok
+node scripts/subscriptions-login.mjs status   # login state + token store path
+```
+
+The script drives the plugin's own OAuth engine: open the printed authorize
+URL in any browser (same machine: the loopback callback finishes
+automatically; remote/SSH: paste the callback URL back into the prompt).
+Tokens land in the plugin's 0600 store shared by every dsh profile; restart
+dscode afterwards. (The plugin's built-in login UI lives in the dsh web
+profile's Settings page — that route also works if you already run one.)
 
 ## Sessions
 
