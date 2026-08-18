@@ -82,6 +82,30 @@ tar -czf "$LICENSES" -C "$stage" dscode-licenses
 rm -rf "$stage"
 echo "  bundled $(basename "$LICENSES")"
 
+# dscode-plugin.tgz: the repo's dsh plugin (grok-leader bridge + dscode
+# launcher), release-pinned via package.json dscode.release so the launcher
+# materializes exactly this release's binary. Plugin-native install:
+#   dsh plugin --profile deepseek-leader add \
+#     https://github.com/HQ1995/deepseek-code/releases/latest/download/dscode-plugin.tgz
+echo "  building the plugin tarball..."
+( cd "$ROOT/bridge/grok-leader" && DSCODE_SKIP_DOWNLOAD=1 pnpm install --silent && pnpm run --silent build )
+plugin_stage="$(mktemp -d)"
+cp -r "$ROOT/bridge/grok-leader/lib" "$ROOT/bridge/grok-leader/src" \
+      "$ROOT/bridge/grok-leader/bin" "$plugin_stage/"
+mkdir -p "$plugin_stage/scripts"
+cp "$ROOT/bridge/grok-leader/scripts/postinstall.mjs" "$plugin_stage/scripts/"
+cp "$ROOT/bridge/grok-leader/cordis.patch.yml" "$plugin_stage/"
+python3 - "$ROOT/bridge/grok-leader/package.json" "$plugin_stage/package.json" "$VERSION" <<'PY'
+import json, sys
+pkg = json.load(open(sys.argv[1]))
+pkg["dscode"] = {"release": sys.argv[3]}
+json.dump(pkg, open(sys.argv[2], "w"), indent=2)
+PY
+( cd "$plugin_stage" && npm pack --silent --pack-destination "$DIST" >/dev/null )
+mv "$DIST"/deepseek-ai-dsh-grok-leader-*.tgz "$DIST/dscode-plugin.tgz"
+rm -rf "$plugin_stage"
+echo "  bundled dscode-plugin.tgz (pinned to $VERSION)"
+
 if [[ "$DRY_RUN" == 1 ]]; then
   echo "dry run: artifacts staged in $DIST; no tag or release created"
   exit 0
@@ -96,5 +120,5 @@ gh release create "$TAG" \
 
 License and attribution for this binary: dscode-licenses.tar.gz (Apache-2.0; includes the vendored grok-build license and modification ledger)." \
   "${PRERELEASE_FLAGS[@]}" \
-  "$DIST/$ASSET" "$DIST/$ASSET.sha256" "$LICENSES"
+  "$DIST/$ASSET" "$DIST/$ASSET.sha256" "$LICENSES" "$DIST/dscode-plugin.tgz"
 echo "published $TAG"

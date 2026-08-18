@@ -26,14 +26,20 @@
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
+  "bin": {
+    "dscode": "./bin/dscode.mjs"
+  },
   "files": [
     "lib/",
     "src/",
+    "bin/",
+    "scripts/postinstall.mjs",
     "cordis.patch.yml"
   ],
   "license": "Apache-2.0",
   "scripts": {
-    "build": "tsc -b tsconfig.json"
+    "build": "tsc -b tsconfig.json",
+    "postinstall": "node scripts/postinstall.mjs || exit 0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
