@@ -79,7 +79,8 @@ registry, `ctx.commands.register(...)`) surface automatically as top-level
 slash commands in dscode — with completion and hints — and route back to the
 plugin's handler; nothing to configure per plugin. `/dsh` itself stays narrow:
 it is the bridge-owned profile manager (install/remove/login), not a bucket
-for plugin commands.
+for plugin commands. (Unrelated: the TUI's builtin `/plugin` manages grok-build's
+own pager plugins, not dsh plugins — use `/dsh` for those.)
 
 `/dsh add` runs the package's install scripts — only add plugins you trust.
 Restart dscode after add/remove (the leader exits with its last client and
