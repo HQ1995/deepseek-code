@@ -12,6 +12,10 @@ dsh plugin --profile deepseek-leader add @hqzhao95/dscode
 ~/.dsh/profiles/deepseek-leader/node_modules/.bin/dscode   # first run links ~/.local/bin/dscode
 ```
 
+> **Personal project** — not affiliated with, endorsed by, or sponsored by
+> DeepSeek or xAI; their names appear only to describe the open-source
+> components this package builds on.
+
 Source, issues, full docs: https://github.com/HQ1995/deepseek-code
 
 ## The bridge (grok-leader)
