@@ -247,6 +247,19 @@ agent-advertised commands into the slash registry (builtin names win,
 BLOCKED_ACP_NAMES skipped). New dsh plugins get top-level slash commands
 with zero pager changes.
 
+### xAI login/logout CLI subcommands are severed
+
+`dscode login` / `dscode logout` no longer run the upstream xAI OAuth
+flows (run_cli_login/logout) — dscode has no x.ai backend, so the last
+reachable OAuth entry points print a redirect to the dsh-side auth
+surfaces (/provider --add, /dsh login) and exit 2. The subcommands stay
+in the arg parser so users get guidance rather than "unknown command";
+the auth subsystem itself stays vendored untouched (entry-point severing
+keeps upstream merges cheap; see the leader-failure entry below for the
+embedded-fallback entry point). The in-TUI login screen is unreachable
+in bridge mode: the bridge advertises only `xai.api_key`, which
+`needs_interactive_login()` classifies as non-interactive.
+
 ### Leader failure is terminal — no embedded-agent fallback, fail-fast spawn
 
 Upstream falls back to the embedded in-process agent when the leader

@@ -941,7 +941,6 @@ pub async fn run(
     );
     let pending_startup = xai_grok_telemetry::startup::PendingStartup::new();
     let timer = xai_grok_telemetry::startup::begin(crate::acp::Owner::Client);
-    let primary_started = std::time::Instant::now();
     let connect_result = bounded_connect(
         &cancel,
         CONNECT_UI_TIMEOUT,

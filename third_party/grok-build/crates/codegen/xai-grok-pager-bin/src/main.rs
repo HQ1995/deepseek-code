@@ -2176,26 +2176,20 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 )
                 .await;
             }
-            Command::Login {
-                legacy: _,
-                oauth,
-                device_auth,
-                devbox,
-            } => {
-                init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                let config = xai_grok_shell::config::load_agent_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                xai_grok_shell::auth::run_cli_login(&config, oauth, device_auth, devbox).await?;
-                println!();
-                xai_grok_shell::instrumentation::finalize_and_exit(0);
+            // DIVERGENCE(deepseek): the xAI OAuth login/logout flows are
+            // unreachable by design — dscode has no x.ai backend. Auth lives
+            // on the dsh side (see TUI-DIVERGENCE.md). The subcommands stay
+            // parseable so users get a redirect instead of "unknown command".
+            Command::Login { .. } => {
+                eprintln!("dscode has no xAI login: authentication belongs to the dsh side.");
+                eprintln!("  API providers:       add a key via /provider --add (or ~/.dsh/settings.yaml)");
+                eprintln!("  Subscription logins: /dsh login <codex|claude|grok> inside dscode");
+                std::process::exit(2);
             }
             Command::Logout => {
-                init_tracing_simple("cli");
-                let config = xai_grok_shell::config::load_agent_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                xai_grok_shell::auth::run_cli_logout(&config)?;
-                xai_grok_shell::instrumentation::finalize_and_exit(0);
+                eprintln!("dscode has no xAI login/logout: authentication belongs to the dsh side.");
+                eprintln!("  Remove providers via /provider (Ctrl+D) or ~/.dsh/settings.yaml.");
+                std::process::exit(2);
             }
             Command::Wrap(ref wrap_args) => {
                 return xai_grok_pager::wrap_cmd::run(wrap_args);
