@@ -327,7 +327,7 @@ async function collectIds(client: ClientHandle, ids: number[]): Promise<Map<numb
 }
 
 async function makeHarness(
-  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; settings?: unknown; commands?: unknown; combineQueuedPrompts?: boolean; followUpBehavior?: 'queue' | 'steer'; idleExitMs?: number } = {},
+  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; settings?: unknown; commands?: unknown; userQuestions?: unknown; combineQueuedPrompts?: boolean; followUpBehavior?: 'queue' | 'steer'; idleExitMs?: number } = {},
 ): Promise<LeaderHarness> {
   const ctx = new Context()
   const registry = makeMockRegistry(ctx, options.manualIdle === true)
@@ -339,6 +339,7 @@ async function makeHarness(
   // which tests must not spend when the harness composes no settings provider.
   ctx.provide('settings', (options.settings ?? { mutate: async () => {} }) as unknown as Context['settings'])
   if (options.commands !== undefined) ctx.provide('commands', options.commands as never)
+  if (options.userQuestions !== undefined) ctx.provide('userQuestions', options.userQuestions as never)
   ctx.provide('sessionPersistence', persistence as unknown as Context['sessionPersistence'])
   ctx.provide('sessions', mockSessionsStore as unknown as Context['sessions'])
   if (presets !== undefined) ctx.provide('agentPresets', presets as unknown as Context['agentPresets'])
@@ -375,7 +376,7 @@ describe('grok leader over a unix socket', () => {
   })
 
   const start = async (
-    options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; commands?: unknown; combineQueuedPrompts?: boolean; followUpBehavior?: 'queue' | 'steer'; idleExitMs?: number } = {},
+    options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; commands?: unknown; userQuestions?: unknown; combineQueuedPrompts?: boolean; followUpBehavior?: 'queue' | 'steer'; idleExitMs?: number } = {},
   ): Promise<LeaderHarness & { client: ClientHandle }> => {
     harness = await makeHarness(options)
     client = await makeClient(harness.socketPath)
@@ -1558,6 +1559,58 @@ describe('grok leader over a unix socket', () => {
     expect(agent.internals.steered).toEqual([])
     agent.internals.idleWaiters.shift()!()
     expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
+  })
+
+  it('a plugin command asks the user a question mid-execution (userQuestions rail)', async () => {
+    // The harness-level contract this verifies: CommandInvocation carries the
+    // live root agent, so a registry command handler may call
+    // userQuestions.ask() and the bridge's registered provider relays it to
+    // the owning client as the _x.ai/ask_user_question reverse request.
+    const questionService = {
+      provider: undefined as undefined | { ask(req: unknown): Promise<unknown> },
+      registerProvider(p: { ask(req: unknown): Promise<unknown> }) {
+        this.provider = p
+        return () => { this.provider = undefined }
+      },
+    }
+    const commandsService = {
+      list: () => [{ name: 'confirm', description: 'Ask before doing' }],
+      execute: async (agent: unknown, line: string) => {
+        if (!/^\/confirm(\s|$)/.test(line)) return undefined
+        const answer = await questionService.provider!.ask({
+          agent,
+          questions: [{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }, { label: 'No' }] }],
+        }) as { answers: Array<{ id: string; selected: string[] }> }
+        const picked = answer.answers[0]?.selected[0] ?? 'nothing'
+        return { commandId: 'c1', result: { kind: 'success', text: 'confirmed: ' + picked } }
+      },
+    }
+    const { client: c } = await start({ commands: commandsService, userQuestions: questionService })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    expect(questionService.provider).toBeDefined()
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/confirm go' }], _meta: { promptId: 'ask-1' } })
+
+    // The command handler blocks on the question: the client sees the wrapped
+    // ext reverse request (leading '_' stripped by the decode mirror; the
+    // inner method + params ride one level down).
+    await waitFor(() => c.all.some(m => m.method === 'x.ai/ask_user_question' && typeof m.id === 'number'))
+    const reverse = c.all.find(m => m.method === 'x.ai/ask_user_question')!
+    const inner = reverse.params as { method: string; params: { sessionId: string; questions: Array<{ question: string; options: Array<{ label: string }> }> } }
+    expect(inner.params.sessionId).toBe(sessionId)
+    expect(inner.params.questions[0].question).toBe('Proceed?')
+    expect(inner.params.questions[0].options.map(o => o.label)).toEqual(['Yes', 'No'])
+
+    // Answer as the grok TUI would: accepted, keyed by question text.
+    c.send({ type: 'acp', payload: JSON.stringify({ jsonrpc: '2.0', id: reverse.id, result: { outcome: 'accepted', answers: { 'Proceed?': ['Yes'] } } }) })
+
+    const settled = await waitForId(c, 2)
+    expect(settled.result).toMatchObject({ stopReason: 'end_turn', _meta: { promptId: 'ask-1' } })
+    await waitFor(() => c.all.some(m => m.method === 'session/update'
+      && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '') === 'confirmed: Yes'))
   })
 
   it('surfaces dsh-registry commands as slash commands and routes them to execute()', async () => {
