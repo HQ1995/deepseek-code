@@ -12,6 +12,10 @@ use xai_grok_shell::util::grok_home::grok_home;
 const TTL_SECONDS_BEFORE_AUTO_UPDATE: Duration = Duration::from_secs(60 * 30);
 const NPM_PACKAGE: &str = "@xai-official/grok";
 pub const GH_RELEASE_REPO: &str = "xai-org-shared/grok-build";
+/// deepseek-code's own GitHub repository; `dscode update` uses this source.
+pub const DEEPSEEK_CODE_RELEASE_REPO: &str = "HQ1995/deepseek-code";
+pub const DEEPSEEK_CODE_RELEASE_API: &str =
+    "https://api.github.com/repos/HQ1995/deepseek-code/releases";
 
 /// Primary CLI base URL: Cloudflare-fronted x.ai endpoint with edge caching
 /// for binaries and origin-respecting no-cache for channel pointers.
@@ -258,6 +262,147 @@ async fn fetch_gh_release_latest(exclude_pre: bool) -> Result<String> {
     Ok(version)
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    #[serde(default)]
+    draft: bool,
+}
+
+/// Base URL for the deepseek-code GitHub Releases API.
+///
+/// Test seam: `DSC_UPDATE_BASE_URL` may point at a loopback HTTP server.
+/// Loopback-only, matching the `GROK_CLI_BASE_URL` convention; non-loopback
+/// values are ignored.
+/// Loopback-only test base for the deepseek-code updater. Accepts both
+/// `DSC_UPDATE_BASE_URL` and `DEEPSEEK_CODE_RELEASE_BASE` so tests can use
+/// whichever name is more natural.
+fn dscode_update_test_base() -> Option<String> {
+    for key in ["DSC_UPDATE_BASE_URL", "DEEPSEEK_CODE_RELEASE_BASE"] {
+        if let Ok(base) = std::env::var(key) {
+            let base = base.trim();
+            if is_loopback_base(base) {
+                return Some(base.trim_end_matches('/').to_string());
+            }
+            if !base.is_empty() {
+                tracing::warn!("{key} ignored: only loopback bases are honored");
+            }
+        }
+    }
+    None
+}
+
+fn dscode_release_api_base() -> String {
+    if let Some(base) = dscode_update_test_base() {
+        return format!("{base}/releases");
+    }
+    DEEPSEEK_CODE_RELEASE_API.to_string()
+}
+
+/// Build the download URL for a deepseek-code release asset.
+///
+/// Honors the same loopback-only test seam as [`dscode_release_api_base`];
+/// production always points at GitHub.
+pub(crate) fn dscode_release_download_url(version: &str, asset_name: &str) -> String {
+    if let Some(base) = dscode_update_test_base() {
+        return format!(
+            "{base}/releases/download/v{}/{}",
+            version, asset_name
+        );
+    }
+    format!(
+        "https://github.com/{}/releases/download/v{}/{}",
+        DEEPSEEK_CODE_RELEASE_REPO,
+        version,
+        asset_name
+    )
+}
+
+/// Fetch the latest stable release version from the deepseek-code GitHub
+/// Releases API. Stable uses `/releases/latest`, which never returns a
+/// pre-release or draft.
+pub async fn fetch_dscode_release_version(channel: &str) -> Result<String> {
+    // "beta" is the user-facing name; "alpha" is the internal channel value
+    // shared with the upstream config plumbing. Both select the newest
+    // release INCLUDING prereleases; stable uses /releases/latest, which
+    // GitHub guarantees is never a prerelease or draft.
+    if channel == "alpha" || channel == "beta" {
+        let releases = fetch_dscode_releases().await?;
+        let mut versions: Vec<(semver::Version, String)> = Vec::new();
+        for release in releases {
+            if release.draft {
+                continue;
+            }
+            let Some(tag) = release.tag_name.strip_prefix('v') else {
+                continue;
+            };
+            if let Ok(version) = semver::Version::parse(tag) {
+                versions.push((version, tag.to_string()));
+            }
+        }
+        versions.sort_by(|a, b| a.0.cmp(&b.0));
+        if let Some((_, version)) = versions.into_iter().last() {
+            return Ok(version);
+        }
+        anyhow::bail!("No releases found in {}", DEEPSEEK_CODE_RELEASE_REPO);
+    }
+    fetch_dscode_release_latest().await
+}
+
+async fn fetch_dscode_release_latest() -> Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    let url = format!("{}/latest", dscode_release_api_base());
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "dscode-updater")
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "GitHub Releases API failed: HTTP {} for {}: {}",
+            status,
+            url,
+            body.chars().take(200).collect::<String>().trim()
+        );
+    }
+    let release: GithubRelease = resp.json().await?;
+    let tag = release.tag_name;
+    let version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
+    if version.is_empty() {
+        anyhow::bail!("No releases found in {}", DEEPSEEK_CODE_RELEASE_REPO);
+    }
+    semver::Version::parse(&version)?;
+    Ok(version)
+}
+
+async fn fetch_dscode_releases() -> Result<Vec<GithubRelease>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    let url = format!("{}?per_page=100", dscode_release_api_base());
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "dscode-updater")
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "GitHub Releases API failed: HTTP {} for {}: {}",
+            status,
+            url,
+            body.chars().take(200).collect::<String>().trim()
+        );
+    }
+    let releases: Vec<GithubRelease> = resp.json().await?;
+    Ok(releases)
+}
+
 /// Fetch the latest version from a public CLI channel pointer.
 ///
 /// Reads `{base}/{channel}` which contains a plain-text semver string
@@ -381,6 +526,7 @@ pub async fn fetch_latest_version(installer: &str, config: &UpdateConfig) -> Res
     match installer {
         "npm" => fetch_npm_version(&config.channel, config.npm_registry.as_deref()).await,
         "gh-release" => fetch_gh_release_version(&config.channel).await,
+        "dscode" => fetch_dscode_release_version(&config.channel).await,
         _ => fetch_gcs_version(&config.channel).await,
     }
 }
@@ -392,7 +538,7 @@ pub async fn fetch_latest_version(installer: &str, config: &UpdateConfig) -> Res
 /// `stable_version` records the current stable channel pointer so that
 /// `channel_label()` can derive `[alpha]` vs `[stable]` without network I/O.
 pub async fn write_version_cache(version: &str, stable_version: Option<&str>) {
-    let version_path = grok_home().join("version.json");
+    let version_path = grok_home().join("dscode-version.json");
     let now = time::OffsetDateTime::now_utc();
     let json = GrokVersion::new(
         version.to_string(),
@@ -436,9 +582,9 @@ pub async fn get_latest_version(installer: &str, config: &UpdateConfig) -> Resul
     Ok(version)
 }
 
-/// True if `version.json` exists and is within TTL.
+/// True if `dscode-version.json` exists and is within TTL.
 pub async fn is_version_cache_fresh() -> bool {
-    let version_path = grok_home().join("version.json");
+    let version_path = grok_home().join("dscode-version.json");
     let now = time::OffsetDateTime::now_utc();
     if let Ok(version_str) = fs::read_to_string(&version_path).await
         && let Ok(version) = serde_json::from_str::<GrokVersion>(&version_str)
@@ -536,12 +682,16 @@ pub(crate) async fn try_fetch_stable_pointer() -> Option<String> {
     .unwrap_or(None)
 }
 
-/// Read the cached stable version from `~/.grok/version.json` (sync, for display).
+/// Read the cached stable version from `~/.grok/dscode-version.json` (sync, for display).
+///
+/// dscode keeps its own cache file: the official grok binary shares
+/// `~/.grok` and writes ITS release line into `version.json`, which would
+/// poison the dscode channel label and update prompts.
 ///
 /// Returns `None` if the file doesn't exist, can't be parsed, or has no
 /// `stable_version` field (e.g. written by an older binary).
 pub fn cached_stable_version() -> Option<String> {
-    let version_path = grok_home().join("version.json");
+    let version_path = grok_home().join("dscode-version.json");
     let content = std::fs::read_to_string(&version_path).ok()?;
     let gv: GrokVersion = serde_json::from_str(&content).ok()?;
     gv.stable_version
@@ -580,8 +730,8 @@ pub fn channel_name() -> Option<&'static str> {
 /// Channel label derived from the cached stable pointer.
 ///
 /// Compares the compiled-in `VERSION` against the stable pointer stored in
-/// `~/.grok/version.json` (written by the auto-updater):
-/// - `" [alpha]"` when the current version is ahead of stable,
+/// `~/.grok/dscode-version.json` (written by the auto-updater):
+/// - `" [beta]"` when the current version is ahead of stable,
 /// - `" [stable]"` when at or behind stable,
 /// - `""` when no cached pointer is available (first launch, old cache format).
 ///
@@ -595,7 +745,7 @@ pub fn channel_label() -> &'static str {
             None => return "",
         };
         match derive_channel(xai_grok_version::VERSION, &stable) {
-            Some("alpha") => " [alpha]",
+            Some("alpha") => " [beta]",
             Some(_) => " [stable]",
             None => "",
         }

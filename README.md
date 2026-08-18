@@ -49,10 +49,19 @@ Presets: `minimal` (default), `code`, `standard`, `cordis`, plus your own in
 
 ## Update
 
-The harness comes from npm (`npm i -g @deepseek-ai/dsh@next`); the
-`deepseek-harness/` submodule stays for dev/upgrade tracking of the fork (see
-`docs/harness-updates.md`). To pick up repo changes, re-run
-`bash scripts/install.sh` — it rebuilds and re-registers the bridge.
+`dscode update` self-updates the TUI binary from the deepseek-code GitHub
+releases: the stable channel (default) follows the latest release, the beta
+channel (`dscode update --beta`, sticky until `--stable`) also picks up
+prereleases. The installer honors the same channels via `DSC_CHANNEL=beta
+bash scripts/install.sh`. Releases are cut with `scripts/release.sh` from the
+repo `VERSION` file (a `-beta.N` suffix publishes a prerelease; a plain
+version publishes stable). The harness comes from npm
+(`npm i -g @deepseek-ai/dsh@next`); the `deepseek-harness/` submodule stays for
+dev/upgrade tracking of the fork (see `docs/harness-updates.md`). To pick up
+full repo changes (including the bridge), re-run `bash scripts/install.sh` — it
+rebuilds and re-registers the bridge. `bash scripts/uninstall.sh` removes the
+launchers, the leader profile, and the TUI state (identity-checked; add
+`--remove-dsh` to also drop the npm CLI).
 
 ## Layout
 

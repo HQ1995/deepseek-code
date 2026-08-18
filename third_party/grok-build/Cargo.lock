@@ -14548,7 +14548,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-version"
-version = "0.0.1"
+version = "0.0.5"
 dependencies = [
  "semver",
 ]

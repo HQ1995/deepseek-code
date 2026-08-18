@@ -61,55 +61,124 @@ echo "  building the grok-leader bridge..."
 ( cd "$ROOT/bridge/grok-leader" && pnpm install && pnpm run build )
 echo "  installing the bridge into the deepseek-leader profile..."
 "${DSH_RUN[@]}" plugin --profile deepseek-leader add "file:$ROOT/bridge/grok-leader"
+# pnpm materializes the file: dependency as hard links through its store, so
+# on a RE-install over an existing profile the copy keeps serving the build
+# that was current when it was first linked (tsc replaces inodes). Rebuild
+# the copy from scratch so re-running this installer picks up the current
+# bridge; scripts/update-bridge.sh is the standalone form of this step.
+profile_dir="$HOME/.dsh/profiles/deepseek-leader"
+if [[ -d "$profile_dir/node_modules" ]]; then
+  rm -rf "$profile_dir/node_modules"
+  ( cd "$profile_dir" && pnpm install --force )
+fi
 
-# Prebuilt TUI binary into the repo tree.
+# Prebuilt TUI binary into the repo tree. The release channel picks which
+# GitHub release serves it: stable resolves /releases/latest (never a
+# prerelease); beta resolves the newest tag by semver INCLUDING prereleases.
+# DEEPSEEK_CODE_TUI_RELEASE pins an exact tag and skips channel resolution;
+# the baked-in pin is the offline fallback when the release API is
+# unreachable.
 mkdir -p "$ROOT/third_party/grok-build/target/release"
-if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
-  if [[ -x "$ROOT/third_party/grok-build/target/release/dscode" ]]; then
-    echo "  prebuilt dscode already present; verifying its SHA-256 before use"
-    case "$TUI_RELEASE" in
-      v0.0.4) expected_sha256='70e2541281b1f4afdab7d0d18cc2ceaf192d822370004cfee5b2fc4120a1f11f' ;;
-      *) expected_sha256='' ;;
-    esac
-    if [[ -n "$expected_sha256" ]] && ! command -v sha256sum >/dev/null 2>&1; then
-      echo "error: sha256sum is required to verify the prebuilt dscode" >&2
+DSC_CHANNEL="${DSC_CHANNEL:-stable}"
+RELEASE_REPO="HQ1995/deepseek-code"
+RELEASE_API="https://api.github.com/repos/$RELEASE_REPO/releases"
+BIN_PATH="$ROOT/third_party/grok-build/target/release/dscode"
+ASSET="dscode-linux-x86_64"
+
+resolve_release_tag() {
+  case "$DSC_CHANNEL" in
+    stable)
+      curl -fsSL "$RELEASE_API/latest" 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])' 2>/dev/null || true
+      ;;
+    beta)
+      curl -fsSL "$RELEASE_API?per_page=100" 2>/dev/null | python3 -c '
+import json, re, sys
+def key(tag):
+    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)(?:-(.+))?$", tag)
+    if not m:
+        return None
+    # A plain release outranks a prerelease of the same x.y.z (semver).
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4) is None, m.group(4) or "")
+tags = [r["tag_name"] for r in json.load(sys.stdin) if not r.get("draft")]
+keyed = sorted((key(t), t) for t in tags if key(t))
+print(keyed[-1][1] if keyed else "")' 2>/dev/null || true
+      ;;
+    *)
+      echo "error: DSC_CHANNEL must be stable or beta (got $DSC_CHANNEL)" >&2
       exit 1
-    fi
-    if [[ -n "$expected_sha256" ]]; then
-      actual_sha256="$(sha256sum "$ROOT/third_party/grok-build/target/release/dscode" | cut -d' ' -f1)"
-      if [[ "$actual_sha256" == "$expected_sha256" ]]; then
-        echo "  prebuilt dscode verified"
-      else
-        echo "  prebuilt dscode differs from the pinned release (got $actual_sha256); re-downloading $TUI_RELEASE"
-        rm -f "$ROOT/third_party/grok-build/target/release/dscode"
-        echo "  downloading prebuilt dscode ($TUI_RELEASE)..."
-        curl -fL -o "$ROOT/third_party/grok-build/target/release/dscode" \
-          "https://github.com/HQ1995/deepseek-code/releases/download/$TUI_RELEASE/dscode-linux-x86_64"
-        actual_sha256="$(sha256sum "$ROOT/third_party/grok-build/target/release/dscode" | cut -d' ' -f1)"
-        if [[ "$actual_sha256" != "$expected_sha256" ]]; then
-          echo "error: downloaded dscode failed its SHA-256 check (got $actual_sha256)" >&2
-          exit 1
-        fi
-      fi
-    fi
-    chmod +x "$ROOT/third_party/grok-build/target/release/dscode"
+      ;;
+  esac
+}
+
+if [[ -z "${DEEPSEEK_CODE_TUI_RELEASE:-}" ]]; then
+  resolved_tag="$(resolve_release_tag)"
+  if [[ -n "$resolved_tag" ]]; then
+    TUI_RELEASE="$resolved_tag"
+    echo "  channel $DSC_CHANNEL resolved to $TUI_RELEASE"
   else
-    echo "  downloading prebuilt dscode ($TUI_RELEASE)..."
-    curl -fL -o "$ROOT/third_party/grok-build/target/release/dscode" \
-      "https://github.com/HQ1995/deepseek-code/releases/download/$TUI_RELEASE/dscode-linux-x86_64"
-    # SHA-256 pin for THIS release; update the pin whenever TUI_RELEASE bumps.
-    case "$TUI_RELEASE" in
-      v0.0.4) expected_sha256='70e2541281b1f4afdab7d0d18cc2ceaf192d822370004cfee5b2fc4120a1f11f' ;;
-      *) expected_sha256='' ;;
-    esac
-    actual_sha256="$(sha256sum "$ROOT/third_party/grok-build/target/release/dscode" | cut -d' ' -f1)"
-    if [[ -n "$expected_sha256" && "$actual_sha256" != "$expected_sha256" ]]; then
-      rm -f "$ROOT/third_party/grok-build/target/release/dscode"
-      echo "error: downloaded dscode failed its SHA-256 check (got $actual_sha256)" >&2
-      exit 1
-    fi
-    chmod +x "$ROOT/third_party/grok-build/target/release/dscode"
+    echo "  release API unreachable; falling back to pinned $TUI_RELEASE"
   fi
+fi
+
+# The expected SHA-256 for the release binary: the .sha256 release asset
+# (published by scripts/release.sh from v0.0.5 on), else the baked-in pin
+# for older releases. Empty means no digest is available.
+expected_dscode_sha256() {
+  local from_asset
+  from_asset="$(curl -fsSL "https://github.com/$RELEASE_REPO/releases/download/$TUI_RELEASE/$ASSET.sha256" 2>/dev/null | cut -d' ' -f1 || true)"
+  if [[ "$from_asset" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "$from_asset"
+    return
+  fi
+  case "$TUI_RELEASE" in
+    v0.0.4) echo '70e2541281b1f4afdab7d0d18cc2ceaf192d822370004cfee5b2fc4120a1f11f' ;;
+    *) echo '' ;;
+  esac
+}
+
+verify_or_fail() { # $1 = expected sha (may be empty), exits on mismatch
+  if [[ -z "$1" ]]; then
+    echo "  warning: no checksum published for $TUI_RELEASE; skipping verification" >&2
+    return 0
+  fi
+  if ! command -v sha256sum >/dev/null 2>&1; then
+    echo "error: sha256sum is required to verify the prebuilt dscode" >&2
+    exit 1
+  fi
+  local actual
+  actual="$(sha256sum "$BIN_PATH" | cut -d' ' -f1)"
+  if [[ "$actual" != "$1" ]]; then
+    rm -f "$BIN_PATH"
+    echo "error: dscode failed its SHA-256 check for $TUI_RELEASE (got $actual, want $1)" >&2
+    exit 1
+  fi
+}
+
+download_dscode() {
+  echo "  downloading prebuilt dscode ($TUI_RELEASE)..."
+  curl -fL -o "$BIN_PATH" \
+    "https://github.com/$RELEASE_REPO/releases/download/$TUI_RELEASE/$ASSET"
+}
+
+if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
+  expected_sha="$(expected_dscode_sha256)"
+  if [[ -x "$BIN_PATH" && -n "$expected_sha" ]]; then
+    echo "  prebuilt dscode already present; verifying its SHA-256 before use"
+    actual_sha="$(sha256sum "$BIN_PATH" | cut -d' ' -f1)"
+    if [[ "$actual_sha" == "$expected_sha" ]]; then
+      echo "  prebuilt dscode verified"
+    else
+      echo "  prebuilt dscode differs from $TUI_RELEASE (got $actual_sha); re-downloading"
+      rm -f "$BIN_PATH"
+      download_dscode
+      verify_or_fail "$expected_sha"
+    fi
+  elif [[ ! -x "$BIN_PATH" ]]; then
+    download_dscode
+    verify_or_fail "$expected_sha"
+  fi
+  chmod +x "$BIN_PATH"
 else
   echo "  no prebuilt binary for this platform; building TUI with cargo (takes minutes)..."
   ( cd "$ROOT/third_party/grok-build" && cargo build --release -p xai-grok-pager-bin )

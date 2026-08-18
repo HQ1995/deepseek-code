@@ -77,6 +77,7 @@ fn reinstall_hint(installer: &str, channel: &str) -> String {
     match installer {
         "npm" => "Please reinstall via npm:\n  npm i -g @xai-official/grok".to_string(),
         "gh-release" => "Please reinstall via GitHub Releases:\n  gh release download --repo xai-org-shared/grok-build --pattern 'grok-*' --output grok && chmod +x grok".to_string(),
+        "dscode" => "Please reinstall via the deepseek-code installer:\n  bash scripts/install.sh".to_string(),
         _ => format!("Please reinstall via:\n  {}", manual_install_cmd(channel)),
     }
 }
@@ -478,6 +479,10 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
 fn disk_version_for_installer(installer: &str) -> Option<String> {
     match installer {
         "internal" | "gh-release" => crate::version::installed_on_disk_version(),
+        // dscode replaces the running executable directly; there is no
+        // versioned download symlink to inspect, so the compiled-in version
+        // is the source of truth.
+        "dscode" => None,
         _ => None,
     }
 }
@@ -488,6 +493,7 @@ fn env_installer() -> Option<&'static str> {
             "npm" => Some("npm"),
             "internal" => Some("internal"),
             "gh-release" | "gh" => Some("gh-release"),
+            "dscode" | "deepseek-code" => Some("dscode"),
             _ => None,
         };
     }
@@ -505,13 +511,27 @@ fn env_installer() -> Option<&'static str> {
 
 pub async fn get_installer() -> Option<&'static str> {
     if let Some(i) = env_installer() {
+        // dscode is not the npm @xai-official/grok package. If npm was only
+        // inferred because this process happened to be spawned from an npm
+        // context (npm_config_user_agent), keep using the dscode GitHub
+        // Releases updater instead of the npm registry.
+        if i == "npm"
+            && std::env::var_os("GROK_INSTALLER").is_none()
+            && std::env::var_os("GROK_MANAGED_BY_NPM").is_none()
+            && std::env::var_os("npm_config_user_agent").is_some()
+        {
+            return Some("dscode");
+        }
         return Some(i);
     }
     let cfg = config::load_config().await;
     match cfg.cli.installer.as_deref() {
         Some("npm") => Some("npm"),
         Some("gh-release") => Some("gh-release"),
-        _ => Some("internal"),
+        Some("dscode") | Some("deepseek-code") => Some("dscode"),
+        // deepseek-code is a self-contained fork; its updater always talks
+        // to the deepseek-code GitHub Releases, not x.ai's internal CDN.
+        _ => Some("dscode"),
     }
 }
 
@@ -554,7 +574,7 @@ fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: boo
 /// `get_installer()`, so they also get rollback support.
 fn installer_allows_downgrade(installer: &str) -> bool {
     match installer {
-        "internal" | "gh-release" => true,
+        "internal" | "gh-release" | "dscode" => true,
         "npm" => false,
         _ => false,
     }
@@ -945,6 +965,7 @@ pub async fn run_install_script(
         )
         .map(|()| None),
         "gh-release" => install_gh_release(target).await.map(|()| None),
+        "dscode" => install_dscode_release(target, &update_config.channel).await.map(|()| None),
         _ => install_internal(target, update_config).await.map(Some),
     };
     // Before the success-only cache sweep, so it cannot inflate successes.
@@ -2464,6 +2485,78 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
     })
     .await;
 
+    Ok(())
+}
+
+/// Download and install dscode from the deepseek-code GitHub Releases.
+///
+/// This is the self-update path for the dscode fork: it fetches the stable
+/// release asset (`dscode-<os>-<arch>`) directly from
+/// `HQ1995/deepseek-code` and atomically replaces the currently running
+/// executable. It does not use the x.ai CDN or require the `gh` CLI.
+#[doc(hidden)]
+pub async fn install_dscode_release(target: Option<&str>, channel: &str) -> Result<()> {
+    let (os, arch) = detect_platform()?;
+    let version = match target {
+        Some(v) => {
+            semver::Version::parse(v)
+                .map_err(|_| anyhow::anyhow!("invalid version format: '{}'", v))?;
+            v.to_string()
+        }
+        None => crate::version::fetch_dscode_release_version(channel).await?,
+    };
+
+    let asset_name = if cfg!(windows) {
+        format!("dscode-{}-{}.exe", os, arch)
+    } else {
+        format!("dscode-{}-{}", os, arch)
+    };
+
+    let exe = std::env::current_exe()
+        .context("cannot locate the running dscode executable")?;
+    let dest = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let tmp = tmp_download_path(&dest);
+    let url = crate::version::dscode_release_download_url(&version, &asset_name);
+
+    eprintln!(
+        "  Downloading dscode v{} ({}) from GitHub Releases...",
+        version, asset_name
+    );
+    download_with_progress(&url, &tmp).await?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).await?;
+    }
+
+    if let Err(e) = smoke_test_binary(&tmp).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e.into());
+    }
+
+    #[cfg(unix)]
+    {
+        publish_downloaded_artifact(&tmp, &dest).await?;
+    }
+    #[cfg(windows)]
+    {
+        windows_replace_exe(&tmp, &dest).await?;
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        anyhow::bail!("Unsupported platform for dscode self-update");
+    }
+
+    // Remember the dscode installer so future auto-update checks use the
+    // same GitHub Releases source instead of falling back to x.ai.
+    let _ = config::update_config(|st| {
+        st.cli.installer = Some("dscode".to_string());
+    })
+    .await;
+
+    eprintln!("  ✓ dscode v{} installed successfully!", version);
     Ok(())
 }
 
