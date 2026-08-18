@@ -924,7 +924,7 @@ pub async fn run(
         set_terminal_title(t);
     }
     const CONNECT_UI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-    let fallback_flags = use_leader.then(|| connect_flags.clone());
+    // (dscode: no embedded-fallback flags — a leader failure is terminal.)
     let primary_target = if use_leader {
         crate::acp::AgentKind::Leader
     } else {
@@ -957,28 +957,31 @@ pub async fn run(
         },
     )
     .await;
+    // DIVERGENCE(deepseek): upstream falls back to the EMBEDDED in-process
+    // agent when the leader connect fails. dscode has no embedded backend —
+    // that path is the real grok shell, which greets the user with xAI OAuth
+    // while having no dsh bridge behind it. A leader failure here is terminal
+    // and diagnosable instead: fail fast and surface the dsh leader log,
+    // which carries the actual boot error (plugin resolution, profile, …).
     let (connect_result, embedded_fallback, timer, connect_target) = match connect_result {
-        Err(f) if use_leader && !cancel.is_cancelled() => {
-            tracing::warn!(error = %f.error, "leader connect failed; falling back to embedded agent");
-            timer.emit_telemetry(primary_target, f.outcome, f.timeout_secs, false);
-            let flags = fallback_flags.expect("set on the use_leader path");
-            let timer = xai_grok_telemetry::startup::begin(crate::acp::Owner::Client);
-            let target = crate::acp::AgentKind::Embedded;
-            let fallback = bounded_connect(
-                &cancel,
-                CONNECT_UI_TIMEOUT,
-                target,
-                startup_failure::ConnectAttempt::AfterFallback(startup_failure::EarlierAttempt {
-                    target: primary_target,
-                    wait: primary_started.elapsed(),
-                    outcome: f.outcome,
-                    longest_step: f.longest_step,
-                }),
-                &timer,
-                async { crate::acp::connect(&cancel, flags).await },
-            )
-            .await;
-            (fallback, true, timer, target)
+        Err(mut f) if use_leader && !cancel.is_cancelled() => {
+            let log_path = crate::dsh_leader::leader_log_path();
+            let tail = std::fs::read_to_string(&log_path)
+                .map(|s| {
+                    let lines: Vec<&str> = s.lines().collect();
+                    let start = lines.len().saturating_sub(12);
+                    lines[start..].join("\n")
+                })
+                .unwrap_or_else(|_| "<no leader log written>".to_string());
+            f.error = anyhow::anyhow!(
+                "{}\n\nThe dsh leader failed to start or accept the connection; \
+                 dscode has no embedded fallback agent.\n\
+                 Leader log tail ({}):\n{}",
+                f.error,
+                log_path.display(),
+                tail
+            );
+            (Err(f), false, timer, primary_target)
         }
         other => (other, false, timer, primary_target),
     };

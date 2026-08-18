@@ -1641,15 +1641,41 @@ async fn connect_or_spawn_inner(
                         external_spawn_pid = Some(spawn(&sock_path)?);
                     }
                 }
-                let conn = match wait_for_socket_connectable(
+                // While waiting for the socket, watch the spawned process: a
+                // leader that dies during boot (profile error, missing
+                // plugin) must fail the connect IMMEDIATELY with the real
+                // reason, not blank-poll the full spawn timeout. The watcher
+                // only resolves on actual exit, so a slow-but-alive leader
+                // still gets the whole socket deadline.
+                let socket_wait = wait_for_socket_connectable(
                     &sock_path,
                     spawn_wait_timeout,
                     client_type,
                     mode,
                     capabilities.clone(),
-                )
-                .await
-                {
+                );
+                let wait_result = if let Some(pid) = external_spawn_pid {
+                    let pid_exit = async {
+                        loop {
+                            if !crate::util::is_process_alive(pid) {
+                                // Grace: the leader may have bound the socket
+                                // and handed off right before exiting.
+                                tokio::time::sleep(SPAWN_POLL_INTERVAL).await;
+                                break;
+                            }
+                            tokio::time::sleep(SPAWN_POLL_INTERVAL).await;
+                        }
+                    };
+                    tokio::select! {
+                        conn = socket_wait => conn,
+                        () = pid_exit => Err(ConnectionError::SpawnFailed(format!(
+                            "leader process {pid} exited before its socket became connectable"
+                        ))),
+                    }
+                } else {
+                    socket_wait.await
+                };
+                let conn = match wait_result {
                     Ok(conn) => conn,
                     Err(ConnectionError::Timeout) => {
                         self_spawn_attempts += 1;

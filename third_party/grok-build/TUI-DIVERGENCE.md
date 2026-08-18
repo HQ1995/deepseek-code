@@ -246,3 +246,19 @@ standard ACP `available_commands_update`, and the stock pager merges
 agent-advertised commands into the slash registry (builtin names win,
 BLOCKED_ACP_NAMES skipped). New dsh plugins get top-level slash commands
 with zero pager changes.
+
+### Leader failure is terminal — no embedded-agent fallback, fail-fast spawn
+
+Upstream falls back to the embedded in-process agent when the leader
+connect fails, and waits out the full spawn timeout polling for the
+socket. In dscode the embedded agent is the real grok shell — no dsh
+bridge, greets the user with xAI OAuth — so `app/mod.rs` removes the
+fallback: a leader failure restores the terminal and prints the error
+plus the dsh leader log tail (the actual boot failure: plugin
+resolution, profile errors). `xai-grok-shell leader/mod.rs
+connect_or_spawn_inner` additionally watches the spawned external
+leader's pid while waiting for the socket and fails immediately with
+"exited before its socket became connectable" when the process dies,
+instead of blank-polling the 30s timeout. Verified: a broken profile now
+errors in ~1s with the resolve error on screen (was: 30s black screen,
+then the xAI login).
