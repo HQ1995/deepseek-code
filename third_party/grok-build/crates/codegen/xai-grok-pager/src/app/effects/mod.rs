@@ -65,6 +65,11 @@ fn parse_provider_roster(
                     .get("baseURL")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
+                let note = row
+                    .get("note")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
                 Some(crate::acp::model_state::ProviderInfo {
                     id,
                     name,
@@ -72,6 +77,7 @@ fn parse_provider_roster(
                     api_key_env,
                     api,
                     base_url,
+                    note,
                 })
             })
             .collect()

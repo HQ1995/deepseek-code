@@ -51,8 +51,15 @@ branding (our identity). Keep this list current on every sync.
   switches the session to the picked provider's first catalog model by reusing
   the existing SetDefaultModel pipeline. The "current provider" is derived
   from the current model's provider meta (the bridge's currentProviderId is
-  only a fallback), and /model's dropdown filters to that provider. The bridge
-  owns provider auth/config (~/.dsh); the TUI never hardcodes provider auth
+  only a fallback). /model's dropdown is GLOBAL: every provider's models in
+  one list, rows outside the current model's provider prefixed "[provider]",
+  so a cross-provider switch is a single /model pick (an earlier iteration
+  scoped /model to the current provider, which made /provider a mandatory
+  two-step hop through an arbitrary first model — reverted as unusable).
+  /provider rows carry a model count; a model-less provider (subscription
+  pre-login, missing API key) says so in the row and errors with the
+  /dsh login pointer instead of a bare "has no models". The bridge owns
+  provider auth/config (~/.dsh); the TUI never hardcodes provider auth
   assumptions.
 - Add-provider flow: the /provider dropdown's final row "+ Add provider…"
   accepts as /provider --add, which opens a new add-provider modal

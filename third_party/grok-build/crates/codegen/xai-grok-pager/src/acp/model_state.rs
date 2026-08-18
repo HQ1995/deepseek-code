@@ -75,6 +75,10 @@ pub struct ProviderInfo {
     pub api_key_env: Option<String>,
     pub api: Option<String>,
     pub base_url: Option<String>,
+    /// Free-text status supplied by the agent (e.g. why a provider has no
+    /// models and what unlocks it). Display-only: the TUI renders it verbatim
+    /// and attaches no semantics, so plugins can shape it without TUI changes.
+    pub note: Option<String>,
 }
 
 impl ModelState {
@@ -131,16 +135,15 @@ impl ModelState {
         self.current_provider_id()
     }
 
-    /// Models offered to the /model surface and effort autocomplete: scoped to
-    /// the current provider when one is selected, plus the current model itself
-    /// when it lives outside the scope (a pending cross-provider switch is
-    /// still visible as "(current)").
-    pub fn scoped_models(&self) -> impl Iterator<Item = (&acp::ModelId, &acp::ModelInfo)> {
-        let scope = self.current_provider_scope();
-        self.available.iter().filter(move |(id, _)| {
-            let provider = self.provider_for(*id);
-            provider.is_empty() || scope.is_empty() || provider == scope || Some(*id) == self.current.as_ref()
-        })
+    /// Models offered to the /model surface and effort autocomplete: the full
+    /// catalog, every provider. Rows outside the current model's provider
+    /// render with a "[provider]" prefix and switch in one step. (dscode: an
+    /// earlier iteration scoped this to the current provider, which made
+    /// /provider a mandatory hop — switch provider to an arbitrary first
+    /// model, then /model again — and dead-ended on providers with no models
+    /// yet, e.g. subscriptions before /dsh login.)
+    pub fn listed_models(&self) -> impl Iterator<Item = (&acp::ModelId, &acp::ModelInfo)> {
+        self.available.iter()
     }
 
     /// Total context window tokens for the current model (if available).
@@ -393,6 +396,11 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                                         .get("baseURL")
                                         .and_then(|v| v.as_str())
                                         .map(str::to_string);
+                                    let note = row
+                                        .get("note")
+                                        .and_then(|v| v.as_str())
+                                        .filter(|s| !s.is_empty())
+                                        .map(str::to_string);
                                     Some(ProviderInfo {
                                         id,
                                         name,
@@ -400,6 +408,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                                         api_key_env,
                                         api,
                                         base_url,
+                                        note,
                                     })
                                 })
                                 .collect()

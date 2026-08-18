@@ -129,7 +129,7 @@ fn split_trailing_token(args: &str) -> Option<(&str, &str)> {
 /// Longest-name-first to disambiguate names that share a prefix.
 fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::ModelId> {
     let mut candidates: Vec<(&acp::ModelId, &str)> = models
-        .scoped_models()
+        .listed_models()
         .filter(|(_, info)| supports_reasoning_effort(info))
         .map(|(id, info)| (id, info.name.as_str()))
         .collect();
@@ -153,14 +153,13 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
     let current_id = models.current.as_ref();
     let mut items: Vec<ArgItem> = Vec::with_capacity(models.available.len());
     let scope = models.current_provider_scope();
-    for (id, info) in models.scoped_models() {
+    for (id, info) in models.listed_models() {
         let is_current = current_id == Some(id);
         let supports = supports_reasoning_effort(info);
 
-        // dscode: provider scoping — the "[provider] " prefix stays only when
-        // there is no scope (global list) or the row belongs to a different
-        // provider. When the list is already scoped to this row's provider,
-        // the prefix would repeat the scope and is dropped.
+        // dscode: global catalog — rows on the current model's provider keep
+        // bare names; rows on other providers carry a "[provider] " prefix so
+        // one list covers cross-provider switching in a single pick.
         let provider = models.provider_for(id);
 
         let display = if is_current {
@@ -331,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_scope_filters_model_items() {
+    fn model_items_span_providers_with_prefixes_outside_the_current_scope() {
         let mut state = ModelState::default();
         let (a, ainfo) = provider_model("ds-chat", "DS Chat", "deepseek");
         let (b, binfo) = provider_model("ds-reasoner", "DS Reasoner", "deepseek");
@@ -339,8 +338,8 @@ mod tests {
         state.available.insert(a.clone(), ainfo);
         state.available.insert(b, binfo);
         state.available.insert(c, cinfo);
-        // Current model = deepseek, so the /model list is scoped to deepseek
-        // and rows drop the redundant [deepseek] prefix.
+        // Current model = deepseek: its provider's rows keep bare names, the
+        // pi row stays listed with a [pi] prefix (one-step cross-provider pick).
         state.current = Some(a);
         state.current_provider = Some("deepseek".into());
 
@@ -355,9 +354,10 @@ mod tests {
             current_title: None,
         };
         let items = ModelCommand.suggest_args(&ctx, "").unwrap();
-        assert_eq!(items.len(), 2, "pi-code is filtered out of a deepseek-scoped /model");
+        assert_eq!(items.len(), 3, "the /model list spans every provider");
         assert_eq!(items[0].display, "DS Chat (current)");
         assert_eq!(items[1].display, "DS Reasoner");
+        assert_eq!(items[2].display, "[pi] Pi Code");
     }
 
     #[test]
@@ -399,9 +399,11 @@ mod tests {
         assert_eq!(state.current_provider_scope(), "deepseek");
         state.set_current(gpt, None);
         assert_eq!(state.current_provider_scope(), "openai");
+        // The list stays global; only the prefixes move with the scope.
         let items = build_model_items(&state);
-        assert_eq!(items.len(), 1, "only the new provider's models are offered");
-        assert_eq!(items[0].display, "GPT-4 (current)");
+        assert_eq!(items.len(), 2, "every provider's models stay offered");
+        assert_eq!(items[0].display, "[deepseek] DS Chat");
+        assert_eq!(items[1].display, "GPT-4 (current)");
     }
 
     #[test]

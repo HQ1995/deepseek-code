@@ -167,8 +167,10 @@ type AskUserQuestionExtResponse =
 interface ModelCatalog {
   currentModelId: string
   /** Provider roster as listed by the harness llm service ({id, name?}) plus
-   * the raw user-section profile fields the edit form prefills. */
-  providers: Array<{ id: string; name?: string; displayName?: string; apiKeyEnv?: string; api?: string; baseURL?: string }>
+   * the raw user-section profile fields the edit form prefills. `note` is a
+   * display-only status the TUI relays verbatim (e.g. empty subscription
+   * provider → its /dsh login pointer). */
+  providers: Array<{ id: string; name?: string; displayName?: string; apiKeyEnv?: string; api?: string; baseURL?: string; note?: string }>
   /** Provider that owns currentModelId ('' when no current model). */
   currentProviderId: string
   availableModels: Array<{ modelId: string; name: string; description?: string; _meta?: { provider: string; supportsReasoningEffort?: boolean; reasoningEfforts?: string[]; reasoningEffort?: string } }>
@@ -457,11 +459,42 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return urls
   }
 
+  /** COMPAT SHIM — the one plugin-specific carve-out in this bridge.
+   *
+   *  Layering rule (see docs/dscode-usage.md "Plugins"): the TUI renders
+   *  generic data; the bridge adapts protocol and manages plugin packages
+   *  (/dsh add|remove|plugins); EVERY feature belongs in a dsh plugin,
+   *  surfaced through generic rails (the @deepseek-ai/dsh-commands registry
+   *  auto-surfaces plugin slash commands; the llm service surfaces provider
+   *  catalogs; provider `note` relays display text).
+   *
+   *  dsh-plugin-subscriptions 0.3.x predates the commands registry and ships
+   *  only a web-profile login UI, so the bridge carries /dsh login + /dsh code
+   *  (and the empty-provider note below) as a shim. RETIRE when the plugin
+   *  (or a wrapper) registers login/logout commands itself — they would then
+   *  auto-surface as slash commands with zero bridge involvement. Do not add
+   *  further plugin-specific knowledge here. */
+  const SUBSCRIPTION_PROVIDERS = ['codex', 'claude', 'grok'] as const
+  type SubscriptionProvider = typeof SUBSCRIPTION_PROVIDERS[number]
+
   /** Rebuild the flattened wire catalog plus the provider ownership the bare ids hide. */
   const refreshCatalog = async (): Promise<ModelCatalog> => {
     const userSection = providerUserSection(settings())
+    const rows = llm === undefined
+      ? []
+      : await Promise.all(llm.listProviders().map(async provider => ({
+        provider: provider.id,
+        models: await llm.listModels(provider.id),
+      })))
+    const modelCount = new Map(rows.map(row => [row.provider, row.models.length]))
     const providers = llm === undefined ? [] : llm.listProviders().map(p => {
       const profile = providerUserProfile(userSection, p.id)
+      // Display-only status for an empty provider. The TUI relays notes
+      // verbatim and attaches no semantics, so the remedy knowledge stays
+      // here: the bridge owns /dsh login, so it may point at it.
+      const note = (modelCount.get(p.id) ?? 0) > 0 ? undefined
+        : (SUBSCRIPTION_PROVIDERS as readonly string[]).includes(p.id) ? 'not logged in — /dsh login ' + p.id
+        : undefined
       return {
         id: p.id,
         ...p.name === undefined ? {} : { name: p.name },
@@ -469,14 +502,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         ...typeof profile.apiKeyEnv === 'string' ? { apiKeyEnv: profile.apiKeyEnv } : {},
         ...typeof profile.api === 'string' ? { api: profile.api } : {},
         ...typeof profile.baseURL === 'string' ? { baseURL: profile.baseURL } : {},
+        ...note === undefined ? {} : { note },
       }
     })
-    const rows = llm === undefined
-      ? []
-      : await Promise.all(llm.listProviders().map(async provider => ({
-        provider: provider.id,
-        models: await llm.listModels(provider.id),
-      })))
     const providerByModel = new Map<string, string>()
     const availableModels: ModelCatalog['availableModels'] = []
     for (const row of rows) {
@@ -1433,8 +1461,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   const execFileAsync = promisify(execFile)
-  const SUBSCRIPTION_PROVIDERS = ['codex', 'claude', 'grok'] as const
-  type SubscriptionProvider = typeof SUBSCRIPTION_PROVIDERS[number]
   /** One OAuth login attempt at a time; /dsh code feeds it a pasted callback. */
   let pendingLogin: { provider: SubscriptionProvider; attempt: { manual(input: string): void; cancel(): void } } | undefined
 

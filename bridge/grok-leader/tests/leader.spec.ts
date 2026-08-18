@@ -1794,6 +1794,34 @@ describe('grok leader over a unix socket', () => {
     expect(agent!.internals.followups).toEqual(['one']) // the queued prompt never ran
   })
 
+  it('annotates an empty subscription provider with its /dsh login note', async () => {
+    const subscriptionLlm = {
+      listProviders: () => [
+        { id: 'deepseek', name: 'DeepSeek' },
+        { id: 'codex', name: 'ChatGPT (Codex)' },
+        { id: 'bare-api', name: 'Bare API' },
+      ],
+      listModels: async (provider: string) => provider === 'deepseek'
+        ? [{ id: 'deepseek-chat', name: 'DeepSeek Chat' }]
+        : [],
+    }
+    const { client: c } = await start({ llm: subscriptionLlm })
+    register(c)
+    await c.next()
+
+    const models = await c.request(1, 'x.ai/models/list', {})
+    const providers = (models.result as { _meta: { providers: Array<{ id: string; note?: string }> } })._meta.providers
+    expect(providers).toEqual([
+      { id: 'deepseek', name: 'DeepSeek' },
+      // The bridge owns /dsh login, so the remedy pointer is its knowledge;
+      // the TUI relays the note verbatim (no hardcoded semantics there).
+      { id: 'codex', name: 'ChatGPT (Codex)', note: 'not logged in — /dsh login codex' },
+      // An empty non-subscription provider gets no note: the bridge only
+      // states remedies it actually owns.
+      { id: 'bare-api', name: 'Bare API' },
+    ])
+  })
+
   it('dedupes colliding model ids and falls back to a catalog entry', async () => {
     const { client: c } = await start({ llm: collidingLlm, model: 'not-in-catalog' })
     register(c)

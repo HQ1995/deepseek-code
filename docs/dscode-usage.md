@@ -66,6 +66,17 @@ into every session (the grok-leader bridge itself is installed through the
 same mechanism). Manage plugins from inside dscode — no CLI or web profile
 needed:
 
+**Design rule (plugin-first, any plugin kind):** the TUI keeps core
+interaction only (transcript, composer, pickers) and renders generic data;
+the bridge adapts protocol and manages plugin packages; every feature lives
+in a dsh plugin, reaching the TUI through generic rails — plugin-registered
+commands auto-surface as slash commands, `llm`-service providers surface in
+`/provider` & `/model`, and free-text provider notes are relayed verbatim.
+Neither the TUI nor the bridge grows per-plugin code; the one existing
+exception (`/dsh login` for the pre-registry subscriptions plugin) is marked
+as a compat shim in the bridge and retires once that plugin registers its
+own commands.
+
 ```
 /dsh plugins                      list installed plugins
 /dsh add <package|git-url>        install a plugin into the leader profile

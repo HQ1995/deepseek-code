@@ -136,7 +136,17 @@ impl SlashCommand for ProviderCommand {
         // The provider's first catalog model is its default (the bridge lists
         // providers before flattening, so catalog order is provider order).
         let Some(model_id) = default_model_for(ctx.models, provider) else {
-            return CommandResult::Error(format!("Provider {provider} has no models"));
+            // The remedy (log in, add a key, …) is the agent's knowledge, not
+            // the TUI's: relay the bridge-supplied note when there is one.
+            let note = ctx
+                .models
+                .providers
+                .iter()
+                .find(|p| p.id == provider)
+                .and_then(|p| p.note.as_deref())
+                .map(|n| format!(" — {n}"))
+                .unwrap_or_default();
+            return CommandResult::Error(format!("Provider {provider} has no models{note}"));
         };
         CommandResult::Action(Action::SetDefaultModel(model_id))
     }
@@ -145,7 +155,10 @@ impl SlashCommand for ProviderCommand {
 /// One row per provider. The row owning the current model is tagged
 /// "(current)"; insert_text carries the provider id so acceptance feeds the
 /// typed form directly (the same string /provider run resolves
-/// case-insensitively).
+/// case-insensitively). The description column carries the bridge-supplied
+/// note when present (the agent knows WHY a provider is empty and what
+/// unlocks it), else the model count — so an unpickable provider says so
+/// before the user hits the error.
 fn build_provider_items(models: &ModelState) -> Vec<ArgItem> {
     let scope = models.current_provider_scope();
     let mut items: Vec<ArgItem> = models
@@ -158,11 +171,28 @@ fn build_provider_items(models: &ModelState) -> Vec<ArgItem> {
             } else {
                 label.to_string()
             };
+            let model_count = models
+                .available
+                .values()
+                .filter(|info| {
+                    info.meta
+                        .as_ref()
+                        .and_then(|m| m.get("provider"))
+                        .and_then(|v| v.as_str())
+                        == Some(provider.id.as_str())
+                })
+                .count();
+            let description = match (provider.note.as_deref(), model_count) {
+                (Some(note), _) => note.to_string(),
+                (None, 0) => "no models".to_string(),
+                (None, 1) => "1 model".to_string(),
+                (None, n) => format!("{n} models"),
+            };
             ArgItem {
                 match_text: format!("{label} {}", provider.id),
                 insert_text: provider.id.clone(),
                 display,
-                description: String::new(),
+                description,
             }
         })
         .collect();
@@ -291,10 +321,47 @@ mod tests {
         let items = ProviderCommand.suggest_args(&app_ctx(&state), "").unwrap();
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].display, "DeepSeek (current)");
+        assert_eq!(items[0].description, "2 models");
         assert_eq!(items[1].display, "Pi AI");
+        assert_eq!(items[1].description, "1 model");
         assert_eq!(items[0].insert_text, "deepseek");
         assert_eq!(items[2].display, ADD_PROVIDER_LABEL);
         assert_eq!(items[2].insert_text, ADD_PROVIDER_ARG);
+    }
+
+    #[test]
+    fn a_model_less_provider_relays_the_bridge_note_verbatim() {
+        let mut state = sample();
+        state.providers.push(crate::acp::model_state::ProviderInfo {
+            id: "codex".into(),
+            name: Some("ChatGPT (Codex)".into()),
+            note: Some("not logged in — /dsh login codex".into()),
+            ..Default::default()
+        });
+        state.providers.push(crate::acp::model_state::ProviderInfo {
+            id: "bare".into(),
+            name: Some("Bare".into()),
+            ..Default::default()
+        });
+        let items = ProviderCommand.suggest_args(&app_ctx(&state), "").unwrap();
+        // The note is display-only pass-through: the TUI renders whatever the
+        // bridge said and hardcodes no remedy of its own.
+        let codex = items.iter().find(|i| i.insert_text == "codex").unwrap();
+        assert_eq!(codex.description, "not logged in — /dsh login codex");
+        let bare = items.iter().find(|i| i.insert_text == "bare").unwrap();
+        assert_eq!(bare.description, "no models");
+
+        let mut ctx = exec_ctx(&state);
+        match ProviderCommand.run(&mut ctx, "codex") {
+            CommandResult::Error(msg) => {
+                assert_eq!(msg, "Provider codex has no models — not logged in — /dsh login codex");
+            }
+            other => panic!("expected an error for a model-less provider, got {other:?}"),
+        }
+        match ProviderCommand.run(&mut ctx, "bare") {
+            CommandResult::Error(msg) => assert_eq!(msg, "Provider bare has no models"),
+            other => panic!("expected an error for a model-less provider, got {other:?}"),
+        }
     }
 
     #[test]
