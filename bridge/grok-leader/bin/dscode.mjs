@@ -42,10 +42,11 @@ const fail = (message) => {
   process.exit(1)
 }
 
-const assetName = () => {
-  if (process.platform === 'linux' && process.arch === 'x64') return 'dscode-linux-x86_64'
-  return undefined
-}
+const assetName = () => ({
+  'linux-x64': 'dscode-linux-x86_64',
+  'darwin-arm64': 'dscode-macos-aarch64',
+  'darwin-x64': 'dscode-macos-x86_64',
+}[`${process.platform}-${process.arch}`])
 
 const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 const binDir = join(dshHome, 'dsc-tui', 'bin')

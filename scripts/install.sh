@@ -83,7 +83,12 @@ DSC_CHANNEL="${DSC_CHANNEL:-stable}"
 RELEASE_REPO="HQ1995/deepseek-code"
 RELEASE_API="https://api.github.com/repos/$RELEASE_REPO/releases"
 BIN_PATH="$ROOT/third_party/grok-build/target/release/dscode"
-ASSET="dscode-linux-x86_64"
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64)   ASSET="dscode-linux-x86_64" ;;
+  Darwin-arm64)   ASSET="dscode-macos-aarch64" ;;
+  Darwin-x86_64)  ASSET="dscode-macos-x86_64" ;;
+  *)              ASSET="" ;;
+esac
 
 resolve_release_tag() {
   case "$DSC_CHANNEL" in
@@ -161,7 +166,7 @@ download_dscode() {
     "https://github.com/$RELEASE_REPO/releases/download/$TUI_RELEASE/$ASSET"
 }
 
-if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
+if [[ -n "$ASSET" ]]; then
   expected_sha="$(expected_dscode_sha256)"
   if [[ -x "$BIN_PATH" && -n "$expected_sha" ]]; then
     echo "  prebuilt dscode already present; verifying its SHA-256 before use"

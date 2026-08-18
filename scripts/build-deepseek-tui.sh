@@ -17,5 +17,10 @@ BIN="$VENDOR/target/release/dscode"
 export GROK_VERSION="${GROK_VERSION:-$(tr -d '[:space:]' < "$ROOT/VERSION")-dev}"
 
 cd "$VENDOR"
-numactl --cpunodebind=1 --membind=1 cargo build --release -p xai-grok-pager-bin
+# NUMA pinning is a this-host policy; CI runners and other machines build plain.
+if command -v numactl >/dev/null 2>&1; then
+  numactl --cpunodebind=1 --membind=1 cargo build --release -p xai-grok-pager-bin
+else
+  cargo build --release -p xai-grok-pager-bin
+fi
 echo "built: $BIN ($GROK_VERSION)"

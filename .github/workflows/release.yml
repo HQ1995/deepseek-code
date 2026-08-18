@@ -1,0 +1,59 @@
+# macOS release binaries. scripts/release.sh (run locally) builds the Linux
+# asset, creates the GitHub release, and publishes npm; pushing the tag
+# triggers this workflow, which adds the macOS binaries to that release.
+# workflow_dispatch backfills an existing release (e.g. tag: v0.0.6).
+# Asset names follow xai-grok-update detect_platform: dscode-{os}-{arch}.
+name: release-macos
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to backfill (e.g. v0.0.6)'
+        required: true
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { asset: dscode-macos-aarch64, runner: macos-latest }
+          - { asset: dscode-macos-x86_64, runner: macos-13 }
+    runs-on: ${{ matrix.runner }}
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: third_party/grok-build
+      - name: Build
+        run: |
+          VERSION="${TAG#v}"
+          GROK_VERSION="$VERSION" bash scripts/build-deepseek-tui.sh
+          banner="$(third_party/grok-build/target/release/dscode --version)"
+          echo "binary: $banner"
+          case "$banner" in *"$VERSION"*) ;; *) echo "version mismatch" >&2; exit 1 ;; esac
+      - name: Stage
+        run: |
+          mkdir -p dist
+          cp third_party/grok-build/target/release/dscode "dist/${{ matrix.asset }}"
+          ( cd dist && shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256" )
+          cat "dist/${{ matrix.asset }}.sha256"
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # scripts/release.sh creates the release moments after pushing the
+          # tag; wait for it rather than racing it.
+          for i in $(seq 1 40); do
+            gh release view "$TAG" >/dev/null 2>&1 && break
+            echo "waiting for release $TAG ($i)"; sleep 15
+          done
+          gh release upload "$TAG" \
+            "dist/${{ matrix.asset }}" "dist/${{ matrix.asset }}.sha256" --clobber
