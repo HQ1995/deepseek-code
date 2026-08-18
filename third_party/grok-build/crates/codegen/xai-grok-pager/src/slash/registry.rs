@@ -172,6 +172,16 @@ impl CommandRegistry {
         hidden.insert("voice".to_string());
         // `/auto` is fail-closed: hidden until `set_auto_mode_available(true)`.
         hidden.insert("auto".to_string());
+        // DIVERGENCE(deepseek): /hooks, /plugins, /marketplace, /skills open
+        // grok-build's OWN pager-plugin surfaces — a second plugin system that
+        // dscode does not use and whose names collide head-on with the real
+        // one (dsh plugins, managed by /dsh). Fail-closed hidden to kill the
+        // confusion; un-hide any of them only if the pager-plugin system ever
+        // becomes a supported dscode surface.
+        hidden.insert("hooks".to_string());
+        hidden.insert("plugins".to_string());
+        hidden.insert("marketplace".to_string());
+        hidden.insert("skills".to_string());
         // DIVERGENCE(deepseek): `/rewind` needs the x.ai/rewind/points and
         // x.ai/rewind/execute RPCs, which the grok-leader bridge does not
         // implement — the picker would die on method-not-found. Hidden (with

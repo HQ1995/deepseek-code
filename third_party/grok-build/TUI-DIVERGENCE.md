@@ -275,3 +275,15 @@ leader's pid while waiting for the socket and fails immediately with
 instead of blank-polling the 30s timeout. Verified: a broken profile now
 errors in ~1s with the resolve error on screen (was: 30s black screen,
 then the xAI login).
+
+### grok's pager-plugin surfaces are hidden (/hooks /plugins /marketplace /skills)
+
+`slash/registry.rs CommandRegistry::new` adds the four to the fail-closed
+`hidden` set. They open grok-build's OWN pager-plugin system — a second
+plugin world dscode does not use, whose names collide head-on with the
+real one (dsh plugins, managed by /dsh). Note dsh itself DOES have skills
+(the `skills` registry, packages/skill) and hooks (hooks-claude-code);
+those live harness-side and are unreachable from these TUI surfaces —
+the future path for exposing them is bridge-advertised ACP commands, not
+un-hiding grok's local UIs. Un-hide only if the pager-plugin system ever
+becomes a supported dscode surface.
