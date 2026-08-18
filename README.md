@@ -1,30 +1,35 @@
 # deepseek-code
 
-The grok-build terminal UI driving the DeepSeek Harness. Full terminal
-experience — mouse, selection, in-scrollback search, queue and todo panes,
-markdown and syntax rendering — backed by the dsh agent runtime, providers,
-plugins, and presets.
+`dscode` — a full terminal UI for AI coding agents: mouse, scrollback
+search, queue and todo panes, markdown and syntax rendering, sessions,
+presets, and a plugin ecosystem, in one binary.
 
-## Install (two steps)
+It is built from two open-source upstreams: the
+[grok-build](https://github.com/xai-org/grok-build) TUI (vendored,
+Apache-2.0) driving the
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) agent
+runtime (`dsh`, MIT) over a unix-socket bridge.
+
+> **This is a personal project.** It is not affiliated with, endorsed by,
+> or sponsored by DeepSeek or xAI. "DeepSeek" and "Grok" are trademarks of
+> their respective owners; they appear here only to describe the
+> open-source components this project builds on.
+
+## Install
+
+dscode ships as a dsh plugin
+([`@hqzhao95/dscode`](https://www.npmjs.com/package/@hqzhao95/dscode)):
 
 ```sh
-npm i -g @deepseek-ai/dsh@next   # the official dsh CLI (0.1.0-rc.6)
-git clone --depth 1 https://github.com/HQ1995/deepseek-code.git && cd deepseek-code
-bash scripts/install.sh
+npm i -g @deepseek-ai/dsh@next
+dsh plugin --profile deepseek-leader add @hqzhao95/dscode
+~/.dsh/profiles/deepseek-leader/node_modules/.bin/dscode
 ```
 
-`scripts/install.sh` downloads the prebuilt TUI, builds the `grok-leader`
-bridge and registers it in the `deepseek-leader` profile, and links `dscode`
-into `~/.local/bin`. If the global npm install fails, the launcher falls back
-to `npx --yes @deepseek-ai/dsh` on demand.
-
-Requirements: Node `^22.19.0` (or `>=24`) with npm, pnpm (the official dsh
-plugin command drives it), and curl on Linux x86_64 (cargo build elsewhere).
-
-Known gap: npm dsh `0.1.0-rc.6` lacks the EMFILE/ENOSPC watch-capacity fix;
-the `deepseek-harness` fork carries it on `dev`. Re-evaluate on every upstream
-release. Affected users can build dsh from the fork instead of npm (see
-docs/harness-updates.md).
+The first run downloads the release-pinned TUI binary (SHA-256 verified)
+and links `dscode` into `~/.local/bin`. Prebuilt binaries are Linux x86_64;
+other platforms build from this repo (`bash scripts/install.sh`, which is
+also the dev-checkout installer). Requires Node `^22.19.0 || >=24` and pnpm.
 
 ## Use
 
@@ -33,51 +38,38 @@ dscode                # open the TUI
 dscode "run tests"    # with a first prompt
 ```
 
-TUI local state lives under `$DSC_HOME` (default `~/.dsh/dsc-tui`);
-set `DSC_HOME` to relocate it. `~/.grok` is never touched and a
-`GROK_HOME` in the environment is ignored, so a real grok-build install can
-coexist on the same machine.
+`Enter` send · `Alt+Enter` newline · `Shift+Tab` mode · `Ctrl+Y` presets ·
+`Ctrl+S` resume · `/model` provider + model · `/dsh` manage plugins ·
+`Ctrl+Q` quit
 
-Keys: `Enter` send · `Alt+Enter` newline · `Shift+Tab` mode ·
-`Ctrl+Y`/`/preset` pick preset (session reloads instantly) ·
-`Ctrl+S` resume · `Ctrl+W` worktree · `/model` pick provider/model ·
-`Ctrl+Q` quit.
+Local state lives under `~/.dsh/dsc-tui` (`DSC_HOME` relocates it);
+`~/.grok` is never touched, so a real grok-build install can coexist.
 
-Presets: `minimal` (default), `code`, `standard`, `cordis`, plus your own in
-`~/.dsh/.agent-presets/`. Plugins:
-`dsh plugin --profile deepseek-leader add <pkg>`.
+Full manual: [docs/dscode-usage.md](docs/dscode-usage.md).
 
-## Update
+## Update / uninstall
 
-`dscode update` self-updates the TUI binary from the deepseek-code GitHub
-releases: the stable channel (default) follows the latest release, the beta
-channel (`dscode update --beta`, sticky until `--stable`) also picks up
-prereleases. The installer honors the same channels via `DSC_CHANNEL=beta
-bash scripts/install.sh`. Releases are cut with `scripts/release.sh` from the
-repo `VERSION` file (a `-beta.N` suffix publishes a prerelease; a plain
-version publishes stable). The harness comes from npm
-(`npm i -g @deepseek-ai/dsh@next`); the `deepseek-harness/` submodule stays for
-dev/upgrade tracking of the fork (see `docs/harness-updates.md`). To pick up
-full repo changes (including the bridge), re-run `bash scripts/install.sh` — it
-rebuilds and re-registers the bridge. `bash scripts/uninstall.sh` removes the
-launchers, the leader profile, and the TUI state (identity-checked; add
-`--remove-dsh` to also drop the npm CLI).
+`dscode update` self-updates from GitHub releases (stable by default,
+`--beta` for prereleases). Plugin installs follow the npm package's release
+pin instead. Releases are cut with `scripts/release.sh` from the `VERSION`
+file; `bash scripts/uninstall.sh` removes the launchers, the leader
+profile, and the TUI state.
 
 ## Layout
 
-- `third_party/grok-build/` — vendored grok-build TUI (Apache-2.0), binary
-  renamed `dscode`
-- `bridge/grok-leader/` — the leader socket server bridging the TUI to the
-  harness, installed as an out-of-tree dsh plugin
-- `deepseek-harness/` — the DeepSeek Harness fork (MIT), pinned as a
-  submodule; dev/upgrade tracking only, never required by the installer
-
-See `docs/dscode-usage.md` for the full manual.
+- `third_party/grok-build/` — vendored grok-build TUI (Apache-2.0);
+  modification ledger in `TUI-DIVERGENCE.md`
+- `bridge/grok-leader/` — the dsh plugin: leader-socket server bridging the
+  TUI to the harness, plus the `dscode` launcher (published as
+  `@hqzhao95/dscode`)
+- `deepseek-harness/` — harness fork (MIT), submodule for dev/upgrade
+  tracking only; the installer never needs it
+- `docs/` — manual, wire-protocol reference, upgrade strategy
 
 ## License
 
-The deepseek-code project is licensed under [Apache-2.0](LICENSE). See
-[NOTICE](NOTICE) for first-party attribution and the grok-build modification
-ledger, and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party
-notices. The vendored `third_party/grok-build/` remains Apache-2.0 and the
+[Apache-2.0](LICENSE). See [NOTICE](NOTICE) for attribution and the
+grok-build modification ledger, and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party notices.
+The vendored `third_party/grok-build/` remains Apache-2.0; the
 `deepseek-harness/` submodule remains MIT.
