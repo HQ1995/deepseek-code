@@ -12,11 +12,15 @@
  * @module @deepseek-ai/dsh-grok-leader
  */
 
+import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, statSync, unlinkSync } from 'node:fs'
+import { chmodSync, existsSync, statSync, unlinkSync } from 'node:fs'
+import { readFile, writeFile } from 'node:fs/promises'
 import { createServer, type Server, type Socket } from 'node:net'
-import { isAbsolute } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { homedir } from 'node:os'
+import { isAbsolute, join, sep } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import { installModelSelection, type Agent, type AgentOptions, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
@@ -885,14 +889,21 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
    * /preset is not executed as a preset switch — it reaches the model as text.
    */
   const availableCommands = async (): Promise<Array<{ name: string; description: string; input?: { hint: string } }>> => {
+    const commands: Array<{ name: string; description: string; input?: { hint: string } }> = [{
+      name: 'dsh',
+      description: 'Manage dsh plugins and subscription logins',
+      input: { hint: 'plugins | add <package> | remove <name> | login <codex|claude|grok> | code <pasted-url>' },
+    }]
     const roster = agentPresets()
     const presets = roster === undefined ? [] : await roster.list()
-    if (presets.length === 0) return []
-    return [{
-      name: 'preset',
-      description: 'Switch the active agent preset',
-      input: { hint: presets.map(preset => preset.id).join(' | ') },
-    }]
+    if (presets.length > 0) {
+      commands.push({
+        name: 'preset',
+        description: 'Switch the active agent preset',
+        input: { hint: presets.map(preset => preset.id).join(' | ') },
+      })
+    }
+    return commands
   }
 
   const initializeResponse = async (): Promise<unknown> => {
@@ -1387,6 +1398,177 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (record.runningPromptId === runningBefore) broadcastQueueChanged(record)
     })
 
+  // ── /dsh: in-TUI dsh plugin management ─────────────────────────────
+  //
+  // Advertised through availableCommands, so the pager sends "/dsh ..." as a
+  // plain prompt (ACP pass-through) and this bridge interprets it instead of
+  // the model. Replies stream as turnless agent messages and settle through
+  // the prompt RPC — no prompt_complete is emitted, so a /dsh issued while a
+  // real turn runs can never finalize that turn on the pager.
+
+  /** The dsh profile directory this bridge is installed in: the directory
+   *  holding the node_modules we were loaded from, a DSH_PROFILE_DIR
+   *  override (tests), or the default deepseek-leader profile. `undefined`
+   *  in a source checkout with no installed profile. */
+  const dshProfileDir = (): string | undefined => {
+    const override = process.env.DSH_PROFILE_DIR
+    if (override !== undefined && override.length > 0) return override
+    const self = fileURLToPath(import.meta.url)
+    const marker = sep + 'node_modules' + sep
+    const idx = self.indexOf(marker)
+    if (idx > 0) return self.slice(0, idx)
+    const fallback = join(homedir(), '.dsh', 'profiles', 'deepseek-leader')
+    return existsSync(join(fallback, 'package.json')) ? fallback : undefined
+  }
+
+  const execFileAsync = promisify(execFile)
+  const SUBSCRIPTION_PROVIDERS = ['codex', 'claude', 'grok'] as const
+  type SubscriptionProvider = typeof SUBSCRIPTION_PROVIDERS[number]
+  /** One OAuth login attempt at a time; /dsh code feeds it a pasted callback. */
+  let pendingLogin: { provider: SubscriptionProvider; attempt: { manual(input: string): void; cancel(): void } } | undefined
+
+  /** Stream a turnless agent message into the session transcript. */
+  const notifySession = (record: SessionRecord, message: string): void => {
+    const conn = connections.get(record.clientId)
+    if (conn === undefined) return
+    emitUpdate(conn, record, undefined, {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: message },
+    }, false, Date.now())
+  }
+
+  const readProfileManifest = async (dir: string): Promise<{ dependencies: Record<string, string>; bundles: string[]; raw: Record<string, unknown> }> => {
+    const raw = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8')) as Record<string, unknown>
+    const dependencies = (raw.dependencies ?? {}) as Record<string, string>
+    const dsh = (raw.dsh ?? {}) as { profile?: { bundles?: string[] } }
+    return { dependencies, bundles: dsh.profile?.bundles ?? [], raw }
+  }
+
+  const writeProfileBundles = async (dir: string, raw: Record<string, unknown>, bundles: string[]): Promise<void> => {
+    const dsh = (raw.dsh ?? (raw.dsh = {})) as Record<string, unknown>
+    const profile = (dsh.profile ?? (dsh.profile = {})) as Record<string, unknown>
+    profile.bundles = bundles
+    await writeFile(join(dir, 'package.json'), JSON.stringify(raw, null, 2) + '\n')
+  }
+
+  /** Import a module from the installed dsh-plugin-subscriptions by path
+   *  (its export map only exposes the plugin entry). */
+  const subscriptionsModule = async (dir: string, rel: string): Promise<Record<string, any> | undefined> => {
+    const path = join(dir, 'node_modules', 'dsh-plugin-subscriptions', 'lib', rel)
+    if (!existsSync(path)) return undefined
+    return await import(pathToFileURL(path).href) as Record<string, any>
+  }
+
+  const runDshCommand = async (record: SessionRecord, p: Record<string, unknown>, text: string): Promise<PromptSettleResult> => {
+    const meta = p._meta as Record<string, unknown> | null | undefined
+    const id = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
+    const settle = (message: string): PromptSettleResult => {
+      notifySession(record, message)
+      return promptSettled(record, id, 'end_turn')
+    }
+    const usage = 'Usage: /dsh plugins | /dsh add <package|git-url|file:path> | /dsh remove <name> | /dsh login <codex|claude|grok> | /dsh code <pasted-callback>'
+    const [verb, ...rest] = text.split(/\s+/).slice(1)
+    const dir = dshProfileDir()
+    if (dir === undefined) {
+      return settle('dsh plugin management is unavailable: no installed leader profile was found (running from a source checkout?). Use: dsh plugin --profile deepseek-leader add <package>')
+    }
+    try {
+      switch (verb) {
+        case undefined:
+        case 'plugins':
+        case 'list': {
+          const { dependencies, bundles } = await readProfileManifest(dir)
+          const lines = bundles.map(name => {
+            const core = name === '@deepseek-ai/dsh-base' || name === '@deepseek-ai/dsh-grok-leader' ? ' (core)' : ''
+            const version = dependencies[name] === undefined ? '' : ' ' + dependencies[name]
+            return '- ' + name + version + core
+          })
+          return settle('Plugins in ' + dir + ':\n' + lines.join('\n') + '\n\n' + usage)
+        }
+        case 'add': {
+          const spec = rest.join(' ').trim()
+          if (spec.length === 0) return settle('Missing package. ' + usage)
+          const before = new Set(Object.keys((await readProfileManifest(dir)).dependencies))
+          notifySession(record, 'Installing ' + spec + ' into the leader profile (runs the package install scripts — only add plugins you trust)...')
+          await execFileAsync('pnpm', ['add', spec], { cwd: dir, timeout: 180_000 })
+          const manifest = await readProfileManifest(dir)
+          const added = Object.keys(manifest.dependencies).filter(name => !before.has(name))
+          const bundles = [...manifest.bundles]
+          for (const name of added) if (!bundles.includes(name)) bundles.push(name)
+          await writeProfileBundles(dir, manifest.raw, bundles)
+          if (added.length === 0) return settle('Nothing new was installed (already present?). Current bundles: ' + bundles.join(', '))
+          return settle('Installed ' + added.join(', ') + ' and registered it in the profile.\nRestart dscode to load it (the leader exits with its last client).')
+        }
+        case 'remove': {
+          const name = rest[0]
+          if (name === undefined) return settle('Missing plugin name. ' + usage)
+          if (name === '@deepseek-ai/dsh-grok-leader' || name === '@deepseek-ai/dsh-base') {
+            return settle(name + ' is a core component of this leader; refusing to remove it.')
+          }
+          const manifest = await readProfileManifest(dir)
+          if (manifest.dependencies[name] === undefined) {
+            return settle(name + ' is not installed. Installed: ' + Object.keys(manifest.dependencies).join(', '))
+          }
+          await execFileAsync('pnpm', ['remove', name], { cwd: dir, timeout: 180_000 })
+          const after = await readProfileManifest(dir)
+          await writeProfileBundles(dir, after.raw, manifest.bundles.filter(bundle => bundle !== name))
+          return settle('Removed ' + name + '.\nRestart dscode to unload it.')
+        }
+        case 'login': {
+          const provider = rest[0] as SubscriptionProvider | undefined
+          if (provider === undefined || !SUBSCRIPTION_PROVIDERS.includes(provider)) {
+            return settle('Usage: /dsh login <codex|claude|grok>')
+          }
+          const flowMod = await subscriptionsModule(dir, 'auth/oauth-flow.js')
+          const providerMod = await subscriptionsModule(dir, 'providers/' + provider + '.js')
+          const storeMod = await subscriptionsModule(dir, 'auth/store.js')
+          if (flowMod === undefined || providerMod === undefined || storeMod === undefined) {
+            return settle('dsh-plugin-subscriptions is not installed. Install it first: /dsh add dsh-plugin-subscriptions')
+          }
+          pendingLogin?.attempt.cancel()
+          const spec = provider === 'codex' ? providerMod.codexFlow
+            : provider === 'claude' ? providerMod.claudeFlow
+            : await providerMod.grokFlow()
+          const manager = new flowMod.OAuthFlowManager()
+          const attempt = await manager.start(provider, spec)
+          pendingLogin = { provider, attempt }
+          // The exchange completes in the background after this reply settles;
+          // progress lands as turnless messages in the same session.
+          void (async () => {
+            try {
+              const code = await attempt.waitCode()
+              const session = provider === 'codex'
+                ? await providerMod.exchangeCodexCode(code, attempt.pkce.verifier, attempt.redirectUri)
+                : provider === 'claude'
+                  ? await providerMod.exchangeClaudeCode(code, attempt.pkce.verifier, attempt.redirectUri, attempt.state)
+                  : await providerMod.exchangeGrokCode(code, attempt.pkce.verifier, attempt.redirectUri, attempt.pkce.challenge)
+              await storeMod.saveSession(provider, session)
+              notifySession(record, provider + ': logged in. Tokens stored at ' + String(storeMod.authFilePath()) + '. Restart dscode to load the subscription models.')
+            } catch (error: unknown) {
+              notifySession(record, provider + ' login failed: ' + (error instanceof Error ? error.message : String(error)))
+            } finally {
+              if (pendingLogin?.provider === provider) pendingLogin = undefined
+            }
+          })()
+          return settle('Open this URL in a browser to log in to ' + provider + ':\n\n' + String(attempt.authorizeUrl)
+            + '\n\nSame machine: the browser redirect completes the login automatically.'
+            + '\nRemote/SSH: paste the callback URL back with:  /dsh code <pasted-url>')
+        }
+        case 'code': {
+          const input = rest.join(' ').trim()
+          if (pendingLogin === undefined) return settle('No login attempt is waiting for a code. Start one with /dsh login <provider>.')
+          if (input.length === 0) return settle('Missing pasted callback URL or code. Usage: /dsh code <pasted-url>')
+          pendingLogin.attempt.manual(input)
+          return settle('Code received; completing the ' + pendingLogin.provider + ' login...')
+        }
+        default:
+          return settle('Unknown /dsh subcommand "' + String(verb) + '". ' + usage)
+      }
+    } catch (error: unknown) {
+      return settle('/dsh ' + String(verb) + ' failed: ' + (error instanceof Error ? error.message : String(error)))
+    }
+  }
+
   const prompt = async (clientId: number, params: unknown): Promise<unknown> => {
     assertOpen()
     const p = paramRecord(params, 'session/prompt')
@@ -1402,6 +1584,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // A prompt joins the session history at acceptance, mirroring the grok
     // shell's queue-time history append.
     record.prompts.push(text)
+    // /dsh is a bridge command (advertised via availableCommands, delivered
+    // as an ACP pass-through prompt): interpret it here, never in the model.
+    if (/^\/dsh(\s|$)/.test(text.trim())) {
+      return runDshCommand(record, p, text.trim())
+    }
     return await enqueuePrompt(record, p, text)
   }
 

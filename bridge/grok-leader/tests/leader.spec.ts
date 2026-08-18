@@ -1552,6 +1552,60 @@ describe('grok leader over a unix socket', () => {
     expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
   })
 
+  it('advertises the /dsh command and interprets it in the bridge, never the model', async () => {
+    const profileDir = resolve(tmpdir(), 'dsh-profile-test-' + randomUUID())
+    const { mkdirSync, writeFileSync, rmSync } = await import('node:fs')
+    mkdirSync(profileDir, { recursive: true })
+    writeFileSync(resolve(profileDir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-test',
+      dependencies: {
+        '@deepseek-ai/dsh-grok-leader': 'file:/x',
+        'dsh-plugin-example': '^1.0.0',
+      },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-plugin-example', '@deepseek-ai/dsh-grok-leader'] } },
+    }, null, 2))
+    process.env.DSH_PROFILE_DIR = profileDir
+    try {
+      const { registry, client: c } = await start()
+      register(c)
+      await c.next()
+
+      const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      const sessionId = (created.result as { sessionId: string }).sessionId
+      const agent = registry.byId.get(sessionId)!
+
+      const listed = await c.request(2, 'x.ai/commands/list', {})
+      const names = ((listed.result as { commands: Array<{ name: string }> }).commands).map(entry => entry.name)
+      expect(names).toContain('dsh')
+
+      // /dsh plugins settles as its own end_turn without ever reaching the
+      // model, and streams the profile bundle list as an agent message.
+      sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh plugins' }], _meta: { promptId: 'dsh-1' } })
+      const settled = await waitForId(c, 3)
+      expect(settled.result).toMatchObject({ stopReason: 'end_turn', _meta: { promptId: 'dsh-1' } })
+      await waitFor(() => c.all.some(m => m.method === 'session/update'
+        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('dsh-plugin-example')))
+      expect(agent.internals.followups).toEqual([])
+
+      // Core components refuse removal.
+      sendRequest(c, 4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh remove @deepseek-ai/dsh-grok-leader' }] })
+      await waitForId(c, 4)
+      await waitFor(() => c.all.some(m => m.method === 'session/update'
+        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('refusing to remove')))
+      expect(agent.internals.followups).toEqual([])
+
+      // Unknown subcommands reply with usage instead of reaching the model.
+      sendRequest(c, 5, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh frobnicate' }] })
+      await waitForId(c, 5)
+      await waitFor(() => c.all.some(m => m.method === 'session/update'
+        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('Usage: /dsh')))
+      expect(agent.internals.followups).toEqual([])
+    } finally {
+      delete process.env.DSH_PROFILE_DIR
+      rmSync(profileDir, { recursive: true, force: true })
+    }
+  })
+
   it('stamps a strictly increasing seq on queue/changed and promptId meta on settle results', async () => {
     const { client: c } = await start()
     register(c)
@@ -1734,6 +1788,7 @@ describe('grok leader over a unix socket', () => {
     })._meta
     expect(meta.cancelRewind).toBe(false)
     expect(meta.availableCommands).toEqual([
+      { name: 'dsh', description: 'Manage dsh plugins and subscription logins', input: { hint: 'plugins | add <package> | remove <name> | login <codex|claude|grok> | code <pasted-url>' } },
       { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | code | minimal | cordis' } },
     ])
 
@@ -1745,6 +1800,7 @@ describe('grok leader over a unix socket', () => {
     const commands = await c.request(3, 'x.ai/commands/list', { sessionId })
     expect(commands.result).toEqual({
       commands: [
+        { name: 'dsh', description: 'Manage dsh plugins and subscription logins', input: { hint: 'plugins | add <package> | remove <name> | login <codex|claude|grok> | code <pasted-url>' } },
         { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | code | minimal | cordis' } },
       ],
     })

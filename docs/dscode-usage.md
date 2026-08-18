@@ -63,15 +63,22 @@ YAML
 
 Any dsh plugin installs into the leader profile and its capabilities compose
 into every session (the grok-leader bridge itself is installed through the
-same mechanism):
+same mechanism). Manage plugins from inside dscode — no CLI or web profile
+needed:
 
-```sh
-dsh plugin --profile deepseek-leader add <package|git-url|file:path>
+```
+/dsh plugins                      list installed plugins
+/dsh add <package|git-url>        install a plugin into the leader profile
+/dsh remove <name>                uninstall a plugin
+/dsh login <codex|claude|grok>    subscription OAuth login (subscriptions plugin)
+/dsh code <pasted-callback-url>   finish a login over SSH (manual code paste)
 ```
 
-Restart dscode afterwards (the leader exits with its last client and reloads
-the profile on the next launch). LLM-provider plugins surface automatically
-in `/provider` and `/model` through the bridge's model catalog.
+`/dsh add` runs the package's install scripts — only add plugins you trust.
+Restart dscode after add/remove (the leader exits with its last client and
+reloads the profile on the next launch). LLM-provider plugins surface
+automatically in `/provider` and `/model` through the bridge's model catalog.
+The CLI equivalent remains `dsh plugin --profile deepseek-leader add <spec>`.
 
 Verified example — [dsh-plugin-subscriptions](https://github.com/V1ki/dsh-plugin-subscriptions)
 (use ChatGPT/Claude/Grok subscriptions as providers via OAuth):
