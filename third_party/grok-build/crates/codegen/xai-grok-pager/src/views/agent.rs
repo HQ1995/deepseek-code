@@ -911,6 +911,16 @@ pub fn build_hints(
             if shift_enter_unavailable && !multiline_mode && prompt.can_send() {
                 hints.push(HintItem::new(crate::key!(Enter, ALT), "newline"));
             }
+            // Steer sits next to the queue label: mid-turn text can fold into
+            // the running turn instead of parking behind it. Bound only on
+            // terminals where Alt+Enter is not the newline fallback.
+            if is_turn_running
+                && prompt.can_send()
+                && let Some(key) = registry.key_for(ActionId::SteerPrompt)
+                && key.code != crossterm::event::KeyCode::Null
+            {
+                hints.push(HintItem::new(key, "steer"));
+            }
             if prompt.file_ref_near_cursor() {
                 hints.push(HintItem::new(crate::key!(':'), "lines"));
             }

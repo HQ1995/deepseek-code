@@ -36,6 +36,83 @@
         assert!(app.shared_prompt_queue("sess-1").is_none());
     }
 
+    /// Seq gate: a stamped snapshot not strictly newer than the last applied
+    /// one is dropped whole — stale rows never resurrect — while newer and
+    /// unstamped (legacy) snapshots apply.
+    #[test]
+    fn queue_changed_drops_stale_seq_snapshots() {
+        let mut app = make_app_with_agent("sess-1");
+
+        assert!(handle_ext_notification(
+            &queue_changed_ext_seq("sess-1", &["p1", "p2"], 10),
+            &mut app
+        ));
+        assert!(handle_ext_notification(
+            &queue_changed_ext_seq("sess-1", &["p2"], 11),
+            &mut app
+        ));
+        // A delayed older snapshot must not resurrect p1.
+        assert!(!handle_ext_notification(
+            &queue_changed_ext_seq("sess-1", &["p1", "p2"], 10),
+            &mut app
+        ));
+        let q = app.shared_prompt_queue("sess-1").expect("queue present");
+        assert_eq!(
+            q.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
+            vec!["p2"]
+        );
+        // Equal seq is stale too: only strictly newer applies.
+        assert!(!handle_ext_notification(
+            &queue_changed_ext_seq("sess-1", &[], 11),
+            &mut app
+        ));
+        assert!(app.shared_prompt_queue("sess-1").is_some());
+        // An unstamped legacy snapshot still applies.
+        assert!(handle_ext_notification(
+            &queue_changed_ext("sess-1", &[]),
+            &mut app
+        ));
+        assert!(app.shared_prompt_queue("sess-1").is_none());
+    }
+
+    /// A session's first stamped snapshot is applied whatever its seq —
+    /// "never seen" is not a watermark of 0, so a seq-0 first snapshot must
+    /// not be swallowed.
+    #[test]
+    fn first_snapshot_with_seq_zero_is_applied() {
+        let mut app = make_app_with_agent("sess-1");
+
+        assert!(handle_ext_notification(
+            &queue_changed_ext_seq("sess-1", &["p1"], 0),
+            &mut app
+        ));
+        let q = app.shared_prompt_queue("sess-1").expect("queue present");
+        assert_eq!(q.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["p1"]);
+        // The applied seq 0 becomes the watermark: a replayed seq 0 is stale.
+        assert!(!handle_ext_notification(
+            &queue_changed_ext_seq("sess-1", &["p1", "p2"], 0),
+            &mut app
+        ));
+    }
+
+    /// Seq watermarks are per session: one session's high seq must not gate
+    /// another session's snapshots.
+    #[test]
+    fn queue_seq_watermarks_are_per_session() {
+        let mut app = make_app_with_agent("sess-1");
+
+        assert!(handle_ext_notification(
+            &queue_changed_ext_seq("sess-1", &["p1"], 1_000),
+            &mut app
+        ));
+        assert!(handle_ext_notification(
+            &queue_changed_ext_seq("sess-2", &["x1"], 1),
+            &mut app
+        ));
+        let q = app.shared_prompt_queue("sess-2").expect("queue present");
+        assert_eq!(q.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["x1"]);
+    }
+
     /// When a server-origin row being edited disappears from a later
     /// broadcast (drained / removed by another client), the queue handler
     /// exits `EditingQueued` so the composer isn't stranded.
@@ -326,6 +403,7 @@
         // shell emits it pins the wire shape the handler consumes, not cross-crate compat.
         let shell_payload = xai_grok_shell::session::prompt_queue::QueueChanged {
             session_id: "sess-1".to_string(),
+            seq: None,
             entries: Vec::new(),
             running_prompt_id: Some("prompt-running".to_string()),
             running_text: None,
@@ -1483,6 +1561,7 @@
         // Shell and pager share the xai-prompt-queue type; pin kind through a serde cycle.
         let shell = xai_grok_shell::session::prompt_queue::QueueChanged {
             session_id: "sess-1".to_string(),
+            seq: None,
             entries: vec![xai_grok_shell::session::prompt_queue::QueueEntryWire {
                 id: "b1".to_string(),
                 version: 0,

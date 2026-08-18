@@ -750,6 +750,13 @@ pub struct AppView {
     /// the id (or it starts running). Never persisted.
     pub optimistic_prompt_echoes:
         std::collections::HashMap<String, Vec<crate::app::prompt_queue::QueueEntryWire>>,
+    /// Highest `x.ai/queue/changed` seq applied per session. A snapshot whose
+    /// seq is not strictly newer is dropped before it touches any queue state,
+    /// so a broadcast delayed behind other channels can never resurrect stale
+    /// rows. The leader epoch-seeds its counter, so a restarted leader always
+    /// outranks its predecessor and no reset handshake is needed; snapshots
+    /// without a seq (legacy shells) are always applied. Never persisted.
+    pub queue_seq_watermarks: std::collections::HashMap<String, u64>,
     /// Server-authoritative running prompts that drained into the running slot
     /// while the previous turn was still finishing locally (handoff race).
     /// Keyed by `AgentId`. Consumed by the `PromptResponse` handler after
@@ -1600,6 +1607,7 @@ impl AppView {
             dashboard_sessions_loading: false,
             shared_prompt_queues: std::collections::HashMap::new(),
             optimistic_prompt_echoes: std::collections::HashMap::new(),
+            queue_seq_watermarks: std::collections::HashMap::new(),
             pending_running_adoptions: std::collections::HashMap::new(),
             session_picker_grouped: false,
             scheduler_background_loops_seed: true,
@@ -2084,6 +2092,7 @@ impl AppView {
     ) -> Vec<(String, String)> {
         let crate::app::prompt_queue::QueueChanged {
             session_id,
+            seq: _,
             mut entries,
             running_prompt_id,
             running_text: _,

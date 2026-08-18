@@ -2170,6 +2170,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::ToggleYolo => return None,
         ActionId::ToggleMultiline => return None,
         ActionId::InterjectPrompt => return None,
+        ActionId::SteerPrompt => return None,
         ActionId::EnableVoiceMode => Action::EnableVoiceMode,
         ActionId::VoiceToggle => {
             if !crate::app::voice_keybind_enabled() {

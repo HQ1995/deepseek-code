@@ -20,6 +20,7 @@ mod tests {
     fn queue_changed_serializes_camel_case_with_session_id() {
         let payload = QueueChanged {
             session_id: "sess-1".to_string(),
+            seq: None,
             entries: vec![QueueEntryWire {
                 id: "p1".to_string(),
                 version: 0,
@@ -50,6 +51,7 @@ mod tests {
     fn queue_changed_round_trips_running_prompt_id() {
         let payload = QueueChanged {
             session_id: "sess-1".to_string(),
+            seq: None,
             entries: Vec::new(),
             running_prompt_id: Some("prompt-running".to_string()),
 

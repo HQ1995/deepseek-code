@@ -27,13 +27,22 @@ pub fn send_now_tip() -> EphemeralTip {
     let key_style = Style::default()
         .fg(theme.text_secondary)
         .add_modifier(Modifier::BOLD);
+    // Advertise steer alongside send-now, but only where its default chord is
+    // actually bound (Alt+Enter doubles as the newline fallback on terminals
+    // without Shift+Enter detection, so steer ships unbound there).
+    let mut spans = vec![
+        Span::styled("Queued · ", dim),
+        Span::styled("Enter", key_style),
+        Span::styled(" to send now", dim),
+    ];
+    if !crate::terminal::terminal_context().shift_enter_unavailable() {
+        spans.push(Span::styled(" · ", dim));
+        spans.push(Span::styled("Alt+Enter", key_style));
+        spans.push(Span::styled(" to steer", dim));
+    }
     EphemeralTip::new(
         SEND_NOW_TIP_KEY,
-        Line::from(vec![
-            Span::styled("Queued · ", dim),
-            Span::styled("Enter", key_style),
-            Span::styled(" to send now", dim),
-        ]),
+        Line::from(spans),
     )
     .with_session_seen_cap(SEND_NOW_TIP_SEEN_KEY, SEND_NOW_TIP_SEEN_CAP)
 }

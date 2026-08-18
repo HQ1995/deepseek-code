@@ -460,6 +460,7 @@ impl SessionActor {
         };
         let payload = crate::session::prompt_queue::QueueChanged {
             session_id: self.session_info.id.0.to_string(),
+            seq: None,
             entries,
             running_prompt_id: running_id,
             running_text,

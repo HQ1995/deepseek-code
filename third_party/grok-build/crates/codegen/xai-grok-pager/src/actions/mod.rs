@@ -37,6 +37,9 @@ pub enum ActionId {
     // Prompt
     SendPrompt,
     InterjectPrompt,
+    /// Merge the composer text into the running turn WITHOUT cancelling it
+    /// (steer). Idle sessions fall back to a plain send.
+    SteerPrompt,
     /// Enable voice mode and start recording (`/voice`). Not a toggle — it
     /// never turns voice mode off; capture is controlled by [`Self::VoiceToggle`].
     EnableVoiceMode,
@@ -525,6 +528,7 @@ pub fn log_shortcut_used(key: &KeyEvent, action_id: ActionId, context: &str) {
 fn shortcut_used_action_label(id: ActionId) -> Option<&'static str> {
     match id {
         ActionId::InterjectPrompt => Some("interject_prompt"),
+        ActionId::SteerPrompt => Some("steer_prompt"),
         ActionId::OpenExtensions => Some("open_extensions"),
         _ => None,
     }

@@ -56,6 +56,16 @@ pub struct QueueEntryWire {
 pub struct QueueChanged {
     /// The session this queue belongs to; drives per-session fan-out routing.
     pub session_id: String,
+    /// Emitter-side snapshot sequence, strictly increasing per emitter. A
+    /// subscriber drops any snapshot whose seq is not strictly newer than the
+    /// last one it applied for the session, so a snapshot delayed behind other
+    /// channels can never resurrect stale queue state. A session's first
+    /// stamped snapshot is always applied whatever its seq (a never-seen
+    /// session has no watermark, so even seq 0 is admitted). Absent on
+    /// emitters without the stamp (legacy shells): such snapshots are always
+    /// applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
     #[serde(default)]
     pub entries: Vec<QueueEntryWire>,
     /// The prompt the actor is currently draining, `None` when no turn runs. The correlation
@@ -83,6 +93,7 @@ mod tests {
     fn queue_changed_full_round_trip() {
         let original = QueueChanged {
             session_id: "sess-42".into(),
+            seq: Some(7),
             entries: vec![
                 QueueEntryWire {
                     id: "p1".into(),
@@ -126,6 +137,7 @@ mod tests {
     fn queue_changed_golden_wire_json() {
         let payload = QueueChanged {
             session_id: "s1".into(),
+            seq: None,
             entries: vec![QueueEntryWire {
                 id: "p1".into(),
                 version: 2,
@@ -163,6 +175,24 @@ mod tests {
     fn queue_changed_requires_session_id() {
         let missing = serde_json::json!({ "entries": [] });
         assert!(serde_json::from_value::<QueueChanged>(missing).is_err());
+    }
+
+    /// `seq` rides the wire as a plain number and is absent when unset, so
+    /// legacy emitters and subscribers interoperate unchanged.
+    #[test]
+    fn seq_round_trips_and_defaults_to_none() {
+        let json = serde_json::to_value(QueueChanged {
+            session_id: "s1".into(),
+            seq: Some(7),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(json["seq"], 7);
+        let parsed: QueueChanged = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.seq, Some(7));
+        let sparse: QueueChanged =
+            serde_json::from_value(serde_json::json!({ "sessionId": "s1" })).unwrap();
+        assert_eq!(sparse.seq, None);
     }
 
     #[test]
@@ -204,6 +234,7 @@ mod tests {
     fn running_combined_texts_round_trip() {
         let original = QueueChanged {
             session_id: "s1".into(),
+            seq: None,
             entries: vec![],
             running_prompt_id: Some("p0".into()),
             running_text: Some("a\n\nb".into()),

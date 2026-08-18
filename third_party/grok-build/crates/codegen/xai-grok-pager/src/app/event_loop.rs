@@ -2755,6 +2755,11 @@ pub(crate) async fn run(
                         // Connection-scoped: a re-elected shell reseeds its push gen from wall clock,
                         // so a surviving higher watermark would silently drop its fresh pushes.
                         app.announcements_last_gen = 0;
+                        // Queue-seq watermarks are connection-scoped too: a new
+                        // leader reseeds its counter from wall clock, and a
+                        // clock that stepped backwards between leaders would
+                        // otherwise mute every snapshot it emits.
+                        app.queue_seq_watermarks.clear();
 
                         // Cancel any in-flight re-init from a previous reconnect
                         // cycle and restore those agents' stashed transcripts —

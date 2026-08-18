@@ -565,6 +565,19 @@ impl QueuePane {
 
         let new_len = self.entries.len();
 
+        // Keyboard liveness: every key in `handle_key` resolves the selected
+        // row first, so a pane without a selection silently swallows e/x/Enter
+        // while the hint bar still advertises them. Rows exist → a selection
+        // exists: initialize it to the first row, and re-home a selection
+        // whose row vanished (ran, was removed, or steered away).
+        let selection_alive = self
+            .list_state
+            .selected_id()
+            .is_some_and(|id| self.entries.iter().any(|e| e.id == id));
+        if !selection_alive && let Some(first) = self.entries.first() {
+            self.list_state.select_by_id(first.id);
+        }
+
         // Auto-show when hidden and queue grew, or empty→non-empty (after external hide reset).
         if new_len > 0 && !self.overlay.visible && (self.prev_len == 0 || new_len > self.prev_len) {
             self.overlay.visible = true;
@@ -1187,6 +1200,53 @@ mod tests {
         pane.reset_auto_show_edge();
         pane.sync_from_merged(&local, &[], None, None, &Default::default());
         assert!(pane.overlay.visible, "reset then sync must show hi2");
+    }
+
+    /// A synced pane always selects a row when rows exist: `handle_key`
+    /// resolves the selection first, so a selection-less pane silently
+    /// swallows e/x/Enter while the hint bar still advertises them. The
+    /// initial sync selects the first row; a selection whose row vanished
+    /// (promoted to running) re-homes to the first surviving row.
+    #[test]
+    fn sync_from_merged_keeps_a_live_selection() {
+        let mut pane = QueuePane::new();
+        let server = vec![wire("p1", "first", 0), wire("p2", "second", 1)];
+
+        pane.sync_from_merged(
+            &std::collections::VecDeque::new(),
+            &server,
+            None,
+            None,
+            &Default::default(),
+        );
+        assert_eq!(
+            pane.selected_id(),
+            Some(pane.entries[0].id),
+            "initial sync must select the first row"
+        );
+
+        // A surviving selection is preserved across resyncs.
+        let second_id = pane.entries[1].id;
+        pane.list_state.select_by_id(second_id);
+        pane.sync_from_merged(
+            &std::collections::VecDeque::new(),
+            &server,
+            None,
+            None,
+            &Default::default(),
+        );
+        assert_eq!(pane.selected_id(), Some(second_id));
+
+        // The selected row promoted to running: selection re-homes.
+        pane.sync_from_merged(
+            &std::collections::VecDeque::new(),
+            &server,
+            Some("p2"),
+            None,
+            &Default::default(),
+        );
+        assert_eq!(pane.entries.len(), 1);
+        assert_eq!(pane.selected_id(), Some(pane.entries[0].id));
     }
 
     /// Server-authoritative rows render as interim queue rows, and the

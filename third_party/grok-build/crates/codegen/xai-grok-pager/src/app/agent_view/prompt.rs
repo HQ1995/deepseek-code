@@ -731,6 +731,37 @@ impl AgentView {
                     }
                     return InputOutcome::Changed;
                 }
+                ActionId::SteerPrompt => {
+                    // Steer: merge the composer text into the running turn at
+                    // the next safe point WITHOUT cancelling it — the no-loss
+                    // sibling of the send-now chord above. Only meaningful
+                    // mid-turn with text to merge, and never while editing a
+                    // queued row (edit-mode Alt+Enter is a newline insert);
+                    // every other state falls through so the chord keeps its
+                    // widget meaning.
+                    let text = self.prompt.text().trim().to_string();
+                    if matches!(self.prompt_mode, PromptMode::Normal)
+                        && self.session.state.is_turn_running()
+                        && !text.is_empty()
+                    {
+                        crate::actions::log_shortcut_used(
+                            key,
+                            ActionId::SteerPrompt,
+                            When::PromptFocused.telemetry_name(),
+                        );
+                        // Paste-then-steer: an image probe is still off-thread.
+                        // The deferred interject re-issues the same
+                        // `Action::Interject` this arm produces, so reuse it.
+                        if self.paste_probe_in_flight > 0 {
+                            self.deferred_send = Some(AgentDeferredSend::Interject);
+                            return InputOutcome::Changed;
+                        }
+                        // Drain images BEFORE set_text("") wipes the chip elements.
+                        let images = self.prompt.drain_images();
+                        self.prompt.set_text("");
+                        return InputOutcome::Action(Action::Interject { text, images });
+                    }
+                }
                 ActionId::ToggleMultiline => {
                     return InputOutcome::Action(Action::SetMultilineMode(!self.multiline_mode));
                 }

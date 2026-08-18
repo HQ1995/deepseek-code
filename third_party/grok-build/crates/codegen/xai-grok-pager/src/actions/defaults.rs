@@ -676,6 +676,32 @@ pub(super) fn default_actions(
             ),
         },
         ActionDef {
+            id: ActionId::SteerPrompt,
+            // Steer: merge into the running turn at the next safe point,
+            // WITHOUT cancelling it — the no-loss sibling of "send now".
+            // Unbound where Shift+Enter can't be detected: Alt+Enter is the
+            // advertised NEWLINE chord there and must not be stolen. The key
+            // handler additionally acts only mid-turn with a non-empty
+            // composer, falling through to the widget otherwise, so the
+            // newline meaning survives everywhere it matters.
+            label: "steer",
+            description: "Merge into the running turn without cancelling it",
+            default_key: if terminal_context().shift_enter_unavailable() {
+                key!(Null)
+            } else {
+                key!(Enter, ALT)
+            },
+            alt_keys: vec![],
+            category: Category::Input,
+            context: When::PromptFocused,
+            hint_priority: None,
+            hint_key_display: None,
+            requires_confirmation: false,
+            long_help: Some(
+                "Folds the composer text into the currently running turn at the agent's next safe point (tool boundary or model step), without cancelling anything — the turn keeps its progress and sees your message within seconds.\nUse it for mid-course corrections and added context while a long turn runs. Plain Enter queues for after the turn; \"send now\" cancels the turn and replaces it.\nWith no turn running it just sends the message normally.",
+            ),
+        },
+        ActionDef {
             id: ActionId::EnableVoiceMode,
             label: "voice mode",
             description: "Start voice dictation (Ctrl+Space / F8)",

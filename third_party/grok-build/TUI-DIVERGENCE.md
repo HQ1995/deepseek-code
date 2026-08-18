@@ -142,13 +142,78 @@ gates are unchanged. Divergence is a strict bug fix; candidate for upstreaming.
 
 app/dispatch/prompt.rs handle_prompt_response now falls back to the
 RPC-minted prompt_id for Ok responses too, not only Err. The dsh bridge
-settles session/prompt with a bare stopReason result (no promptId meta),
+settled session/prompt with a bare stopReason result (no promptId meta),
 which left every healthy response unattributed: the lost-response reconcile
 was never disarmed (the stale arm then refused the next turn's
 prompt_complete arm) and the not-the-running-turn gate never fired (a late
 response finished whatever turn was current, emptying a freshly adopted
-promoted turn). apply_turn_start_shim also back-dates the adopted turn's
+promoted turn). The bridge now stamps _meta.promptId on every settle result
+(the grok shell's PromptResponse _meta shape), so the fallback only covers
+older leaders. Root-cause postscript: the bridge also used to emit every
+extension notification WITHOUT the ACP '_' wire prefix, which
+agent-client-protocol drops as method_not_found before dispatch — so
+prompt_complete, queue/changed, and session/interjection never reached the
+pager at all, and this fallback plus the two fixes below were compensating
+for a severed notification plane. The bridge now prefixes all extension
+notifications; these pager-side fixes remain as defense in depth. apply_turn_start_shim also back-dates the adopted turn's
 elapsed anchor from the wire turnStartMs (via
 acp_handler::prompt_origin::viewer_turn_anchor, now pub(crate)) instead of
 stamping now(), so a fast handoff does not finalize with a bogus 0.0s
 marker. Divergence is a strict bug fix; candidate for upstreaming.
+
+### Follow-up steer parity in the dsh bridge
+
+The dsh bridge implements grok's ui.follow_up_behavior=steer semantics
+(bridge config followUpBehavior / env DEEPSEEK_LEADER_FOLLOW_UP; default
+queue, matching upstream; per-prompt override via session/prompt
+_meta.followUp): with steer on, a prompt sent while a turn runs folds into
+that turn at the harness's next step boundary instead of parking behind the
+whole turn. The wire stays TUI-compatible: the row is broadcast once
+(optimistic echo retires by id), then leaves the queue; the text streams as
+a user echo inside the live turn; the RPC settles with the host turn. The
+bridge also implements the two grok mid-turn wire inputs the pager already
+emits: x.ai/interject (merge into the running turn, no cancel; broadcasts
+x.ai/session/interjection) and session/prompt _meta.sendNow (cancel the
+running turn, run this prompt next — previously silently ignored, which
+made the composer's send-now chord a plain queue). Known gap: the TUI
+settings toggle for [ui].follow_up_behavior does not propagate to the
+bridge in leader mode — the bridge reads its own config/env.
+
+### The queue pane always keeps a live selection
+
+`views/queue_pane.rs sync_from_merged` initializes the list selection to the
+first row whenever rows exist and re-homes a selection whose row vanished
+(ran, removed, steered). Upstream leaves the selection unset until the user
+navigates, so a freshly focused pane silently swallowed e/x/Enter while the
+hint bar advertised them. Strict bug fix; candidate for upstreaming.
+
+### Alt+Enter steers the composer into the running turn
+
+New ActionId::SteerPrompt (actions/defaults.rs, default Alt+Enter, prompt
+context): with a turn running and a non-empty composer it emits
+Action::Interject — the existing mid-turn interjection pipeline (local
+block, x.ai/interject, broadcast dedup by interjectionId) — folding the
+text into the live turn WITHOUT cancelling it. Idle sessions fall back to
+a plain send. Upstream has the interject pipeline but no composer chord
+for it (Ctrl+Enter is send-now, which cancels); this fills the "add
+context without losing the turn" gesture. Feature class; candidate for
+upstreaming.
+
+### Queue snapshots are seq-gated (stale broadcasts dropped whole)
+
+xai-prompt-queue QueueChanged gains an optional `seq` field (absent on the
+wire when unset, so the golden wire JSON and legacy emitters are unchanged).
+The pager (app/acp_handler/queue.rs handle_queue_changed) keeps a per-session
+watermark (AppView::queue_seq_watermarks) and drops any stamped snapshot
+whose seq is not strictly newer before it touches queue state — the mirror
+reconcile, optimistic-echo retirement, and adoption logic all assume
+snapshots arrive in emission order, and the gate enforces that assumption in
+one place instead of each consumer defending against reordering. A session's
+first stamped snapshot always applies ("never seen" is not a watermark of
+0), and x.ai/sessions/changed removal drops the session's watermark so the
+map stays bounded by live sessions. The dsh
+bridge stamps every x.ai/queue/changed with an epoch-seeded strictly
+increasing seq (a restarted leader outranks its predecessor, so no reset
+handshake exists). The native shell emitter does not stamp seq yet
+(seq: None), so non-leader mode is unchanged; stamping it upstream is the
+natural follow-up if this is offered as a PR.

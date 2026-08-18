@@ -102,8 +102,8 @@ See ~/.grok/README.md for more information.
         /// Install a specific version (e.g. 0.1.150 or 0.1.151-alpha.2).
         #[arg(long)]
         version: Option<String>,
-        /// Switch to the alpha release channel (faster updates, may have bugs).
-        #[arg(long, conflicts_with_all = ["stable", "enterprise"])]
+        /// Switch to the beta release channel (faster updates, may have bugs).
+        #[arg(long, alias = "beta", conflicts_with_all = ["stable", "enterprise"])]
         alpha: bool,
         /// Switch to the stable release channel (default, weekly releases).
         #[arg(long, conflicts_with_all = ["alpha", "enterprise"])]

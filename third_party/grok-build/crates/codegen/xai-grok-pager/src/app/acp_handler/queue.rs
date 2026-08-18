@@ -88,6 +88,30 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
         return false;
     };
 
+    // Seq gate: apply a stamped snapshot only when it is strictly newer than
+    // the last one applied for this session. Everything below (mirror
+    // reconcile, echo retirement, adoption) assumes snapshots arrive in
+    // emission order; dropping the stale ones here upholds that assumption
+    // instead of every consumer defending against reordering individually.
+    if let Some(seq) = changed.seq {
+        // "Never seen" is distinct from a watermark of 0, so a first snapshot
+        // stamped seq 0 is admitted rather than silently dropped forever.
+        let watermark = app.queue_seq_watermarks.get(&changed.session_id).copied();
+        if watermark.is_some_and(|w| seq <= w) {
+            tracing::debug!(
+                target: "qtrace",
+                pid = std::process::id(),
+                session = %changed.session_id,
+                seq,
+                watermark = watermark.unwrap_or_default(),
+                "dropping stale x.ai/queue/changed snapshot",
+            );
+            return false;
+        }
+        app.queue_seq_watermarks
+            .insert(changed.session_id.clone(), seq);
+    }
+
     let running_prompt_id = changed.running_prompt_id.clone();
     let session_id = changed.session_id.clone();
 

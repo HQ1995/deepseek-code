@@ -407,6 +407,9 @@ pub(super) fn handle_sessions_changed(notif: &acp::ExtNotification, app: &mut Ap
     }
     for sid in changed.removed {
         app.remove_roster_entry(&sid);
+        // A removed session's queue-seq watermark has no future snapshots to
+        // gate; dropping it keeps the map bounded by live sessions.
+        app.queue_seq_watermarks.remove(&sid);
         affected = true;
     }
     affected
