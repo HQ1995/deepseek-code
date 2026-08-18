@@ -33,9 +33,11 @@ jobs:
         with:
           workspaces: third_party/grok-build
       - name: Build
+        # cargo directly (not scripts/build-deepseek-tui.sh): backfills check
+        # out old tags whose script may carry host-specific wrappers.
         run: |
           VERSION="${TAG#v}"
-          GROK_VERSION="$VERSION" bash scripts/build-deepseek-tui.sh
+          ( cd third_party/grok-build && GROK_VERSION="$VERSION" cargo build --release -p xai-grok-pager-bin )
           banner="$(third_party/grok-build/target/release/dscode --version)"
           echo "binary: $banner"
           case "$banner" in *"$VERSION"*) ;; *) echo "version mismatch" >&2; exit 1 ;; esac
