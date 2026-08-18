@@ -15,7 +15,7 @@ BRIDGE="$ROOT/bridge/grok-leader"
 PROFILE="$HOME/.dsh/profiles/deepseek-leader"
 
 echo "building the grok-leader bridge..."
-( cd "$BRIDGE" && DSCODE_SKIP_DOWNLOAD=1 pnpm install --silent && pnpm run build )
+( cd "$BRIDGE" && pnpm install --silent && pnpm run build )
 
 if [[ ! -d "$PROFILE" ]]; then
   echo "error: profile not found at $PROFILE; run scripts/install.sh first" >&2
@@ -24,11 +24,11 @@ fi
 
 echo "refreshing the profile copy at $PROFILE..."
 rm -rf "$PROFILE/node_modules"
-( cd "$PROFILE" && DSCODE_SKIP_DOWNLOAD=1 pnpm install --force --silent )
+( cd "$PROFILE" && pnpm install --force --silent )
 
 sentinel="lib/types/index.js"
 want="$(md5sum "$BRIDGE/$sentinel" | cut -d' ' -f1)"
-got="$(md5sum "$PROFILE/node_modules/@deepseek-ai/dsh-grok-leader/$sentinel" | cut -d' ' -f1)"
+got="$(md5sum "$PROFILE/node_modules/dscode/$sentinel" | cut -d' ' -f1)"
 if [[ "$want" != "$got" ]]; then
   echo "error: the profile copy still differs from the fresh build ($got != $want)" >&2
   exit 1

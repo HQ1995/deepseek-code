@@ -9,7 +9,7 @@
  * approval/request, sessions.flush, llm.listProviders/listModels,
  * sessionPersistence.list/load, agentDefaultModel.saveSelection). Unclear grok
  * surfaces carry TODO(verify) markers with the grok file:line to check.
- * @module @deepseek-ai/dsh-grok-leader
+ * @module dscode
  */
 
 import { execFile } from 'node:child_process'
@@ -959,7 +959,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       // auth gate treats the leader as authenticated; the harness providers
       // own credentials, so the bridge answers authenticate with no meta.
       authMethods: [{ id: 'xai.api_key', name: 'API key' }],
-      agentInfo: { name: 'deepseek-harness-grok-leader', version: '0.1.0-rc.6' },
+      agentInfo: { name: 'deepseek-harness-grok-leader', version: '0.0.5' },
       // cancelRewind is false: the bridge cancels turns but does not implement
       // the client-side rewind composer restore, so it stays unadvertised.
       // modelState flattens provider-scoped dsh model ids into one global
@@ -1552,7 +1552,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         case 'list': {
           const { dependencies, bundles } = await readProfileManifest(dir)
           const lines = bundles.map(name => {
-            const core = name === '@deepseek-ai/dsh-base' || name === '@deepseek-ai/dsh-grok-leader' ? ' (core)' : ''
+            const core = name === '@deepseek-ai/dsh-base' || name === 'dscode' || name === '@deepseek-ai/dsh-grok-leader' ? ' (core)' : ''
             const version = dependencies[name] === undefined ? '' : ' ' + dependencies[name]
             return '- ' + name + version + core
           })
@@ -1575,7 +1575,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         case 'remove': {
           const name = rest[0]
           if (name === undefined) return settle('Missing plugin name. ' + usage)
-          if (name === '@deepseek-ai/dsh-grok-leader' || name === '@deepseek-ai/dsh-base') {
+          if (name === 'dscode' || name === '@deepseek-ai/dsh-grok-leader' || name === '@deepseek-ai/dsh-base') {
             return settle(name + ' is a core component of this leader; refusing to remove it.')
           }
           const manifest = await readProfileManifest(dir)

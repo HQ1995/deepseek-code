@@ -79,6 +79,6 @@
 
 - insert:
     - id: grok-leader
-      name: '@deepseek-ai/dsh-grok-leader'
+      name: 'dscode'
       config:
         socketPath: !!js process.env.DEEPSEEK_LEADER_SOCKET

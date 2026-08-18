@@ -45,7 +45,7 @@ done
 # 2. The deepseek-leader profile   only when it is actually ours (its
 #    package.json must declare the grok-leader bridge).
 if [[ -d "$PROFILE" ]]; then
-  if grep -q '"@deepseek-ai/dsh-grok-leader"' "$PROFILE/package.json" 2>/dev/null; then
+  if grep -qE '"(dscode|@deepseek-ai/dsh-grok-leader)"' "$PROFILE/package.json" 2>/dev/null; then
     rm -rf "$PROFILE"
     echo "  removed $PROFILE"
   else

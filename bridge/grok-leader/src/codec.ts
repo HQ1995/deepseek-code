@@ -2,7 +2,7 @@
  * Grok leader wire framing: 4-byte big-endian payload length followed by a
  * JSON payload. Mirrors read_frame/write_frame in xai-grok-shell
  * leader/protocol.rs; the envelope JSON layer lives in protocol.ts.
- * @module @deepseek-ai/dsh-grok-leader/codec
+ * @module dscode/codec
  */
 
 /** Largest accepted frame payload, mirroring MAX_MESSAGE_SIZE in protocol.rs. */

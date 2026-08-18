@@ -1,7 +1,7 @@
 {
-  "name": "@deepseek-ai/dsh-grok-leader",
-  "description": "Grok leader-protocol unix-socket server for driving DeepSeek Harness agents",
-  "version": "0.1.0-rc.6",
+  "name": "dscode",
+  "description": "dscode - DeepSeek Harness coding TUI, distributed as a dsh plugin (grok-leader bridge + launcher)",
+  "version": "0.0.5",
   "publishConfig": {
     "access": "public"
   },
@@ -27,19 +27,17 @@
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
   "bin": {
-    "dscode": "./bin/dscode.mjs"
+    "dscode": "bin/dscode.mjs"
   },
   "files": [
     "lib/",
     "src/",
     "bin/",
-    "scripts/postinstall.mjs",
     "cordis.patch.yml"
   ],
   "license": "Apache-2.0",
   "scripts": {
-    "build": "tsc -b tsconfig.json",
-    "postinstall": "node scripts/postinstall.mjs || exit 0"
+    "build": "tsc -b tsconfig.json"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

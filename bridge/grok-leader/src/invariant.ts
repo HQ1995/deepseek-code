@@ -1,13 +1,13 @@
 /**
- * Package-owned invariant companion for @deepseek-ai/dsh-grok-leader.
- * @module @deepseek-ai/dsh-grok-leader/invariant
+ * Package-owned invariant companion for the dscode plugin package.
+ * @module dscode/invariant
  */
 
 /* jscpd:ignore-start */
 import type { Context } from '@deepseek-ai/cordis'
 import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 
-const PACKAGE_NAME = '@deepseek-ai/dsh-grok-leader'
+const PACKAGE_NAME = 'dscode'
 
 /** Cordis companion plugin name. */
 export const name = 'grok-leader-invariant'

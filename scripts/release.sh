@@ -88,12 +88,10 @@ echo "  bundled $(basename "$LICENSES")"
 #   dsh plugin --profile deepseek-leader add \
 #     https://github.com/HQ1995/deepseek-code/releases/latest/download/dscode-plugin.tgz
 echo "  building the plugin tarball..."
-( cd "$ROOT/bridge/grok-leader" && DSCODE_SKIP_DOWNLOAD=1 pnpm install --silent && pnpm run --silent build )
+( cd "$ROOT/bridge/grok-leader" && pnpm install --silent && pnpm run --silent build )
 plugin_stage="$(mktemp -d)"
 cp -r "$ROOT/bridge/grok-leader/lib" "$ROOT/bridge/grok-leader/src" \
       "$ROOT/bridge/grok-leader/bin" "$plugin_stage/"
-mkdir -p "$plugin_stage/scripts"
-cp "$ROOT/bridge/grok-leader/scripts/postinstall.mjs" "$plugin_stage/scripts/"
 cp "$ROOT/bridge/grok-leader/cordis.patch.yml" "$plugin_stage/"
 python3 - "$ROOT/bridge/grok-leader/package.json" "$plugin_stage/package.json" "$VERSION" <<'PY'
 import json, sys
@@ -102,7 +100,7 @@ pkg["dscode"] = {"release": sys.argv[3]}
 json.dump(pkg, open(sys.argv[2], "w"), indent=2)
 PY
 ( cd "$plugin_stage" && npm pack --silent --pack-destination "$DIST" >/dev/null )
-mv "$DIST"/deepseek-ai-dsh-grok-leader-*.tgz "$DIST/dscode-plugin.tgz"
+mv "$DIST"/dscode-*.tgz "$DIST/dscode-plugin.tgz"
 rm -rf "$plugin_stage"
 echo "  bundled dscode-plugin.tgz (pinned to $VERSION)"
 
@@ -122,3 +120,11 @@ License and attribution for this binary: dscode-licenses.tar.gz (Apache-2.0; inc
   "${PRERELEASE_FLAGS[@]}" \
   "$DIST/$ASSET" "$DIST/$ASSET.sha256" "$LICENSES" "$DIST/dscode-plugin.tgz"
 echo "published $TAG"
+
+# npm: dscode@$VERSION pinned to this release. The npm account requires 2FA;
+# pass NPM_OTP or run scripts/publish-npm.sh manually afterwards.
+if bash "$ROOT/scripts/publish-npm.sh" --pin "$VERSION"; then
+  echo "published dscode@$VERSION to npm"
+else
+  echo "warning: npm publish failed (2FA?); run: scripts/publish-npm.sh --otp <code> --pin $VERSION" >&2
+fi

@@ -1607,10 +1607,10 @@ describe('grok leader over a unix socket', () => {
     writeFileSync(resolve(profileDir, 'package.json'), JSON.stringify({
       name: 'dsh-profile-test',
       dependencies: {
-        '@deepseek-ai/dsh-grok-leader': 'file:/x',
+        'dscode': 'file:/x',
         'dsh-plugin-example': '^1.0.0',
       },
-      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-plugin-example', '@deepseek-ai/dsh-grok-leader'] } },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-plugin-example', 'dscode'] } },
     }, null, 2))
     process.env.DSH_PROFILE_DIR = profileDir
     try {
@@ -1636,7 +1636,7 @@ describe('grok leader over a unix socket', () => {
       expect(agent.internals.followups).toEqual([])
 
       // Core components refuse removal.
-      sendRequest(c, 4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh remove @deepseek-ai/dsh-grok-leader' }] })
+      sendRequest(c, 4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh remove dscode' }] })
       await waitForId(c, 4)
       await waitFor(() => c.all.some(m => m.method === 'session/update'
         && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('refusing to remove')))

@@ -4,7 +4,7 @@
  * one JSON-RPC 2.0 request/notification STRING in the ACP camelCase dialect.
  * Wire names and defaults mirror the real TUI capture in
  * tests/fixtures/grok-tui-messages.jsonl.
- * @module @deepseek-ai/dsh-grok-leader/protocol
+ * @module dscode/protocol
  */
 
 import { FrameError } from './codec.ts'

@@ -16,21 +16,24 @@ scripts/build-deepseek-tui.sh   # (dev) cargo build --release of the vendored TU
 scripts/uninstall.sh            # remove launchers, leader profile, TUI state (identity-checked)
 ```
 
-Plugin-native install — dscode itself is a dsh plugin (from v0.0.6 on). One
-package carries the grok-leader bridge plus a `dscode` launcher that
-materializes the release-pinned TUI binary on first run (GitHub Releases,
-SHA-256 verified, cached at `~/.dsh/dsc-tui/bin/`):
+Plugin-native install — dscode itself is a dsh plugin, published on npm as
+[`dscode`](https://www.npmjs.com/package/dscode) (`scripts/publish-npm.sh`;
+the npm version equals the product release it pins). One package carries the
+grok-leader bridge plus a `dscode` launcher that materializes the
+release-pinned TUI binary on first run (GitHub Releases, SHA-256 verified,
+cached at `~/.dsh/dsc-tui/bin/`):
 
 ```sh
-dsh plugin --profile deepseek-leader add \
-  https://github.com/HQ1995/deepseek-code/releases/latest/download/dscode-plugin.tgz
+npm i -g @deepseek-ai/dsh@next
+dsh plugin --profile deepseek-leader add dscode
 ~/.dsh/profiles/deepseek-leader/node_modules/.bin/dscode   # first run links ~/.local/bin/dscode
 ```
 
-Updating means updating the plugin (re-add a newer tarball): the launcher
-follows the package's release pin. It never replaces a newer or `-dev`
-binary in the cache (dev builds are developer-managed; `dscode update`
-remains the in-TUI escape hatch).
+(`add dscode-plugin.tgz` from the GitHub release assets is the equivalent
+registry-free form, published from v0.0.6 on.) Updating means updating the
+plugin: the launcher follows the package's release pin. It never replaces a
+newer or `-dev` binary in the cache (dev builds are developer-managed;
+`dscode update` remains the in-TUI escape hatch).
 
 Dev loop on a repo checkout (the launcher is not involved;
 `~/.local/bin/dscode` symlinks straight to the build output):

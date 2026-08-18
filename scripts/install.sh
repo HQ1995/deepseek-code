@@ -58,7 +58,7 @@ fi
 # into the deepseek-leader profile. The official CLI initializes the profile
 # with the dsh-base bundle and reconciles the bridge's cordis.patch.yml layer.
 echo "  building the grok-leader bridge..."
-( cd "$ROOT/bridge/grok-leader" && DSCODE_SKIP_DOWNLOAD=1 pnpm install && pnpm run build )
+( cd "$ROOT/bridge/grok-leader" && pnpm install && pnpm run build )
 echo "  installing the bridge into the deepseek-leader profile..."
 "${DSH_RUN[@]}" plugin --profile deepseek-leader add "file:$ROOT/bridge/grok-leader"
 # pnpm materializes the file: dependency as hard links through its store, so
@@ -69,7 +69,7 @@ echo "  installing the bridge into the deepseek-leader profile..."
 profile_dir="$HOME/.dsh/profiles/deepseek-leader"
 if [[ -d "$profile_dir/node_modules" ]]; then
   rm -rf "$profile_dir/node_modules"
-  ( cd "$profile_dir" && DSCODE_SKIP_DOWNLOAD=1 pnpm install --force )
+  ( cd "$profile_dir" && pnpm install --force )
 fi
 
 # Prebuilt TUI binary into the repo tree. The release channel picks which

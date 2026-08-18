@@ -1,4 +1,20 @@
-# @deepseek-ai/dsh-grok-leader
+# dscode
+
+DeepSeek Harness coding TUI, distributed as a dsh plugin: this package
+carries the grok-leader bridge (the dsh-side server the TUI drives) plus the
+`dscode` launcher, which materializes the release-pinned TUI binary from
+GitHub Releases on first run (SHA-256 verified, cached at
+`~/.dsh/dsc-tui/bin/`).
+
+```sh
+npm i -g @deepseek-ai/dsh@next
+dsh plugin --profile deepseek-leader add dscode
+~/.dsh/profiles/deepseek-leader/node_modules/.bin/dscode   # first run links ~/.local/bin/dscode
+```
+
+Source, issues, full docs: https://github.com/HQ1995/deepseek-code
+
+## The bridge (grok-leader)
 
 Grok leader-protocol unix-socket server that drives DeepSeek Harness agents for grok clients (the TUI, headless modes). It speaks the leader IPC envelope — 4-byte big-endian length plus JSON frames with a type discriminator — and carries ACP JSON-RPC 2.0 payloads inside acp frames, mapping them onto the harness services the ACP bridge drives. The wire facts are pinned by the real TUI capture in [tests/fixtures/grok-tui-messages.jsonl](tests/fixtures/grok-tui-messages.jsonl) and the protocol reference in [docs/grok-leader-protocol.md](../../docs/grok-leader-protocol.md).
 
