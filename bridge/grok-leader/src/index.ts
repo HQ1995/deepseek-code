@@ -2877,9 +2877,11 @@ export function sessionEventToUpdates(
       const block = event.data.message.content[0] as { type?: string; toolCallId?: unknown; content?: unknown } | undefined
       const callId = String(block?.toolCallId)
       const prior = options.toolCall?.(callId)
+      const metaDiffs = diffBlocksFromMeta(event.data.meta)
       const contents: ToolResultContentBlock[] = [
         ...textBlocks(block?.content),
-        ...diffBlocksFromMeta(event.data.meta),
+        ...metaDiffs,
+        ...(metaDiffs.length === 0 && event.data.error === undefined ? diffBlocksFromCall(prior) : []),
       ]
       const rawOutput = typedRawOutput(prior, event.data.meta, contents, event.data.error !== undefined)
       return [{
@@ -2952,6 +2954,38 @@ function diffBlocksFromMeta(meta: unknown): Array<{ type: 'diff'; path: string; 
     })
   }
   return blocks
+}
+
+/** Fallback diff blocks for Edit/Write results that lack presentationMeta. */
+function diffBlocksFromCall(prior: { name: string; arguments: unknown } | undefined): Array<{ type: 'diff'; path: string; oldText?: string; newText: string }> {
+  if (prior === undefined) return []
+  const args = (prior.arguments ?? {}) as Record<string, unknown>
+  const lower = prior.name.toLowerCase()
+  const path = typeof args.file_path === 'string' ? args.file_path
+    : typeof args.filePath === 'string' ? args.filePath
+    : typeof args.path === 'string' ? args.path
+    : undefined
+  if (path === undefined) return []
+  const stringField = (...keys: string[]): string | undefined => {
+    for (const key of keys) {
+      const value = args[key]
+      if (typeof value === 'string') return value
+    }
+    return undefined
+  }
+  if (lower === 'edit' || lower === 'str_replace_editor') {
+    const oldText = stringField('old_string', 'oldString', 'old_str')
+    // file_text: str_replace_editor `create` carries the whole file there.
+    const newText = stringField('new_string', 'newString', 'new_str', 'content', 'file_text')
+    if (newText === undefined) return []
+    return [{ type: 'diff', path, ...(oldText !== undefined ? { oldText } : {}), newText }]
+  }
+  if (lower === 'write') {
+    const newText = stringField('content')
+    if (newText === undefined) return []
+    return [{ type: 'diff', path, newText }]
+  }
+  return []
 }
 
 /**

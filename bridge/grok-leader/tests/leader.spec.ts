@@ -2441,3 +2441,67 @@ describe('x.ai/providers/remove', () => {
     expect(settings.calls).toHaveLength(0)
   })
 })
+
+describe('sessionEventToUpdates tool-result diff fallback', () => {
+  const toolResult = (opts: { text?: string; meta?: unknown; error?: { name: string; code: string } } = {}) => ({
+    type: 'tool/result',
+    data: {
+      message: { content: [{ type: 'tool-result', toolCallId: 'call-1', content: opts.text === undefined ? [] : [{ type: 'text', text: opts.text }] }] },
+      ...opts.meta === undefined ? {} : { meta: opts.meta },
+      ...opts.error === undefined ? {} : { error: opts.error },
+    },
+  }) as never
+
+  const map = (event: never, call?: { name: string; arguments: unknown }) =>
+    GrokLeader.sessionEventToUpdates(event, { replay: false, textStreamed: false, toolCall: () => call })
+
+  const diffs = (updates: GrokLeader.GrokSessionUpdate[]): unknown[] =>
+    ((updates[0] as { content?: Array<{ type: string }> }).content ?? []).filter(block => block.type === 'diff')
+
+  it('synthesizes a diff block from the recorded Edit call when meta has none', () => {
+    const updates = map(toolResult({ text: 'ok' }), {
+      name: 'edit',
+      arguments: { file_path: '/tmp/a.ts', old_string: 'let x = 1', new_string: 'let x = 2' },
+    })
+    expect(diffs(updates)).toEqual([{ type: 'diff', path: '/tmp/a.ts', oldText: 'let x = 1', newText: 'let x = 2' }])
+  })
+
+  it('prefers presentation-meta diffs over the call-argument fallback', () => {
+    const updates = map(
+      toolResult({ meta: { diffs: [{ path: '/tmp/a.ts', oldText: 'meta old', newText: 'meta new' }] } }),
+      { name: 'edit', arguments: { file_path: '/tmp/a.ts', old_string: 'arg old', new_string: 'arg new' } },
+    )
+    expect(diffs(updates)).toEqual([{ type: 'diff', path: '/tmp/a.ts', oldText: 'meta old', newText: 'meta new' }])
+  })
+
+  it('emits no fallback diff when the tool errored', () => {
+    const updates = map(toolResult({ error: { name: 'EditError', code: 'not_found' } }), {
+      name: 'edit',
+      arguments: { file_path: '/tmp/a.ts', old_string: 'a', new_string: 'b' },
+    })
+    expect((updates[0] as { status: string }).status).toBe('error')
+    expect(diffs(updates)).toEqual([])
+  })
+
+  it('renders Write as a new-file diff (no oldText) and keeps deletions (empty new_string)', () => {
+    const write = map(toolResult({}), { name: 'Write', arguments: { file_path: '/tmp/new.md', content: 'hello' } })
+    expect(diffs(write)).toEqual([{ type: 'diff', path: '/tmp/new.md', newText: 'hello' }])
+    const deletion = map(toolResult({}), { name: 'edit', arguments: { file_path: '/tmp/a.ts', old_string: 'gone', new_string: '' } })
+    expect(diffs(deletion)).toEqual([{ type: 'diff', path: '/tmp/a.ts', oldText: 'gone', newText: '' }])
+  })
+
+  it('covers str_replace_editor create via file_text', () => {
+    const updates = map(toolResult({}), {
+      name: 'str_replace_editor',
+      arguments: { command: 'create', path: '/tmp/new.py', file_text: 'print(1)' },
+    })
+    expect(diffs(updates)).toEqual([{ type: 'diff', path: '/tmp/new.py', newText: 'print(1)' }])
+  })
+
+  it('yields no diff for non-edit tools, incomplete args, or unknown calls', () => {
+    expect(diffs(map(toolResult({ text: 'ran' }), { name: 'bash', arguments: { command: 'ls' } }))).toEqual([])
+    expect(diffs(map(toolResult({}), { name: 'edit', arguments: { file_path: '/tmp/a.ts' } }))).toEqual([])
+    expect(diffs(map(toolResult({}), { name: 'edit', arguments: { old_string: 'a', new_string: 'b' } }))).toEqual([])
+    expect(diffs(map(toolResult({})))).toEqual([])
+  })
+})
