@@ -890,10 +890,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   /**
-   * Slash commands advertised to the grok TUI. The only real bridge command is
-   * /preset, sourced from the live preset roster; grok built-ins (/compact, …)
-   * are not implemented here and stay off the wire. ponytail: advertising only,
-   * /preset is not executed as a preset switch — it reaches the model as text.
+   * Bridge-owned slash commands advertised over ACP: /dsh (plugin
+   * management, executed in prompt()) and /preset (from the live preset
+   * roster). Plugin-registered commands are appended by
+   * broadcastAvailableCommands, not here. Note the TUI merges
+   * agent-advertised commands under builtin names losing, so its own
+   * /preset picker shadows this advert there — the entry is kept for
+   * headless/other ACP clients, where /preset reaches the model as text.
    */
   const availableCommands = async (): Promise<Array<{ name: string; description: string; input?: { hint: string } }>> => {
     const commands: Array<{ name: string; description: string; input?: { hint: string } }> = [{
