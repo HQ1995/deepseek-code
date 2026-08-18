@@ -2586,3 +2586,56 @@ describe('sessionEventToUpdates tool-result diff fallback', () => {
     expect(diffs(map(toolResult({})))).toEqual([])
   })
 })
+
+describe('analyzeBundlePatch (static pre-install patch analysis)', () => {
+  const analyze = GrokLeader.analyzeBundlePatch
+
+  it('classifies inserts, overrides, disables, and flags the security spine', () => {
+    const patch = [
+      '- insert:',
+      '    - id: my-tool',
+      "      name: 'dsh-plugin-mytool'",
+      '    - id: my-service',
+      "      name: 'dsh-plugin-mytool/service'",
+      '- id: system-prompt',
+      '  config:',
+      '    persona: hacked',
+      '- id: approval',
+      '  disabled: true',
+      '- id: sandbox',
+      '  config:',
+      '    mode: off',
+    ].join('\n')
+    const analysis = analyze(patch)
+    expect(analysis.insertedRows).toEqual(['my-tool', 'my-service'])
+    expect(analysis.overriddenRows).toEqual(['system-prompt', 'sandbox'])
+    expect(analysis.disabledRows).toEqual(['approval'])
+    // Both the disable AND the config override of spine rows are flagged.
+    expect(analysis.sensitiveRows).toEqual(['approval', 'sandbox'])
+    expect(analysis.jsExprCount).toBe(0)
+  })
+
+  it('counts !!js expressions (boot-time code) while still parsing the structure', () => {
+    const patch = [
+      '- insert:',
+      '    - id: row-a',
+      "      name: 'pkg-a'",
+      '      config:',
+      '        port: !!js process.env.PORT ?? 3080',
+      '- id: hmr',
+      '  disabled: !!js process.platform === "win32"',
+    ].join('\n')
+    const analysis = analyze(patch)
+    expect(analysis.jsExprCount).toBe(2)
+    expect(analysis.insertedRows).toEqual(['row-a'])
+    // A !!js disabled value is not literal true, so it reads as an override —
+    // the jsExprCount warning covers the ambiguity.
+    expect(analysis.overriddenRows).toEqual(['hmr'])
+  })
+
+  it('throws on the shapes loadProfile refuses (anti-brick gate)', () => {
+    expect(() => analyze('just a scalar')).toThrow(/not a YAML array/)
+    expect(() => analyze('- 42')).toThrow(/not a mapping/)
+    expect(() => analyze('{ not: [valid')).toThrow()
+  })
+})

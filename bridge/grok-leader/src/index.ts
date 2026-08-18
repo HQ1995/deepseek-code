@@ -28,6 +28,7 @@ import { ReasoningEffortId, createUserMessage, errorChain } from '@deepseek-ai/d
 import { SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-user-approval'
+import { load as loadYaml } from 'js-yaml'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 import { encodeJsonFrame, FrameDecoder } from './codec.ts'
 import { LEADER_PROTOCOL_VERSION, RpcError, decodeClientMessage, encodeServerMessage, type ClientMessage, type ServerMessage } from './protocol.ts'
@@ -350,6 +351,52 @@ interface AgentPresetsLike {
  * @param ctx - Cordis context carrying the agent factory and harness services.
  * @param config - socket path and initial provider/model selection.
  */
+/** Composition rows a third-party layer should not touch silently: the
+ *  sandbox/approval/permission spine. Patch layers apply AFTER dsh-base, so
+ *  an installed bundle can disable or reconfigure these — legal in dsh, but
+ *  the user must see it before the layer is registered. */
+const SENSITIVE_ROW_IDS = new Set(['sandbox', 'sandbox-policy', 'approval', 'permission-presets', 'credentials', 'settings'])
+
+/** What one bundle's cordis.patch.yml does to the composition. */
+export interface BundlePatchAnalysis {
+  insertedRows: string[]
+  overriddenRows: string[]
+  disabledRows: string[]
+  sensitiveRows: string[]
+  jsExprCount: number
+}
+
+/** Statically analyze a bundle patch. Throws on anything loadProfile would
+ *  choke on (non-array, non-mapping entries) — /dsh add uses that to refuse
+ *  registration BEFORE the layer can brick the next boot. `!!js` tags are
+ *  neutralized for parsing but counted: they are code that runs in the
+ *  leader process at boot, before any plugin module loads. */
+export function analyzeBundlePatch(patchText: string): BundlePatchAnalysis {
+  const jsExprCount = (patchText.match(/!!js\b/g) ?? []).length
+  const doc = loadYaml(patchText.replace(/!!js\b/g, ''))
+  if (!Array.isArray(doc)) throw new Error('the patch is not a YAML array (loadProfile would refuse to boot this profile)')
+  const analysis: BundlePatchAnalysis = { insertedRows: [], overriddenRows: [], disabledRows: [], sensitiveRows: [], jsExprCount }
+  for (const entry of doc) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error('a patch entry is not a mapping (loadProfile would refuse to boot this profile)')
+    }
+    const patch = entry as Record<string, unknown>
+    if (Array.isArray(patch.insert)) {
+      for (const row of patch.insert) {
+        const r = row as { id?: unknown; name?: unknown } | null
+        analysis.insertedRows.push(String(r?.id ?? r?.name ?? '?'))
+      }
+      continue
+    }
+    if (typeof patch.id === 'string') {
+      if (patch.disabled === true) analysis.disabledRows.push(patch.id)
+      else analysis.overriddenRows.push(patch.id)
+      if (SENSITIVE_ROW_IDS.has(patch.id)) analysis.sensitiveRows.push(patch.id)
+    }
+  }
+  return analysis
+}
+
 export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const agents = ctx.agents
   const llm = ctx.get('llm') as LlmLike | undefined
@@ -1532,6 +1579,36 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     for (const record of sessions.values()) void broadcastAvailableCommands(record)
   })
 
+  /** Inspect one freshly installed package: plain dependency, valid bundle
+   *  (with its patch analysis), or a bundle whose patch would brick the boot. */
+  const inspectInstalledBundle = async (
+    dir: string,
+    name: string,
+  ): Promise<{ kind: 'plain' } | { kind: 'bundle'; analysis: BundlePatchAnalysis } | { kind: 'broken'; error: string }> => {
+    const pkgDir = join(dir, 'node_modules', ...name.split('/'))
+    try {
+      const manifest = JSON.parse(await readFile(join(pkgDir, 'package.json'), 'utf8')) as { dsh?: { bundle?: { patch?: string } } }
+      const patchRel = manifest.dsh?.bundle?.patch
+      if (patchRel === undefined) return { kind: 'plain' }
+      const patchText = await readFile(join(pkgDir, patchRel), 'utf8')
+      return { kind: 'bundle', analysis: analyzeBundlePatch(patchText) }
+    } catch (error) {
+      return { kind: 'broken', error: errorChain(error) }
+    }
+  }
+
+  /** Human summary of a bundle's composition delta. */
+  const describeAnalysis = (name: string, analysis: BundlePatchAnalysis): string => {
+    const lines = [name + ' contributes a composition layer:']
+    if (analysis.insertedRows.length > 0) lines.push('  + inserts ' + String(analysis.insertedRows.length) + ' row(s): ' + analysis.insertedRows.join(', '))
+    if (analysis.overriddenRows.length > 0) lines.push('  ~ overrides: ' + analysis.overriddenRows.join(', '))
+    if (analysis.disabledRows.length > 0) lines.push('  - disables: ' + analysis.disabledRows.join(', '))
+    if (analysis.sensitiveRows.length > 0) lines.push('  ⚠ touches security rows: ' + analysis.sensitiveRows.join(', ') + ' (sandbox/approval spine — make sure you trust this)')
+    if (analysis.jsExprCount > 0) lines.push('  ⚠ contains ' + String(analysis.jsExprCount) + ' !!js expression(s) — code that runs at leader boot')
+    if (lines.length === 1) lines.push('  (empty layer)')
+    return lines.join('\n')
+  }
+
   const runDshCommand = async (record: SessionRecord, p: Record<string, unknown>, text: string): Promise<PromptSettleResult> => {
     const meta = p._meta as Record<string, unknown> | null | undefined
     const id = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
@@ -1562,15 +1639,31 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           const spec = rest.join(' ').trim()
           if (spec.length === 0) return settle('Missing package. ' + usage)
           const before = new Set(Object.keys((await readProfileManifest(dir)).dependencies))
-          notifySession(record, 'Installing ' + spec + ' into the leader profile (runs the package install scripts — only add plugins you trust)...')
+          notifySession(record, 'Installing ' + spec + ' into the leader profile (a dsh plugin runs with full process authority — only add plugins you trust)...')
           await execFileAsync('pnpm', ['add', spec], { cwd: dir, timeout: 180_000 })
           const manifest = await readProfileManifest(dir)
           const added = Object.keys(manifest.dependencies).filter(name => !before.has(name))
+          if (added.length === 0) return settle('Nothing new was installed (already present?). Current bundles: ' + manifest.bundles.join(', '))
+          // Validate BEFORE registering: a bundle layer that loadProfile
+          // cannot parse bricks the whole profile on the next boot, and `add`
+          // alone never checks the patch. Broken → uninstall and report.
           const bundles = [...manifest.bundles]
-          for (const name of added) if (!bundles.includes(name)) bundles.push(name)
+          const report: string[] = []
+          for (const name of added) {
+            const info = await inspectInstalledBundle(dir, name)
+            if (info.kind === 'broken') {
+              await execFileAsync('pnpm', ['remove', name], { cwd: dir, timeout: 180_000 }).catch(() => undefined)
+              return settle('Rolled back ' + name + ': its dsh bundle patch would break the profile at boot.\n' + info.error)
+            }
+            if (info.kind === 'plain') {
+              report.push(name + ': declares no dsh.bundle — installed as a plain dependency, not a profile layer.')
+              continue
+            }
+            if (!bundles.includes(name)) bundles.push(name)
+            report.push(describeAnalysis(name, info.analysis))
+          }
           await writeProfileBundles(dir, manifest.raw, bundles)
-          if (added.length === 0) return settle('Nothing new was installed (already present?). Current bundles: ' + bundles.join(', '))
-          return settle('Installed ' + added.join(', ') + ' and registered it in the profile.\nRestart dscode to load it (the leader exits with its last client).')
+          return settle('Installed ' + added.join(', ') + '.\n\n' + report.join('\n\n') + '\n\nRestart dscode to load it (the leader exits with its last client).')
         }
         case 'remove': {
           const name = rest[0]

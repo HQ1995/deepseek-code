@@ -67,11 +67,15 @@
     "@deepseek-ai/schemastery": "^3.18.1",
     "@types/node": "^22.19.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "@types/js-yaml": "^4.0.9"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "dependencies": {
+    "js-yaml": "^5.3.0"
   }
 }
