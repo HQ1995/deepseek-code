@@ -32,6 +32,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: third_party/grok-build
+      - name: Build tools
+        # xai-grok-tools-api build.rs needs protoc; the repo's bin/protoc is
+        # a dotslash launcher that only works on the dev host.
+        run: brew install protobuf
       - name: Build
         # cargo directly (not scripts/build-deepseek-tui.sh): backfills check
         # out old tags whose script may carry host-specific wrappers.
