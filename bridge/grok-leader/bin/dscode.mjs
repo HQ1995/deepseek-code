@@ -2,13 +2,17 @@
 // dscode launcher — the plugin-native install path.
 //
 // This package IS the dscode dsh plugin: the grok-leader bridge (loaded by
-// the dsh profile) plus this launcher, which materializes the matching TUI
-// binary from GitHub Releases on first run. Installing the plugin is the
-// whole install:
+// the dsh profile) plus this launcher. The launcher self-installs, so the
+// whole install is one command:
 //
-//   dsh plugin --profile deepseek-leader add \
-//     https://github.com/HQ1995/deepseek-code/releases/latest/download/dscode-plugin.tgz
-//   ~/.dsh/profiles/deepseek-leader/node_modules/.bin/dscode
+//   npx @hqzhao95/dscode
+//
+// On first run it registers this plugin into the deepseek-leader dsh
+// profile (through the official dsh CLI — resolved from DSH_BIN, PATH, or
+// `npx --yes @deepseek-ai/dsh`), materializes the matching TUI binary from
+// GitHub Releases, and links `dscode` into ~/.local/bin; afterwards plain
+// `dscode` is the command. The profile name is an internal detail the user
+// never types.
 //
 // The binary lives in the dsc-tui home (~/.dsh/dsc-tui/bin/dscode), NOT in
 // the package dir, so profile reinstalls never re-download 200MB — and the
@@ -46,6 +50,36 @@ const assetName = () => {
 const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 const binDir = join(dshHome, 'dsc-tui', 'bin')
 const binPath = join(binDir, 'dscode')
+
+// The dsh profile the TUI spawns its leader with (xai-grok-pager
+// dsh_leader.rs hardcodes the same name) — internal, never user-typed.
+const PROFILE_NAME = 'deepseek-leader'
+const profileDir = join(dshHome, 'profiles', PROFILE_NAME)
+const profileLauncher = join(profileDir, 'node_modules', ...pkg.name.split('/'), 'bin', 'dscode.mjs')
+
+/** dsh CLI argv: DSH_BIN, then dsh on PATH, then npx on demand — the same
+ *  resolution order the TUI uses to spawn the leader (dsh_leader.rs). */
+const dshCommand = () => {
+  if (process.env.DSH_BIN !== undefined && process.env.DSH_BIN !== '') return [process.env.DSH_BIN]
+  for (const dir of (process.env.PATH ?? '').split(':')) {
+    if (dir !== '' && existsSync(join(dir, 'dsh'))) return [join(dir, 'dsh')]
+  }
+  return ['npx', '--yes', '@deepseek-ai/dsh']
+}
+
+/** First run: register this plugin into the leader profile via the official
+ *  dsh CLI. No-op when the profile already has it (the normal case once
+ *  installed — including when this launcher IS the profile's copy). */
+export const ensureProfilePlugin = () => {
+  if (existsSync(join(profileDir, 'node_modules', ...pkg.name.split('/'), 'package.json'))) return
+  const spec = `${pkg.name}@${pkg.version}`
+  console.error(`dscode: first run — registering ${spec} in the ${PROFILE_NAME} dsh profile...`)
+  const argv = [...dshCommand(), 'plugin', '--profile', PROFILE_NAME, 'add', spec]
+  const result = spawnSync(argv[0], argv.slice(1), { stdio: ['ignore', 'inherit', 'inherit'] })
+  if (result.status !== 0 || !existsSync(join(profileDir, 'node_modules', ...pkg.name.split('/'), 'package.json'))) {
+    throw new Error(`plugin registration failed; run manually: ${argv.join(' ')}`)
+  }
+}
 
 /** Pinned release for this package build: X.Y.Z, no leading v. */
 const pinnedRelease = () => {
@@ -110,29 +144,31 @@ const installBinary = async (release, asset) => {
   }
 }
 
-/** Point ~/.local/bin/dscode at this launcher. Polite: create it when
- *  missing, retarget only a symlink that points at a PREVIOUS plugin
- *  install's launcher (a node_modules .../bin/dscode.mjs). A repo dev
- *  symlink (target/release/dscode) or anything user-made is left alone. */
+/** Point ~/.local/bin/dscode at the profile install's launcher (the stable
+ *  copy — an npx temp-store copy of this file may be garbage-collected), or
+ *  at this file when the profile copy is absent. Polite: create the link
+ *  when missing, retarget only a symlink that points at a plugin launcher
+ *  (a node_modules .../bin/dscode.mjs). A repo dev symlink
+ *  (target/release/dscode) or anything user-made is left alone. */
 export const healLauncherLink = () => {
   try {
     const linkDir = join(homedir(), '.local', 'bin')
     const link = join(linkDir, 'dscode')
-    const self = join(here, 'dscode.mjs')
+    const preferred = existsSync(profileLauncher) ? profileLauncher : join(here, 'dscode.mjs')
     let existing
     try {
       existing = lstatSync(link)
     } catch {
       mkdirSync(linkDir, { recursive: true })
-      symlinkSync(self, link)
+      symlinkSync(preferred, link)
       return
     }
     if (!existing.isSymbolicLink()) return
     const target = readlinkSync(link)
-    if (target === self) return
+    if (target === preferred) return
     if (!(target.includes('node_modules') && target.endsWith('/bin/dscode.mjs'))) return
     rmSync(link)
-    symlinkSync(self, link)
+    symlinkSync(preferred, link)
   } catch {
     // Best-effort: a broken ~/.local/bin never blocks a launch.
   }
@@ -166,6 +202,7 @@ const main = async () => {
     child.on('exit', (code, signal) => process.exit(signal !== null ? 1 : code ?? 1))
     return
   }
+  ensureProfilePlugin()
   healLauncherLink()
   const bin = await ensureBinary()
   const child = spawn(bin, process.argv.slice(2), { stdio: 'inherit' })

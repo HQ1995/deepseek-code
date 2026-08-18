@@ -17,19 +17,22 @@ runtime (`dsh`, MIT) over a unix-socket bridge.
 
 ## Install
 
-dscode ships as a dsh plugin
-([`@hqzhao95/dscode`](https://www.npmjs.com/package/@hqzhao95/dscode)):
-
 ```sh
-npm i -g @deepseek-ai/dsh@next
-dsh plugin --profile deepseek-leader add @hqzhao95/dscode
-~/.dsh/profiles/deepseek-leader/node_modules/.bin/dscode
+npx @hqzhao95/dscode
 ```
 
-The first run downloads the release-pinned TUI binary (SHA-256 verified)
-and links `dscode` into `~/.local/bin`. Prebuilt binaries are Linux x86_64;
-other platforms build from this repo (`bash scripts/install.sh`, which is
-also the dev-checkout installer). Requires Node `^22.19.0 || >=24` and pnpm.
+That's it — dscode ships as a dsh plugin
+([`@hqzhao95/dscode`](https://www.npmjs.com/package/@hqzhao95/dscode)) whose
+launcher self-installs on first run: it registers the plugin in a dsh
+profile, downloads the release-pinned TUI binary (SHA-256 verified), links
+`dscode` into `~/.local/bin`, and starts. From then on the command is just
+`dscode`.
+
+Requires Node `^22.19.0 || >=24` and pnpm. Installing the dsh CLI globally
+(`npm i -g @deepseek-ai/dsh@next`) is optional but makes agent startup
+faster than the on-demand `npx` fallback. Prebuilt binaries are Linux
+x86_64; other platforms build from this repo (`bash scripts/install.sh`,
+also the dev-checkout installer).
 
 ## Use
 

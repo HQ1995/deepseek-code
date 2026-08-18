@@ -24,10 +24,13 @@ release-pinned TUI binary on first run (GitHub Releases, SHA-256 verified,
 cached at `~/.dsh/dsc-tui/bin/`):
 
 ```sh
-npm i -g @deepseek-ai/dsh@next
-dsh plugin --profile deepseek-leader add @hqzhao95/dscode
-~/.dsh/profiles/deepseek-leader/node_modules/.bin/dscode   # first run links ~/.local/bin/dscode
+npx @hqzhao95/dscode      # first run: registers the plugin in the leader
+                          # profile, fetches the binary, links ~/.local/bin/dscode
+dscode                    # every run after that
 ```
+
+(`npm i -g @deepseek-ai/dsh@next` first is optional — the launcher and the
+TUI resolve dsh from DSH_BIN, PATH, or an `npx` fallback, in that order.)
 
 (`add dscode-plugin.tgz` from the GitHub release assets is the equivalent
 registry-free form, published from v0.0.6 on.) Updating means updating the
