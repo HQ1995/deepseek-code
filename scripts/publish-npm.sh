@@ -6,9 +6,10 @@
 #   scripts/publish-npm.sh --otp 123456          # pin = repo VERSION file
 #   scripts/publish-npm.sh --otp 123456 --pin 0.0.5
 #
-# The npm account requires 2FA, so --otp (or a granular automation token in
-# the npm config) is needed. scripts/release.sh calls this after publishing
-# the GitHub release; NPM_OTP env works there.
+# Auth: NPM_TOKEN env (a token with publish rights / 2FA bypass) is used
+# when set — the user's shell exports it from ~/.zshrc; otherwise --otp (or
+# NPM_OTP) supplies the 2FA code for the npm-config login. scripts/release.sh
+# calls this after publishing the GitHub release.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,5 +42,6 @@ pkg["version"] = sys.argv[3]
 pkg["dscode"] = {"release": sys.argv[3]}
 f = open(sys.argv[2], "w"); json.dump(pkg, f, indent=2, ensure_ascii=False); f.write("\n")
 PY
-( cd "$stage" && npm publish --access public ${OTP:+--otp="$OTP"} )
+( cd "$stage" && npm publish --access public ${OTP:+--otp="$OTP"} \
+    ${NPM_TOKEN:+--//registry.npmjs.org/:_authToken="$NPM_TOKEN"} )
 echo "published: npm view dscode version -> $(npm view dscode version)"
