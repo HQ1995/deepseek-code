@@ -1,5 +1,5 @@
 {
-  "name": "dscode",
+  "name": "@hqzhao95/dscode",
   "description": "dscode - DeepSeek Harness coding TUI, distributed as a dsh plugin (grok-leader bridge + launcher)",
   "version": "0.0.5",
   "publishConfig": {

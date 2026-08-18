@@ -28,7 +28,7 @@ rm -rf "$PROFILE/node_modules"
 
 sentinel="lib/types/index.js"
 want="$(md5sum "$BRIDGE/$sentinel" | cut -d' ' -f1)"
-got="$(md5sum "$PROFILE/node_modules/dscode/$sentinel" | cut -d' ' -f1)"
+got="$(md5sum "$PROFILE/node_modules/@hqzhao95/dscode/$sentinel" | cut -d' ' -f1)"
 if [[ "$want" != "$got" ]]; then
   echo "error: the profile copy still differs from the fresh build ($got != $want)" >&2
   exit 1

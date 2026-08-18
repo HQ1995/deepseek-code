@@ -44,4 +44,4 @@ f = open(sys.argv[2], "w"); json.dump(pkg, f, indent=2, ensure_ascii=False); f.w
 PY
 ( cd "$stage" && npm publish --access public ${OTP:+--otp="$OTP"} \
     ${NPM_TOKEN:+--//registry.npmjs.org/:_authToken="$NPM_TOKEN"} )
-echo "published: npm view dscode version -> $(npm view dscode version)"
+echo "published: npm view @hqzhao95/dscode version -> $(npm view @hqzhao95/dscode version)"

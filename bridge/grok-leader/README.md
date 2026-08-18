@@ -8,7 +8,7 @@ GitHub Releases on first run (SHA-256 verified, cached at
 
 ```sh
 npm i -g @deepseek-ai/dsh@next
-dsh plugin --profile deepseek-leader add dscode
+dsh plugin --profile deepseek-leader add @hqzhao95/dscode
 ~/.dsh/profiles/deepseek-leader/node_modules/.bin/dscode   # first run links ~/.local/bin/dscode
 ```
 

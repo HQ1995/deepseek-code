@@ -100,7 +100,7 @@ pkg["dscode"] = {"release": sys.argv[3]}
 json.dump(pkg, open(sys.argv[2], "w"), indent=2)
 PY
 ( cd "$plugin_stage" && npm pack --silent --pack-destination "$DIST" >/dev/null )
-mv "$DIST"/dscode-*.tgz "$DIST/dscode-plugin.tgz"
+mv "$DIST"/hqzhao95-dscode-*.tgz "$DIST/dscode-plugin.tgz"
 rm -rf "$plugin_stage"
 echo "  bundled dscode-plugin.tgz (pinned to $VERSION)"
 

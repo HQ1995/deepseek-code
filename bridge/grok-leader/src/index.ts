@@ -1552,7 +1552,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         case 'list': {
           const { dependencies, bundles } = await readProfileManifest(dir)
           const lines = bundles.map(name => {
-            const core = name === '@deepseek-ai/dsh-base' || name === 'dscode' || name === '@deepseek-ai/dsh-grok-leader' ? ' (core)' : ''
+            const core = name === '@deepseek-ai/dsh-base' || name === '@hqzhao95/dscode' || name === 'dscode' || name === '@deepseek-ai/dsh-grok-leader' ? ' (core)' : ''
             const version = dependencies[name] === undefined ? '' : ' ' + dependencies[name]
             return '- ' + name + version + core
           })
@@ -1575,7 +1575,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         case 'remove': {
           const name = rest[0]
           if (name === undefined) return settle('Missing plugin name. ' + usage)
-          if (name === 'dscode' || name === '@deepseek-ai/dsh-grok-leader' || name === '@deepseek-ai/dsh-base') {
+          if (name === '@hqzhao95/dscode' || name === 'dscode' || name === '@deepseek-ai/dsh-grok-leader' || name === '@deepseek-ai/dsh-base') {
             return settle(name + ' is a core component of this leader; refusing to remove it.')
           }
           const manifest = await readProfileManifest(dir)

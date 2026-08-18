@@ -17,7 +17,7 @@ scripts/uninstall.sh            # remove launchers, leader profile, TUI state (i
 ```
 
 Plugin-native install — dscode itself is a dsh plugin, published on npm as
-[`dscode`](https://www.npmjs.com/package/dscode) (`scripts/publish-npm.sh`;
+[`@hqzhao95/dscode`](https://www.npmjs.com/package/@hqzhao95/dscode) (`scripts/publish-npm.sh`;
 the npm version equals the product release it pins). One package carries the
 grok-leader bridge plus a `dscode` launcher that materializes the
 release-pinned TUI binary on first run (GitHub Releases, SHA-256 verified,
@@ -25,7 +25,7 @@ cached at `~/.dsh/dsc-tui/bin/`):
 
 ```sh
 npm i -g @deepseek-ai/dsh@next
-dsh plugin --profile deepseek-leader add dscode
+dsh plugin --profile deepseek-leader add @hqzhao95/dscode
 ~/.dsh/profiles/deepseek-leader/node_modules/.bin/dscode   # first run links ~/.local/bin/dscode
 ```
 

@@ -7,7 +7,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 
-const PACKAGE_NAME = 'dscode'
+const PACKAGE_NAME = '@hqzhao95/dscode'
 
 /** Cordis companion plugin name. */
 export const name = 'grok-leader-invariant'
