@@ -217,3 +217,25 @@ increasing seq (a restarted leader outranks its predecessor, so no reset
 handshake exists). The native shell emitter does not stamp seq yet
 (seq: None), so non-leader mode is unchanged; stamping it upstream is the
 natural follow-up if this is offered as a PR.
+
+### /rewind is hidden (bridge has no rewind RPCs)
+
+`slash/registry.rs CommandRegistry::new` adds `rewind` to the fail-closed
+`hidden` set (same mechanism as /dashboard and /voice; the `undo` alias is
+hidden with it because the gate matches the canonical name). Upstream
+/rewind opens a picker backed by the x.ai/rewind/points and
+x.ai/rewind/execute RPCs, which the grok-leader bridge does not implement —
+the visible command was a dead end that errored on open. Typed `/rewind`
+now falls through to the model as plain prompt text like any unrecognized
+command. Un-hide it when the bridge implements rewind over dsh session
+persistence (the sessions store replays full transcripts, so a
+turn-boundary rewind is feasible later).
+
+### Plugin slash commands arrive over ACP available_commands_update
+
+Not a TUI divergence — recorded here as the contract's other half: the
+bridge advertises dsh-registry plugin commands (plus its own /dsh) via the
+standard ACP `available_commands_update`, and the stock pager merges
+agent-advertised commands into the slash registry (builtin names win,
+BLOCKED_ACP_NAMES skipped). New dsh plugins get top-level slash commands
+with zero pager changes.

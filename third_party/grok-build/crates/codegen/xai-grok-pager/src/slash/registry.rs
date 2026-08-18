@@ -172,6 +172,12 @@ impl CommandRegistry {
         hidden.insert("voice".to_string());
         // `/auto` is fail-closed: hidden until `set_auto_mode_available(true)`.
         hidden.insert("auto".to_string());
+        // DIVERGENCE(deepseek): `/rewind` needs the x.ai/rewind/points and
+        // x.ai/rewind/execute RPCs, which the grok-leader bridge does not
+        // implement — the picker would die on method-not-found. Hidden (with
+        // its `undo` alias) until the bridge grows rewind support; typed
+        // `/rewind` falls through to the model as plain prompt text.
+        hidden.insert("rewind".to_string());
         // `/share` starts menu-hidden (still dispatchable) until
         // `set_share_visible(true)`. Menu-only so typed `/share` can
         // surface a client disable message rather than PassThrough.
