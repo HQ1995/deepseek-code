@@ -4,6 +4,8 @@ A terminal UI for AI coding agents, powered by DeepSeek Harness.
 
 > Not an official DeepSeek or xAI project.
 
+![DeepSeek Code](docs/dscode.png)
+
 ## Install
 
 ```sh
