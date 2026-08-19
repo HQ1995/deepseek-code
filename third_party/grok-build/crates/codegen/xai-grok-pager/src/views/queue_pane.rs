@@ -368,14 +368,16 @@ pub enum QueueEvent {
     SwapDown { id: u64 },
     /// Force-send the selected prompt as a mid-turn interjection.
     ForceInterject { id: u64 },
+    /// Merge the selected prompt into the running turn without cancelling it.
+    SteerSelected { id: u64 },
 }
 
 /// Maximum height (in lines) the queue pane will request.
 const MAX_QUEUE_HEIGHT: u16 = 3;
 
-/// Hit-test + hover state for one per-row action button (`[edit]`,
-/// `[Send now]`, `[cancel]`). Rect and row binding are rebound on every
-/// `QueuePane::render`; hover persists across frames so a stationary
+/// Hit-test + hover state for one per-row action button (`[steer]`,
+/// `[edit]`, `[Send now]`, `[cancel]`). Rect and row binding are rebound on
+/// every `QueuePane::render`; hover persists across frames so a stationary
 /// pointer keeps its highlight.
 #[derive(Default)]
 struct RowActionButton {
@@ -470,6 +472,8 @@ pub struct QueuePane {
     prev_len: usize,
     /// `[Send now]` (force-interject) action button.
     send_now: RowActionButton,
+    /// `[steer]` (no-cancel mid-turn merge) action button.
+    steer_button: RowActionButton,
     /// `[cancel]` (row delete) action button.
     delete_button: RowActionButton,
     /// `[edit]` (queued-row edit) action button.
@@ -512,6 +516,7 @@ impl QueuePane {
             overlay: OverlayState::hidden(),
             prev_len: 0,
             send_now: RowActionButton::default(),
+            steer_button: RowActionButton::default(),
             delete_button: RowActionButton::default(),
             edit_button: RowActionButton::default(),
             hovered_row_id: None,
@@ -657,6 +662,9 @@ impl QueuePane {
         if registry.matches_id(crate::actions::ActionId::InterjectPrompt, key) {
             return Some(QueueEvent::ForceInterject { id });
         }
+        if registry.matches_id(crate::actions::ActionId::SteerPrompt, key) {
+            return Some(QueueEvent::SteerSelected { id });
+        }
         match key.code {
             KeyCode::Char('x') | KeyCode::Delete | KeyCode::Backspace => {
                 Some(QueueEvent::DeleteSelected { id })
@@ -771,6 +779,11 @@ impl QueuePane {
         self.send_now.hit(col, row, self.selected_id())
     }
 
+    /// Hit-test the action-row `[steer]` button (merges into the running turn).
+    pub fn steer_click(&self, col: u16, row: u16) -> Option<u64> {
+        self.steer_button.hit(col, row, self.selected_id())
+    }
+
     /// Hit-test the action-row `[cancel]` button (removes the row).
     pub fn delete_click(&self, col: u16, row: u16) -> Option<u64> {
         self.delete_button.hit(col, row, self.selected_id())
@@ -802,6 +815,17 @@ impl QueuePane {
     /// Clear the `[Interject]` hover. Returns `true` if it was previously hovered.
     pub fn clear_send_now_hover(&mut self) -> bool {
         self.send_now.clear_hover()
+    }
+
+    /// Update the `[steer]` hover. Returns `true` if it changed (caller redraws).
+    pub fn update_steer_hover(&mut self, col: u16, row: u16) -> bool {
+        let selected = self.selected_id();
+        self.steer_button.update_hover(col, row, selected)
+    }
+
+    /// Clear the `[steer]` hover. Returns `true` if it was previously hovered.
+    pub fn clear_steer_hover(&mut self) -> bool {
+        self.steer_button.clear_hover()
     }
 
     /// Update the `[edit]` hover. Returns `true` if it changed (caller redraws).
@@ -975,6 +999,7 @@ impl QueuePane {
         // takes precedence so mouse users can act on any row without
         // focusing/selecting it first.
         self.send_now.reset();
+        self.steer_button.reset();
         self.delete_button.reset();
         self.edit_button.reset();
         let action_idx = self
@@ -1061,6 +1086,22 @@ impl QueuePane {
                             );
                             self.send_now
                                 .bind(Rect::new(interject_x, screen_y, interject_w, 1), entry.id);
+                            right = interject_x;
+                        }
+
+                        // No-cancel sibling of [Send now]: merge the queued row
+                        // into the running turn instead of cancelling it.
+                        let steer_label = "[steer]";
+                        let steer_w = steer_label.len() as u16;
+                        if let Some(steer_x) = fits(right, steer_w) {
+                            let steer_style = if self.steer_button.is_hovered_for(entry.id) {
+                                Style::default().fg(theme.text_primary)
+                            } else {
+                                btn_style
+                            };
+                            buf.set_string_safe(steer_x, screen_y, steer_label, steer_style);
+                            self.steer_button
+                                .bind(Rect::new(steer_x, screen_y, steer_w, 1), entry.id);
                         }
                     }
                 }
@@ -1690,6 +1731,32 @@ mod tests {
         );
     }
 
+    /// `[steer]` renders only while a turn is running, flush against the left
+    /// side of `[Send now]`, and stays hidden when idle.
+    #[test]
+    fn steer_button_renders_when_turn_running() {
+        let mut pane = QueuePane::new();
+        let mut local = std::collections::VecDeque::new();
+        local.push_back(local_prompt(1, "msg"));
+        pane.sync_from_merged(&local, &[], None, None, &Default::default());
+        let ids = pane.entry_ids();
+        pane.list_state.select_by_id(ids[0]);
+
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+        let layout_cfg = crate::appearance::LayoutConfig::default();
+        pane.render(area, &mut buf, true, &layout_cfg, None, true);
+
+        let steer = pane.steer_button.rect.expect("steer button renders mid-turn");
+        let send_now = pane.send_now.rect.expect("send now button renders mid-turn");
+        assert_eq!(pane.steer_button.entry_id, Some(ids[0]));
+        assert_eq!(
+            steer.x + steer.width,
+            send_now.x,
+            "[steer] must sit flush against [Send now] (no gap to leak through)"
+        );
+    }
+
     /// `[edit]` renders even when no turn is running — the keyboard `e` edit
     /// works regardless of turn state — while `[Send now]` stays hidden, and
     /// the chain stays flush: [edit][cancel].
@@ -1711,6 +1778,10 @@ mod tests {
         assert!(
             pane.send_now.rect.is_none(),
             "[Send now] only renders mid-turn"
+        );
+        assert!(
+            pane.steer_button.rect.is_none(),
+            "[steer] only renders mid-turn"
         );
         let edit = pane
             .edit_button
@@ -1763,6 +1834,7 @@ mod tests {
                 let rects = [
                     ("edit", pane.edit_button.rect),
                     ("send_now", pane.send_now.rect),
+                    ("steer", pane.steer_button.rect),
                     ("cancel", pane.delete_button.rect),
                 ];
                 let mut placed: Vec<(&str, Rect)> = rects

@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# The dsh CLI from our internal dev fork (the deepseek-harness submodule,
-# dev branch: upstream rc.7 + our local fixes). Fresh clones without a fork
-# build fall back to the official npm release, which is what end users get.
-ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-FORK="$ROOT/deepseek-harness/apps/cli/lib/bin.js"
-if [[ -f "$FORK" ]]; then
-  exec node "$FORK" "$@"
-fi
-exec npx --yes @deepseek-ai/dsh "$@"
+# Fallback dsh launcher for dscode. Real installs normally have dsh on PATH or
+# set DSH_BIN; this is only linked when no dsh is reachable. It uses the exact
+# npm version this dscode release was tested against.
+exec npx --yes @deepseek-ai/dsh@0.1.0-rc.8 "$@"

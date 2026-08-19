@@ -15,7 +15,7 @@
 # the model-facing tools process-wide (single-session TUI layout); this
 # profile is multi-session like the web surface, so the host tool rows are
 # disabled here and each preset mounts its own catalog (mirrors
-# deepseek-harness/packages/bundle/web-app/cordis.patch.yml).
+# upstream deepseek-harness/packages/bundle/web-app/cordis.patch.yml).
 - id: tool-bash
   disabled: true
 - id: tool-pwsh
@@ -85,4 +85,4 @@
     - id: grok-leader
       name: '@hqzhao95/dscode'
       config:
-        socketPath: !!js process.env.DEEPSEEK_LEADER_SOCKET
+        socketPath: !!js process.env.DSCODE_SOCKET

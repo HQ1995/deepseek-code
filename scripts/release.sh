@@ -85,7 +85,7 @@ echo "  bundled $(basename "$LICENSES")"
 # dscode-plugin.tgz: the repo's dsh plugin (grok-leader bridge + dscode
 # launcher), release-pinned via package.json dscode.release so the launcher
 # materializes exactly this release's binary. Plugin-native install:
-#   dsh plugin --profile deepseek-leader add \
+#   dsh plugin --profile dscode add \
 #     https://github.com/HQ1995/deepseek-code/releases/latest/download/dscode-plugin.tgz
 echo "  building the plugin tarball..."
 ( cd "$ROOT/bridge/grok-leader" && pnpm install --silent && pnpm run --silent build )

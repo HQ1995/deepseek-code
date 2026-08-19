@@ -27,10 +27,10 @@ import { existsSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
 
-const PROFILE_LIB = `${homedir()}/.dsh/profiles/deepseek-leader/node_modules/dsh-plugin-subscriptions/lib`
-if (!existsSync(PROFILE_LIB)) {
-  console.error('dsh-plugin-subscriptions is not installed in the deepseek-leader profile.')
-  console.error('Install it first:  dsh plugin --profile deepseek-leader add dsh-plugin-subscriptions')
+const PROFILE_LIB = `${homedir()}/.dsh/profiles/dscode/node_modules/dsh-plugin-subscriptions/lib`
+if (!PROFILE_LIB) {
+  console.error('dsh-plugin-subscriptions is not installed in the dscode profile.')
+  console.error('Install it first:  dsh plugin --profile dscode add dsh-plugin-subscriptions')
   process.exit(1)
 }
 const mod = (rel) => import(pathToFileURL(`${PROFILE_LIB}/${rel}`).href)

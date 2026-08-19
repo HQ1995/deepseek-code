@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# deepseek-code uninstaller: remove the launcher links, the deepseek-leader
+# deepseek-code uninstaller: remove the launcher links, the dscode
 # profile (bridge plugin), and optionally the official dsh CLI. Everything it
 # deletes is guarded by an identity check so a same-named foreign file or
 # directory is never touched.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PROFILE="$HOME/.dsh/profiles/deepseek-leader"
+PROFILE="$HOME/.dsh/profiles/dscode"
 FLAG="${1:-}"
 
 note() { echo "  $1"; }
@@ -18,7 +18,8 @@ dscode_link="$HOME/.local/bin/dscode"
 if [[ -L "$dscode_link" ]]; then
   target="$(readlink "$dscode_link" 2>/dev/null || true)"
   if [[ "$target" == "$ROOT/third_party/grok-build/target/release/dscode" \
-      || "$target" == "$ROOT/bin/dscode" ]]; then
+      || "$target" == "$ROOT/bin/dscode" \
+      || "$target" == *"/.dsh/profiles/dscode/node_modules/"*"/bin/dscode.mjs" ]]; then
     unlink "$dscode_link"
     echo "  removed $dscode_link"
   else
@@ -42,8 +43,8 @@ for name in dsh; do
   fi
 done
 
-# 2. The deepseek-leader profile   only when it is actually ours (its
-#    package.json must declare the grok-leader bridge).
+# 2. The dscode profile — only when it is actually ours (its package.json
+#    must declare the grok-leader bridge).
 if [[ -d "$PROFILE" ]]; then
   if grep -qE '"(@hqzhao95/dscode|dscode|@deepseek-ai/dsh-grok-leader)"' "$PROFILE/package.json" 2>/dev/null; then
     rm -rf "$PROFILE"

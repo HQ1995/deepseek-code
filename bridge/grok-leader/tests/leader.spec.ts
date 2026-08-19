@@ -248,6 +248,9 @@ async function makeClient(socketPath: string): Promise<ClientHandle> {
       // response; capture them so order-sensitive assertions stay exact.
       if (msg.method === 'x.ai/queue/changed') { broadcasts.push(msg); continue }
       if (msg.method === 'x.ai/session/prompt_complete') { completes.push(msg); continue }
+      // Ambient model-catalog refreshes (after session/set_model) are not
+      // request/response traffic; keep them out of the next() queue.
+      if (msg.method === 'x.ai/models/update') continue
       // Ambient command-roster refreshes (fired on session create/load and on
       // registry changes) stay out of the request/next() queue; assertions
       // read them from `all`.
@@ -418,14 +421,14 @@ describe('grok leader over a unix socket', () => {
       _meta: {
         grokShell: true,
         modelState: {
-          currentModelId: '',
+          currentModelId: 'deepseek-chat',
           availableModels: [
-            { modelId: 'deepseek-chat', name: 'DeepSeek Chat', _meta: { provider: 'deepseek', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+            { modelId: 'deepseek-chat', name: 'DeepSeek Chat', _meta: { provider: 'deepseek', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoningEffort: 'high' } },
             { modelId: 'deepseek-reasoner', name: 'DeepSeek Reasoner', _meta: { provider: 'deepseek', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
             { modelId: 'pi-code', name: 'Pi Code', _meta: { provider: 'pi', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
           ],
           _meta: {
-            currentProviderId: '',
+            currentProviderId: 'deepseek',
             providers: [
               { id: 'deepseek', name: 'DeepSeek' },
               { id: 'pi', name: 'Pi AI' },
@@ -480,14 +483,14 @@ describe('grok leader over a unix socket', () => {
 
     const models = await c.request(3, 'x.ai/models/list', {})
     expect(models.result).toEqual({
-      currentModelId: '',
+      currentModelId: 'deepseek-chat',
       availableModels: [
-        { modelId: 'deepseek-chat', name: 'DeepSeek Chat', _meta: { provider: 'deepseek', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+        { modelId: 'deepseek-chat', name: 'DeepSeek Chat', _meta: { provider: 'deepseek', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoningEffort: 'high' } },
         { modelId: 'deepseek-reasoner', name: 'DeepSeek Reasoner', _meta: { provider: 'deepseek', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
         { modelId: 'pi-code', name: 'Pi Code', _meta: { provider: 'pi', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
       ],
       _meta: {
-        currentProviderId: '',
+        currentProviderId: 'deepseek',
         providers: [
           { id: 'deepseek', name: 'DeepSeek' },
           { id: 'pi', name: 'Pi AI' },
@@ -672,6 +675,47 @@ describe('grok leader over a unix socket', () => {
     const echoIndex = c.all.findIndex(m => m.method === 'session/update' && ((m.params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } }).update?.content?.text) === 'second')
     expect(promoIndex).toBeGreaterThanOrEqual(0)
     expect(echoIndex).toBeGreaterThan(promoIndex)
+  })
+
+  it('queue/steer merges a queued row into the running turn without cancelling it', async () => {
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'queue' })
+    register(c)
+    await c.next()
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { runningText?: string }).runningText) === 'first'))
+    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'second' }] })
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 1))
+    const held = c.broadcasts[c.broadcasts.length - 1]!
+    const secondId = ((held.params as { entries: Array<{ id: string }> }).entries[0]!).id
+
+    c.notify('x.ai/queue/steer', { sessionId, id: secondId, expectedVersion: 0 })
+
+    // The queued row is folded into the live turn, not promoted/cancelled.
+    await waitFor(() => agent.internals.steered.includes('second'))
+    expect(agent.internals.cancelCalls).toBe(0)
+    await waitFor(() => {
+      const last = c.broadcasts[c.broadcasts.length - 1]!.params as {
+        entries?: Array<{ id: string }>
+        runningPromptId?: string
+      }
+      return last.entries?.length === 0 && last.runningPromptId !== undefined
+    })
+
+    // The host turn keeps running and settles normally; the steered prompt
+    // settles with the host turn's stop reason.
+    agent.internals.idleWaiters.shift()!()
+    const responses = await collectIds(c, [2, 3])
+    expect(responses.get(2)!.result).toMatchObject({ stopReason: 'cancelled' })
+    expect(responses.get(3)!.result).toMatchObject({
+      stopReason: 'cancelled',
+      _meta: { promptId: secondId },
+    })
   })
 
   it('queue/edit replaces the row text, bumps its version, and rebroadcasts', async () => {
@@ -972,6 +1016,41 @@ describe('grok leader over a unix socket', () => {
     const models = await c.request(3, 'x.ai/models/list', {})
     const listed = (models.result as { availableModels: Array<{ modelId: string; _meta?: { reasoningEffort?: string } }> }).availableModels
     expect(listed.find(m => m.modelId === 'deepseek-chat')?._meta?.reasoningEffort).toBe('max')
+  })
+
+  it('remembers a model effort across switches and re-applies it on return', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    mockDefaultModel.saved.length = 0
+    mockDefaultModel.current = undefined
+
+    const setReasoner = await c.request(2, 'session/set_model', { sessionId, modelId: 'deepseek-reasoner', _meta: { reasoningEffort: 'max' } })
+    expect(setReasoner.error).toBeUndefined()
+    expect(mockDefaultModel.saved).toEqual([{ provider: 'deepseek', model: 'deepseek-reasoner', reasoningEffort: 'max' }])
+
+    const setPi = await c.request(3, 'session/set_model', { sessionId, modelId: 'pi-code' })
+    expect(setPi.error).toBeUndefined()
+    expect(mockDefaultModel.saved.at(-1)).toEqual({ provider: 'pi', model: 'pi-code' })
+
+    const backToReasoner = await c.request(4, 'session/set_model', { sessionId, modelId: 'deepseek-reasoner' })
+    expect(backToReasoner.error).toBeUndefined()
+    expect(mockDefaultModel.saved.at(-1)).toEqual({ provider: 'deepseek', model: 'deepseek-reasoner', reasoningEffort: 'max' })
+
+    // The bridge broadcasts the refreshed catalog so the TUI can show the
+    // remembered effort immediately, not only on the next models/list call.
+    const update = c.all.find(m =>
+      m.method === 'x.ai/models/update'
+      && (m.params as { currentModelId?: string }).currentModelId === 'deepseek-reasoner')
+    expect(update).toBeDefined()
+    const updatedModels = (update!.params as { availableModels: Array<{ modelId: string; _meta?: { reasoningEffort?: string } }> }).availableModels
+    expect(updatedModels.find(m => m.modelId === 'deepseek-reasoner')?._meta?.reasoningEffort).toBe('max')
+
+    const models = await c.request(5, 'x.ai/models/list', {})
+    const listed = (models.result as { availableModels: Array<{ modelId: string; _meta?: { reasoningEffort?: string } }> }).availableModels
+    expect(listed.find(m => m.modelId === 'deepseek-reasoner')?._meta?.reasoningEffort).toBe('max')
   })
 
   it('session/set_model rejects a modelId outside the catalog without persisting', async () => {
@@ -1933,8 +2012,9 @@ describe('grok leader over a unix socket', () => {
       _meta: { modelState: { currentModelId: string; availableModels: Array<{ modelId: string; name: string }> } }
     })._meta.modelState
     expect(modelState.availableModels).toEqual([
-      { modelId: 'shared', name: 'Shared A', _meta: { provider: 'a', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+      { modelId: 'shared', name: 'Shared A', _meta: { provider: 'a', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoningEffort: 'high' } },
       { modelId: 'only-a', name: 'Only A', _meta: { provider: 'a', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+      { modelId: 'b:shared', name: 'Shared B', _meta: { provider: 'b', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
       { modelId: 'only-b', name: 'Only B', _meta: { provider: 'b', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
     ])
     expect(modelState.currentModelId).toEqual('shared')
@@ -1943,8 +2023,9 @@ describe('grok leader over a unix socket', () => {
     expect(models.result).toEqual({
       currentModelId: 'shared',
       availableModels: [
-        { modelId: 'shared', name: 'Shared A', _meta: { provider: 'a', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+        { modelId: 'shared', name: 'Shared A', _meta: { provider: 'a', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoningEffort: 'high' } },
         { modelId: 'only-a', name: 'Only A', _meta: { provider: 'a', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+        { modelId: 'b:shared', name: 'Shared B', _meta: { provider: 'b', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
         { modelId: 'only-b', name: 'Only B', _meta: { provider: 'b', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
       ],
       _meta: {
@@ -1952,6 +2033,51 @@ describe('grok leader over a unix socket', () => {
         providers: [{ id: 'a' }, { id: 'b' }],
       },
     })
+  })
+
+  it('remembers model and effort for a provider-qualified duplicate id', async () => {
+    const { client: c } = await start({ llm: collidingLlm })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    mockDefaultModel.saved.length = 0
+    mockDefaultModel.current = undefined
+
+    const setBShared = await c.request(2, 'session/set_model', { sessionId, modelId: 'b:shared', _meta: { reasoningEffort: 'max' } })
+    expect(setBShared.error).toBeUndefined()
+    expect(mockDefaultModel.saved.at(-1)).toEqual({ provider: 'b', model: 'shared', reasoningEffort: 'max' })
+
+    const setOnlyA = await c.request(3, 'session/set_model', { sessionId, modelId: 'only-a' })
+    expect(setOnlyA.error).toBeUndefined()
+    expect(mockDefaultModel.saved.at(-1)).toEqual({ provider: 'a', model: 'only-a' })
+
+    const backToBShared = await c.request(4, 'session/set_model', { sessionId, modelId: 'b:shared' })
+    expect(backToBShared.error).toBeUndefined()
+    expect(mockDefaultModel.saved.at(-1)).toEqual({ provider: 'b', model: 'shared', reasoningEffort: 'max' })
+
+    const models = await c.request(5, 'x.ai/models/list', {})
+    const listed = (models.result as { availableModels: Array<{ modelId: string; _meta?: { reasoningEffort?: string } }> }).availableModels
+    expect(listed.find(m => m.modelId === 'b:shared')?._meta?.reasoningEffort).toBe('max')
+  })
+
+  it('carries a remembered effort to the same raw model on another provider', async () => {
+    const { client: c } = await start({ llm: collidingLlm })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    mockDefaultModel.saved.length = 0
+    mockDefaultModel.current = undefined
+
+    const setAShared = await c.request(2, 'session/set_model', { sessionId, modelId: 'shared', _meta: { reasoningEffort: 'high' } })
+    expect(setAShared.error).toBeUndefined()
+    expect(mockDefaultModel.saved.at(-1)).toEqual({ provider: 'a', model: 'shared', reasoningEffort: 'high' })
+
+    // Same raw model id on provider b should pick up the remembered effort.
+    const setBShared = await c.request(3, 'session/set_model', { sessionId, modelId: 'b:shared' })
+    expect(setBShared.error).toBeUndefined()
+    expect(mockDefaultModel.saved.at(-1)).toEqual({ provider: 'b', model: 'shared', reasoningEffort: 'high' })
   })
 
   it('advertises the preset command and serves the session prompt history', async () => {
@@ -2214,7 +2340,7 @@ describe('x.ai/providers/add', () => {
         { id: 'deepseek', name: 'DeepSeek' },
         { id: 'acme-gateway', name: 'Acme Gateway' },
       ],
-      currentProviderId: '',
+      currentProviderId: 'deepseek',
     })
     expect(settings.calls).toHaveLength(1)
     expect(settings.calls[0].ns).toBe('llm-pi-ai')
@@ -2294,6 +2420,56 @@ describe('x.ai/providers/add', () => {
     const res = await client.request(1, 'x.ai/providers/add', { id: 'Acme-Gateway!' })
     expect(res.error).toMatchObject({ code: -32602 })
     expect(settings.calls).toHaveLength(0)
+  })
+
+  it('dynamically refreshes an OpenAI-compatible provider catalog from /models', async () => {
+    const settings = makeSettings(true)
+    settings.providers['ocx'] = {
+      displayName: 'OpenCodex',
+      apiKeyEnv: 'OCX_API_KEY',
+      api: 'openai-responses',
+      baseURL: 'http://127.0.0.1:10100/v1',
+      models: [
+        { id: 'opencode-go/deepseek-v4-flash' },
+        { id: 'deepseek-v4-pro', input: ['text', 'image'] },
+      ],
+    }
+    const llm = {
+      listProviders: () => [
+        { id: 'deepseek', name: 'DeepSeek' },
+        { id: 'ocx', name: 'OpenCodex' },
+      ],
+      listModels: async (provider: string) => provider === 'deepseek'
+        ? [{ provider: 'deepseek', id: 'deepseek-chat', name: 'DeepSeek Chat' }]
+        : [{ provider: 'ocx', id: 'opencode-go/deepseek-v4-flash', name: 'opencode-go/deepseek-v4-flash' }],
+      discoverModels: async (_ns: string, request: { provider?: string }) =>
+        request.provider === 'ocx'
+          ? [
+            { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+            { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+          ]
+          : [],
+    }
+    const made = await makeHarness({ llm, settings: settings as unknown as Context['settings'] })
+    harness = made
+    client = await makeClient(made.socketPath)
+    register(client)
+    await client.next()
+
+    const models = await client.request(1, 'x.ai/models/list', {})
+    const listed = (models.result as { availableModels: Array<{ modelId: string; name: string; _meta: { provider: string } }> }).availableModels
+    expect(listed.find(m => m.modelId === 'deepseek-v4-flash')).toMatchObject({
+      modelId: 'deepseek-v4-flash',
+      name: 'DeepSeek V4 Flash',
+      _meta: { provider: 'ocx' },
+    })
+    expect(listed.find(m => m.modelId === 'opencode-go/deepseek-v4-flash')).toBeUndefined()
+    expect(settings.providers['ocx']).toMatchObject({
+      models: [
+        { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+        { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', input: ['text', 'image'] },
+      ],
+    })
   })
 
   it('fills a custom route with gateway-discovered models after the seam refuses', async () => {
@@ -2652,6 +2828,20 @@ describe('sessionEventToUpdates tool-result diff fallback', () => {
     expect(diffs(updates)).toEqual([{ type: 'diff', path: '/tmp/a.ts', oldText: 'meta old', newText: 'meta new' }])
   })
 
+  it('wraps text blocks in ACP content so the tool_call_update frame parses', () => {
+    // ACP ToolCallContent is tagged `content`/`diff`/`terminal`; a bare
+    // `{"type":"text"}` block fails serde and drops the whole update in the
+    // TUI (verified against agent-client-protocol 0.10.4).
+    const updates = map(toolResult({ text: 'ok' }), {
+      name: 'edit',
+      arguments: { file_path: '/tmp/a.ts', old_string: 'a', new_string: 'b' },
+    })
+    expect((updates[0] as { content?: unknown[] }).content).toEqual([
+      { type: 'content', content: { type: 'text', text: 'ok' } },
+      { type: 'diff', path: '/tmp/a.ts', oldText: 'a', newText: 'b' },
+    ])
+  })
+
   it('emits no fallback diff when the tool errored', () => {
     const updates = map(toolResult({ error: { name: 'EditError', code: 'not_found' } }), {
       name: 'edit',
@@ -2700,6 +2890,39 @@ describe('sessionEventToUpdates tool-result diff fallback', () => {
       arguments: { command: 'view', path: '/tmp/a.ts' },
     })
     expect(diffs(view)).toEqual([])
+  })
+
+  it('skips fallback diffs that would exceed the display-only performance budget', () => {
+    const huge = 'x'.repeat(64 * 1024 + 1)
+    expect(diffs(map(toolResult({}), {
+      name: 'edit',
+      arguments: { file_path: '/tmp/a.ts', old_string: 'small', new_string: huge },
+    }))).toEqual([])
+    expect(diffs(map(toolResult({}), {
+      name: 'str_replace_editor',
+      arguments: { command: 'create', path: '/tmp/new.py', file_text: huge },
+    }))).toEqual([])
+    expect(diffs(map(toolResult({}), {
+      name: 'write',
+      arguments: { file_path: '/tmp/new.md', content: huge },
+    }))).toEqual([])
+  })
+
+  it('skips oversized presentation-meta diffs as a defensive performance guard', () => {
+    const huge = 'y'.repeat(64 * 1024 + 1)
+    expect(diffs(map(toolResult({ meta: { diffs: [{ path: '/tmp/a.ts', oldText: 'small', newText: huge }] } }), {
+      name: 'edit',
+      arguments: { file_path: '/tmp/a.ts', old_string: 'small', new_string: huge },
+    }))).toEqual([])
+  })
+
+  it('keeps fallback diffs within the performance budget', () => {
+    const ok = 'z'.repeat(64 * 1024 - 1)
+    const updates = map(toolResult({}), {
+      name: 'edit',
+      arguments: { file_path: '/tmp/a.ts', old_string: 'a', new_string: ok },
+    })
+    expect(diffs(updates)).toEqual([{ type: 'diff', path: '/tmp/a.ts', oldText: 'a', newText: ok }])
   })
 
   it('yields no diff for non-edit tools, incomplete args, or unknown calls', () => {

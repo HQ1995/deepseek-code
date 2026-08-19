@@ -38,11 +38,11 @@ grep -q 'mock ready' "$OUT/mock-$RUN_ID.log" || fail "mock gateway did not start
 # 2. Isolated DSH_HOME seeded with the real settings, bridge installed.
 mkdir -p "$SCRATCH"
 cp "$HOME/.dsh/settings.yaml" "$SCRATCH/settings.yaml"
-DSH_HOME="$SCRATCH" "$ROOT/bin/dsh" plugin --profile deepseek-leader add "file:$ROOT/bridge/grok-leader" >"$OUT/plugin-$RUN_ID.log" 2>&1   || fail "dsh plugin add failed"
+DSH_HOME="$SCRATCH" "$ROOT/bin/dsh" plugin --profile dscode add "file:$ROOT/bridge/grok-leader" >"$OUT/plugin-$RUN_ID.log" 2>&1   || fail "dsh plugin add failed"
 
 export TERM=xterm-256color
 export DSH_HOME="$SCRATCH"
-export DEEPSEEK_LEADER_SOCKET="$SOCK"
+export DSCODE_SOCKET="$SOCK"
 export DSH_TELEMETRY_DISABLED=1
 export FAKE_KEY=e2e-fake-key
 export NO_COLOR=1
@@ -99,7 +99,7 @@ grep -q 'Fake GW' "$OUT/frame-$RUN_ID-provider-list.txt" || fail "/provider does
 tmux -L "$SESSION" -f /dev/null kill-server 2>/dev/null || true
 
 # 6. Subsequent boot with the same scratch home still works.
-export DEEPSEEK_LEADER_SOCKET="$SOCK2"
+export DSCODE_SOCKET="$SOCK2"
 boot_and_wait boot2 "$SOCK2"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "/provider fake"
 sleep 2

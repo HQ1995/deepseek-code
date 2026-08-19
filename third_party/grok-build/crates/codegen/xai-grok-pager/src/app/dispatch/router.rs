@@ -440,6 +440,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             expected_version,
             new_text,
         } => queue::dispatch_queue_interject_shared(app, id, expected_version, new_text),
+        Action::QueueSteerShared {
+            id,
+            expected_version,
+        } => queue::dispatch_queue_steer_shared(app, id, expected_version),
         Action::RunEditedQueuedCommand {
             local_id,
             server,

@@ -7,9 +7,9 @@ GitHub Releases on first run (SHA-256 verified, cached at
 `~/.dsh/dsc-tui/bin/`).
 
 ```sh
-npm i -g @deepseek-ai/dsh@next
-dsh plugin --profile deepseek-leader add @hqzhao95/dscode
-~/.dsh/profiles/deepseek-leader/node_modules/.bin/dscode   # first run links ~/.local/bin/dscode
+npm i -g @deepseek-ai/dsh@0.1.0-rc.8
+dsh plugin --profile dscode add @hqzhao95/dscode
+~/.dsh/profiles/dscode/node_modules/.bin/dscode   # first run links ~/.local/bin/dscode
 ```
 
 > **Personal project** — not affiliated with, endorsed by, or sponsored by
@@ -28,15 +28,15 @@ This package is a transport adapter, not a UI integration. Interactive rendering
 
 apply(ctx, config) binds a node:net unix socket, answers the registration handshake, and drives ctx.agents plus the optional sessionPersistence, userQuestions, agentDefaultModel, agentPresets, and sessions services through structural reads. The socket file is unlinked on disposal, but the bridge never unlinks on EADDRINUSE: it fails loud instead of orphaning a live leader. The launcher owns the path and removes stale files before spawning the leader.
 
-The package doubles as the deepseek-leader profile bundle: cordis.patch.yml mounts the server over dsh-base, disables HMR, and inserts the agent-presets roster (default: standard) exactly like the web profile. apps/cli profile-boot patches in the shipped preset root (apps/cli/config/agent-presets) for any composition whose rows include agent-presets.
+The package doubles as the dscode profile bundle: cordis.patch.yml mounts the server over dsh-base, disables HMR, and inserts the agent-presets roster (default: standard) exactly like the web profile. apps/cli profile-boot patches in the shipped preset root (apps/cli/config/agent-presets) for any composition whose rows include agent-presets.
 
 | Config | Default | Meaning |
 |---|---|---|
 | socketPath | /tmp/dsh-grok-leader.sock | Unix socket path the grok clients connect to. |
 | provider | — | Initial provider route for every created agent. |
 | model | — | Initial model for every created agent. |
-| combineQueuedPrompts | false | grok ui.combine_queued_prompts parity; env DEEPSEEK_LEADER_COMBINE_QUEUED=1 also enables it. |
-| followUpBehavior | queue | What a prompt sent while a turn runs does: queue (grok parity) parks it until the turn ends — Enter on the queued row is Send Now, which cancels the running turn; steer folds it into the running turn at the harness's next step boundary without interrupting (Codex-style steering). Explicit config wins over the DEEPSEEK_LEADER_FOLLOW_UP env override. |
+| combineQueuedPrompts | false | grok ui.combine_queued_prompts parity; env DSCODE_COMBINE_QUEUED=1 also enables it. |
+| followUpBehavior | queue | What a prompt sent while a turn runs does: queue (grok parity) parks it until the turn ends — Enter on the queued row is Send Now, which cancels the running turn; steer folds it into the running turn at the harness's next step boundary without interrupting (Codex-style steering). Explicit config wins over the DSCODE_FOLLOW_UP env override. |
 
 ## Protocol contract
 
@@ -63,8 +63,9 @@ The package doubles as the deepseek-leader profile bundle: cordis.patch.yml moun
 | notification wire form | Every extension notification (x.ai/*) rides the wire with the ACP '_' prefix (_x.ai/queue/changed, _x.ai/session/prompt_complete, …): the pager's agent-client-protocol decode strips the prefix before dispatching to its x.ai/* handlers and silently drops unprefixed unknown methods as method_not_found. session/update is the sole typed (unprefixed) notification. |
 | x.ai/queue/changed | Broadcast on every queue mutation: pending rows (id, version, kind, text, position) plus the running prompt (runningPromptId/runningText/runningKind). Each snapshot carries a strictly increasing seq (epoch-seeded, so a restarted leader outranks its predecessor); the TUI drops any snapshot whose seq is not strictly newer for the session and adopts current_prompt_id from the applied ones. |
 | x.ai/queue/interject, /remove, /reorder, /clear | Queue edit notifications. interject is grok send-now: the row jumps to front, the running turn is cancelled (prompt_complete carries cancelTrigger=send_now) and the row runs next. remove (running row falls back to cancel), reorder by orderedIds, clear. |
+| x.ai/queue/steer | Queue-row steering: atomically removes a still-pending queued row and merges its text into the running turn WITHOUT cancelling it. The row's RPC settles with the host turn's stop reason; the authoritative `x.ai/queue/changed` rebroadcast is the source of truth. If no turn is running, the row stays queued (benign no-op + resync). |
 | x.ai/session/prompt_complete | Terminal signal per settled turn (stopReason, promptId, optional cancelTrigger/cancellationCategory); emitted before the queue broadcast so the pager finalizes and reconciles the turn. The session/prompt RPC result carries the same attribution in _meta (sessionId, promptId), so the pager never has to infer which queue row a settle response belongs to. |
-| combine | grok ui.combine_queued_prompts parity: with 2+ plain queued prompts, followers fold into the front (text joined with blank lines, runningCombinedTexts broadcast, followers settle cancelled). Config combineQueuedPrompts or env DEEPSEEK_LEADER_COMBINE_QUEUED=1; default off. |
+| combine | grok ui.combine_queued_prompts parity: with 2+ plain queued prompts, followers fold into the front (text joined with blank lines, runningCombinedTexts broadcast, followers settle cancelled). Config combineQueuedPrompts or env DSCODE_COMBINE_QUEUED=1; default off. |
 | follow-up steer | With followUpBehavior=steer (default queue) — or per prompt via session/prompt _meta.followUp: 'steer' \| 'queue' — a prompt arriving while a turn is in flight is folded into that turn at the harness's next step boundary: its queue row is broadcast once (the pager's optimistic echo retires by id) and then leaves the queue, its text streams as a user echo inside the live turn, and its RPC settles with the host turn's stop reason (own promptId in _meta, no separate prompt_complete). An idle session runs the prompt as its own turn as usual. |
 | x.ai/interject | Mid-turn interjection (the pager's Alt+Enter steer chord and plan review comments): merges the text into the running turn at the harness's next step boundary WITHOUT cancelling it, then broadcasts x.ai/session/interjection (sessionId, text, interjectionId) — the originator dedups by id, other panes render the block. An idle session's steering wakes a turn of its own. |
 | send now | session/prompt with _meta.sendNow: true (the pager's Ctrl+Enter chord) cancels the running turn (prompt_complete carries cancelTrigger=send_now, suppressing the cancelled marker) and runs this prompt next, ahead of the queue — the composer twin of x.ai/queue/interject. |
@@ -78,7 +79,7 @@ Client disconnect and Cordis disposal share the per-client teardown: owned agent
 
 ## Running
 
-The dscode binary bootstraps the leader directly: it resolves dsh (DSH_BIN env, dsh on PATH, then npx --yes @deepseek-ai/dsh), spawns dsh --profile deepseek-leader bound to the socket, removes any stale socket file first, waits for the socket, and attaches through the normal --leader path (third_party/grok-build/crates/codegen/xai-grok-pager/src/dsh_leader.rs). The same composition underneath is the agent loop, LLM adapters, session persistence, and this plugin in the deepseek-leader profile.
+The dscode binary bootstraps the leader directly: it resolves dsh (DSH_BIN env, dsh on PATH, then npx --yes @deepseek-ai/dsh), spawns dsh --profile dscode bound to the socket, removes any stale socket file first, waits for the socket, and attaches through the normal --leader path (third_party/grok-build/crates/codegen/xai-grok-pager/src/dsh_leader.rs). The same composition underneath is the agent loop, LLM adapters, session persistence, and this plugin in the dscode profile.
 
 After changing this package, run `scripts/update-bridge.sh` (repo root): building alone is not enough. The profile holds the plugin as a pnpm `file:` dependency materialized as hard links, and tsc replaces output inodes, so the profile keeps serving the old build until its node_modules is rebuilt from scratch — the script does that and verifies the copy. A leader that is already running keeps its loaded code either way; it exits with its last client, and the next dscode spawn picks up the refreshed profile.
 
@@ -121,18 +122,16 @@ Append-only through the owning tool result.
 - Replay buffering — live notifications racing a session/load are dropped by the high-water mark instead of buffered for a gap-free flush (server.rs MAX_BUFFERED_LIVE_PER_LOAD).
 - Unverified surfaces — the x.ai/ask_user_question request and answer shapes, capability injection into session/new, the grok built-in agentProfile name mapping (grok-build-plan and friends have no dsh preset counterparts), and the lock-file singleton guard carry TODO(verify) markers with grok file:line citations.
 
-## Running the tests out-of-tree
+## Running the tests
 
-The bridge resolves its @deepseek-ai/* peers from the built deepseek-harness
-submodule. Link them once, then run vitest from the harness install:
+The bridge builds and tests against the official npm `@deepseek-ai/dsh-*`
+packages, declared as devDependencies. No deepseek-harness checkout is
+required.
 
 ```sh
-# from bridge/grok-leader
-mkdir -p node_modules/@deepseek-ai
-ln -sfn ../../deepseek-harness/vendor/cordis node_modules/@deepseek-ai/cordis
-ln -sfn ../../deepseek-harness/vendor/schemastery node_modules/@deepseek-ai/schemastery
-ln -sfn ../../deepseek-harness/packages/core/agent node_modules/@deepseek-ai/dsh-agent
-../../deepseek-harness/node_modules/.bin/vitest run
+pnpm install
+pnpm run build
+pnpm exec vitest run
 ```
 
 ## License

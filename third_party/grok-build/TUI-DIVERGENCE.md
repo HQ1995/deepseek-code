@@ -26,9 +26,9 @@ branding (our identity). Keep this list current on every sync.
   mode against the EXTERNAL dsh CLI instead of grok's self-spawn:
   crates/codegen/xai-grok-pager/src/dsh_leader.rs resolves dsh (DSH_BIN env ->
   "dsh" on PATH -> npx),
-  spawns "dsh --profile deepseek-leader" with DEEPSEEK_LEADER_SOCKET /
+  spawns "dsh --profile dscode" with DSCODE_SOCKET /
   DSH_TELEMETRY_DISABLED=1 and a numactl node-1 wrapper (host policy,
-  conditional), logs to /tmp/deepseek-leader.log, and records the PID in the
+  conditional), logs to /tmp/dscode.log, and records the PID in the
   sibling .lock. pager-bin main.rs synthesizes --leader/--leader-socket/
   --sandbox off/--no-auto-update; acp::connect_via_leader and the
   LeaderReconnector call the new xai-grok-shell connect_or_spawn_external
@@ -51,16 +51,36 @@ branding (our identity). Keep this list current on every sync.
   switches the session to the picked provider's first catalog model by reusing
   the existing SetDefaultModel pipeline. The "current provider" is derived
   from the current model's provider meta (the bridge's currentProviderId is
-  only a fallback). /model's dropdown is GLOBAL: every provider's models in
-  one list, rows outside the current model's provider prefixed "[provider]",
-  so a cross-provider switch is a single /model pick (an earlier iteration
-  scoped /model to the current provider, which made /provider a mandatory
-  two-step hop through an arbitrary first model — reverted as unusable).
+  only a fallback). /model's dropdown is scoped to the current provider when
+  empty (falling back to the full catalog if that provider has no models), and
+  typing a query searches the full global catalog (rows outside the current
+  provider prefixed "[provider]"), so a cross-provider switch is still a
+  single /model pick via completion search. An earlier all-provider-always-
+  visible iteration became unusable as providers and models grew; an earlier
+  strict current-provider-only version made cross-provider switching a
+  mandatory two-step hop.
   /provider rows carry a model count; a model-less provider (subscription
   pre-login, missing API key) says so in the row and errors with the
   /dsh login pointer instead of a bare "has no models". The bridge owns
   provider auth/config (~/.dsh); the TUI never hardcodes provider auth
-  assumptions.
+  assumptions. /model rows also show the technical model id in the
+  description column and match on it, so ids like `deepseek-v4-flash` are
+  visible and typeable; provider prefixes use the human-readable provider
+  name when the bridge supplies one instead of raw route ids. When two
+  providers expose the same raw model id, the bridge qualifies the later
+  provider's copy as `provider:model` so both remain selectable, and the
+  remembered effort follows the raw model id across providers. The effort
+  menu is sourced from each model's adapter metadata instead of a hardcoded
+  grok list, so unsupported levels (e.g. medium/xhigh where absent) are not
+  offered. For OpenAI-compatible custom providers, the bridge refreshes the
+  model catalog from `GET /models` once per provider (and writes the refreshed
+  list back to settings), so stale hand-entered lists are replaced by the
+  provider's current models.
+- Queue-pane steering: while a turn runs, the queue row hover/focus action
+  chain now includes `[steer]` next to `[Send now]` (`[steer][Send now][edit][cancel]`).
+  `[steer]` removes the queued row and merges its text into the running turn
+  without cancelling it, matching the composer's Alt+Enter steer. Local rows
+  dispatch `Action::Interject`; server rows use the bridge's new `x.ai/queue/steer`.
 - Add-provider flow: the /provider dropdown's final row "+ Add provider…"
   accepts as /provider --add, which opens a new add-provider modal
   (crates/codegen/xai-grok-pager/src/views/add_provider_modal.rs, wired through
@@ -202,7 +222,7 @@ marker. Divergence is a strict bug fix; candidate for upstreaming.
 ### Follow-up steer parity in the dsh bridge
 
 The dsh bridge implements grok's ui.follow_up_behavior=steer semantics
-(bridge config followUpBehavior / env DEEPSEEK_LEADER_FOLLOW_UP; default
+(bridge config followUpBehavior / env DSCODE_FOLLOW_UP; default
 queue, matching upstream; per-prompt override via session/prompt
 _meta.followUp): with steer on, a prompt sent while a turn runs folds into
 that turn at the harness's next step boundary instead of parking behind the

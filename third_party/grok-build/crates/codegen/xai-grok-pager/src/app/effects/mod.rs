@@ -1543,6 +1543,27 @@ pub(crate) fn execute(
                     TaskResult::CancelComplete
                 });
         }
+        Effect::QueueSteer { session_id, id, expected_version } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!({
+                        "sessionId": session_id.0.to_string(),
+                        "id": id,
+                        "expectedVersion": expected_version,
+                    });
+                    let notification = acp::ExtNotification::new(
+                        "x.ai/queue/steer",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize queue/steer params")
+                            .into(),
+                    );
+                    if let Err(e) = acp_send(notification, &tx).await {
+                        tracing::warn!("Failed to send queue/steer notification: {e}");
+                    }
+                    TaskResult::CancelComplete
+                });
+        }
         Effect::SetSessionMode { session_id, mode_id } => {
             let tx = acp_tx.clone();
             tasks

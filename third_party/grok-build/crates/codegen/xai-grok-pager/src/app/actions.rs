@@ -255,6 +255,15 @@ pub enum Action {
         /// live on [`Effect::QueueInterject`].
         new_text: Option<String>,
     },
+    /// Steer a server-authoritative (shared) queued prompt into the running
+    /// turn without cancelling it: the leader atomically removes the row from
+    /// the queue and merges its text into the in-flight turn. Routed as
+    /// `x.ai/queue/steer`; the `x.ai/queue/changed` rebroadcast is the source
+    /// of truth (no optimistic client-side block).
+    QueueSteerShared {
+        id: String,
+        expected_version: u64,
+    },
     /// A queued-row edit whose saved text is a complete pager builtin invocation: drop the row,
     /// then run the command through the normal slash dispatch. The view only classifies; dispatch
     /// stays the sole execution owner, and it removes the row only after its own guards pass, so a
@@ -1750,6 +1759,16 @@ pub enum Effect {
         id: String,
         expected_version: u64,
         new_text: Option<String>,
+    },
+    /// Steer a server-owned queued prompt into the running turn without
+    /// cancelling it: fire-and-forget `x.ai/queue/steer`. The session actor
+    /// atomically removes it from the queue and merges its text into the
+    /// in-flight turn, then broadcasts the authoritative queue. If the turn
+    /// already ended, the row stays queued (a benign no-op + resync).
+    QueueSteer {
+        session_id: acp::SessionId,
+        id: String,
+        expected_version: u64,
     },
     /// Set the session mode via ACP `session/set_mode`.
     SetSessionMode {

@@ -5,7 +5,7 @@
 //!
 //! Resolution order (mirrors the old shell):
 //!   DSH_BIN env -> "dsh" on PATH -> npx on demand.
-//! The spawned leader logs to /tmp/deepseek-leader.log (DEEPSEEK_LEADER_LOG
+//! The spawned leader logs to /tmp/dscode.log (DSCODE_LOG
 //! overrides); on this host it is wrapped in numactl node-1 pinning when
 //! numactl is on PATH (conditional, host policy).
 
@@ -18,24 +18,24 @@ use xai_grok_shell::leader::ConnectionError;
 /// Env override naming the dsh executable (first resolution candidate).
 pub const DSH_BIN_ENV: &str = "DSH_BIN";
 /// Socket path env for the dsh leader (the bridge binds it via
-/// cordis.patch.yml: socketPath: process.env.DEEPSEEK_LEADER_SOCKET).
-pub const DSH_LEADER_SOCKET_ENV: &str = "DEEPSEEK_LEADER_SOCKET";
-/// Leader log path env; defaults to /tmp/deepseek-leader.log.
-pub const DSH_LEADER_LOG_ENV: &str = "DEEPSEEK_LEADER_LOG";
-/// The leader socket path: DEEPSEEK_LEADER_SOCKET or /tmp/deepseek-leader-UID.sock.
+/// cordis.patch.yml: socketPath: process.env.DSCODE_SOCKET).
+pub const DSCODE_SOCKET_ENV: &str = "DSCODE_SOCKET";
+/// Leader log path env; defaults to /tmp/dscode.log.
+pub const DSCODE_LOG_ENV: &str = "DSCODE_LOG";
+/// The leader socket path: DSCODE_SOCKET or /tmp/dscode-UID.sock.
 pub fn default_leader_socket() -> PathBuf {
-    if let Some(socket) = std::env::var_os(DSH_LEADER_SOCKET_ENV).filter(|v| !v.is_empty()) {
+    if let Some(socket) = std::env::var_os(DSCODE_SOCKET_ENV).filter(|v| !v.is_empty()) {
         return PathBuf::from(socket);
     }
-    PathBuf::from(format!("/tmp/deepseek-leader-{}.sock", uid()))
+    PathBuf::from(format!("/tmp/dscode-{}.sock", uid()))
 }
 
-/// The leader log path: DEEPSEEK_LEADER_LOG or /tmp/deepseek-leader.log.
+/// The leader log path: DSCODE_LOG or /tmp/dscode.log.
 pub fn leader_log_path() -> PathBuf {
-    std::env::var_os(DSH_LEADER_LOG_ENV)
+    std::env::var_os(DSCODE_LOG_ENV)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp/deepseek-leader.log"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/dscode.log"))
 }
 
 #[cfg(unix)]
@@ -49,8 +49,11 @@ fn uid() -> u32 {
     0
 }
 
+/// The exact dsh npm version this release is tested against.
+pub const DSH_NPM_SPEC: &str = "@deepseek-ai/dsh@0.1.0-rc.8";
+
 /// Resolve the dsh argv prefix: DSH_BIN env, "dsh" on PATH, then
-/// ["npx", "--yes", "@deepseek-ai/dsh"]. The env override is authoritative
+/// ["npx", "--yes", DSH_NPM_SPEC]. The env override is authoritative
 /// (taken verbatim); spawn failures point at the leader log.
 pub fn resolve_dsh_command() -> Result<Vec<OsString>, ConnectionError> {
     if let Some(bin) = std::env::var_os(DSH_BIN_ENV).filter(|v| !v.is_empty()) {
@@ -63,7 +66,7 @@ pub fn resolve_dsh_command() -> Result<Vec<OsString>, ConnectionError> {
         return Ok(vec![
             "npx".into(),
             "--yes".into(),
-            "@deepseek-ai/dsh".into(),
+            DSH_NPM_SPEC.into(),
         ]);
     }
     Err(ConnectionError::SpawnFailed(
@@ -71,7 +74,7 @@ pub fn resolve_dsh_command() -> Result<Vec<OsString>, ConnectionError> {
     ))
 }
 
-/// Spawn "dsh --profile deepseek-leader" bound to sock_path, logging to the
+/// Spawn "dsh --profile dscode" bound to sock_path, logging to the
 /// leader log. Called under the leader flock: the caller owns the socket path,
 /// so the stale file is removed here before the fresh leader binds.
 /// Returns the child PID (also recorded in the sibling .lock file).
@@ -108,8 +111,8 @@ pub fn spawn_dsh_leader(sock_path: &Path) -> Result<u32, ConnectionError> {
     };
     cmd.args(&argv[1..])
         .arg("--profile")
-        .arg("deepseek-leader")
-        .env(DSH_LEADER_SOCKET_ENV, sock_path)
+        .arg("dscode")
+        .env(DSCODE_SOCKET_ENV, sock_path)
         .env("DSH_TELEMETRY_DISABLED", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_file.try_clone().map_err(|e| {
@@ -204,7 +207,7 @@ mod tests {
         let _env = crate::test_util::EnvVarGuard::set(DSH_BIN_ENV, "/bin/sh");
         let log = std::env::temp_dir().join(format!("dsh-leader-test-{}.log", std::process::id()));
         let _log_env =
-            crate::test_util::EnvVarGuard::set(DSH_LEADER_LOG_ENV, log.to_str().unwrap());
+            crate::test_util::EnvVarGuard::set(DSCODE_LOG_ENV, log.to_str().unwrap());
         let sock =
             std::env::temp_dir().join(format!("dsh-leader-test-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);

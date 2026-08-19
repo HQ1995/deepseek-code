@@ -61,7 +61,7 @@ impl SlashCommand for ModelCommand {
         if let Some(model_id) = detect_effort_phase(ctx.models, args_query) {
             return Some(build_effort_items(ctx.models, &model_id));
         }
-        Some(build_model_items(ctx.models))
+        Some(build_model_items(ctx.models, args_query))
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -149,25 +149,49 @@ fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::Mod
 
 /// One row per logical model. Reasoning models get a trailing space in
 /// `insert_text` so the prompt widget chains into the effort sub-menu.
-fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
+///
+/// dscode: with no query the list is scoped to the current provider so a large
+/// multi-provider catalog stays manageable. Typing a query switches to the
+/// full global catalog, so cross-provider switching is still one step via
+/// completion search.
+fn build_model_items(models: &ModelState, query: &str) -> Vec<ArgItem> {
     let current_id = models.current.as_ref();
     let mut items: Vec<ArgItem> = Vec::with_capacity(models.available.len());
     let scope = models.current_provider_scope();
+    let searching = !query.trim().is_empty();
+    // If the current provider has no models, don't show an empty picker:
+    // fall back to the full catalog so the user can still find another route.
+    let scope_has_models = !scope.is_empty()
+        && models.listed_models().any(|(id, _)| models.provider_for(id) == scope);
     for (id, info) in models.listed_models() {
+        let provider = models.provider_for(id);
+        // Empty query: show the current provider's models first. A non-empty
+        // query searches the whole catalog (provider prefixes still identify
+        // rows from other providers).
+        if !searching && scope_has_models && provider != scope {
+            continue;
+        }
         let is_current = current_id == Some(id);
         let supports = supports_reasoning_effort(info);
 
-        // dscode: global catalog — rows on the current model's provider keep
-        // bare names; rows on other providers carry a "[provider] " prefix so
-        // one list covers cross-provider switching in a single pick.
-        let provider = models.provider_for(id);
+        // dscode: global search catalog — rows on the current model's provider
+        // keep bare names; rows on other providers carry a "[provider] " prefix
+        // so one list covers cross-provider switching in a single pick. The
+        // prefix uses the provider's human-readable name when the bridge
+        // supplied one (raw ids like "deepseek-official" are noisy).
+        let provider_label = models
+            .providers
+            .iter()
+            .find(|p| p.id == provider)
+            .and_then(|p| p.name.as_deref())
+            .unwrap_or(&provider);
 
         let display = if is_current {
             format!("{} (current)", info.name)
         } else if provider.is_empty() {
             info.name.clone()
         } else if scope.is_empty() || provider != scope {
-            format!("[{}] {}", provider, info.name)
+            format!("[{}] {}", provider_label, info.name)
         } else {
             info.name.clone()
         };
@@ -181,17 +205,29 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
             info.name.clone()
         };
 
+        // Match on the provider id, the human provider label, the display
+        // name, and the model id so `/model deepseek-v4-flash` is findable.
         let match_text = if provider.is_empty() {
             info.name.clone()
+        } else if provider_label == provider {
+            format!("{} {} {}", provider, info.name, id.0.as_ref())
         } else {
-            format!("{} {}", provider, info.name)
+            format!("{} {} {} {}", provider, provider_label, info.name, id.0.as_ref())
+        };
+
+        // Show the technical model id in the description column; the bridge's
+        // catalogs often carry no description, so this is what makes ids like
+        // deepseek-v4-flash visible in the picker.
+        let description = match info.description.clone() {
+            Some(desc) if !desc.is_empty() => format!("{} · {}", id.0.as_ref(), desc),
+            _ => id.0.to_string(),
         };
 
         items.push(ArgItem {
             display,
             match_text,
             insert_text,
-            description: info.description.clone().unwrap_or_default(),
+            description,
         });
     }
     items
@@ -355,10 +391,15 @@ mod tests {
             current_title: None,
         };
         let items = ModelCommand.suggest_args(&ctx, "").unwrap();
-        assert_eq!(items.len(), 3, "the /model list spans every provider");
+        assert_eq!(items.len(), 2, "an empty /model query scopes to the current provider");
         assert_eq!(items[0].display, "DS Chat (current)");
         assert_eq!(items[1].display, "DS Reasoner");
-        assert_eq!(items[2].display, "[pi] Pi Code");
+
+        // Typing a query switches to the full global catalog, so a model on
+        // another provider is still reachable in one step via search.
+        let searched = ModelCommand.suggest_args(&ctx, "pi").unwrap();
+        assert_eq!(searched.len(), 3, "a non-empty query searches the full catalog");
+        assert!(searched.iter().any(|i| i.display == "[pi] Pi Code"));
     }
 
     #[test]
@@ -391,6 +432,35 @@ mod tests {
     }
 
     #[test]
+    fn model_items_show_ids_and_human_provider_prefixes() {
+        let mut state = ModelState::default();
+        state.providers = vec![crate::acp::model_state::ProviderInfo {
+            id: "deepseek-official".into(),
+            name: Some("DeepSeek".into()),
+            ..Default::default()
+        }];
+        let (id, info) = provider_model("deepseek-v4-flash", "DeepSeek V4 Flash", "deepseek-official");
+        state.available.insert(id, info);
+
+        let ctx = AppCtx {
+            models: &state,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            workflows_available: true,
+            capabilities: None,
+            screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
+        };
+        let items = ModelCommand.suggest_args(&ctx, "").unwrap();
+        assert_eq!(items[0].display, "[DeepSeek] DeepSeek V4 Flash");
+        assert_eq!(items[0].description, "deepseek-v4-flash");
+        assert!(items[0].match_text.contains("deepseek-v4-flash"));
+        assert!(items[0].match_text.contains("DeepSeek"));
+    }
+
+    #[test]
     fn switching_current_model_moves_provider_scope() {
         let mut state = ModelState::default();
         let (ds, dsinfo) = provider_model("ds-chat", "DS Chat", "deepseek");
@@ -401,11 +471,14 @@ mod tests {
         assert_eq!(state.current_provider_scope(), "deepseek");
         state.set_current(gpt, None);
         assert_eq!(state.current_provider_scope(), "openai");
-        // The list stays global; only the prefixes move with the scope.
-        let items = build_model_items(&state);
-        assert_eq!(items.len(), 2, "every provider's models stay offered");
-        assert_eq!(items[0].display, "[deepseek] DS Chat");
-        assert_eq!(items[1].display, "GPT-4 (current)");
+        // Empty query scopes to the new current provider; a non-empty query
+        // re-opens the full catalog for cross-provider search.
+        let items = build_model_items(&state, "");
+        assert_eq!(items.len(), 1, "empty query scopes to the current provider");
+        assert_eq!(items[0].display, "GPT-4 (current)");
+        let searched = build_model_items(&state, "ds");
+        assert_eq!(searched.len(), 2, "search re-opens the full catalog");
+        assert!(searched.iter().any(|i| i.display == "[deepseek] DS Chat"));
     }
 
     #[test]

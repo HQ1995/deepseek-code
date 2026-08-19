@@ -1094,6 +1094,24 @@ pub(super) fn dispatch_queue_interject_shared(
     }
 }
 
+/// `Action::QueueSteerShared` arm: map a server queue-row steer to a
+/// fire-and-forget effect scoped to the active agent's session. The leader
+/// removes the row and folds its text into the running turn without cancel.
+pub(super) fn dispatch_queue_steer_shared(
+    app: &mut AppView,
+    id: String,
+    expected_version: u64,
+) -> Vec<Effect> {
+    match active_agent_session_id(app) {
+        Some(session_id) => vec![Effect::QueueSteer {
+            session_id,
+            id,
+            expected_version,
+        }],
+        None => vec![],
+    }
+}
+
 /// Decides whether the edited row is dropped and whether its text reaches the send path.
 enum EditedCommandGate {
     /// Drop the row and run the command. Carries the bound session a server-row removal needs.

@@ -1,7 +1,7 @@
 # ACP feasibility: interactive pager on the official dsh ACP server
 
 Question: can the interactive `dscode` TUI be driven by the official dsh ACP
-server (`deepseek-harness/packages/acp`) instead of the custom grok-leader
+server (in `deepseek-ai/deepseek-harness`, package `packages/acp`) instead of the custom grok-leader
 unix-socket bridge, while keeping the interactive pager (mouse, queue pane,
 session picker, tool blocks)?
 
@@ -15,10 +15,8 @@ automation (headless-semantics) transport. Evidence below.
 
 Sources analyzed (this worktree):
 
-- Official ACP server at the upstream release `dsh-v0.1.0-rc.7`
-  (`deepseek-harness` @ `99f6f02fecdb7dff40c3fbc9470f5907c29f74ca`);
-  the current dev gitlink `47b5c455d4cd5f4923c0293fb7d5f9e2a57ad842` was
-  cross-checked and agrees on every point below.
+- Official ACP server at the upstream release `dsh-v0.1.0-rc.8`
+  (`deepseek-ai/deepseek-harness` @ `141eb6fef8`).
 - Pager connection surfaces under
   `third_party/grok-build/crates/codegen/xai-grok-pager/src/`.
 - Bridge wire surface `bridge/grok-leader/src/index.ts`.
@@ -57,7 +55,7 @@ Actual external-attach path:
    (src/acp/mod.rs:266-403; invoked from src/app/mod.rs:953).
 2. It dials `connect_or_spawn_external` over a **unix socket**
    (`GROK_LEADER_SOCKET` / `~/.grok/leader.sock`) and, for dscode, spawns the
-   external `dsh --profile deepseek-leader` process that serves it
+   external `dsh --profile dscode` process that serves it
    (src/acp/mod.rs:308-316, src/dsh_leader.rs:86-125). Never a self-spawned
    agent.
 3. The wire is grok leader framing — 4-byte BE length + JSON envelope

@@ -465,6 +465,12 @@ impl AgentView {
                         {
                             return InputOutcome::Action(action);
                         }
+                        if let Some(id) = self.queue.steer_click(mouse.column, mouse.row)
+                            && self.session.state.is_turn_running()
+                            && let InputOutcome::Action(action) = self.steer_queue_row(id)
+                        {
+                            return InputOutcome::Action(action);
+                        }
                         if let Some(id) = self.queue.edit_click(mouse.column, mouse.row)
                             && (!matches!(self.prompt_mode, PromptMode::EditingQueued { .. })
                                 || self.set_active_pane(AgentPane::Queue, false))
@@ -1033,11 +1039,13 @@ impl AgentView {
                 ) {
                     changed |= self.queue.update_delete_hover(mouse.column, mouse.row);
                     changed |= self.queue.update_send_now_hover(mouse.column, mouse.row);
+                    changed |= self.queue.update_steer_hover(mouse.column, mouse.row);
                     changed |= self.queue.update_edit_hover(mouse.column, mouse.row);
                     changed |= self.queue.update_row_hover(mouse.column, mouse.row);
                 } else {
                     changed |= self.queue.clear_delete_hover();
                     changed |= self.queue.clear_send_now_hover();
+                    changed |= self.queue.clear_steer_hover();
                     changed |= self.queue.clear_edit_hover();
                     changed |= self.queue.clear_row_hover();
                 }
@@ -1287,6 +1295,10 @@ mod tests {
     fn click_send_now(agent: &mut AgentView, selected_id: u64) -> InputOutcome {
         click_queue_button(agent, selected_id, |a, c, r| a.queue.send_now_click(c, r))
     }
+    /// Left-click the row's `[steer]` (no-cancel merge) button.
+    fn click_steer(agent: &mut AgentView, selected_id: u64) -> InputOutcome {
+        click_queue_button(agent, selected_id, |a, c, r| a.queue.steer_click(c, r))
+    }
     /// Left-click the row's `[cancel]` (delete) button.
     fn click_delete(agent: &mut AgentView, selected_id: u64) -> InputOutcome {
         click_queue_button(agent, selected_id, |a, c, r| a.queue.delete_click(c, r))
@@ -1377,6 +1389,30 @@ mod tests {
         assert_eq!(agent.prompt.text(), "draft");
         assert!(!agent.queue.overlay.visible);
     }
+    /// Mouse `[steer]` on a local row removes it and sends a no-cancel
+    /// interjection into the running turn.
+    #[test]
+    fn mouse_steer_local_row_interjects_without_cancel() {
+        let mut agent = running_agent_local_only();
+        let ids = agent.queue.entry_ids();
+        let outcome = click_steer(&mut agent, ids[0]);
+        match outcome {
+            InputOutcome::Action(Action::Interject { text, images }) => {
+                assert_eq!(text, "local one");
+                assert!(images.is_empty());
+            }
+            other => panic!("expected Interject action, got {other:?}"),
+        }
+        assert!(
+            agent.session.pending_prompts.is_empty(),
+            "steered local row must be consumed"
+        );
+        assert!(
+            !agent.queue.overlay.visible,
+            "steering the last local row should hide the empty queue pane"
+        );
+    }
+
     /// Mouse `[cancel]` of the FRONT local row being edited while idle:
     /// discarding the edit releases the drain block, so the click must kick
     /// `DrainQueue` like the modal Delete arm (the row behind must not sit

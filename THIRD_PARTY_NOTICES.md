@@ -17,12 +17,12 @@ the complete modification ledger is maintained in:
 Per Apache-2.0 §4(b), modified grok-build files carry or are accompanied by
 prominent change notices. Modified files remain under Apache-2.0.
 
-## deepseek-harness (submodule)
+## DeepSeek Harness (npm dependency)
 
-The `deepseek-harness/` submodule is the DeepSeek Harness fork (MIT). Its full
-dependency disclosure is recorded in
-`deepseek-harness/THIRD_PARTY_NOTICES.md` and
-`deepseek-harness/pnpm-lock.yaml`.
+dscode uses the official `@deepseek-ai/dsh` npm packages (MIT). Their full
+dependency disclosure is published with the npm packages and in the upstream
+[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)
+repository.
 
 ## Vendored grok-build TUI
 
@@ -36,5 +36,5 @@ dependency disclosure is recorded in
 
 `bridge/grok-leader/` is first-party code licensed under Apache-2.0. It has no
 external npm dependencies beyond the `@deepseek-ai/dsh-*` packages and vendored
-cordis/schemastery (all MIT), resolved from the deepseek-harness submodule. Its
+cordis/schemastery (all MIT), resolved from the official npm packages. Its
 build-only devDependencies are TypeScript (Apache-2.0) and `@types/node` (MIT).

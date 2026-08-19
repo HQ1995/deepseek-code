@@ -4,7 +4,7 @@ Audit of every intentional divergence between `third_party/grok-build` and
 upstream `xai-org/grok-build`, with effort estimates and a recommended
 removal order. Sources: `third_party/grok-build/TUI-DIVERGENCE.md`,
 `third_party/grok-build/VENDORING.md`, targeted greps for local-only marks
-(`dscode`/`DSCODE`, `dsh_leader.rs`, `DEEPSEEK_LEADER_*`, the thinking
+(`dscode`/`DSCODE`, `dsh_leader.rs`, `DSCODE_*`, the thinking
 display-mode default, `[[bin]]` names), and spot-checks against the upstream
 tree at the recorded vendoring commit
 `d6a22a1` (the `SOURCE_REV` value `7140ec` is unfetchable upstream —
@@ -47,7 +47,7 @@ and release before they ship.
 | 12 | `xai-grok-pager-bin/src/main.rs` (applied #2) | version_text now prints `env!("CARGO_BIN_NAME")` — honest version reporting; PR candidate upstream (they hardcode "grok") | b | done |
 | 13 | `xai-grok-pager/src/scrollback/state/mod.rs:267` | `thinking_display_mode` default `Truncated` (upstream `Collapsed`). UX default; no config seam today | a | small |
 | 14 | `xai-grok-pager/src/app/app_view.rs:4839,4958` | preset-label fallback "standard" -> "minimal", coupled to bridge default | c | — |
-| 15 | `xai-grok-pager/src/dsh_leader.rs` + `pager-bin/main.rs` | single-entry leader bootstrap: resolve dsh, spawn `dsh --profile deepseek-leader`, `DEEPSEEK_LEADER_SOCKET`/`DEEPSEEK_LEADER_LOG`, `DSH_TELEMETRY_DISABLED=1`, PID in sibling .lock | c | — |
+| 15 | `xai-grok-pager/src/dsh_leader.rs` + `pager-bin/main.rs` | single-entry leader bootstrap: resolve dsh, spawn `dsh --profile dscode`, `DSCODE_SOCKET`/`DSCODE_LOG`, `DSH_TELEMETRY_DISABLED=1`, PID in sibling .lock | c | — |
 | 16 | `xai-grok-shell/src/leader/mod.rs`, `xai-grok-pager/src/acp/mod.rs` | `connect_or_spawn_external`, `LeaderReconnector`, flock-serialized spawner, ~30s cold-boot wait, failed-spawn kill | c | — |
 | 17 | `xai-grok-pager/src/app/event_loop.rs:1066` | skip local x.ai interactive-login gate in leader-client mode (auth owned by harness) | c | — |
 | 18 | pager-bin main.rs + cli.rs | `--leader`/`--leader-socket` flags, local x.ai auth bypass in leader mode | c | — |

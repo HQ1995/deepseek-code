@@ -361,6 +361,47 @@ impl AgentView {
         InputOutcome::Changed
     }
 
+    /// Merge one merged-queue row into the running turn without cancelling it.
+    /// This is the no-loss sibling of [`Self::force_interject_queue_row`]:
+    /// the row leaves the queue and its text is sent as a mid-turn steer.
+    pub(in crate::app) fn steer_queue_row(&mut self, id: u64) -> InputOutcome {
+        if !self.session.state.is_turn_running() {
+            self.show_toast("No turn running — prompt will send when ready");
+            return InputOutcome::Changed;
+        }
+        // Only plain prompts / raw skill rows can steer (others would send
+        // display text, not payload).
+        if self.queue_row_prompt_like(id) != Some(true) {
+            self.show_toast("Can't steer this — it runs when the current turn ends");
+            return InputOutcome::Changed;
+        }
+        let row = self.queue.row_ref(id);
+        let is_server = matches!(
+            row.as_ref().map(|r| r.origin),
+            Some(crate::views::queue_pane::QueueRowOrigin::Server)
+        );
+        if is_server {
+            if let Some(row) = row.as_ref()
+                && let Some(server_id) = row.server_id.clone()
+            {
+                // Server rows route to the leader's atomic queue-steer command;
+                // the authoritative queue broadcast removes the row.
+                return InputOutcome::Action(Action::QueueSteerShared {
+                    id: server_id,
+                    expected_version: row.version,
+                });
+            }
+            return InputOutcome::Changed;
+        }
+        if let Some(prompt) = self.remove_local_queue_row(id) {
+            return InputOutcome::Action(Action::Interject {
+                text: prompt.text,
+                images: prompt.images,
+            });
+        }
+        InputOutcome::Changed
+    }
+
     /// Reconcile this client's optimistic queue echoes against a raw
     /// `x.ai/queue/changed` broadcast (pre-merge entries — the mirrored
     /// snapshot re-pins unconfirmed echoes, so it can't tell confirmation
@@ -564,6 +605,12 @@ impl AgentView {
                     }
                     self.session.swap_prompt_down(id);
                 }
+                QueueEvent::SteerSelected { id } => {
+                    // Same SteerPrompt chord as the composer; surface is the
+                    // queue pane (not When::PromptFocused).
+                    crate::actions::log_shortcut_used(key, ActionId::SteerPrompt, "queue");
+                    return self.steer_queue_row(id);
+                }
                 QueueEvent::ForceInterject { id } => {
                     // Same InterjectPrompt chord as the prompt; surface is the
                     // queue pane (not When::PromptFocused).
@@ -590,7 +637,8 @@ impl AgentView {
             | QueueEvent::EditSelected { id }
             | QueueEvent::SwapUp { id }
             | QueueEvent::SwapDown { id }
-            | QueueEvent::ForceInterject { id } => *id,
+            | QueueEvent::ForceInterject { id }
+            | QueueEvent::SteerSelected { id } => *id,
         }
     }
 
@@ -964,6 +1012,53 @@ mod queue_edit_routing_tests {
             other => panic!("expected SendPromptNow action, got {other:?}"),
         }
         // Local interject removed it from the client-owned queue.
+        assert!(agent.session.pending_prompts.is_empty());
+    }
+
+    /// Steering a Server-origin row routes to `Action::QueueSteerShared`; a
+    /// Local-origin row removes itself and routes to `Action::Interject`.
+    #[test]
+    fn steer_routes_server_to_action_and_local_to_interject() {
+        let mut agent = make_running_agent();
+        let registry = non_vscode_registry();
+        let key = registry
+            .key_for(ActionId::SteerPrompt)
+            .expect("steer prompt has a default key")
+            .to_key_event();
+        // Stored image must ride the local steer action.
+        agent.session.pending_prompts[0]
+            .images
+            .push(test_pasted_image());
+
+        let ids = agent.queue.entry_ids();
+        assert_eq!(ids.len(), 2);
+        // Server row first (documented merge order).
+        agent.queue.list_state.select_by_id(ids[0]);
+        let outcome = agent.handle_queue_key(&key, &registry);
+        match outcome {
+            InputOutcome::Action(Action::QueueSteerShared {
+                id,
+                expected_version,
+            }) => {
+                assert_eq!(id, "p1");
+                assert_eq!(expected_version, 2);
+            }
+            other => panic!("expected QueueSteerShared action, got {other:?}"),
+        }
+        // Server steer does NOT mutate the local queue.
+        assert_eq!(agent.session.pending_prompts.len(), 1);
+
+        // The local row steers its text (and stored images) directly.
+        agent.queue.list_state.select_by_id(ids[1]);
+        let outcome = agent.handle_queue_key(&key, &registry);
+        match outcome {
+            InputOutcome::Action(Action::Interject { text, images }) => {
+                assert_eq!(text, "local one");
+                assert_eq!(images.len(), 1, "row image must ride the steer");
+            }
+            other => panic!("expected Interject action, got {other:?}"),
+        }
+        // Local steer removed it from the client-owned queue.
         assert!(agent.session.pending_prompts.is_empty());
     }
 

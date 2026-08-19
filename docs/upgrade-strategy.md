@@ -1,7 +1,7 @@
 # Upgrade strategy
 
-dscode = a forked grok-build TUI (our own code, in-repo) + a pinned
-deepseek-harness submodule + the out-of-tree grok-leader bridge. The only
+dscode = a vendored/modified grok-build TUI (our code, in-repo) + the
+out-of-tree grok-leader bridge + the official npm dsh runtime. The only
 contract between TUI and harness is the grok leader protocol
 (docs/grok-leader-protocol.md) plus its version handshake. Each side upgrades
 through its own pipeline; the other side does not change.
@@ -21,21 +21,27 @@ through its own pipeline; the other side does not change.
   - third_party/grok-build/TUI-DIVERGENCE.md — every change we made, the file,
     the reason, and its class (patch / feature / branding). Patches that fix
     generic bugs should be offered upstream; accepted upstream patches get
-    deleted from our fork.
+    removed from our divergence list.
 - Sync gate: fetch/diff -> port by hand -> cargo build --release ->
   fake-leader replay -> one real turn against deepseek-v4-flash. Only the
   green run counts. Wrap in scripts/update-tui.sh.
 - Cadence: every upstream release, small batches. Upstream security fixes are
   cherry-picked on a fast path.
 
-## Harness (deepseek-harness submodule) — pin and bump
+## dsh npm release — pin and bump
 
-- Pinned to our fork HQ1995/deepseek-harness at the commit recorded by the
-  submodule pointer. Zero patches is the goal; the EMFILE watcher fix is the
-  only known divergence until it is accepted upstream.
-- Upgrade = advance the submodule SHA -> rebuild dsh from the submodule ->
-  reinstall the bridge plugin -> rerun the bridge tests and one real turn.
-  See docs/harness-updates.md for the runbook.
+- End-user installs use the official npm dsh, pinned to the exact version
+  recorded in `bridge/grok-leader/package.json` -> `dsh.testedVersion`
+  (currently `0.1.0-rc.8`).
+- The same manifest also records `dsh.supportedRange`
+  (`>=0.1.0-rc.8 <0.2.0`): versions in that range are allowed to run, while
+  `testedVersion` is the one we actually validated in CI.
+- Do not switch `scripts/install.sh` or the launcher back to `@next`/`latest`.
+  A dsh upgrade is a deliberate release step:
+  1. bump `dsh.testedVersion`;
+  2. run the bridge test suite and the dscode e2e suites;
+  3. update the launcher/installer if the CLI invocation changes;
+  4. cut a new dscode release.
 
 ## Bridge (bridge/grok-leader)
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rebuild the grok-leader bridge and force-refresh its copy inside the
-# deepseek-leader profile.
+# dscode profile.
 #
 # Why the force-refresh: the profile depends on the bridge as a pnpm `file:`
 # dependency, which pnpm materializes as HARD LINKS through its store. tsc
@@ -12,7 +12,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BRIDGE="$ROOT/bridge/grok-leader"
-PROFILE="$HOME/.dsh/profiles/deepseek-leader"
+PROFILE="$HOME/.dsh/profiles/dscode"
 
 echo "building the grok-leader bridge..."
 ( cd "$BRIDGE" && pnpm install --silent && pnpm run build )
@@ -37,8 +37,8 @@ echo "profile copy matches the fresh build"
 
 # A live leader keeps the code it loaded at spawn; only a new leader picks
 # up this refresh. Never kill it here: it may be serving live TUI sessions.
-if pgrep -f "profile deepseek-leader" >/dev/null 2>&1; then
-  echo "note: a deepseek-leader is running on the OLD build."
+if pgrep -f "profile dscode" >/dev/null 2>&1; then
+  echo "note: a dscode is running on the OLD build."
   echo "      exit every dscode session (the leader exits with its last client),"
   echo "      then start dscode again to spawn a leader on the new build."
 fi

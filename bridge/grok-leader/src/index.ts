@@ -99,6 +99,7 @@ const WIRE = {
   sessionUpdate: 'session/update',
   requestPermission: 'session/request_permission',
   modelsList: 'x.ai/models/list',
+  modelsUpdate: 'x.ai/models/update',
   sessionsList: 'x.ai/sessions/list',
   askUserQuestion: 'x.ai/ask_user_question',
   providersAdd: 'x.ai/providers/add',
@@ -118,6 +119,35 @@ const PROVIDER_APIS = ['openai-completions', 'openai-responses', 'anthropic-mess
  * catalog (catalog routes never hit it: they resolve their models first).
  */
 const NO_MODELS_MARKER = 'resolves no models'
+
+/**
+ * Fallback reasoning effort shown in the TUI before the user has explicitly
+ * picked one. DeepSeek's own adapter defaults to high when omitted; this is
+ * also the first canonical level in the bridge's advertised effort menu.
+ */
+const DEFAULT_REASONING_EFFORT = 'high'
+/** Fallback effort menu when the llm service exposes no exact-model reasoning metadata. */
+const DEFAULT_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/** Separator used to disambiguate the same model id owned by different providers. */
+const MODEL_ID_SEPARATOR = ':'
+
+/** Build the wire catalog id for a provider/model pair. */
+function wireModelId(provider: string, modelId: string): string {
+  return provider + MODEL_ID_SEPARATOR + modelId
+}
+
+/** Split a wire catalog id back into provider/model when it is provider-qualified. */
+function parseWireModelId(wireId: string): { provider: string; model: string } | undefined {
+  const index = wireId.indexOf(MODEL_ID_SEPARATOR)
+  if (index <= 0 || index === wireId.length - 1) return undefined
+  return { provider: wireId.slice(0, index), model: wireId.slice(index + 1) }
+}
+
+/** Stable in-memory key for a provider/model effort. */
+function modelEffortKey(provider: string, model: string): string {
+  return provider + '\u0000' + model
+}
 
 /**
  * English display copy for the four shipped (system) agent presets, mirrored
@@ -160,9 +190,14 @@ export type GrokSessionUpdate =
 
 /** grok ACP ToolKind vocabulary the TUI renders for a tool call. */
 export type ToolKindWire = 'execute' | 'read' | 'edit' | 'search' | 'fetch' | 'other'
-/** grok ToolCallContent shapes the TUI understands (text or file diff). */
+/** grok ToolCallContent shapes the TUI understands (text or file diff).
+ *
+ * NOTE: ACP's `ToolCallContent` is an internally-tagged enum whose variants are
+ * `content` / `diff` / `terminal` — a bare `{"type":"text"}` block does NOT
+ * deserialize and drops the whole `tool_call_update` notification in the TUI.
+ * Text must ride as `{"type":"content","content":{"type":"text",...}}`. */
 export type ToolResultContentBlock =
-  | { type: 'text'; text: string }
+  | { type: 'content'; content: { type: 'text'; text: string } }
   | { type: 'diff'; path: string; oldText?: string; newText: string }
 
 /** grok AskUserQuestionExtResponse: tagged on `outcome`, snake_case variant names. */
@@ -297,6 +332,17 @@ interface CommandsLike {
 interface LlmLike {
   listProviders(): Array<{ id: string; name?: string }>
   listModels(provider: string): Promise<Array<{ id: string; name: string; description?: string }>>
+  /** Exact-route model metadata (used for adapter-configured effort defaults). */
+  resolveModelInfo?(
+    provider: string,
+    model: string,
+    signal?: AbortSignal,
+  ): Promise<{
+    provider: string
+    id: string
+    name?: string
+    reasoning?: { defaultEffort?: string; efforts?: Array<{ id: string; name?: string }> }
+  }>
   /** Interrogate a draft provider for its model catalog (llm-pi-ai discovery). */
   discoverModels?(
     settingsNs: string,
@@ -331,18 +377,20 @@ interface AgentDefaultModelLike {
 function modelSelectionFromDefault(
   config: Pick<GrokLeaderConfig, 'provider' | 'model'>,
   defaultSelection: { provider: string; model: string; reasoningEffort?: string } | undefined,
+  rememberedEffort?: string,
 ) {
   const provider = config.provider ?? defaultSelection?.provider ?? 'deepseek-official'
   const model = config.model ?? defaultSelection?.model ?? 'deepseek-v4-flash'
   const fromDefault = defaultSelection !== undefined
     && provider === defaultSelection.provider
     && model === defaultSelection.model
+  const reasoningEffort = fromDefault && defaultSelection.reasoningEffort !== undefined
+    ? defaultSelection.reasoningEffort
+    : rememberedEffort
   return {
     provider,
     model,
-    ...fromDefault && defaultSelection.reasoningEffort !== undefined
-      ? { reasoningEffort: ReasoningEffortId(defaultSelection.reasoningEffort) }
-      : {},
+    ...reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(reasoningEffort) },
   }
 }
 
@@ -352,6 +400,7 @@ function modelSelectionFromRequest(
   config: Pick<GrokLeaderConfig, 'provider' | 'model'>,
   defaultSelection: { provider: string; model: string; reasoningEffort?: string } | undefined,
   meta: Record<string, unknown> | null | undefined,
+  rememberedEfforts?: ReadonlyMap<string, string>,
 ) {
   const provider = typeof meta?.provider === 'string' ? meta.provider : config.provider ?? defaultSelection?.provider ?? 'deepseek-official'
   const model = typeof meta?.model === 'string' ? meta.model : config.model ?? defaultSelection?.model ?? 'deepseek-v4-flash'
@@ -359,7 +408,9 @@ function modelSelectionFromRequest(
     && provider === defaultSelection.provider
     && model === defaultSelection.model
   const effort = typeof meta?.reasoningEffort === 'string' ? meta.reasoningEffort : undefined
-  const reasoningEffort = effort ?? (fromDefault ? defaultSelection.reasoningEffort : undefined)
+  const reasoningEffort = effort
+    ?? (fromDefault ? defaultSelection.reasoningEffort : undefined)
+    ?? rememberedEfforts?.get(model)
   return {
     provider,
     model,
@@ -536,11 +587,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   let clientSeq = 0
   let closed = false
   let catalog: ModelCatalog | undefined
+  /** Per-model reasoning effort remembered across switches in this leader run. */
+  const modelEfforts = new Map<string, string>()
+  /** Fresh model catalogs pulled once per provider from OpenAI-compatible /models endpoints. */
+  const discoveredModels = new Map<string, Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>>()
   // grok's ui.combine_queued_prompts (default off); env override for dev shells.
-  const combineQueued = config.combineQueuedPrompts === true || process.env.DEEPSEEK_LEADER_COMBINE_QUEUED === '1'
+  const combineQueued = config.combineQueuedPrompts === true || process.env.DSCODE_COMBINE_QUEUED === '1'
   // Explicit config wins; the env override serves dev shells; the default is
   // queue (grok parity). 'steer' folds follow-ups into the running turn.
-  const followUpSteer = (config.followUpBehavior ?? process.env.DEEPSEEK_LEADER_FOLLOW_UP ?? 'queue') === 'steer'
+  const followUpSteer = (config.followUpBehavior ?? process.env.DSCODE_FOLLOW_UP ?? 'queue') === 'steer'
   const idleExitMs = config.idleExitMs ?? 2000
   /** x.ai/session/list rows served when the request carries no (or an oversized) limit. */
   const DEFAULT_SESSION_LIST_LIMIT = 50
@@ -623,12 +678,75 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   /** Rebuild the flattened wire catalog plus the provider ownership the bare ids hide. */
   const refreshCatalog = async (): Promise<ModelCatalog> => {
     const userSection = providerUserSection(settings())
+    const providerService = settings()
     const rows = llm === undefined
       ? []
-      : await Promise.all(llm.listProviders().map(async provider => ({
-        provider: provider.id,
-        models: await llm.listModels(provider.id),
-      })))
+      : await Promise.all(llm.listProviders().map(async provider => {
+        const profile = providerUserProfile(userSection, provider.id)
+        const staticModels = await llm.listModels(provider.id)
+        const baseURL = typeof profile.baseURL === 'string' ? profile.baseURL : undefined
+        const api = typeof profile.api === 'string' ? profile.api : undefined
+        let models = staticModels
+        // Codex-style dynamic catalog: for an OpenAI-compatible custom route,
+        // pull the provider's current /models once and use that as the source
+        // of truth. A stale settings list (e.g. old prefixed ids) is refreshed
+        // in place, and failures fall back to the configured catalog.
+        if (llm?.discoverModels !== undefined
+          && baseURL !== undefined
+          && (api === 'openai-completions' || api === 'openai-responses')) {
+          try {
+            let discovered = discoveredModels.get(provider.id)
+            if (discovered === undefined) {
+              discovered = await discoverProviderModels(provider.id, profile)
+              discoveredModels.set(provider.id, discovered)
+            }
+            models = discovered.map(model => ({
+              provider: provider.id,
+              id: model.id,
+              name: model.name ?? model.id,
+            }))
+            // Persist the refreshed list so the adapter's request path serves
+            // exactly what the picker shows, without waiting for a restart.
+            if (providerService !== undefined && Array.isArray(profile.models)) {
+              const existingById = new Map<string, Record<string, unknown>>(
+                (profile.models as Array<Record<string, unknown>>).map(model => [
+                  String(model.id ?? ''),
+                  model,
+                ]),
+              )
+              const nextModels = discovered.map(model => {
+                const existing = existingById.get(model.id)
+                return {
+                  ...(model.name === undefined ? {} : { name: model.name }),
+                  ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
+                  ...(model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens }),
+                  ...existing,
+                  id: model.id,
+                }
+              })
+              const modelShape = (model: Record<string, unknown>): string =>
+                JSON.stringify([
+                  String(model.id ?? ''),
+                  model.name ?? null,
+                  model.contextWindow ?? null,
+                  model.maxTokens ?? null,
+                ])
+              const currentShapes = (profile.models as Array<Record<string, unknown>>).map(modelShape)
+              const nextShapes = nextModels.map(modelShape)
+              if (currentShapes.join('\u0000') !== nextShapes.join('\u0000')) {
+                await providerService.mutate(PROVIDER_SETTINGS_NS, [{
+                  op: 'set',
+                  path: ['providers', provider.id],
+                  value: { ...profile, models: nextModels },
+                }])
+              }
+            }
+          } catch (error) {
+            logger.warn('grok-leader: model discovery failed for ' + provider.id + '; using configured models: ' + (error instanceof Error ? error.message : String(error)))
+          }
+        }
+        return { provider: provider.id, models }
+      }))
     const modelCount = new Map(rows.map(row => [row.provider, row.models.length]))
     const providers = llm === undefined ? [] : llm.listProviders().map(p => {
       const profile = providerUserProfile(userSection, p.id)
@@ -648,30 +766,65 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       }
     })
     const providerByModel = new Map<string, string>()
+    const providerModelToWireId = new Map<string, string>()
+    const rawModelOwners = new Map<string, string>()
     const availableModels: ModelCatalog['availableModels'] = []
     for (const row of rows) {
       for (const model of row.models) {
-        // Deterministic dedup: the first provider that lists an id owns it.
-        if (providerByModel.has(model.id)) continue
-        providerByModel.set(model.id, row.provider)
+        const pairKey = modelEffortKey(row.provider, model.id)
+        if (providerModelToWireId.has(pairKey)) continue
+        // The first provider that lists a raw id keeps the bare id for
+        // backward compatibility; later providers that also carry the same
+        // id get a provider-qualified wire id so both remain selectable.
+        const existingOwner = rawModelOwners.get(model.id)
+        const wireId = existingOwner === undefined || existingOwner === row.provider
+          ? model.id
+          : wireModelId(row.provider, model.id)
+        rawModelOwners.set(model.id, existingOwner ?? row.provider)
+        providerModelToWireId.set(pairKey, wireId)
+        providerByModel.set(wireId, row.provider)
+        // Prefer the adapter's exact-model reasoning metadata over the old
+        // one-size-fits-all grok menu, so a provider that has no low/medium/
+        // xhigh does not advertise them.
+        let reasoning: { defaultEffort?: string; efforts?: Array<{ id: string; name?: string }> } | undefined
+        if (llm?.resolveModelInfo !== undefined) {
+          try {
+            const info = await llm.resolveModelInfo(row.provider, model.id)
+            reasoning = info.reasoning
+          } catch (error) {
+            logger.warn('grok-leader: could not resolve model metadata for ' + row.provider + '/' + model.id + ': ' + (error instanceof Error ? error.message : String(error)))
+          }
+        }
+        const efforts = reasoning?.efforts
+          ?.map(effort => effort.id)
+          .filter((id): id is string => typeof id === 'string' && id.length > 0)
         availableModels.push({
-          modelId: model.id,
+          modelId: wireId,
           name: model.name,
           ...model.description === undefined ? {} : { description: model.description },
-          // dsh's llm catalog carries no per-model effort capability, so the
-          // bridge advertises the canonical grok effort set and lets the
-          // provider reject unsupported tiers at call time.
           _meta: {
             provider: row.provider,
-            supportsReasoningEffort: true,
-            reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+            supportsReasoningEffort: reasoning === undefined
+              ? true
+              : (efforts?.length ?? 0) > 0,
+            ...(efforts !== undefined && efforts.length > 0
+              ? { reasoningEfforts: efforts }
+              : reasoning === undefined
+                ? { reasoningEfforts: [...DEFAULT_REASONING_EFFORTS] }
+                : {}),
           },
         })
       }
     }
-    const requested = config.model
-      ?? (ctx.get('agentDefaultModel') as { currentSelection?: () => { model: string } | undefined } | undefined)?.currentSelection?.()?.model
-      ?? ''
+    const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
+    const defaultSelection = defaultModel?.currentSelection?.()
+    const requestedProvider = config.provider ?? defaultSelection?.provider
+    const requestedRawModel = config.model
+      ?? defaultSelection?.model
+      ?? 'deepseek-v4-flash'
+    const requested = requestedProvider === undefined
+      ? requestedRawModel
+      : providerModelToWireId.get(modelEffortKey(requestedProvider, requestedRawModel)) ?? requestedRawModel
     // A configured model absent from the catalog must not reach the client as
     // an unresolvable currentModelId; fall back to the catalog's first entry.
     let currentModelId = requested
@@ -679,11 +832,37 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       currentModelId = availableModels[0]?.modelId ?? ''
       logger.warn('grok-leader: model "' + requested + '" is not in the catalog; falling back to "' + currentModelId + '"')
     }
+    const currentProviderId = currentModelId === '' ? '' : providerByModel.get(currentModelId) ?? ''
+    const currentParsed = parseWireModelId(currentModelId)
+    const currentRawModel = currentParsed !== undefined && currentProviderId === currentParsed.provider
+      ? currentParsed.model
+      : currentModelId
     // The pager reads the selected effort from the current model's
     // _meta.reasoningEffort on every models/list, so a /effort choice must
-    // ride the catalog or it is forgotten across restarts.
-    const selectedEffort = (ctx.get('agentDefaultModel') as
-      { currentSelection?: () => { reasoningEffort?: string } | undefined } | undefined)?.currentSelection?.()?.reasoningEffort
+    // ride the catalog or it is forgotten across restarts. When the user has
+    // not chosen one yet, surface the adapter-configured default (DeepSeek's
+    // adapter defaults to high) so the status bar is not empty on first run.
+    let selectedEffort = defaultSelection?.reasoningEffort
+    if (typeof selectedEffort !== 'string' || selectedEffort.length === 0) {
+      selectedEffort = modelEfforts.get(currentRawModel)
+    }
+    if ((typeof selectedEffort !== 'string' || selectedEffort.length === 0)
+      && currentModelId !== ''
+      && currentProviderId !== ''
+      && llm?.resolveModelInfo !== undefined) {
+      try {
+        const info = await llm.resolveModelInfo(currentProviderId, currentRawModel)
+        selectedEffort = info.reasoning?.defaultEffort
+      } catch (error) {
+        logger.warn('grok-leader: could not resolve model effort for ' + currentModelId + ': ' + (error instanceof Error ? error.message : String(error)))
+      }
+    }
+    if ((typeof selectedEffort !== 'string' || selectedEffort.length === 0) && currentModelId !== '') {
+      const current = availableModels.find(model => model.modelId === currentModelId)
+      if (current?._meta?.supportsReasoningEffort === true) {
+        selectedEffort = DEFAULT_REASONING_EFFORT
+      }
+    }
     if (typeof selectedEffort === 'string' && selectedEffort.length > 0) {
       const current = availableModels.find(model => model.modelId === currentModelId)
       if (current !== undefined && current._meta !== undefined) {
@@ -693,7 +872,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     catalog = {
       currentModelId,
       providers,
-      currentProviderId: currentModelId === '' ? '' : providerByModel.get(currentModelId) ?? '',
+      currentProviderId,
       availableModels,
       providerByModel,
     }
@@ -741,7 +920,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   const sendAcp = (conn: ClientConnection, value: unknown): void => {
-    if (process.env.DEEPSEEK_LEADER_DEBUG === '1') {
+    if (process.env.DSCODE_DEBUG === '1') {
       process.stderr.write('grok-leader wire out acp: ' + JSON.stringify(value).slice(0, 400) + '\n')
     }
     conn.socket.write(encodeJsonFrame({ type: 'acp', payload: JSON.stringify(value) }))
@@ -1253,7 +1432,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
     const defaultSelection = defaultModel?.currentSelection?.()
     const selection: ModelSelectionRef = {
-      current: modelSelectionFromRequest(config, defaultSelection, meta),
+      current: modelSelectionFromRequest(config, defaultSelection, meta, modelEfforts),
       assembled: undefined,
     }
     const handle = await agents.create({
@@ -1599,7 +1778,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   /** The dsh profile directory this bridge is installed in: the directory
    *  holding the node_modules we were loaded from, a DSH_PROFILE_DIR
-   *  override (tests), or the default deepseek-leader profile. `undefined`
+   *  override (tests), or the default dscode profile. `undefined`
    *  in a source checkout with no installed profile. */
   const dshProfileDir = (): string | undefined => {
     const override = process.env.DSH_PROFILE_DIR
@@ -1608,7 +1787,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const marker = sep + 'node_modules' + sep
     const idx = self.indexOf(marker)
     if (idx > 0) return self.slice(0, idx)
-    const fallback = join(homedir(), '.dsh', 'profiles', 'deepseek-leader')
+    const fallback = join(homedir(), '.dsh', 'profiles', 'dscode')
     return existsSync(join(fallback, 'package.json')) ? fallback : undefined
   }
 
@@ -1681,6 +1860,26 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     })
   }
 
+  /** Broadcast the current flattened model catalog to every connected client.
+   *  The TUI uses this to refresh model metadata after a switch, so a
+   *  remembered reasoning effort is visible immediately instead of waiting
+   *  for the next models/list roundtrip. */
+  const broadcastModelsUpdate = (): void => {
+    const current = catalog
+    if (current === undefined) return
+    const params = {
+      currentModelId: current.currentModelId,
+      availableModels: current.availableModels,
+      _meta: {
+        currentProviderId: current.currentProviderId,
+        providers: current.providers,
+      },
+    }
+    for (const conn of connections.values()) {
+      sendNotification(conn, WIRE.modelsUpdate, params)
+    }
+  }
+
   // Live refresh: a plugin registering or removing commands re-advertises to
   // every open session (observer failures never veto registry mutations).
   // The event is declared by @deepseek-ai/dsh-commands, an optional
@@ -1731,7 +1930,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const [verb, ...rest] = text.split(/\s+/).slice(1)
     const dir = dshProfileDir()
     if (dir === undefined) {
-      return settle('dsh plugin management is unavailable: no installed leader profile was found (running from a source checkout?). Use: dsh plugin --profile deepseek-leader add <package>')
+      return settle('dsh plugin management is unavailable: no installed leader profile was found (running from a source checkout?). Use: dsh plugin --profile dscode add <package>')
     }
     try {
       switch (verb) {
@@ -1996,7 +2195,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
     const defaultSelection = defaultModel?.currentSelection?.()
     const selection: ModelSelectionRef = {
-      current: modelSelectionFromRequest(config, defaultSelection, meta),
+      current: modelSelectionFromRequest(config, defaultSelection, meta, modelEfforts),
       assembled: undefined,
     }
     const handle = await agents.resume({
@@ -2091,6 +2290,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (typeof modelId !== 'string' || modelId.length === 0) throw invalidParams('modelId must be a non-empty string')
     const meta = p._meta as Record<string, unknown> | null | undefined
     const reasoningEffort = meta?.reasoningEffort
+    const explicitEffort = typeof reasoningEffort === 'string' && reasoningEffort.length > 0
+      ? reasoningEffort
+      : undefined
     // TODO(verify): grok modelId is a global catalog id (agent.rs
     // SetSessionModelRequest); dsh needs a provider+model pair, so the provider
     // comes from the catalog's modelId -> provider mapping, then the agent's
@@ -2101,13 +2303,22 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (!current.providerByModel.has(modelId)) {
       throw invalidParams('modelId is not in the catalog: ' + modelId)
     }
-    const provider = current.providerByModel.get(modelId) ?? record.agent.options.provider ?? config.provider ?? ''
+    const parsed = parseWireModelId(modelId)
+    const provider = parsed !== undefined && current.providerByModel.get(modelId) === parsed.provider
+      ? parsed.provider
+      : current.providerByModel.get(modelId) ?? record.agent.options.provider ?? config.provider ?? ''
+    const rawModel = parsed !== undefined && provider === parsed.provider ? parsed.model : modelId
+    // Remember an explicitly chosen effort per raw model id, and re-apply it
+    // when the user later switches back to that model (even on another
+    // provider that exposes the same id) without naming an effort.
+    if (explicitEffort !== undefined) {
+      modelEfforts.set(rawModel, explicitEffort)
+    }
+    const effectiveEffort = explicitEffort ?? modelEfforts.get(rawModel)
     const selection = {
       provider,
-      model: modelId,
-      ...typeof reasoningEffort === 'string' && reasoningEffort.length > 0
-        ? { reasoningEffort: ReasoningEffortId(reasoningEffort) }
-        : {},
+      model: rawModel,
+      ...effectiveEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effectiveEffort) },
     }
     record.selection.current = selection
     const defaultModel = agentDefaultModel()
@@ -2117,7 +2328,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // models/list (and initialize _meta) reports the provider that now owns
     // the current model. Without this a re-spawned TUI shows the pre-switch
     // provider scope.
-    if (catalog !== undefined) await refreshCatalog()
+    if (catalog !== undefined) {
+      await refreshCatalog()
+      broadcastModelsUpdate()
+    }
     return {}
   }
 
@@ -2129,10 +2343,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
    * resolved secret only travels to a baseURL this bridge already knows; a
    * brand-new endpoint receives the env NAME, never the resolved value.
    */
-  const discoverProviderModels = async (
+  async function discoverProviderModels(
     id: string,
     p: Record<string, unknown>,
-  ): Promise<Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>> => {
+  ): Promise<Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>> {
     // Method call, not a detached const: the llm service method reads
     // this.discoveries (a detached reference would lose the receiver).
     if (llm === undefined || llm.discoverModels === undefined) {
@@ -2338,6 +2552,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const currentProfile = providerUserProfile(providerUserSection(providerService), providerId)
     const next = mergeEditable(currentProfile, p)
     await mutateProviderRoute(providerService, providerId, next, p, 'update')
+    discoveredModels.delete(providerId)
     const current = await refreshCatalog()
     return { providers: current.providers, currentProviderId: current.currentProviderId }
   }
@@ -2368,6 +2583,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     } catch (error: unknown) {
       throw internalError('failed to remove provider "' + id + '": ' + (error instanceof Error ? error.message : String(error)))
     }
+    discoveredModels.delete(id)
     const refreshed = await refreshCatalog()
     return { providers: refreshed.providers, currentProviderId: refreshed.currentProviderId }
   }
@@ -2445,7 +2661,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
     const defaultSelection = defaultModel?.currentSelection?.()
     const selection: ModelSelectionRef = {
-      current: modelSelectionFromRequest(config, defaultSelection, p),
+      current: modelSelectionFromRequest(config, defaultSelection, p, modelEfforts),
       assembled: undefined,
     }
     const handle = await agents.create({
@@ -2942,6 +3158,49 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         queueMutate(record)
         return
       }
+      case 'x.ai/queue/steer': {
+        if (unwrapped === undefined) return
+        const p = unwrapped
+        const record = queueRecord(p)
+        if (record === undefined) return
+        const expectedVersion = typeof p.expectedVersion === 'number' ? p.expectedVersion : 0
+        const located = queueEntry(record, p.id)
+        if (located === undefined || located.entry.version !== expectedVersion) {
+          if (typeof p.id === 'string') record.editHolds.delete(p.id)
+          promoteWhenIdle(record)
+          queueMutate(record)
+          return
+        }
+        // Steer is only meaningful into a live turn; otherwise keep the row
+        // queued and let it run normally (grok InterjectQueuedPrompt no-op).
+        if (record.inflight === undefined) {
+          promoteWhenIdle(record)
+          queueMutate(record)
+          return
+        }
+        const [entry] = record.promptQueue.splice(located.index, 1)
+        record.editHolds.delete(entry.id)
+        const text = entry.combinedTexts === undefined ? entry.text : entry.combinedTexts.join('\n\n')
+        try {
+          record.agent.steer(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
+        } catch (error) {
+          // Put the row back so a failed steer never loses the queued message.
+          record.promptQueue.splice(located.index, 0, entry)
+          queueMutate(record)
+          entry.reject(internalError('prompt was not steered: ' + (error instanceof Error ? error.message : String(error))))
+          return
+        }
+        record.steered.push({ id: entry.id, resolve: entry.resolve })
+        const conn = connections.get(record.clientId)
+        if (conn !== undefined) {
+          emitUpdate(conn, record, undefined, {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text },
+          }, false, Date.now())
+        }
+        queueMutate(record)
+        return
+      }
       case 'x.ai/queue/remove': {
         if (unwrapped === undefined) return
         const p = unwrapped
@@ -3175,8 +3434,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const conn: ClientConnection = { socket, clientId: ++clientSeq, pending: new Map(), nextRequestId: 0 }
     const decoder = new FrameDecoder()
     let registered = false
-    // Wire tracing behind DEEPSEEK_LEADER_DEBUG=1.
-    const debugWire = process.env.DEEPSEEK_LEADER_DEBUG === '1'
+    // Wire tracing behind DSCODE_DEBUG=1.
+    const debugWire = process.env.DSCODE_DEBUG === '1'
     const wireLog = (dir: 'in' | 'out', msg: unknown): void => {
       if (!debugWire) return
       const record = msg as { type?: unknown; payload?: unknown; method?: unknown }
@@ -3670,7 +3929,7 @@ export function sessionEventToUpdates(
       const prior = options.toolCall?.(callId)
       const metaDiffs = diffBlocksFromMeta(event.data.meta)
       const contents: ToolResultContentBlock[] = [
-        ...textBlocks(block?.content),
+        ...textBlocks(block?.content).map(block => ({ type: 'content' as const, content: block })),
         ...metaDiffs,
         ...(metaDiffs.length === 0 && event.data.error === undefined ? diffBlocksFromCall(prior) : []),
       ]
@@ -3723,6 +3982,21 @@ function parseJsonObject(raw: string): unknown {
   return undefined
 }
 
+/**
+ * Safety cap for TUI-side fallback diff blocks.
+ *
+ * The bridge only synthesizes these for display; it must never become a
+ * performance path. If an edit payload is large enough that the TUI's diff
+ * renderer could spend noticeable time on it, we skip the diff fallback and
+ * let the normal text result render instead.
+ */
+const MAX_FALLBACK_DIFF_CHARS = 64 * 1024
+
+/** True when a fallback diff stays within the display-only performance budget. */
+function withinDiffBudget(oldText: string | undefined, newText: string): boolean {
+  return (oldText?.length ?? 0) + newText.length <= MAX_FALLBACK_DIFF_CHARS
+}
+
 /** True when a value looks like a dsh tool-fs diff-meta envelope. */
 function isDiffMeta(meta: unknown): meta is { diffs: Array<{ path?: unknown; oldText?: unknown; newText?: unknown }> } {
   if (typeof meta !== 'object' || meta === null) return false
@@ -3737,6 +4011,7 @@ function diffBlocksFromMeta(meta: unknown): Array<{ type: 'diff'; path: string; 
   for (const diff of meta.diffs) {
     if (typeof diff !== 'object' || diff === null) continue
     if (typeof diff.newText !== 'string') continue
+    if (!withinDiffBudget(typeof diff.oldText === 'string' ? diff.oldText : undefined, diff.newText)) continue
     blocks.push({
       type: 'diff',
       path: typeof diff.path === 'string' ? diff.path : '',
@@ -3768,6 +4043,7 @@ function diffBlocksFromCall(prior: { name: string; arguments: unknown } | undefi
     const oldText = stringField('old_string', 'oldString')
     const newText = stringField('new_string', 'newString')
     if (newText === undefined) return []
+    if (!withinDiffBudget(oldText, newText)) return []
     return [{ type: 'diff', path, ...(oldText !== undefined ? { oldText } : {}), newText }]
   }
   if (lower === 'str_replace_editor') {
@@ -3779,11 +4055,13 @@ function diffBlocksFromCall(prior: { name: string; arguments: unknown } | undefi
     const newText = stringField('new_str', 'file_text')
       ?? (command === 'str_replace' ? '' : undefined)
     if (newText === undefined) return []
+    if (!withinDiffBudget(oldText, newText)) return []
     return [{ type: 'diff', path, ...(oldText !== undefined ? { oldText } : {}), newText }]
   }
   if (lower === 'write') {
     const newText = stringField('content')
     if (newText === undefined) return []
+    if (!withinDiffBudget(undefined, newText)) return []
     return [{ type: 'diff', path, newText }]
   }
   return []
@@ -3802,10 +4080,10 @@ function rawInputForTool(name: string, args: unknown): unknown {
 }
 
 /** Join text content blocks into the model-facing result text. */
-function textFromContents(contents: Array<{ type: 'text'; text: string } | { type: 'diff'; path: string; oldText?: string; newText: string }>): string {
+function textFromContents(contents: Array<{ type: 'text'; text: string } | { type: 'content'; content: { type: 'text'; text: string } } | { type: 'diff'; path: string; oldText?: string; newText: string }>): string {
   return contents
-    .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
-    .map(block => block.text)
+    .filter((block): block is { type: 'text'; text: string } | { type: 'content'; content: { type: 'text'; text: string } } => block.type === 'text' || block.type === 'content')
+    .map(block => block.type === 'content' ? block.content.text : block.text)
     .join('')
 }
 
@@ -3950,7 +4228,7 @@ function webFetchRawOutput(
 function typedRawOutput(
   prior: { name: string; arguments: unknown } | undefined,
   meta: unknown,
-  contents: Array<{ type: 'text'; text: string } | { type: 'diff'; path: string; oldText?: string; newText: string }>,
+  contents: Array<ToolResultContentBlock>,
   isError: boolean,
 ): Record<string, unknown> | undefined {
   if (prior === undefined) return undefined

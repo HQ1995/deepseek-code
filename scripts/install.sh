@@ -2,12 +2,11 @@
 # deepseek-code installer: the official @deepseek-ai/dsh CLI from npm, the
 # grok-leader bridge as an out-of-tree plugin in the dscode profile,
 # the prebuilt grok TUI into this repo tree, and launchers into ~/.local/bin.
-# The deepseek-harness submodule is dev/upgrade-only and never required.
 #
 # Known gap: the pinned npm dsh may still lack the EMFILE/ENOSPC watch-capacity
-# and persistent-bash-prompt fixes carried by the fork (upstream PRs planned);
-# watch-driven hot reload can degrade under heavy watch pressure and persistent
-# bash sessions may fall back to idle-silence timeouts until they land upstream.
+# and persistent-bash-prompt fixes; watch-driven hot reload can degrade under
+# heavy watch pressure and persistent bash sessions may fall back to
+# idle-silence timeouts until they land upstream.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -235,5 +234,5 @@ echo
 echo "done. run: dscode"
 echo "  (make sure $HOME/.local/bin is on PATH)"
 echo "  note: the pinned npm dsh may still lack the EMFILE/ENOSPC watch-capacity"
-echo "  and persistent-bash-prompt fixes carried by the fork; watch-driven hot"
-echo "  reload may degrade under load and persistent bash may use idle timeouts."
+echo "  and persistent-bash-prompt fixes; watch-driven hot reload may degrade"
+echo "  under load and persistent bash may use idle timeouts."
