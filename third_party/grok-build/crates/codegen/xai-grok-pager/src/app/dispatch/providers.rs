@@ -20,6 +20,54 @@ pub(super) fn add_provider_modal_state_mut(
     }
 }
 
+/// Open the /provider list picker (bare /provider submit): a navigable
+/// roster modal — Enter switches to the highlighted provider's default
+/// model, e edits, d deletes (y/n), a adds. Reuses the generic ArgPicker
+/// with the rows /provider's own suggest_args builds (counts, notes, the
+/// "+ Add provider…" tail row), opened navigation-first ('/' searches).
+pub(super) fn open_provider_picker(app: &mut AppView) -> Vec<Effect> {
+    let mut effects = vec![];
+    let id = match app.active_view {
+        ActiveView::Agent(id) => id,
+        _ => {
+            if let Some(existing) = app.agents.keys().next().copied() {
+                super::ctx::switch_to_agent(app, existing, super::ctx::SwitchCause::Picker);
+                existing
+            } else {
+                let (new_id, create_effects) =
+                    super::session::lifecycle::dispatch_new_session_inner_with_id(app, None);
+                effects.extend(create_effects);
+                new_id
+            }
+        }
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return effects;
+    };
+    let Some(cmd) = agent.prompt.slash_controller.registry().get("provider").cloned() else {
+        return effects;
+    };
+    let ctx = agent.prompt.slash_controller.app_ctx(&agent.session.models);
+    let Some(items) = cmd.suggest_args(&ctx, "") else {
+        return effects;
+    };
+    if items.is_empty() {
+        return effects;
+    }
+    agent.prompt.provider_pending_delete = None;
+    agent.active_modal = Some(ActiveModal::ArgPicker {
+        command: "provider".to_string(),
+        args_query: String::new(),
+        items: items.clone(),
+        original_items: items,
+        // Navigation-first: arrows move the highlight immediately; '/' searches.
+        state: crate::views::picker::PickerState::default(),
+        previous_palette: None,
+        window: crate::views::modal_window::ModalWindowState::new(),
+    });
+    effects
+}
+
 /// Open (or focus) the add-provider modal. Full TUI only. When not on an
 /// agent view (dashboard/welcome), switch to an existing agent or create a
 /// placeholder session so the modal can mount — the same fallback
@@ -35,7 +83,11 @@ pub(super) fn open_edit_provider_modal(app: &mut AppView, provider_id: &str) -> 
         .models
         .providers
         .iter()
-        .chain(app.agents.values().flat_map(|agent| agent.session.models.providers.iter()))
+        .chain(
+            app.agents
+                .values()
+                .flat_map(|agent| agent.session.models.providers.iter()),
+        )
         .find(|provider| provider.id == provider_id)
         .cloned();
     let Some(profile) = profile else {

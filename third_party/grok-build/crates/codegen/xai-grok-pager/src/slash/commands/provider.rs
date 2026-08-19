@@ -103,14 +103,10 @@ impl SlashCommand for ProviderCommand {
     }
 
     fn usage(&self) -> &str {
-        "/provider <id> | --add"
+        "/provider [id] | --add"
     }
 
     fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn args_required(&self) -> bool {
         true
     }
 
@@ -128,7 +124,9 @@ impl SlashCommand for ProviderCommand {
             return CommandResult::Action(Action::OpenAddProvider);
         }
         if query.is_empty() {
-            return CommandResult::Error("Usage: /provider <id> | --add".into());
+            // Bare /provider opens the list picker: arrows move the highlight,
+            // Enter switches, e edits, d deletes (y/n), a adds.
+            return CommandResult::Action(Action::OpenProviderPicker);
         }
         let Some(provider) = resolve_provider(ctx.models, query) else {
             return CommandResult::Error(format!("Unknown provider: {query}"));
@@ -218,7 +216,11 @@ fn resolve_provider<'a>(models: &'a ModelState, query: &str) -> Option<&'a str> 
             models
                 .providers
                 .iter()
-                .find(|p| p.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(query)))
+                .find(|p| {
+                    p.name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(query))
+                })
                 .map(|p| p.id.as_str())
         })
 }
@@ -251,7 +253,10 @@ mod tests {
         id: &str,
         name: &str,
         provider: &str,
-    ) -> (agent_client_protocol::ModelId, agent_client_protocol::ModelInfo) {
+    ) -> (
+        agent_client_protocol::ModelId,
+        agent_client_protocol::ModelInfo,
+    ) {
         let id = agent_client_protocol::ModelId::new(Arc::from(id));
         let mut meta = serde_json::Map::new();
         meta.insert(
@@ -354,7 +359,10 @@ mod tests {
         let mut ctx = exec_ctx(&state);
         match ProviderCommand.run(&mut ctx, "codex") {
             CommandResult::Error(msg) => {
-                assert_eq!(msg, "Provider codex has no models — not logged in — /dsh login codex");
+                assert_eq!(
+                    msg,
+                    "Provider codex has no models — not logged in — /dsh login codex"
+                );
             }
             other => panic!("expected an error for a model-less provider, got {other:?}"),
         }
@@ -365,11 +373,25 @@ mod tests {
     }
 
     #[test]
+    fn bare_run_opens_the_provider_picker() {
+        let state = sample();
+        let mut ctx = exec_ctx(&state);
+        let result = ProviderCommand.run(&mut ctx, "");
+        assert!(matches!(
+            result,
+            CommandResult::Action(Action::OpenProviderPicker)
+        ));
+    }
+
+    #[test]
     fn run_add_opens_the_add_provider_modal() {
         let state = sample();
         let mut ctx = exec_ctx(&state);
         let result = ProviderCommand.run(&mut ctx, ADD_PROVIDER_ARG);
-        assert!(matches!(result, CommandResult::Action(Action::OpenAddProvider)));
+        assert!(matches!(
+            result,
+            CommandResult::Action(Action::OpenAddProvider)
+        ));
     }
 
     #[test]
@@ -397,7 +419,8 @@ mod tests {
 
     #[test]
     fn pending_delete_y_confirms_n_cancels_other_disarms() {
-        let key = |code| crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
+        let key =
+            |code| crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
         let arm = || ProviderPendingDelete {
             provider_id: "pi".into(),
             name: "Pi AI".into(),
@@ -412,7 +435,10 @@ mod tests {
 
         let mut pending = Some(arm());
         assert!(matches!(
-            handle_provider_pending_delete_key(&mut pending, &key(crossterm::event::KeyCode::Char('n'))),
+            handle_provider_pending_delete_key(
+                &mut pending,
+                &key(crossterm::event::KeyCode::Char('n'))
+            ),
             ProviderPendingDeleteKey::Cancel
         ));
         assert!(pending.is_none());
@@ -426,7 +452,10 @@ mod tests {
 
         let mut pending = None;
         assert!(matches!(
-            handle_provider_pending_delete_key(&mut pending, &key(crossterm::event::KeyCode::Char('y'))),
+            handle_provider_pending_delete_key(
+                &mut pending,
+                &key(crossterm::event::KeyCode::Char('y'))
+            ),
             ProviderPendingDeleteKey::NotArmed
         ));
     }

@@ -292,3 +292,15 @@ those live harness-side and are unreachable from these TUI surfaces —
 the future path for exposing them is bridge-advertised ACP commands, not
 un-hiding grok's local UIs. Un-hide only if the pager-plugin system ever
 becomes a supported dscode surface.
+
+### Bare /provider opens a list picker
+
+`/provider` with no args opens the generic ArgPicker as a provider roster
+(dispatch/providers.rs open_provider_picker): navigation-first (arrows move
+the highlight immediately, '/' searches), Enter switches to the highlighted
+provider's default model, `e` opens the edit form, `d` arms a y/n delete
+(reusing the composer's ProviderPendingDelete contract; the bridge still
+refuses removing the in-use provider), `a` opens the add form. The typed
+`/provider <id>` form still works. Rationale: the completion dropdown is a
+typing surface, not a management surface — picking/editing providers wants
+a highlighted list ("上下选到哪个就指向哪个").

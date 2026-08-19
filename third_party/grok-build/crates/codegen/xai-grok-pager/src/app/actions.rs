@@ -712,6 +712,9 @@ pub enum Action {
     ShowUsage,
     /// Open the add-provider form modal (the /provider dropdown's final row).
     OpenAddProvider,
+    /// Open the /provider list picker (bare /provider): Enter switches to the
+    /// highlighted provider, e edits, d deletes (y/n confirm), a adds.
+    OpenProviderPicker,
     /// Open the add-provider form prefilled from the provider's settings
     /// profile and submit it as an update (the dropdown's edit row action).
     OpenEditProvider {

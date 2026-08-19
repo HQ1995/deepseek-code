@@ -1159,13 +1159,16 @@ fn slash_model_no_args_produces_scrollback_error() {
     assert_eq!(app.agents[&id].scrollback.len(), initial_scrollback + 1);
 }
 #[test]
-fn slash_hooks_opens_modal() {
+fn slash_hooks_is_hidden_and_falls_through_as_prompt_text() {
+    // DIVERGENCE(deepseek): the grok pager-plugin surfaces (/hooks /plugins
+    // /marketplace /skills) are fail-closed hidden — dscode's plugin system
+    // is dsh (/dsh). A typed /hooks is no longer a command: it reaches the
+    // model as plain prompt text and opens nothing.
     let mut app = test_app_with_agent();
     app.appearance.disable_plugins = false;
     let id = AgentId(0);
-    let effects = dispatch(Action::SendPrompt("/hooks".into()), &mut app);
-    assert!(app.agents[&id].extensions_modal.is_some());
-    assert_eq!(effects.len(), 6);
+    dispatch(Action::SendPrompt("/hooks".into()), &mut app);
+    assert!(app.agents[&id].extensions_modal.is_none());
 }
 #[test]
 fn acp_bootstrap_command_appears_in_autocomplete() {

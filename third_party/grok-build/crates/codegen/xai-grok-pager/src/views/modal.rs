@@ -667,6 +667,7 @@ impl ActiveModal {
                 "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
                 "model" | "m" => "Pick model",
                 "theme" | "t" => "Pick theme",
+                "provider" => "Providers",
                 _ => "Pick option",
             },
             ActiveModal::DocPicker { .. } => "How-to Guides",

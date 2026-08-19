@@ -619,6 +619,13 @@ impl AgentView {
             Selected(crate::slash::command::ArgItem),
             Closed,
             FilterChanged,
+            ProviderAdd,
+            ProviderEdit(String),
+            ProviderArmDelete {
+                provider_id: String,
+                name: String,
+                blocked: bool,
+            },
         }
 
         let (command_clone, in_effort_phase, entry_count) = match self.active_modal.as_ref() {
@@ -630,6 +637,28 @@ impl AgentView {
             }) => (command.clone(), !args_query.is_empty(), items.len()),
             _ => return InputOutcome::Changed,
         };
+        let provider_mode = command_clone == "provider";
+
+        // Provider picker: an armed delete owns y/n first (same contract as
+        // the composer dropdown's ProviderPendingDelete flow).
+        if provider_mode
+            && let crossterm::event::Event::Key(key) = ev
+        {
+            use crate::slash::commands::provider::{
+                ProviderPendingDeleteKey, handle_provider_pending_delete_key,
+            };
+            match handle_provider_pending_delete_key(&mut self.prompt.provider_pending_delete, key)
+            {
+                ProviderPendingDeleteKey::Confirm(provider_id) => {
+                    return InputOutcome::Action(crate::app::actions::Action::RemoveProvider {
+                        provider_id,
+                    });
+                }
+                ProviderPendingDeleteKey::Cancel => return InputOutcome::Changed,
+                ProviderPendingDeleteKey::Disarmed | ProviderPendingDeleteKey::NotArmed => {}
+            }
+        }
+        let provider_pending = provider_mode && self.prompt.provider_pending_delete.is_some();
 
         let config = PickerConfig {
             title: None,
@@ -637,7 +666,14 @@ impl AgentView {
             expandable: false,
             esc_clears_query: false,
             shortcuts: Some(crate::views::picker::picker_shortcuts()),
-            pending_hint: None,
+            pending_hint: if provider_pending {
+                Some(crate::views::shortcuts_bar::PendingHint {
+                    shortcut: crate::key!('y'),
+                    label: "delete highlighted provider (y confirms, n keeps)",
+                })
+            } else {
+                None
+            },
             non_selectable: &[],
             non_selectable_clickable: &[],
             shortcuts_area: None,
@@ -647,10 +683,14 @@ impl AgentView {
             filter_key_hint: None,
             filter_active: false,
             header_note: None,
-            action_keys: &[],
+            action_keys: if provider_mode {
+                &[('e', "edit"), ('d', "delete"), ('a', "add")]
+            } else {
+                &[]
+            },
             disable_search: false,
             compact_bottom_bar: false,
-            search_only_on_slash: false,
+            search_only_on_slash: provider_mode,
             vim_normal_first: crate::appearance::cache::load_vim_mode(),
         };
 
@@ -668,6 +708,31 @@ impl AgentView {
                 PickerOutcome::QueryChanged => ArgPickerStep::FilterChanged,
                 PickerOutcome::Changed => return InputOutcome::Changed,
                 PickerOutcome::Unchanged => return InputOutcome::Unchanged,
+                PickerOutcome::Action(ch) if command_clone == "provider" => match ch {
+                    'a' => ArgPickerStep::ProviderAdd,
+                    'e' | 'd' => {
+                        let Some(item) = items.get(state.selected) else {
+                            return InputOutcome::Changed;
+                        };
+                        // The "+ Add provider…" tail row has no provider to act on.
+                        if item.insert_text == "--add" {
+                            return InputOutcome::Changed;
+                        }
+                        let provider_id = item.insert_text.clone();
+                        let is_current = item.display.ends_with(" (current)");
+                        let name = item.display.trim_end_matches(" (current)").to_string();
+                        if ch == 'e' {
+                            ArgPickerStep::ProviderEdit(provider_id)
+                        } else {
+                            ArgPickerStep::ProviderArmDelete {
+                                provider_id,
+                                name,
+                                blocked: is_current,
+                            }
+                        }
+                    }
+                    _ => return InputOutcome::Changed,
+                },
                 _ => return InputOutcome::Changed,
             }
         };
@@ -694,6 +759,25 @@ impl AgentView {
                         .collect();
                     state.selected = state.selected.min(items.len().saturating_sub(1));
                 }
+                InputOutcome::Changed
+            }
+            ArgPickerStep::ProviderAdd => {
+                InputOutcome::Action(crate::app::actions::Action::OpenAddProvider)
+            }
+            ArgPickerStep::ProviderEdit(provider_id) => InputOutcome::Action(
+                crate::app::actions::Action::OpenEditProvider { provider_id },
+            ),
+            ArgPickerStep::ProviderArmDelete {
+                provider_id,
+                name,
+                blocked,
+            } => {
+                self.prompt.provider_pending_delete =
+                    Some(crate::slash::commands::provider::ProviderPendingDelete {
+                        provider_id,
+                        name,
+                        blocked,
+                    });
                 InputOutcome::Changed
             }
             ArgPickerStep::Closed => {
@@ -1730,8 +1814,12 @@ impl AgentView {
         // AddProvider: chrome-only mouse (close button / click-outside);
         // the form itself is keyboard-driven.
         if let Some(ActiveModal::AddProvider { state }) = &mut self.active_modal {
-            return match mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row)
-            {
+            return match mw::handle_modal_mouse(
+                &mut state.window,
+                mouse.kind,
+                mouse.column,
+                mouse.row,
+            ) {
                 ModalWindowOutcome::CloseRequested => {
                     self.active_modal = None;
                     InputOutcome::Changed
@@ -1959,6 +2047,7 @@ impl AgentView {
                     "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
                     "model" | "m" => "Pick model",
                     "theme" | "t" => "Pick theme",
+                    "provider" => "Providers",
                     _ => "Pick option",
                 };
                 let picker_entries: Vec<PickerEntry> = items

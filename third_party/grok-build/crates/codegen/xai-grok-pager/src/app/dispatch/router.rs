@@ -1021,7 +1021,11 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 let Some(session_id) = agent.session.session_id.clone() else {
                     return vec![];
                 };
-                (session_id.0.to_string(), agent.session.cwd.clone(), agent.chat_kind)
+                (
+                    session_id.0.to_string(),
+                    agent.session.cwd.clone(),
+                    agent.chat_kind,
+                )
             };
             let (session_id, cwd, chat_kind) = reload;
             clear_stale_session_id(app, &session_id);
@@ -1045,6 +1049,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowContextInfo => dispatch_show_context_info(app),
         Action::ShowUsage => dispatch_show_usage(app),
         Action::OpenAddProvider => super::providers::open_add_provider_modal(app),
+        Action::OpenProviderPicker => super::providers::open_provider_picker(app),
         Action::OpenEditProvider { provider_id } => {
             super::providers::open_edit_provider_modal(app, &provider_id)
         }
