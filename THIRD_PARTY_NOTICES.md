@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-deepseek-code is licensed under [Apache-2.0](LICENSE). It contains or depends
+DeepSeek Code is licensed under [Apache-2.0](LICENSE). It contains or depends
 on the third-party software below. Each project remains under its own license;
 nothing in this file changes those terms.
 

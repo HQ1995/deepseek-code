@@ -1,4 +1,4 @@
-# dscode
+# DeepSeek Code
 
 A terminal UI for AI coding agents, powered by DeepSeek Harness.
 
