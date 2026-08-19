@@ -81,7 +81,18 @@ export const ensureProfilePlugin = () => {
   const spec = `${pkg.name}@${pkg.version}`
   console.error(`dscode: first run — registering ${spec} in the ${PROFILE_NAME} dsh profile...`)
   const argv = [...dshCommand(), 'plugin', '--profile', PROFILE_NAME, 'add', spec]
-  const result = spawnSync(argv[0], argv.slice(1), { stdio: ['ignore', 'inherit', 'inherit'] })
+  if (process.env.DSCODE_DEBUG !== undefined) console.error(`dscode: running: ${argv.join(' ')}`)
+  const pnpmCheck = spawnSync('pnpm', ['--version'], { encoding: 'utf8' })
+  if (pnpmCheck.error || pnpmCheck.status !== 0) {
+    throw new Error('pnpm is required for dsh plugin installs; enable it with: corepack enable')
+  }
+  const result = spawnSync(argv[0], argv.slice(1), {
+    stdio: ['ignore', 'inherit', 'inherit'],
+    timeout: 120000,
+  })
+  if (result.error?.code === 'ETIMEDOUT') {
+    throw new Error(`plugin registration timed out; run manually: ${argv.join(' ')}`)
+  }
   if (result.status !== 0 || !existsSync(join(profileDir, 'node_modules', ...pkg.name.split('/'), 'package.json'))) {
     throw new Error(`plugin registration failed; run manually: ${argv.join(' ')}`)
   }
@@ -122,7 +133,7 @@ const sha256File = async (path) => {
 }
 
 const download = async (url, dest) => {
-  const res = await fetch(url, { redirect: 'follow' })
+  const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(120000) })
   if (!res.ok || res.body === null) throw new Error(`${res.status} ${res.statusText} for ${url}`)
   await pipeline(Readable.fromWeb(res.body), createWriteStream(dest))
 }
