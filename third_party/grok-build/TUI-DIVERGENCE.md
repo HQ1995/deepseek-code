@@ -67,8 +67,13 @@ branding (our identity). Keep this list current on every sync.
   ActiveModal::AddProvider, Action::OpenAddProvider/AddProvider and
   Effect::AddProvider). The modal offers the dsh provider presets (DeepSeek
   official, OpenCodex gateway, OpenAI/Anthropic-compatible, OpenRouter) plus a
-  Custom empty form over id/displayName/apiKeyEnv/api/baseURL; auth is env-key
-  only (the form says so). Submit sends x.ai/providers/add to the bridge,
+  Custom empty form over id/displayName/apiKeyEnv/api/baseURL/apiKey. A
+  pasted apiKey renders masked and is stored by the bridge in the dsh
+  credentials service ($DSH_HOME/.credentials.yaml via
+  dsh-credentials-local) under the apiKeyEnv reference (derived
+  <ID>_API_KEY when blank) — llm-pi-ai resolves credentials-first with env
+  fallback, so exported env vars keep working. Submit sends
+  x.ai/providers/add to the bridge,
   which writes the provider into the dsh settings document through the official
   settings seam (ctx.settings.mutate on the llm-pi-ai namespace); the response
   refreshes modelState.providers so /provider updates without a reload.

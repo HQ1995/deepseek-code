@@ -71,7 +71,9 @@ third_party/grok-build/target/release/dscode "run the tests"   # dev: direct bin
 The harness owns providers: the shipped `deepseek-official` route plus any
 `llm-pi-ai` routes configured in `$DSH_HOME/settings.yaml` (OpenAI-compatible
 gateways included). `/model` lists them live; the selection is saved as the
-harness default.
+harness default. Adding one is `/provider --add`: pick a template, fill the
+baseURL, paste the API key, done — the key lands in the dsh credentials
+store (never in settings.yaml); naming an env var instead also works.
 
 ## Presets
 
