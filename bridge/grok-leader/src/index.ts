@@ -1078,7 +1078,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       // auth gate treats the leader as authenticated; the harness providers
       // own credentials, so the bridge answers authenticate with no meta.
       authMethods: [{ id: 'xai.api_key', name: 'API key' }],
-      agentInfo: { name: 'deepseek-harness-grok-leader', version: '0.0.6' },
+      agentInfo: { name: 'deepseek-harness-grok-leader', version: '0.0.7' },
       // cancelRewind is false: the bridge cancels turns but does not implement
       // the client-side rewind composer restore, so it stays unadvertised.
       // modelState flattens provider-scoped dsh model ids into one global
