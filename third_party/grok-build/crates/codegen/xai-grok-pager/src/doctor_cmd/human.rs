@@ -9,8 +9,43 @@ const LIVE_TUI_PROBE_CTA: &str = "Some checks only run in Dscode. Start Dscode a
 
 pub(super) fn format(report: &DiagnosticReport) -> String {
     let facts = &report.facts;
-    let mut out = String::from("Dscode Doctor\n\nEnvironment\n");
+    let mut out = String::from("Dscode Doctor\n\n");
 
+    let issues = report.issue_count();
+    let recommendations = report.recommendation_count();
+    if issues == 0 && recommendations == 0 {
+        out.push_str("✅ Your terminal environment looks good.\n");
+        out.push_str("   No issues found.\n");
+    } else if issues == 0 {
+        out.push_str("✅ Your terminal environment is basically OK.\n");
+        out.push_str(&format!(
+            "   {} suggestion{} below.\n",
+            recommendations,
+            if recommendations == 1 { "" } else { "s" }
+        ));
+    } else {
+        out.push_str(&format!(
+            "⚠ Found {} issue{} that may need your attention.\n",
+            issues,
+            if issues == 1 { "" } else { "s" }
+        ));
+        if recommendations > 0 {
+            out.push_str(&format!(
+                "   {} suggestion{} below.\n",
+                recommendations,
+                if recommendations == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
+    if !report.findings.is_empty() {
+        out.push_str("\nFindings\n");
+        for finding in &report.findings {
+            format_finding(&mut out, finding);
+        }
+    }
+
+    out.push_str("\nEnvironment\n");
     fact(&mut out, "terminal", &facts.terminal.to_string());
     match &facts.xtversion {
         RuntimeFact::Available(value) => fact(&mut out, "terminal version", value),
@@ -138,13 +173,6 @@ pub(super) fn format(report: &DiagnosticReport) -> String {
         }
     }
 
-    if !report.findings.is_empty() {
-        out.push_str("\nFindings\n");
-        for finding in &report.findings {
-            format_finding(&mut out, finding);
-        }
-    }
-
     let visible_notes = report
         .probe_notes
         .iter()
@@ -170,8 +198,6 @@ pub(super) fn format(report: &DiagnosticReport) -> String {
         out.push_str(&format!("  {LIVE_TUI_PROBE_CTA}\n"));
     }
 
-    let issues = report.issue_count();
-    let recommendations = report.recommendation_count();
     out.push('\n');
     out.push_str(&format!(
         "{} {}, {} {}\n",

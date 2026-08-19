@@ -303,6 +303,10 @@ pub struct SlashController {
     /// Whether `/usage` is offered. Default `true`; cleared for external auth.
     usage_command_visible: bool,
     workflows_available: bool,
+    /// Runtime capability names advertised by the leader (e.g. "subagents",
+    /// "skills", "plan", "todo", "schedule", "goal"). `None` means unknown,
+    /// so commands should remain visible until a capability list arrives.
+    capabilities: Option<HashSet<String>>,
     /// Effective render mode of this process (immutable after startup — it only
     /// changes via a full `/minimal`-`/fullscreen` re-exec). Injected via
     /// [`Self::set_screen_mode`] wherever prompts are created; gates the
@@ -349,6 +353,7 @@ impl SlashController {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: false,
+            capabilities: None,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
             mru,
@@ -407,6 +412,14 @@ impl SlashController {
         self.workflows_available
     }
 
+    pub fn set_capabilities(&mut self, capabilities: Option<HashSet<String>>) {
+        self.capabilities = capabilities;
+    }
+
+    pub fn capabilities(&self) -> Option<&HashSet<String>> {
+        self.capabilities.as_ref()
+    }
+
     /// Record the process's effective screen mode (see the field doc).
     pub(crate) fn set_screen_mode(&mut self, mode: crate::app::ScreenMode) {
         self.screen_mode = mode;
@@ -436,6 +449,7 @@ impl SlashController {
             billing_surface_visible: self.billing_surface_visible,
             usage_command_visible: self.usage_command_visible,
             workflows_available: self.workflows_available,
+            capabilities: self.capabilities.clone(),
             screen_mode: self.screen_mode,
             current_title: self.current_title.as_deref(),
         }
@@ -2204,9 +2218,8 @@ mod tests {
         assert!(names.iter().any(|d| d == "/doctor"));
     }
 
-    /// `/cd` is dashboard-only: it appears in the dropdown on the
-    /// session-less dashboard surface but is hidden on the default (agent
-    /// view) surface — the inverse of session-scoped commands.
+    /// DIVERGENCE(deepseek): dsh has no Agent Dashboard, so `/cd` is
+    /// hard-hidden everywhere, including the session-less dashboard surface.
     #[test]
     fn dashboard_only_command_hidden_off_dashboard() {
         let models = ModelState::default();
@@ -2226,7 +2239,7 @@ mod tests {
             "/cd must be hidden off the dashboard, got {agent_names:?}"
         );
 
-        // Dashboard surface (session-less): `/cd` is offered.
+        // Dashboard surface (session-less): `/cd` is also hidden in dscode.
         let mut dash = SlashController::with_builtins(std::path::PathBuf::from("."));
         dash.set_hide_session_scoped(true);
         let state = SlashState::default();
@@ -2238,8 +2251,8 @@ mod tests {
             .map(|r| r.display.clone())
             .collect();
         assert!(
-            dash_names.iter().any(|d| d == "/cd"),
-            "/cd must be offered on the dashboard, got {dash_names:?}"
+            !dash_names.iter().any(|d| d == "/cd"),
+            "/cd must be hidden on the dashboard in dscode, got {dash_names:?}"
         );
     }
 

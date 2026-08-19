@@ -21,7 +21,7 @@ pub const TMUX_TRUECOLOR_ID: DiagnosticId = DiagnosticId::new("terminal", "tmux-
 pub const SSH_WRAP_FIX_COMMAND: &str = "dscode doctor fix terminal.ssh-wrap";
 pub const SSH_WRAP_ONE_OFF: &str = "dscode wrap ssh <host>";
 
-const MANAGED_NAMESPACE: &str = "grok doctor";
+const MANAGED_NAMESPACE: &str = "dscode doctor";
 const SSH_WRAP_ALIAS_POSIX: &str = "alias ssh='dscode wrap ssh'";
 const SSH_WRAP_ALIAS_FISH: &str = "alias ssh 'dscode wrap ssh'";
 const TMUX_SCANNER_CAVEAT: &str = "Dscode checks this file for direct global assignments of this option. Review sourced files, conditionals, plugins, and generated tmux setup yourself.";
@@ -412,7 +412,7 @@ enum TmuxEvidence {
 }
 
 /// How a tmux remedy reaches its healthy state, which decides whether an
-/// existing line elsewhere in the config can defeat Grok's managed block.
+/// existing line elsewhere in the config can defeat Dscode's managed block.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TmuxRemedy {
     /// `set -g <option> <value>`: the last assignment wins, so a direct

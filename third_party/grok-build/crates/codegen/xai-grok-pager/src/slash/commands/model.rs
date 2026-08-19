@@ -239,14 +239,13 @@ mod tests {
         (id, info)
     }
 
-    fn provider_model(
-        id: &str,
-        name: &str,
-        provider: &str,
-    ) -> (acp::ModelId, acp::ModelInfo) {
+    fn provider_model(id: &str, name: &str, provider: &str) -> (acp::ModelId, acp::ModelInfo) {
         let id = acp::ModelId::new(Arc::from(id));
         let mut meta = serde_json::Map::new();
-        meta.insert("provider".into(), serde_json::Value::String(provider.into()));
+        meta.insert(
+            "provider".into(),
+            serde_json::Value::String(provider.into()),
+        );
         let info = acp::ModelInfo::new(id.clone(), name.to_string())
             .meta(serde_json::Value::Object(meta).as_object().cloned());
         (id, info)
@@ -309,6 +308,7 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            capabilities: None,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -350,6 +350,7 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            capabilities: None,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -379,6 +380,7 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            capabilities: None,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -420,6 +422,7 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            capabilities: None,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -453,6 +456,7 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            capabilities: None,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -475,6 +479,7 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            capabilities: None,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };

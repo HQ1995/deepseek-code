@@ -133,6 +133,11 @@ fn healthy_local_output_is_stable() {
     assert_eq!(
         output,
         concat!(
+            "Dscode Doctor\n",
+            "\n",
+            "✅ Your terminal environment looks good.\n",
+            "   No issues found.\n",
+            "\n",
             "Environment\n",
             "  terminal     Ghostty\n",
             "  multiplexer  None detected\n",
@@ -146,8 +151,6 @@ fn healthy_local_output_is_stable() {
             "  osc 52       off\n",
             "  wrap         off\n",
             "  status       confirmed\n",
-            "\n",
-            "No issues found.\n",
         )
     );
 }
@@ -184,6 +187,27 @@ fn tmux_config_and_reload_notes_output_is_stable() {
     assert_eq!(
         output,
         concat!(
+            "Dscode Doctor\n",
+            "\n",
+            "⚠ Found 3 issues that may need your attention.\n",
+            "\n",
+            "Issues (3)\n",
+            "\n",
+            "  ! terminal.tmux-clipboard  `set-clipboard` is off in tmux, so OSC 52 clipboard copies are blocked\n",
+            "      Automatic setup: `dscode doctor fix tmux-clipboard`\n",
+            "      Add `set -g set-clipboard on` to ~/.byobu/.tmux.conf\n",
+            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or restart the tmux server.\n",
+            "\n",
+            "  ! terminal.dcs-passthrough  `allow-passthrough` is off in tmux, which can block clipboard copies in nested sessions\n",
+            "      Automatic setup: `dscode doctor fix dcs-passthrough`\n",
+            "      Add `set -wg allow-passthrough on` to ~/.byobu/.tmux.conf\n",
+            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or restart the tmux server.\n",
+            "\n",
+            "  ! terminal.tmux-extended-keys  `extended-keys` is off in tmux, so some shortcuts may not work\n",
+            "      Automatic setup: `dscode doctor fix tmux-extended-keys`\n",
+            "      Add `set -g extended-keys on` to ~/.byobu/.tmux.conf\n",
+            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or restart the tmux server.\n",
+            "\n",
             "Environment\n",
             "  terminal     iTerm2\n",
             "  multiplexer  tmux\n",
@@ -198,23 +222,6 @@ fn tmux_config_and_reload_notes_output_is_stable() {
             "  osc 52       supported\n",
             "  wrap         off\n",
             "  status       confirmed\n",
-            "\n",
-            "Issues (3)\n",
-            "\n",
-            "  ! terminal.tmux-clipboard  `set-clipboard` is off in tmux, so OSC 52 clipboard copies are blocked\n",
-            "      Automatic setup: `grok doctor fix tmux-clipboard`\n",
-            "      Add `set -g set-clipboard on` to ~/.byobu/.tmux.conf\n",
-            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or restart the tmux server.\n",
-            "\n",
-            "  ! terminal.dcs-passthrough  `allow-passthrough` is off in tmux, which can block clipboard copies in nested sessions\n",
-            "      Automatic setup: `grok doctor fix dcs-passthrough`\n",
-            "      Add `set -wg allow-passthrough on` to ~/.byobu/.tmux.conf\n",
-            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or restart the tmux server.\n",
-            "\n",
-            "  ! terminal.tmux-extended-keys  `extended-keys` is off in tmux, so some shortcuts may not work\n",
-            "      Automatic setup: `grok doctor fix tmux-extended-keys`\n",
-            "      Add `set -g extended-keys on` to ~/.byobu/.tmux.conf\n",
-            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or restart the tmux server.\n",
         )
     );
 }
@@ -235,6 +242,16 @@ fn limited_color_output_is_stable() {
     assert_eq!(
         output,
         concat!(
+            "Dscode Doctor\n",
+            "\n",
+            "⚠ Found 1 issue that may need your attention.\n",
+            "\n",
+            "Issues (1)\n",
+            "\n",
+            "  ! terminal.limited-color  This terminal reports 256 color, so truecolor themes are unavailable\n",
+            "      Run: `export COLORTERM=truecolor`\n",
+            "      Note: Add this export to your shell startup file, such as `~/.zshrc` or `~/.bashrc`, then restart Dscode.\n",
+            "\n",
             "Environment\n",
             "  terminal     Ghostty\n",
             "  multiplexer  None detected\n",
@@ -248,12 +265,6 @@ fn limited_color_output_is_stable() {
             "  osc 52       off\n",
             "  wrap         off\n",
             "  status       confirmed\n",
-            "\n",
-            "Issues (1)\n",
-            "\n",
-            "  ! terminal.limited-color  This terminal reports 256 color, so truecolor themes are unavailable\n",
-            "      Run: `export COLORTERM=truecolor`\n",
-            "      Note: Add this export to your shell startup file, such as `~/.zshrc` or `~/.bashrc`, then restart Grok.\n",
         )
     );
 }
@@ -274,6 +285,18 @@ fn unwrapped_ssh_recommendation_with_no_issues_output_is_stable() {
     assert_eq!(
         output,
         concat!(
+            "Dscode Doctor\n",
+            "\n",
+            "✅ Your terminal environment is basically OK.\n",
+            "   1 suggestion below.\n",
+            "\n",
+            "Recommendations\n",
+            "\n",
+            "  i terminal.ssh-wrap  Use local SSH wrapping for more reliable clipboard copy and terminal recovery\n",
+            "      Automatic setup: `dscode doctor fix ssh-wrap`\n",
+            "      One-off: `dscode wrap ssh <host>`\n",
+            "      Note: Run this on your local computer instead of plain `ssh`. It forwards copies to your local clipboard and restores terminal modes if the connection drops.\n",
+            "\n",
             "Environment\n",
             "  terminal     Ghostty\n",
             "  multiplexer  None detected\n",
@@ -287,15 +310,6 @@ fn unwrapped_ssh_recommendation_with_no_issues_output_is_stable() {
             "  osc 52       supported\n",
             "  wrap         off\n",
             "  status       confirmed\n",
-            "\n",
-            "No issues found.\n",
-            "\n",
-            "Recommendations\n",
-            "\n",
-            "  i terminal.ssh-wrap  Use local SSH wrapping for more reliable clipboard copy and terminal recovery\n",
-            "      Automatic setup: `grok doctor fix ssh-wrap`\n",
-            "      One-off: `grok wrap ssh <host>`\n",
-            "      Note: Run this on your local computer instead of plain `ssh`. It forwards copies to your local clipboard and restores terminal modes if the connection drops.\n",
         )
     );
 }
@@ -316,6 +330,11 @@ fn wrapped_ssh_output_has_no_recommendation() {
     assert_eq!(
         output,
         concat!(
+            "Dscode Doctor\n",
+            "\n",
+            "✅ Your terminal environment looks good.\n",
+            "   No issues found.\n",
+            "\n",
             "Environment\n",
             "  terminal     Ghostty\n",
             "  multiplexer  None detected\n",
@@ -329,8 +348,6 @@ fn wrapped_ssh_output_has_no_recommendation() {
             "  osc 52       supported\n",
             "  wrap         on\n",
             "  status       confirmed\n",
-            "\n",
-            "No issues found.\n",
         )
     );
 }
@@ -354,6 +371,15 @@ fn wezterm_xtversion_runtime_evidence_output_is_stable() {
     assert_eq!(
         output,
         concat!(
+            "Dscode Doctor\n",
+            "\n",
+            "⚠ Found 1 issue that may need your attention.\n",
+            "\n",
+            "Issues (1)\n",
+            "\n",
+            "  ! terminal.wezterm-kitty  Shift+Enter can't insert a newline in WezTerm over SSH\n",
+            "      Note: For this session, type `\\` and then press Enter. Dscode can't negotiate the Kitty keyboard protocol over SSH yet. `enable_kitty_keyboard = true` applies only to local WezTerm sessions.\n",
+            "\n",
             "Environment\n",
             "  terminal     Unknown\n",
             "  xtversion    WezTerm 20240203-110809\n",
@@ -368,11 +394,6 @@ fn wezterm_xtversion_runtime_evidence_output_is_stable() {
             "  osc 52       supported\n",
             "  wrap         on\n",
             "  status       confirmed\n",
-            "\n",
-            "Issues (1)\n",
-            "\n",
-            "  ! terminal.wezterm-kitty  Shift+Enter can't insert a newline in WezTerm over SSH\n",
-            "      Note: For this session, type `\\` and then press Enter. Grok can't negotiate the Kitty keyboard protocol over SSH yet. `enable_kitty_keyboard = true` applies only to local WezTerm sessions.\n",
         )
     );
 }
@@ -407,6 +428,11 @@ fn unavailable_and_error_probes_do_not_create_false_issues() {
     assert_eq!(
         output,
         concat!(
+            "Dscode Doctor\n",
+            "\n",
+            "✅ Your terminal environment looks good.\n",
+            "   No issues found.\n",
+            "\n",
             "Environment\n",
             "  terminal     iTerm2\n",
             "  multiplexer  tmux\n",
@@ -420,8 +446,6 @@ fn unavailable_and_error_probes_do_not_create_false_issues() {
             "  osc 52       supported\n",
             "  wrap         off\n",
             "  status       confirmed\n",
-            "\n",
-            "No issues found.\n",
         )
     );
 }
@@ -446,6 +470,16 @@ fn vscode_newline_output_is_platform_neutral() {
     assert_eq!(
         output,
         concat!(
+            "Dscode Doctor\n",
+            "\n",
+            "✅ Your terminal environment is basically OK.\n",
+            "   1 suggestion below.\n",
+            "\n",
+            "Recommendations\n",
+            "\n",
+            "  i terminal.newline-fallback  Shift+Enter can't insert a newline in this xterm.js terminal\n",
+            "      Note: Use Alt+Enter to insert a newline in VS Code. xterm.js sends Shift+Enter as Enter in this setup.\n",
+            "\n",
             "Environment\n",
             "  terminal     VS Code\n",
             "  multiplexer  None detected\n",
@@ -460,13 +494,6 @@ fn vscode_newline_output_is_platform_neutral() {
             "  osc 52       off\n",
             "  wrap         off\n",
             "  status       confirmed\n",
-            "\n",
-            "No issues found.\n",
-            "\n",
-            "Recommendations\n",
-            "\n",
-            "  i terminal.newline-fallback  Shift+Enter can't insert a newline in this xterm.js terminal\n",
-            "      Note: Use Alt+Enter to insert a newline in VS Code. xterm.js sends Shift+Enter as Enter in this setup.\n",
         )
     );
 }
@@ -540,7 +567,7 @@ fn runtime_startup_findings_are_visible_with_useful_doctor_content() {
         },
     );
 
-    assert!(output.contains("Grok is using the terminal bell"));
+    assert!(output.contains("Dscode is using the terminal bell"));
     assert!(output.contains("If the bell works for you"));
     assert!(output.contains("may not report focus changes"));
     assert!(output.contains(&crate::util::display_user_grok_path("config.toml")));
@@ -584,7 +611,7 @@ fn runtime_findings_merge_before_single_formatter_orders_issues_before_recommend
         },
     );
 
-    let issue = output.find("Grok is using the terminal bell").unwrap();
+    let issue = output.find("Dscode is using the terminal bell").unwrap();
     let recommendation = output.find("Recommendations").unwrap();
     assert!(issue < recommendation);
     assert!(!output.contains("No issues found."));
@@ -606,7 +633,7 @@ fn legacy_fact_only_clipboard_issue_never_claims_no_issues() {
     report.facts.clipboard.delivery = crate::clipboard::ClipboardDelivery::Failed;
     assert_eq!(report.issue_count(), 1);
     let output = format_doctor(&report);
-    assert!(output.contains("An issue is shown in the Clipboard status above."));
+    assert!(output.contains("Clipboard status is unavailable. See Clipboard details below."));
     assert!(!output.contains("No issues found."));
 }
 
@@ -662,6 +689,11 @@ fn keyboard_fact_formats_from_explicit_target_evidence() {
     assert_eq!(
         format_doctor(&report),
         concat!(
+            "Dscode Doctor\n",
+            "\n",
+            "✅ Your terminal environment looks good.\n",
+            "   No issues found.\n",
+            "\n",
             "Environment\n",
             "  terminal     WezTerm\n",
             "  multiplexer  None detected\n",
@@ -676,8 +708,6 @@ fn keyboard_fact_formats_from_explicit_target_evidence() {
             "  osc 52       off\n",
             "  wrap         off\n",
             "  status       confirmed\n",
-            "\n",
-            "No issues found.\n",
         )
     );
 }

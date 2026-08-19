@@ -107,14 +107,27 @@ branding (our identity). Keep this list current on every sync.
   /gboom, /voice, /release_notes, /announcements, /recap, /timeline. /preset
   remains the only preset picker; /usage is adapted to session stats (above).
 - Slash commands hard-hidden because dsh has no matching surface: /cd (no
-  Agent Dashboard), /auto (no dsh auto permission-mode classifier), plus the
-  already-hidden /hooks, /plugins, /marketplace, /skills, /dashboard, /rewind.
+  Agent Dashboard), /auto (no dsh auto permission-mode classifier),
+  /workflows (dsh workflow has no list/run-history API yet), plus the
+  already-hidden /hooks, /plugins, /marketplace, /dashboard, /rewind.
+  /skills is available again because the bridge now serves dsh skills via
+  x.ai/skills/list.
 - Bridge now maps dsh capabilities onto grok RPCs: x.ai/session/rename →
   dsh session-title, session/set_mode → dsh plan-mode, x.ai/session/fork →
   dsh sessions.fork + agents.create(seed), x.ai/mcp/list → dsh MCP tool
-  names, x.ai/yolo_mode_changed → dsh permission-presets. session/new and
-  session/load also accept _meta.provider/_meta.model/_meta.reasoningEffort
-  for future CLI wiring.
+  names, x.ai/yolo_mode_changed → dsh permission-presets, /loop →
+  dsh-schedule. /tasks is fed from dsh jobs (task_backgrounded/task_completed),
+  dsh subagent events (subagent_spawned/subagent_finished), and dsh-schedule
+  (scheduled_task_created), x.ai/skills/list serves dsh skills,
+  todo/write maps to ACP Plan updates, goal/changed maps to GoalUpdated,
+  x.ai/btw runs a one-shot subagent so it does not pollute the main
+  session context, and AvailableCommandsUpdate.meta.capabilities drives
+  runtime capability-aware slash visibility (subagents/skills/plan/todo/
+  schedule/goal). session/new and session/load accept
+  _meta.provider/_meta.model/_meta.reasoningEffort/_meta.permissionMode/
+  _meta.sandbox/_meta.systemPromptOverride/_meta.rules/_meta.tools/
+  _meta.disallowedTools for CLI wiring. dsh-schedule is mounted in the
+  leader profile, and TUI /loop no longer requires grok's scheduler_create.
 - dscode CLI surfaces hidden because they have no dsh counterpart or are not
   worth exposing yet: login, logout, plugin, memory, setup, trace, worktree,
   dashboard, --worktree, --worktree-ref, --restore-code, --oauth. They remain

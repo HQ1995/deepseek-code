@@ -1819,6 +1819,7 @@ fn set_simple_mode_propagates_to_every_agent() {
             available_commands: Vec::new(),
             available_commands_generation: 0,
             available_tools: None,
+            available_capabilities: None,
             model_switch_pending: false,
             user_model_preference: None,
             deferred_model_switch: None,

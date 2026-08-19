@@ -166,6 +166,13 @@ impl CommandRegistry {
         // Fail-closed until the matching `set_*_visible` call reveals them.
         let mut hidden = HashSet::new();
         hidden.insert("dashboard".to_string());
+        // DIVERGENCE(deepseek): dsh has no Agent Dashboard; /cd is a
+        // dashboard-only command, so keep it hidden too.
+        hidden.insert("cd".to_string());
+        // DIVERGENCE(deepseek): dsh workflow has no list/run-history API yet,
+        // so /workflows would only show an empty list. Hide it until the
+        // bridge can surface real workflow runs.
+        hidden.insert("workflows".to_string());
         hidden.insert("recap".to_string());
         // Voice is fail-closed in the registry until `set_voice_visible` after
         // the runtime gate resolves (GA default on; remote kill switch may hide).
@@ -181,7 +188,8 @@ impl CommandRegistry {
         hidden.insert("hooks".to_string());
         hidden.insert("plugins".to_string());
         hidden.insert("marketplace".to_string());
-        hidden.insert("skills".to_string());
+        // DIVERGENCE(deepseek): /skills is kept available because the bridge
+        // now serves real dsh skills through x.ai/skills/list.
         // DIVERGENCE(deepseek): `/rewind` needs the x.ai/rewind/points and
         // x.ai/rewind/execute RPCs, which the grok-leader bridge does not
         // implement — the picker would die on method-not-found. Hidden (with

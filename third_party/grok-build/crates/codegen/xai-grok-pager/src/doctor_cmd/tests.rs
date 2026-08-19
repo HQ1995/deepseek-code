@@ -177,7 +177,7 @@ fn mixed_report() -> DiagnosticReport {
             disposition: FindingDisposition::Recommendation,
             message: "Use local SSH wrapping".to_owned(),
             remediation: Some(ManualRemediation {
-                fix: "grok wrap ssh <host>".to_owned(),
+                fix: "dscode wrap ssh <host>".to_owned(),
                 config_path: None,
             }),
             automatic_remediation: Some(crate::diagnostics::ssh_wrap_automatic_remediation()),
@@ -243,7 +243,11 @@ fn fake_standalone_facts_compose_through_shared_view() {
     );
     let report = collect_report_with(snapshot);
 
-    assert_eq!(report.issue_count(), 1);
+    let voice_issue = report
+        .findings
+        .iter()
+        .any(|finding| finding.id == crate::diagnostics::VOICE_NO_INPUT_DEVICE_ID);
+    assert_eq!(report.issue_count(), if voice_issue { 2 } else { 1 });
     assert!(
         report
             .findings
@@ -343,7 +347,13 @@ fn human_wayland_error_includes_detail_once() {
     assert_eq!(
         human::format(&report),
         concat!(
-            "Grok Doctor\n",
+            "Dscode Doctor\n",
+            "\n",
+            "⚠ Found 1 issue that may need your attention.\n",
+            "\n",
+            "Findings\n",
+            "  ! clipboard.delivery-unavailable No configured clipboard route can reach the intended clipboard\n",
+            "      Each in-app copy is also written to the backup path shown by the operation. Use `/copy <file>` for an explicit file or `/minimal` for terminal-native selection, then check the native clipboard tool reported above.\n",
             "\n",
             "Environment\n",
             "  · terminal                     Ghostty\n",
@@ -360,10 +370,6 @@ fn human_wayland_error_includes_detail_once() {
             "  · SSH wrap                     off\n",
             "  ? data-control                 error: probe worker died\n",
             "  · status                       unavailable\n",
-            "\n",
-            "Findings\n",
-            "  ! clipboard.delivery-unavailable No configured clipboard route can reach the intended clipboard\n",
-            "      Each in-app copy is also written to the backup path shown by the operation. Use `/copy <file>` for an explicit file or `/minimal` for terminal-native selection, then check the native clipboard tool reported above.\n",
             "\n",
             "1 issue, 0 recommendations\n",
         )
@@ -452,7 +458,10 @@ fn human_healthy_fixture_is_exact() {
     assert_eq!(
         human::format(&healthy_report()),
         concat!(
-            "Grok Doctor\n",
+            "Dscode Doctor\n",
+            "\n",
+            "✅ Your terminal environment looks good.\n",
+            "   No issues found.\n",
             "\n",
             "Environment\n",
             "  · terminal                     Ghostty\n",
@@ -479,7 +488,19 @@ fn human_mixed_fixture_is_exact() {
     assert_eq!(
         human::format(&mixed_report()),
         concat!(
-            "Grok Doctor\n",
+            "Dscode Doctor\n",
+            "\n",
+            "⚠ Found 1 issue that may need your attention.\n",
+            "   1 suggestion below.\n",
+            "\n",
+            "Findings\n",
+            "  ! terminal.tmux-clipboard      OSC 52 clipboard passthrough is disabled\n",
+            "    → Automatic setup: `dscode doctor fix tmux-clipboard`\n",
+            "    → Add `set -g set-clipboard on` to ~/.tmux.conf\n",
+            "      Reload tmux after editing.\n",
+            "  i terminal.ssh-wrap            Use local SSH wrapping\n",
+            "    → Automatic setup: `dscode doctor fix ssh-wrap`\n",
+            "    → One-off: `dscode wrap ssh <host>`\n",
             "\n",
             "Environment\n",
             "  · terminal                     Ghostty\n",
@@ -499,15 +520,6 @@ fn human_mixed_fixture_is_exact() {
             "  · SSH wrap                     off\n",
             "  · status                       confirmed\n",
             "\n",
-            "Findings\n",
-            "  ! terminal.tmux-clipboard      OSC 52 clipboard passthrough is disabled\n",
-            "    → Automatic setup: `grok doctor fix tmux-clipboard`\n",
-            "    → Add `set -g set-clipboard on` to ~/.tmux.conf\n",
-            "      Reload tmux after editing.\n",
-            "  i terminal.ssh-wrap            Use local SSH wrapping\n",
-            "    → Automatic setup: `grok doctor fix ssh-wrap`\n",
-            "    → One-off: `grok wrap ssh <host>`\n",
-            "\n",
             "Checks not completed\n",
             "  ? tmux.version                 unavailable\n",
             "  ? tmux.extended-keys           unavailable\n",
@@ -516,7 +528,7 @@ fn human_mixed_fixture_is_exact() {
             "  ? tmux.control-mode            error: server unavailable\n",
             "\n",
             "Needs a running session\n",
-            "  Some checks only run in Grok. Start Grok and run /doctor.\n",
+            "  Some checks only run in Dscode. Start Dscode and run /doctor.\n",
             "\n",
             "1 issue, 1 recommendation\n",
         )
@@ -538,12 +550,10 @@ fn fix_preview_contains_exact_change_and_caveats() {
     let preview = String::from_utf8(preview).unwrap();
     assert_eq!(preview, crate::diagnostics::format_fix_preview(&plan));
     assert!(preview.contains("File: "));
-    assert!(
-        preview.contains(
-            "# >>> grok doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh='grok wrap ssh'"
-        )
-    );
-    assert!(preview.contains("To use once without changing config: `grok wrap ssh <host>`"));
+    assert!(preview.contains(
+        "# >>> dscode doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh='dscode wrap ssh'"
+    ));
+    assert!(preview.contains("To use once without changing config: `dscode wrap ssh <host>`"));
     assert!(preview.contains("Use `command ssh ...` to bypass the alias."));
     assert!(preview.contains("ssh -f"));
     assert!(preview.contains("ControlPersist"));
@@ -639,7 +649,10 @@ fn human_incomplete_fixture_is_exact_without_duplicate_probe_rows() {
     assert_eq!(
         human::format(&report),
         concat!(
-            "Grok Doctor\n",
+            "Dscode Doctor\n",
+            "\n",
+            "✅ Your terminal environment looks good.\n",
+            "   No issues found.\n",
             "\n",
             "Environment\n",
             "  · terminal                     Ghostty\n",
@@ -657,7 +670,7 @@ fn human_incomplete_fixture_is_exact_without_duplicate_probe_rows() {
             "  · status                       confirmed\n",
             "\n",
             "Needs a running session\n",
-            "  Some checks only run in Grok. Start Grok and run /doctor.\n",
+            "  Some checks only run in Dscode. Start Dscode and run /doctor.\n",
             "\n",
             "0 issues, 0 recommendations\n",
         )
@@ -766,7 +779,7 @@ fn json_contract_is_structural_stable_ordered_and_ansi_free() {
                     },
                     "automaticRemediation": {
                         "fixId": "terminal.tmux-clipboard",
-                        "command": "grok doctor fix terminal.tmux-clipboard"
+                        "command": "dscode doctor fix terminal.tmux-clipboard"
                     },
                     "note": "Reload tmux after editing."
                 },
@@ -774,10 +787,10 @@ fn json_contract_is_structural_stable_ordered_and_ansi_free() {
                     "id": "terminal.ssh-wrap",
                     "disposition": "recommendation",
                     "message": "Use local SSH wrapping",
-                    "remediation": {"fix": "grok wrap ssh <host>", "configPath": null},
+                    "remediation": {"fix": "dscode wrap ssh <host>", "configPath": null},
                     "automaticRemediation": {
                         "fixId": "terminal.ssh-wrap",
-                        "command": "grok doctor fix terminal.ssh-wrap"
+                        "command": "dscode doctor fix terminal.ssh-wrap"
                     },
                     "note": null
                 }
@@ -805,7 +818,7 @@ fn json_contract_is_structural_stable_ordered_and_ansi_free() {
     assert!(issue < recommendation);
     assert!(version < extended && extended < unsupported && unsupported < unavailable);
     assert!(!text.contains("\u{1b}"));
-    assert!(!text.contains("Grok Doctor"));
+    assert!(!text.contains("Dscode Doctor"));
 }
 
 #[test]
@@ -1008,7 +1021,7 @@ fn clipboard_issue_count_preserves_legacy_reports_without_double_counting_named_
 fn new_named_findings_extend_json_without_schema_changes() {
     let mut report = healthy_report();
     report.facts.clipboard.delivery = ClipboardDelivery::Unverified;
-    report.facts.clipboard.fix = Some("grok wrap <ssh command> or /minimal".to_owned());
+    report.facts.clipboard.fix = Some("dscode wrap <ssh command> or /minimal".to_owned());
     report.findings.push(DiagnosticFinding {
         id: crate::diagnostics::CLIPBOARD_DELIVERY_UNVERIFIED_ID,
         disposition: FindingDisposition::Issue,
@@ -1025,7 +1038,7 @@ fn new_named_findings_extend_json_without_schema_changes() {
     assert_eq!(json["facts"]["clipboard"]["delivery"], "unverified");
     assert_eq!(
         json["facts"]["clipboard"]["fix"],
-        "grok wrap <ssh command> or /minimal"
+        "dscode wrap <ssh command> or /minimal"
     );
     assert_eq!(json["findings"][0]["id"], "clipboard.delivery-unverified");
     assert_eq!(json["counts"]["issues"], 1);

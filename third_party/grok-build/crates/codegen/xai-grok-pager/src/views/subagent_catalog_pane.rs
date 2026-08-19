@@ -149,7 +149,9 @@ impl SubagentCatalogPane {
                 let display = detail
                     .map(|d| d.name.clone())
                     .unwrap_or_else(|| item.clone());
-                let desc = detail.and_then(|d| d.description.as_deref()).filter(|d| !d.is_empty());
+                let desc = detail
+                    .and_then(|d| d.description.as_deref())
+                    .filter(|d| !d.is_empty());
                 let value = if *kind == "persona" {
                     Some(item.clone())
                 } else {

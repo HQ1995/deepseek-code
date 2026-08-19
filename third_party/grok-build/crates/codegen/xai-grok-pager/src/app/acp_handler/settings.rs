@@ -71,7 +71,8 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         // the settings modal both reflect a remote-only enablement/kill-switch
         // without a restart.
         xai_grok_shell::util::config::cache_remote_auto_permission_mode_enabled(Some(v));
-        app.auto_mode_gate = xai_grok_shell::util::config::auto_permission_mode_enabled_from_disk();
+        // DIVERGENCE(deepseek): dsh has no auto permission-mode classifier.
+        app.auto_mode_gate = false;
         // Mid-session kill switch: when the gate just went off, drop displayed
         // Auto to Ask + clear every agent's per-session flag (shared with the
         // startup reconcile), AND tell live sessions to leave Auto. Clearing only

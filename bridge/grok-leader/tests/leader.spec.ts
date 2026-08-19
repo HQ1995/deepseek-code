@@ -2676,6 +2676,32 @@ describe('sessionEventToUpdates tool-result diff fallback', () => {
     expect(diffs(updates)).toEqual([{ type: 'diff', path: '/tmp/new.py', newText: 'print(1)' }])
   })
 
+  it('covers str_replace_editor replace, deletion, and insert fallback diffs', () => {
+    const replace = map(toolResult({}), {
+      name: 'str_replace_editor',
+      arguments: { command: 'str_replace', path: '/tmp/a.ts', old_str: 'let x = 1', new_str: 'let x = 2' },
+    })
+    expect(diffs(replace)).toEqual([{ type: 'diff', path: '/tmp/a.ts', oldText: 'let x = 1', newText: 'let x = 2' }])
+
+    const deletion = map(toolResult({}), {
+      name: 'str_replace_editor',
+      arguments: { command: 'str_replace', path: '/tmp/a.ts', old_str: 'gone' },
+    })
+    expect(diffs(deletion)).toEqual([{ type: 'diff', path: '/tmp/a.ts', oldText: 'gone', newText: '' }])
+
+    const insert = map(toolResult({}), {
+      name: 'str_replace_editor',
+      arguments: { command: 'insert', path: '/tmp/a.ts', insert_line: 1, new_str: 'added' },
+    })
+    expect(diffs(insert)).toEqual([{ type: 'diff', path: '/tmp/a.ts', newText: 'added' }])
+
+    const view = map(toolResult({}), {
+      name: 'str_replace_editor',
+      arguments: { command: 'view', path: '/tmp/a.ts' },
+    })
+    expect(diffs(view)).toEqual([])
+  })
+
   it('yields no diff for non-edit tools, incomplete args, or unknown calls', () => {
     expect(diffs(map(toolResult({ text: 'ran' }), { name: 'bash', arguments: { command: 'ls' } }))).toEqual([])
     expect(diffs(map(toolResult({}), { name: 'edit', arguments: { file_path: '/tmp/a.ts' } }))).toEqual([])

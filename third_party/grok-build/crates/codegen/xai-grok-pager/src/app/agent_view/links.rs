@@ -740,7 +740,7 @@ mod link_click_tests {
     /// never passes `true` while a critical announcement is live), arms its
     /// three rects, and clicks dispatch the banner actions. Turning it off
     /// clears the rects.
-        /// Promo twin of the [hide] suppression test: the [label] CTA rect must
+    /// Promo twin of the [hide] suppression test: the [label] CTA rect must
     /// also drop under an open dropdown so a dropdown click cannot open a URL
     /// from a button that is no longer on screen.
     #[test]

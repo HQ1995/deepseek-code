@@ -22,7 +22,7 @@ use crate::scrollback::state::verb_group::verb_group_kind_changed;
 use agent_client_protocol as acp;
 use chrono::{DateTime, Local, TimeZone};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 use xai_grok_tools::types::output::{BashOutput, ToolOutput};
@@ -429,6 +429,8 @@ pub struct AcpUpdateTracker {
     /// `handle_update`) so a partial replay can't silently regress the
     /// registry to the unknown-toolset state.
     pending_acp_tools: Option<Vec<String>>,
+    /// Pending runtime capability names from `AvailableCommandsUpdate.meta.capabilities`.
+    pending_acp_capabilities: Option<HashSet<String>>,
     /// Live Edit completions awaiting full-file HL (drained via [`Self::take_pending_edit_hl`]).
     pending_edit_hl: Vec<EntryId>,
 }
@@ -754,6 +756,10 @@ impl AcpUpdateTracker {
     pub fn take_pending_acp_tools(&mut self) -> Option<Vec<String>> {
         self.pending_acp_tools.take()
     }
+    /// Drain the runtime capability names from the most recent update.
+    pub fn take_pending_acp_capabilities(&mut self) -> Option<HashSet<String>> {
+        self.pending_acp_capabilities.take()
+    }
     /// Drain Edit entry ids that need a background full-file HL job.
     pub fn take_pending_edit_hl(&mut self) -> Vec<EntryId> {
         std::mem::take(&mut self.pending_edit_hl)
@@ -1011,6 +1017,9 @@ impl AcpUpdateTracker {
             acp::SessionUpdate::AvailableCommandsUpdate(update) => {
                 if let Some(t) = parse_tools_meta(update.meta.as_ref()) {
                     self.pending_acp_tools = Some(t);
+                }
+                if let Some(c) = parse_capabilities_meta(update.meta.as_ref()) {
+                    self.pending_acp_capabilities = Some(c);
                 }
                 self.pending_acp_commands = Some(update.available_commands);
                 true
@@ -2651,6 +2660,17 @@ fn extract_listdir_content(raw: &Option<serde_json::Value>) -> Option<String> {
 /// hides every tool-gated command.
 fn parse_tools_meta(meta: Option<&acp::Meta>) -> Option<Vec<String>> {
     let arr = meta?.get("tools")?.as_array()?;
+    Some(
+        arr.iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+    )
+}
+
+/// Extract the agent's advertised runtime capability names from
+/// `AvailableCommandsUpdate.meta.capabilities`.
+fn parse_capabilities_meta(meta: Option<&acp::Meta>) -> Option<HashSet<String>> {
+    let arr = meta?.get("capabilities")?.as_array()?;
     Some(
         arr.iter()
             .filter_map(|v| v.as_str().map(String::from))

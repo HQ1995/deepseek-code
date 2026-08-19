@@ -7,9 +7,74 @@ use crate::clipboard::{ClipboardDelivery, NativeClipboardPreflight};
 use crate::host::{DisplayServer, HostOs};
 
 pub fn format_doctor(report: &DiagnosticReport) -> String {
+    let mut out = String::from("Dscode Doctor\n\n");
+    format_summary(report, &mut out);
+    format_findings(report, &mut out);
+    format_details(report, &mut out);
+    out
+}
+
+fn format_summary(report: &DiagnosticReport, out: &mut String) {
+    let issue_count = report.issue_count();
+    let recommendation_count = report.recommendation_count();
+    if issue_count == 0 && recommendation_count == 0 {
+        out.push_str("✅ Your terminal environment looks good.\n");
+        out.push_str("   No issues found.\n");
+    } else if issue_count == 0 {
+        out.push_str("✅ Your terminal environment is basically OK.\n");
+        out.push_str(&format!(
+            "   {} suggestion{} below.\n",
+            recommendation_count,
+            if recommendation_count == 1 { "" } else { "s" }
+        ));
+    } else {
+        out.push_str(&format!(
+            "⚠ Found {} issue{} that may need your attention.\n",
+            issue_count,
+            if issue_count == 1 { "" } else { "s" }
+        ));
+        if recommendation_count > 0 {
+            out.push_str(&format!(
+                "   {} suggestion{} below.\n",
+                recommendation_count,
+                if recommendation_count == 1 { "" } else { "s" }
+            ));
+        }
+    }
+}
+
+fn format_findings(report: &DiagnosticReport, out: &mut String) {
+    let issues = report
+        .findings
+        .iter()
+        .filter(|finding| finding.disposition == FindingDisposition::Issue)
+        .collect::<Vec<_>>();
+    if !issues.is_empty() {
+        out.push_str(&format!("\nIssues ({})\n", issues.len()));
+        for finding in issues {
+            format_finding(out, finding);
+        }
+    } else if report.issue_count() > 0 {
+        out.push_str("\nIssues (1)\n");
+        out.push_str("\n  ! Clipboard status is unavailable. See Clipboard details below.\n");
+    }
+
+    let recommendations = report
+        .findings
+        .iter()
+        .filter(|finding| finding.disposition == FindingDisposition::Recommendation)
+        .collect::<Vec<_>>();
+    if !recommendations.is_empty() {
+        out.push_str("\nRecommendations\n");
+        for finding in recommendations {
+            format_finding(out, finding);
+        }
+    }
+}
+
+fn format_details(report: &DiagnosticReport, out: &mut String) {
     let facts = &report.facts;
-    let mut out = String::new();
-    out.push_str("Environment\n");
+    out.push_str("\nEnvironment\n");
     out.push_str(&format!("  terminal     {}\n", facts.terminal));
     if let RuntimeFact::Available(xtversion) = &facts.xtversion {
         out.push_str(&format!("  xtversion    {xtversion}\n"));
@@ -132,41 +197,6 @@ pub fn format_doctor(report: &DiagnosticReport) -> String {
             VoiceFacts::Missing { .. } => {
                 out.push_str("  microphone   none detected\n");
             }
-        }
-    }
-
-    format_findings(report, &mut out);
-    out
-}
-
-fn format_findings(report: &DiagnosticReport, out: &mut String) {
-    let issues = report
-        .findings
-        .iter()
-        .filter(|finding| finding.disposition == FindingDisposition::Issue)
-        .collect::<Vec<_>>();
-    if issues.is_empty() {
-        if report.issue_count() == 0 {
-            out.push_str("\nNo issues found.\n");
-        } else {
-            out.push_str("\nAn issue is shown in the Clipboard status above.\n");
-        }
-    } else {
-        out.push_str(&format!("\nIssues ({})\n", issues.len()));
-        for finding in issues {
-            format_finding(out, finding);
-        }
-    }
-
-    let recommendations = report
-        .findings
-        .iter()
-        .filter(|finding| finding.disposition == FindingDisposition::Recommendation)
-        .collect::<Vec<_>>();
-    if !recommendations.is_empty() {
-        out.push_str("\nRecommendations\n");
-        for finding in recommendations {
-            format_finding(out, finding);
         }
     }
 }

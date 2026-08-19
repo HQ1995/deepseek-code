@@ -45,7 +45,7 @@ pub use model::{
 };
 pub use view::{DiagnosticSnapshot, view};
 
-/// Passive input-device probe for `grok doctor` / `/doctor`.
+/// Passive input-device probe for `dscode doctor` / `/doctor`.
 ///
 /// Does not open a capture stream (no macOS mic-permission prompt). When
 /// `emit_missing_issue` is true and no device exists, appends an issue finding.
@@ -285,7 +285,9 @@ pub(crate) fn collect_startup_warnings_from(
     {
         let message = match fullscreen_active {
             Some(true) => "Fullscreen may be unreliable in tmux control mode",
-            Some(false) => "Dscode is using inline mode because tmux control mode limits fullscreen",
+            Some(false) => {
+                "Dscode is using inline mode because tmux control mode limits fullscreen"
+            }
             None => "Display may be limited in tmux control mode",
         };
         let mut warning = TerminalWarning::new(WarningCategory::ControlMode, message, None, None);
@@ -450,14 +452,14 @@ fn sandbox_profile_conflict_warning_from(conflicts: Vec<String>) -> Option<Termi
     })
 }
 
-/// Pure SSH `grok wrap` recommendation — suggests launching the session
-/// through `grok wrap ssh <host>` on the user's local machine, which gives a
+/// Pure SSH `dscode wrap` recommendation — suggests launching the session
+/// through `dscode wrap ssh <host>` on the user's local machine, which gives a
 /// remote session reliable clipboard forwarding plus terminal-mode restore
 /// when the connection drops.
 ///
 /// Gates (all must hold):
 /// - `is_ssh` — the session runs over SSH ([`TerminalContext::is_ssh`]);
-/// - `!osc52_sink_active` — no wrap is already capturing our output. `grok
+/// - `!osc52_sink_active` — no wrap is already capturing our output. `dscode
 ///   wrap` advertises its OSC 52 sink through the SSH hop via an env var
 ///   (see `clipboard::osc52_sink_active`), so once a user adopts wrap the
 ///   hint silences itself with no further bookkeeping. Env-based, so stale
@@ -973,9 +975,9 @@ pub fn color_support_warning(
     }
 
     // Checked before the detected level is consulted at all: the level says
-    // what Grok emits, which is a different question from what survives tmux.
+    // what Dscode emits, which is a different question from what survives tmux.
     // A truecolor detection is not evidence that truecolor reaches the
-    // terminal, and a session with no color evidence (piped `grok doctor`)
+    // terminal, and a session with no color evidence (piped `dscode doctor`)
     // still has a clamping client worth reporting.
     if color_passthrough == TmuxColorPassthrough::Reduced {
         let mut warning = TerminalWarning::new(
@@ -2220,14 +2222,14 @@ mod tests {
         assert!(out[1].message.contains("sandbox settings"));
     }
 
-    // -- ssh_wrap_hint: `grok wrap ssh` recommendation --------------------------
+    // -- ssh_wrap_hint: `dscode wrap ssh` recommendation ------------------------
 
     #[test]
     fn ssh_wrap_hint_fires_over_plain_ssh() {
         // is_ssh, no sink, not VS Code remote → recommend wrap.
         let w = ssh_wrap_hint(true, false, false).expect("hint must fire");
         assert_eq!(w.category, WarningCategory::SshWithoutWrap);
-        assert_eq!(w.fix.as_deref(), Some("grok wrap ssh <host>"));
+        assert_eq!(w.fix.as_deref(), Some("dscode wrap ssh <host>"));
         assert!(
             w.config_path.is_none(),
             "fix is a command, not a config line"
@@ -2618,7 +2620,7 @@ mod tests {
         assert!(finding.automatic_remediation.is_none());
         assert!(finding.note.as_deref().is_some_and(|note| {
             note.contains("install a supported audio recorder")
-                && note.contains("grok doctor")
+                && note.contains("dscode doctor")
                 && note.contains("can't detect denied macOS microphone access")
         }));
     }
@@ -3089,7 +3091,7 @@ mod tests {
         );
     }
 
-    /// Piped `grok doctor` has no color evidence, but the tmux client is still
+    /// Piped `dscode doctor` has no color evidence, but the tmux client is still
     /// measurable, and `doctor fix` needs the finding to plan against.
     #[test]
     fn color_support_warning_reports_tmux_clamp_without_color_evidence() {

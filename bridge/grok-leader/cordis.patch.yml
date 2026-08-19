@@ -78,6 +78,10 @@
       name: '@deepseek-ai/dsh-cordis-host-runner'
 
 - insert:
+    - id: schedule
+      name: '@deepseek-ai/dsh-schedule'
+
+- insert:
     - id: grok-leader
       name: '@hqzhao95/dscode'
       config:

@@ -115,6 +115,8 @@ pub struct AppCtx<'a> {
     /// deployments with no grok.com billing session.
     pub usage_command_visible: bool,
     pub workflows_available: bool,
+    /// Runtime capability names advertised by the leader. `None` means unknown.
+    pub capabilities: Option<std::collections::HashSet<String>>,
     /// Effective render mode of this process (gates `/minimal` and
     /// `/fullscreen` visibility). Same source of truth as
     /// [`CommandExecCtx::screen_mode`], carried by the owning

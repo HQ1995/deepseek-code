@@ -204,19 +204,18 @@ impl AgentView {
                             return InputOutcome::Changed;
                         }
                         crate::slash::commands::provider::ProviderPendingDeleteKey::Disarmed
-                        | crate::slash::commands::provider::ProviderPendingDeleteKey::NotArmed => {
-                        }
+                        | crate::slash::commands::provider::ProviderPendingDeleteKey::NotArmed => {}
                     }
                 } else if key.kind == KeyEventKind::Press {
-                    let edit = key.code == KeyCode::Char('e')
-                        && key.modifiers == KeyModifiers::CONTROL;
-                    let delete = key.code == KeyCode::Char('d')
-                        && key.modifiers == KeyModifiers::CONTROL;
+                    let edit =
+                        key.code == KeyCode::Char('e') && key.modifiers == KeyModifiers::CONTROL;
+                    let delete =
+                        key.code == KeyCode::Char('d') && key.modifiers == KeyModifiers::CONTROL;
                     if edit || delete {
                         let snap = self.prompt.slash_snapshot();
                         if let Some(row) = snap.selection().cloned() {
-                            let add_row =
-                                row.insert_text == crate::slash::commands::provider::ADD_PROVIDER_ARG;
+                            let add_row = row.insert_text
+                                == crate::slash::commands::provider::ADD_PROVIDER_ARG;
                             if !add_row {
                                 if edit {
                                     self.prompt.slash_cancel_preview();
@@ -226,12 +225,9 @@ impl AgentView {
                                         provider_id: row.insert_text,
                                     });
                                 }
-                                let name = row
-                                    .display
-                                    .trim_end_matches(" (current)")
-                                    .to_string();
-                                let blocked = self.session.models.current_provider_scope()
-                                    == row.insert_text;
+                                let name = row.display.trim_end_matches(" (current)").to_string();
+                                let blocked =
+                                    self.session.models.current_provider_scope() == row.insert_text;
                                 self.prompt.provider_pending_delete =
                                     Some(crate::slash::commands::provider::ProviderPendingDelete {
                                         provider_id: row.insert_text,

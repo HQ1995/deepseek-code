@@ -323,6 +323,22 @@ pub(crate) struct SessionFlags {
     /// Auto (classifier) permission mode (`_meta.autoMode`). Mutually exclusive
     /// with `yolo_mode` on the agent; both may be set only if yolo wins at spawn.
     pub auto_mode: bool,
+    /// CLI `-m/--model`, forwarded to dsh through `_meta.model`.
+    pub model: Option<String>,
+    /// CLI `--reasoning-effort`, forwarded to dsh through `_meta.reasoningEffort`.
+    pub reasoning_effort: Option<String>,
+    /// CLI `--permission-mode`, forwarded to dsh through `_meta.permissionMode`.
+    pub permission_mode: Option<String>,
+    /// CLI `--sandbox`, forwarded to dsh through `_meta.sandbox`.
+    pub sandbox: Option<String>,
+    /// CLI `--system-prompt-override`, forwarded to dsh through `_meta.systemPromptOverride`.
+    pub system_prompt_override: Option<String>,
+    /// CLI `--rules`, forwarded to dsh through `_meta.rules`.
+    pub rules: Option<String>,
+    /// CLI `--tools`, forwarded to dsh through `_meta.tools`.
+    pub tools: Option<String>,
+    /// CLI `--disallowed-tools`, forwarded to dsh through `_meta.disallowedTools`.
+    pub disallowed_tools: Option<String>,
     /// Gateway light-frontend (`kind: "chat"`) — `--chat` / `/chat`.
     /// Mutual exclusivity with Build plan profiles: profiles are omitted and a
     /// warn is logged when plan flags are also set (K12).
@@ -405,6 +421,30 @@ impl SessionFlags {
                 self.auto_mode
             )),
         );
+        if let Some(ref model) = self.model {
+            meta.insert("model".into(), serde_json::json!(model));
+        }
+        if let Some(ref effort) = self.reasoning_effort {
+            meta.insert("reasoningEffort".into(), serde_json::json!(effort));
+        }
+        if let Some(ref mode) = self.permission_mode {
+            meta.insert("permissionMode".into(), serde_json::json!(mode));
+        }
+        if let Some(ref sandbox) = self.sandbox {
+            meta.insert("sandbox".into(), serde_json::json!(sandbox));
+        }
+        if let Some(ref prompt) = self.system_prompt_override {
+            meta.insert("systemPromptOverride".into(), serde_json::json!(prompt));
+        }
+        if let Some(ref rules) = self.rules {
+            meta.insert("rules".into(), serde_json::json!(rules));
+        }
+        if let Some(ref tools) = self.tools {
+            meta.insert("tools".into(), serde_json::json!(tools));
+        }
+        if let Some(ref disallowed) = self.disallowed_tools {
+            meta.insert("disallowedTools".into(), serde_json::json!(disallowed));
+        }
         if meta.is_empty() { None } else { Some(meta) }
     }
 }

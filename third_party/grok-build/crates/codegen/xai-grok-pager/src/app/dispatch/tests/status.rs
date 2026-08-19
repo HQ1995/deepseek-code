@@ -630,17 +630,6 @@ fn set_coding_data_sharing_no_agents_still_emits_effect() {
     assert!(app.privacy_banner_acked.is_none());
 }
 
-
-
-
-
-
-
-
-
-
-
-
 /// A Settings pick before the notice is rolled out must not stamp an ack
 /// that would hide the banner when the cohort turns on.
 #[test]

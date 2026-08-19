@@ -40,11 +40,8 @@ pub fn send_now_tip() -> EphemeralTip {
         spans.push(Span::styled("Alt+Enter", key_style));
         spans.push(Span::styled(" to steer", dim));
     }
-    EphemeralTip::new(
-        SEND_NOW_TIP_KEY,
-        Line::from(spans),
-    )
-    .with_session_seen_cap(SEND_NOW_TIP_SEEN_KEY, SEND_NOW_TIP_SEEN_CAP)
+    EphemeralTip::new(SEND_NOW_TIP_KEY, Line::from(spans))
+        .with_session_seen_cap(SEND_NOW_TIP_SEEN_KEY, SEND_NOW_TIP_SEEN_CAP)
 }
 
 #[cfg(test)]

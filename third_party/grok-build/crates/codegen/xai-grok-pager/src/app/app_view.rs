@@ -945,6 +945,18 @@ pub struct AppView {
     pub cli_model_override: Option<acp::ModelId>,
     /// CLI effort token (`--reasoning-effort` / `--effort`). Applied on session create.
     pub cli_effort_token: Option<String>,
+    /// CLI `--permission-mode`, forwarded to dsh through session `_meta`.
+    pub cli_permission_mode: Option<String>,
+    /// CLI `--sandbox`, forwarded to dsh through session `_meta`.
+    pub cli_sandbox: Option<String>,
+    /// CLI `--system-prompt-override`, forwarded to dsh through session `_meta`.
+    pub cli_system_prompt_override: Option<String>,
+    /// CLI `--rules`, forwarded to dsh through session `_meta`.
+    pub cli_rules: Option<String>,
+    /// CLI `--tools`, forwarded to dsh through session `_meta`.
+    pub cli_tools: Option<String>,
+    /// CLI `--disallowed-tools`, forwarded to dsh through session `_meta`.
+    pub cli_disallowed_tools: Option<String>,
     /// Default YOLO for new sessions, seeded at startup from `effective_yolo_for_launch`.
     pub default_yolo: bool,
     /// Soft-default still owns the mode: settings/update may rewrite UI +
@@ -1272,7 +1284,7 @@ impl AppView {
         }
     }
     /// Welcome privacy banner visibility gates.
-        pub fn privacy_banner_should_show(&self) -> bool {
+    pub fn privacy_banner_should_show(&self) -> bool {
         // dscode: no data-collection upsell; the banner is never shown.
         false
     }
@@ -1505,9 +1517,17 @@ impl AppView {
             welcome_shimmer_frame: 0,
             cli_model_override: None,
             cli_effort_token: None,
+            cli_permission_mode: None,
+            cli_sandbox: None,
+            cli_system_prompt_override: None,
+            cli_rules: None,
+            cli_tools: None,
+            cli_disallowed_tools: None,
             default_yolo: false,
             permission_mode_from_soft_default: true,
-            auto_mode_gate: xai_grok_shell::util::config::auto_permission_mode_enabled_from_disk(),
+            // DIVERGENCE(deepseek): dsh has no auto permission-mode classifier;
+            // keep /auto and the auto permission mode hard-disabled in dscode.
+            auto_mode_gate: false,
             yolo_policy_block: None,
             yolo_launch_block_notice: None,
             screen_mode_switch_hint: None,
@@ -4855,7 +4875,10 @@ impl AppView {
                                     voice_listening,
                                     voice_interim: voice_interim.as_deref(),
                                     esc_owned_before_agent,
-                                    preset_label: self.persona_override.as_deref().unwrap_or("minimal"),
+                                    preset_label: self
+                                        .persona_override
+                                        .as_deref()
+                                        .unwrap_or("minimal"),
                                 },
                             );
                             if let Some(modal) = self.import_claude_modal.as_mut() {
@@ -4941,25 +4964,28 @@ impl AppView {
                                 self.dashboard_sessions_loading,
                                 dash_upgrade_cta,
                             );
-                            let (popup_cursor, popup_post_flush, drawn_popup_agent) =
-                                if let Some(agent_id) = dashboard.attached_agent {
-                                    let theme = crate::theme::Theme::current();
-                                    let popup_area = crate::views::dashboard::popup_rect(view_area);
-                                    let title = agents
-                                        .get(&agent_id)
-                                        .map(crate::views::session_title::entry_title)
-                                        .unwrap_or_else(|| "(session)".to_string());
-                                    let bundle_state = &self.bundle_state;
-                                    let (cursor, post_flush, drawn) =
-                                        crate::views::dashboard::render_popup_overlay(
-                                            f.buffer_mut(),
-                                            popup_area,
-                                            &theme,
-                                            &title,
-                                            dashboard,
-                                            |inner, buf| {
-                                                if let Some(agent) = agents.get_mut(&agent_id) {
-                                                    agent.draw(
+                            let (popup_cursor, popup_post_flush, drawn_popup_agent) = if let Some(
+                                agent_id,
+                            ) =
+                                dashboard.attached_agent
+                            {
+                                let theme = crate::theme::Theme::current();
+                                let popup_area = crate::views::dashboard::popup_rect(view_area);
+                                let title = agents
+                                    .get(&agent_id)
+                                    .map(crate::views::session_title::entry_title)
+                                    .unwrap_or_else(|| "(session)".to_string());
+                                let bundle_state = &self.bundle_state;
+                                let (cursor, post_flush, drawn) =
+                                    crate::views::dashboard::render_popup_overlay(
+                                        f.buffer_mut(),
+                                        popup_area,
+                                        &theme,
+                                        &title,
+                                        dashboard,
+                                        |inner, buf| {
+                                            if let Some(agent) = agents.get_mut(&agent_id) {
+                                                agent.draw(
                                                     inner,
                                                     buf,
                                                     registry,
@@ -4974,19 +5000,22 @@ impl AppView {
                                                     link_spans,
                                                     AppRenderParams {
                                                         esc_owned_before_agent,
-                                                        preset_label: self.persona_override.as_deref().unwrap_or("minimal"),
+                                                        preset_label: self
+                                                            .persona_override
+                                                            .as_deref()
+                                                            .unwrap_or("minimal"),
                                                         ..Default::default()
                                                     },
                                                 )
-                                                } else {
-                                                    (None, None)
-                                                }
-                                            },
-                                        );
-                                    (cursor, post_flush, drawn.then_some(agent_id))
-                                } else {
-                                    (None, None, None)
-                                };
+                                            } else {
+                                                (None, None)
+                                            }
+                                        },
+                                    );
+                                (cursor, post_flush, drawn.then_some(agent_id))
+                            } else {
+                                (None, None, None)
+                            };
                             let stale_clears =
                                 Self::dashboard_stale_image_clears(agents, drawn_popup_agent);
                             let popup_post_flush =
@@ -5432,6 +5461,10 @@ impl AppView {
                     .any(|c| c.name == "workflow")
                     || !agent.workflow_runs.is_empty(),
             );
+            agent
+                .prompt
+                .slash_controller
+                .set_capabilities(agent.session.available_capabilities.clone());
             if agent.acp_synced_generation != agent.session.available_commands_generation {
                 agent.prompt.sync_acp_commands(
                     &agent.session.available_commands,

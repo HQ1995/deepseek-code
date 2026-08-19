@@ -69,6 +69,7 @@ impl AgentView {
             billing_surface_visible: slash_controller.billing_surface_visible(),
             usage_command_visible: slash_controller.usage_command_visible(),
             workflows_available: slash_controller.workflows_available(),
+            capabilities: slash_controller.capabilities().cloned(),
             screen_mode: slash_controller.screen_mode(),
             current_title: slash_controller.current_title(),
         };

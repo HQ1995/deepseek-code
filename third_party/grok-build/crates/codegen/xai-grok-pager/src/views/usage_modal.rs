@@ -260,10 +260,7 @@ impl UsageInfoModalState {
     fn step_tab(&mut self, forward: bool) {
         let tabs = UsageInfoTab::visible_tabs(self.ctx.usage_visible);
         let n = tabs.len();
-        let i = tabs
-            .iter()
-            .position(|t| *t == self.active_tab)
-            .unwrap_or(0);
+        let i = tabs.iter().position(|t| *t == self.active_tab).unwrap_or(0);
         let next = if forward {
             (i + 1) % n
         } else {
@@ -1176,7 +1173,10 @@ mod tests {
             })
             .collect();
         assert_eq!(state.window.tab_rects.len(), 2);
-        assert!(!text.contains("Usage limit"), "billing tab must hide:\n{text}");
+        assert!(
+            !text.contains("Usage limit"),
+            "billing tab must hide:\n{text}"
+        );
         assert!(text.contains("Context usage") && text.contains("Session info"));
 
         // Cycling skips the hidden billing tab.
@@ -1189,7 +1189,11 @@ mod tests {
             handle_usage_modal_key(&mut state, &key(KeyCode::Tab)),
             UsageModalOutcome::Changed
         );
-        assert_eq!(state.active_tab, UsageInfoTab::ContextUsage, "wraps over 2 tabs");
+        assert_eq!(
+            state.active_tab,
+            UsageInfoTab::ContextUsage,
+            "wraps over 2 tabs"
+        );
     }
 
     #[test]

@@ -20,8 +20,10 @@ pub enum Command {
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
     /// Sign out and clear cached credentials
+    #[command(hide = true)]
     Logout,
     /// Sign in to Dscode
+    #[command(hide = true)]
     Login {
         /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
         #[arg(long, hide = true)]
@@ -47,14 +49,17 @@ pub enum Command {
     /// Manage MCP server configurations
     Mcp(crate::mcp_cmd::McpArgs),
     /// Manage plugins and marketplace sources
+    #[command(hide = true)]
     Plugin(crate::plugin_cmd::PluginArgs),
     /// Manage cross-session memory
+    #[command(hide = true)]
     Memory(crate::memory_cmd::MemoryArgs),
     /// List available models and exit
     Models,
     /// List, search, or restore sessions
     Sessions(crate::sessions_cmd::SessionsArgs),
     /// Fetch and install managed configuration
+    #[command(hide = true)]
     Setup {
         /// Print the fetched configuration as JSON instead of installing it;
         /// writes nothing to ~/.grok.
@@ -87,6 +92,7 @@ See ~/.grok/README.md for more information.
     /// Export a session transcript as Markdown
     Export(crate::export_cmd::ExportArgs),
     /// Export or upload session trace data
+    #[command(hide = true)]
     Trace(crate::trace_cmd::TraceArgs),
     /// Check for updates or install a specific version
     Update {
@@ -134,6 +140,7 @@ See ~/.grok/README.md for more information.
         shell: Shell,
     },
     /// Manage git worktrees
+    #[command(hide = true)]
     Worktree(crate::worktree_cmd::WorktreeArgs),
     /// Show what the dscode home (~/.grok) uses on disk
     #[command(name = "du", visible_alias = "disk-usage")]
@@ -150,6 +157,7 @@ See ~/.grok/README.md for more information.
     /// subagents). Disabled when `[dashboard].enabled = false` in
     /// `~/.grok/config.toml` or when the `GROK_AGENT_DASHBOARD=0` env
     /// var is set.
+    #[command(hide = true)]
     Dashboard,
 }
 /// Arguments for the `wrap` subcommand: the command to run, then its args.
@@ -608,16 +616,16 @@ pub struct PagerArgs {
     /// With `--resume` of a remote session, pass `--restore-code` to apply
     /// the snapshot codebase (conversation is restored either way).
     /// Headless (`-p`) does not create a worktree from this flag.
-    #[arg(short = 'w', long = "worktree", num_args = 0..= 1, default_missing_value = "")]
+    #[arg(short = 'w', long = "worktree", num_args = 0..= 1, default_missing_value = "", hide = true)]
     pub worktree: Option<String>,
     /// Branch, tag, or commit to base the worktree on (with `--worktree`).
     /// Defaults to the current HEAD of the source checkout when omitted.
-    #[arg(long = "worktree-ref", visible_alias = "ref", requires = "worktree")]
+    #[arg(long = "worktree-ref", visible_alias = "ref", requires = "worktree", hide = true)]
     pub worktree_ref: Option<String>,
     /// Restore the original session's repository snapshot when resuming.
     /// Remote sessions require `--worktree` (never checks out into the current
     /// directory). Without this flag, resume restores conversation only.
-    #[arg(long = "restore-code", requires = "resume_session")]
+    #[arg(long = "restore-code", requires = "resume_session", hide = true)]
     pub restore_code: bool,
     /// Disable plan mode.
     #[arg(long = "no-plan")]
@@ -780,7 +788,7 @@ pub struct PagerArgs {
     #[arg(long = "force-login", hide = true)]
     pub force_login: bool,
     /// Use OAuth when the welcome screen starts authentication.
-    #[arg(long = "oauth")]
+    #[arg(long = "oauth", hide = true)]
     pub oauth: bool,
     /// Connect to a shared leader process.
     #[arg(long, conflicts_with = "no_leader", hide = true)]

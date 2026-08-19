@@ -196,24 +196,22 @@ mod tests {
         assert!(reg.get("find").is_some(), "/find should be registered");
     }
     #[test]
-    fn loop_command_declares_scheduler_tool_requirement() {
+    fn loop_command_declares_no_scheduler_tool_requirement() {
         let loop_cmd = loop_cmd::LoopCommand;
-        assert_eq!(loop_cmd.required_tools(), &["scheduler_create"]);
+        // DIVERGENCE(deepseek): /loop is handled by the dsh bridge via
+        // dsh-schedule, so it no longer depends on scheduler_create.
+        assert!(loop_cmd.required_tools().is_empty());
     }
     #[test]
-    fn loop_command_hidden_when_scheduler_tools_absent() {
+    fn loop_command_visible_without_scheduler_tools() {
         let mut reg = CommandRegistry::new(builtin_commands());
         reg.set_available_tools(std::collections::HashSet::from([
             "read_file".to_string(),
             "grep".to_string(),
         ]));
-        assert!(reg.get("loop").is_none(), "/loop should be hidden");
+        assert!(reg.get("loop").is_some(), "/loop should be visible");
         assert!(reg.get("quit").is_some());
         assert!(reg.get("compact").is_some());
-        reg.set_available_tools(std::collections::HashSet::from([
-            "scheduler_create".to_string()
-        ]));
-        assert!(reg.get("loop").is_some());
     }
     #[test]
     fn builtin_registry_lookup_by_alias() {
@@ -409,6 +407,7 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            capabilities: None,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -436,6 +435,7 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            capabilities: None,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -530,6 +530,7 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            capabilities: None,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -548,6 +549,7 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: false,
+            capabilities: None,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -577,6 +579,7 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: false,
             workflows_available: false,
+            capabilities: None,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -601,9 +604,11 @@ mod tests {
     #[test]
     fn cd_registered_in_builtin_commands() {
         let reg = CommandRegistry::new(builtin_commands());
+        // DIVERGENCE(deepseek): dsh has no Agent Dashboard, so /cd is
+        // hard-hidden even though it remains a builtin.
         assert!(
-            reg.get("cd").is_some(),
-            "/cd should be registered in builtins"
+            reg.get("cd").is_none(),
+            "/cd should be hidden in dscode"
         );
     }
     #[test]

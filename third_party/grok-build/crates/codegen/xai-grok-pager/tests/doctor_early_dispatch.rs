@@ -53,7 +53,7 @@ fn doctor_json_bypasses_unrelated_startup_state() {
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
     assert_eq!(json["schemaVersion"], "1");
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("Grok Doctor"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Dscode Doctor"));
 
     let after = directory_entries(&grok_home);
     assert_eq!(after, before, "doctor must not create startup artifacts");
@@ -365,7 +365,7 @@ fn doctor_fix_without_id_lists_only_applicable_automatic_fixes() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.contains("On your local computer, run: grok doctor fix ssh-wrap"),
+        stdout.contains("On your local computer, run: dscode doctor fix ssh-wrap"),
         "{stdout}"
     );
     assert!(!home.join(".bashrc").exists());
@@ -449,7 +449,7 @@ fn doctor_tmux_fix_yes_writes_only_actual_home_tmux_config() {
     );
     assert_eq!(
         std::fs::read_to_string(home.join(".tmux.conf")).unwrap(),
-        "# >>> grok doctor >>>\n# >>> terminal.tmux-clipboard >>>\nset -g set-clipboard on\n# <<< terminal.tmux-clipboard <<<\n# <<< grok doctor <<<"
+        "# >>> dscode doctor >>>\n# >>> terminal.tmux-clipboard >>>\nset -g set-clipboard on\n# <<< terminal.tmux-clipboard <<<\n# <<< dscode doctor <<<"
     );
     assert!(!grok_home.join(".tmux.conf").exists());
 }
@@ -487,7 +487,7 @@ fn doctor_fix_yes_writes_only_actual_home_shell_rc() {
     assert!(stdout.contains("command ssh"));
     assert_eq!(
         std::fs::read_to_string(home.join(".bashrc")).unwrap(),
-        "# >>> grok doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh='grok wrap ssh'\n# <<< terminal.ssh-wrap <<<\n# <<< grok doctor <<<"
+        "# >>> dscode doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh='dscode wrap ssh'\n# <<< terminal.ssh-wrap <<<\n# <<< dscode doctor <<<"
     );
     assert!(!grok_home.join(".bashrc").exists());
 }

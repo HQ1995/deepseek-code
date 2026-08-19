@@ -785,6 +785,10 @@ pub struct AgentSession {
     /// `Some(_)` enables tool-gating in the slash registry; `None` keeps
     /// every command visible (avoids bootstrap flicker).
     pub available_tools: Option<HashSet<String>>,
+    /// Runtime capability names advertised by the leader (e.g. "subagents",
+    /// "skills", "plan", "todo", "schedule", "goal"). `None` until the shell
+    /// sends an `AvailableCommandsUpdate.meta.capabilities` list.
+    pub available_capabilities: Option<HashSet<String>>,
     /// Whether a `/model` switch is in flight. Dims the status-bar model name
     /// and holds the queue drain (`maybe_drain_queue`) so a queued prompt isn't
     /// sent on the old harness mid-switch. Cleared on
@@ -1188,6 +1192,7 @@ mod tests {
             available_commands: Vec::new(),
             available_commands_generation: 0,
             available_tools: None,
+            available_capabilities: None,
             model_switch_pending: false,
             user_model_preference: None,
             deferred_model_switch: None,

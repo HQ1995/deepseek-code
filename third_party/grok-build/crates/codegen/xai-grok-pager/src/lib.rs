@@ -11,8 +11,8 @@ mod config_toml_edit;
 pub mod diagnostics;
 pub mod disk_usage_cmd;
 pub mod docs;
-pub mod dsh_leader;
 pub mod doctor_cmd;
+pub mod dsh_leader;
 pub mod export_cmd;
 pub(crate) mod fs_size;
 pub mod git_info;
@@ -78,4 +78,3 @@ pub mod worktree_cmd;
 
 #[cfg(test)]
 pub mod test_util;
-

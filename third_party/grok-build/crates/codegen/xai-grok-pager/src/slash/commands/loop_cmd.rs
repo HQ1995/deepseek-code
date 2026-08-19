@@ -1,6 +1,6 @@
 use agent_client_protocol as acp;
 use xai_grok_tools::implementations::grok_build::{
-    LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction, loop_usage_message,
+    LoopFireMode, loop_schedule_instruction, loop_usage_message,
 };
 
 use crate::slash::command::{CommandExecCtx, CommandResult, ScheduledTaskPreview, SlashCommand};
@@ -9,7 +9,9 @@ use crate::slash::command::{CommandExecCtx, CommandResult, ScheduledTaskPreview,
 /// module-level constant so the trait method can return a `'static`
 /// slice; the constant pulls the canonical name from `xai-grok-tools`
 /// so a tool rename surfaces here at compile time.
-const LOOP_REQUIRED_TOOLS: &[&str] = &[SCHEDULER_CREATE_TOOL_NAME];
+// DIVERGENCE(deepseek): /loop is handled by the dsh bridge through
+// dsh-schedule; it no longer depends on grok's scheduler_create tool.
+const LOOP_REQUIRED_TOOLS: &[&str] = &[];
 
 pub struct LoopCommand;
 
@@ -108,6 +110,10 @@ impl SlashCommand for LoopCommand {
         LOOP_REQUIRED_TOOLS
     }
 
+    fn visible(&self, ctx: &crate::slash::command::AppCtx) -> bool {
+        ctx.capabilities.as_ref().map_or(true, |caps| caps.contains("schedule"))
+    }
+
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         if args.trim().is_empty() {
             return CommandResult::Message(loop_usage_message().to_string());
@@ -132,7 +138,11 @@ impl SlashCommand for LoopCommand {
         CommandResult::InjectSkill {
             display_text: format!("/loop {args}"),
             prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
-                loop_schedule_instruction(args, fire_mode),
+                // DIVERGENCE(deepseek): dsh-schedule uses schedule_create /
+                // schedule_delete rather than grok's scheduler_create.
+                loop_schedule_instruction(args, fire_mode)
+                    .replace("scheduler_create", "schedule_create")
+                    .replace("scheduler_delete", "schedule_delete"),
             ))],
             display_as_skill: false,
             scheduled_task_preview: Some(ScheduledTaskPreview {
@@ -375,7 +385,12 @@ mod tests {
                     let acp::ContentBlock::Text(text) = &prompt_blocks[0] else {
                         panic!("expected a text prompt block");
                     };
-                    assert_eq!(text.text, loop_schedule_instruction(args, mode));
+                    assert_eq!(
+                        text.text,
+                        loop_schedule_instruction(args, mode)
+                            .replace("scheduler_create", "schedule_create")
+                            .replace("scheduler_delete", "schedule_delete"),
+                    );
                 }
                 other => panic!("expected InjectSkill, got {other:?}"),
             }

@@ -24,7 +24,7 @@ import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import { installModelSelection, type Agent, type AgentOptions, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import { ReasoningEffortId, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
+import { CallId, ReasoningEffortId, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-user-approval'
@@ -94,6 +94,7 @@ const WIRE = {
   sessionLoad: 'session/load',
   sessionList: 'session/list',
   sessionSetModel: 'session/set_model',
+  sessionSetMode: 'session/set_mode',
   sessionClose: 'session/close',
   sessionUpdate: 'session/update',
   requestPermission: 'session/request_permission',
@@ -155,6 +156,7 @@ export type GrokSessionUpdate =
   | { sessionUpdate: 'agent_thought_chunk'; content: { type: 'text'; text: string } }
   | { sessionUpdate: 'tool_call'; toolCallId: string; title: string; kind: ToolKindWire; status: 'in_progress'; rawInput?: unknown }
   | { sessionUpdate: 'tool_call_update'; toolCallId: string; status: 'completed' | 'error'; content?: Array<ToolResultContentBlock>; rawOutput?: unknown; error?: { name: string; code: string } }
+  | { sessionUpdate: 'plan'; entries: Array<{ content: string; priority: string; status: string }> }
 
 /** grok ACP ToolKind vocabulary the TUI renders for a tool call. */
 export type ToolKindWire = 'execute' | 'read' | 'edit' | 'search' | 'fetch' | 'other'
@@ -341,6 +343,27 @@ function modelSelectionFromDefault(
     ...fromDefault && defaultSelection.reasoningEffort !== undefined
       ? { reasoningEffort: ReasoningEffortId(defaultSelection.reasoningEffort) }
       : {},
+  }
+}
+
+/** Like modelSelectionFromDefault, but also lets a session/new or session/load
+ *  `_meta` override provider/model/reasoningEffort (future CLI wiring). */
+function modelSelectionFromRequest(
+  config: Pick<GrokLeaderConfig, 'provider' | 'model'>,
+  defaultSelection: { provider: string; model: string; reasoningEffort?: string } | undefined,
+  meta: Record<string, unknown> | null | undefined,
+) {
+  const provider = typeof meta?.provider === 'string' ? meta.provider : config.provider ?? defaultSelection?.provider ?? 'deepseek-official'
+  const model = typeof meta?.model === 'string' ? meta.model : config.model ?? defaultSelection?.model ?? 'deepseek-v4-flash'
+  const fromDefault = defaultSelection !== undefined
+    && provider === defaultSelection.provider
+    && model === defaultSelection.model
+  const effort = typeof meta?.reasoningEffort === 'string' ? meta.reasoningEffort : undefined
+  const reasoningEffort = effort ?? (fromDefault ? defaultSelection.reasoningEffort : undefined)
+  return {
+    provider,
+    model,
+    ...reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(reasoningEffort) },
   }
 }
 
@@ -881,6 +904,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (event.type === 'turn/start') {
         record.turnStartMs = event.time
       }
+      if (event.type === 'todo/write') {
+        const data = event.data as { todos?: Array<{ content?: unknown; status?: unknown }> }
+        const entries = (data.todos ?? []).map(todo => ({
+          content: String(todo.content ?? ''),
+          priority: 'medium',
+          status: todo.status === 'in_progress' ? 'in_progress' : todo.status === 'completed' ? 'completed' : 'pending',
+        }))
+        emitUpdate(conn, record, event.seq, { sessionUpdate: 'plan', entries }, false, event.time)
+      }
       for (const item of mapEvent(record, event, false)) {
         emitUpdate(conn, record, event.seq, item, false, event.time)
       }
@@ -1221,7 +1253,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
     const defaultSelection = defaultModel?.currentSelection?.()
     const selection: ModelSelectionRef = {
-      current: modelSelectionFromDefault(config, defaultSelection),
+      current: modelSelectionFromRequest(config, defaultSelection, meta),
       assembled: undefined,
     }
     const handle = await agents.create({
@@ -1270,6 +1302,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       steered: [],
     }
     sessions.set(sessionId, record)
+    applyPermissionMode(record, typeof meta?.permissionMode === 'string' ? meta.permissionMode as string : undefined, meta?.yoloMode === true)
     void broadcastAvailableCommands(record)
     // The pager parks on "Starting session…" until this arrives (the probe
     // worker's scripted fake sends it 50 ms after the session/new result;
@@ -1591,6 +1624,21 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }, false, Date.now())
   }
 
+  const capabilitiesFor = (record: SessionRecord): string[] => {
+    const capabilities: string[] = []
+    if (ctx.get('subagents') !== undefined || record.agent.ctx.get('subagents') !== undefined) capabilities.push('subagents')
+    if (record.agent.ctx.get('skills') !== undefined) capabilities.push('skills')
+    if (record.agent.ctx.get('planMode') !== undefined) capabilities.push('plan')
+    if (record.agent.ctx.get('goals') !== undefined) capabilities.push('goal')
+    if (ctx.get('jobs') !== undefined) capabilities.push('jobs')
+    if (ctx.get('workflowEngine') !== undefined) capabilities.push('workflow')
+    const tools = record.agent.ctx.get('tools') as { schemas(scope?: unknown): Array<{ name: string }> } | undefined
+    const names = new Set((tools === undefined ? [] : tools.schemas(record.agent)).map(schema => schema.name))
+    if (names.has('todo_write')) capabilities.push('todo')
+    if (names.has('schedule_create')) capabilities.push('schedule')
+    return capabilities
+  }
+
   const readProfileManifest = async (dir: string): Promise<{ dependencies: Record<string, string>; bundles: string[]; raw: Record<string, unknown> }> => {
     const raw = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8')) as Record<string, unknown>
     const dependencies = (raw.dependencies ?? {}) as Record<string, string>
@@ -1628,6 +1676,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       update: {
         sessionUpdate: 'available_commands_update',
         availableCommands: [...await availableCommands(), ...fromPlugins],
+        meta: { capabilities: capabilitiesFor(record) },
       },
     })
   }
@@ -1761,6 +1810,89 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
+  const presetIsMinimal = (record: SessionRecord): boolean =>
+    record.agent.session.header.agentPreset === 'minimal'
+
+  const runLoopCommand = async (record: SessionRecord, p: Record<string, unknown>, text: string): Promise<PromptSettleResult> => {
+    const meta = p._meta as Record<string, unknown> | null | undefined
+    const id = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
+    const settle = (message: string): PromptSettleResult => {
+      notifySession(record, message)
+      return promptSettled(record, id, 'end_turn')
+    }
+    if (presetIsMinimal(record)) {
+      return settle('/loop is not available in the minimal preset (dsh-schedule is not part of its two-tool composition)')
+    }
+    const args = text.replace(/^\/loop\s*/, '').trim()
+    const match = /^(\d+)([smhd])\s+(.+)$/.exec(args)
+    if (match === null) {
+      return settle('Usage: /loop <interval> <prompt>, e.g. /loop 5m check deploy status')
+    }
+    const count = Number(match[1])
+    const unit = match[2]
+    const promptText = match[3].trim()
+    const multiplier = unit === 's' ? 1 : unit === 'm' ? 60 : unit === 'h' ? 3600 : 86400
+    const seconds = count * multiplier
+    // dsh-schedule's fixed-rate floor is 5 minutes.
+    if (seconds < 300) {
+      return settle('/loop via dsh-schedule requires at least 5 minutes (300s); try /loop 5m <prompt>')
+    }
+    const tools = record.agent.ctx.get('tools') as
+      | { execute(input: { callId: unknown; name: string; arguments: unknown; agent?: unknown; signal: AbortSignal }): Promise<{ isError?: boolean; content?: Array<{ type?: string; text?: string }> }> }
+      | undefined
+    if (tools === undefined) {
+      return settle('dsh-schedule is not available in this agent preset')
+    }
+    try {
+      const result = await tools.execute({
+        callId: CallId('loop-' + randomUUID()),
+        name: 'schedule_create',
+        arguments: { prompt: promptText, every_seconds: seconds },
+        agent: record.agent,
+        signal: new AbortController().signal,
+      })
+      const body = (result.content ?? []).map(block => block.text ?? '').join('')
+      if (result.isError !== true) {
+        try {
+          const parsed = JSON.parse(body) as {
+            id?: string
+            prompt?: string
+            scheduledAt?: string
+            everySeconds?: number
+            kind?: string
+          }
+          if (typeof parsed.id === 'string' && parsed.id.length > 0) {
+            const conn = connections.get(record.clientId)
+            if (conn !== undefined) {
+              const every = typeof parsed.everySeconds === 'number' ? parsed.everySeconds : undefined
+              const human = every === undefined
+                ? 'scheduled'
+                : every % 86400 === 0
+                  ? `every ${every / 86400}d`
+                  : every % 3600 === 0
+                    ? `every ${every / 3600}h`
+                    : every % 60 === 0
+                      ? `every ${every / 60}m`
+                      : `every ${every}s`
+              sendNotification(conn, 'x.ai/scheduled_task_created', {
+                sessionId: record.agent.session.id,
+                taskId: parsed.id,
+                prompt: parsed.prompt ?? '',
+                humanSchedule: human,
+                nextFireAt: parsed.scheduledAt ?? null,
+              })
+            }
+          }
+        } catch {
+          // The schedule body is informational; a failed parse must not fail the command.
+        }
+      }
+      return settle(result.isError === true ? 'error: ' + body : body)
+    } catch (error: unknown) {
+      return settle('/loop failed: ' + (error instanceof Error ? error.message : String(error)))
+    }
+  }
+
   const prompt = async (clientId: number, params: unknown): Promise<unknown> => {
     assertOpen()
     const p = paramRecord(params, 'session/prompt')
@@ -1780,6 +1912,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // as an ACP pass-through prompt): interpret it here, never in the model.
     if (/^\/dsh(\s|$)/.test(text.trim())) {
       return runDshCommand(record, p, text.trim())
+    }
+    // /loop is handled directly through dsh-schedule.
+    if (/^\/loop(\s|$)/.test(text.trim())) {
+      return runLoopCommand(record, p, text.trim())
     }
     // Plugin-registered slash commands (dsh command registry): execute() runs
     // only known names and returns undefined otherwise, so unknown slash text
@@ -1860,7 +1996,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
     const defaultSelection = defaultModel?.currentSelection?.()
     const selection: ModelSelectionRef = {
-      current: modelSelectionFromDefault(config, defaultSelection),
+      current: modelSelectionFromRequest(config, defaultSelection, meta),
       assembled: undefined,
     }
     const handle = await agents.resume({
@@ -1902,6 +2038,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       steered: [],
     }
     sessions.set(sessionId, record)
+    applyPermissionMode(record, typeof meta?.permissionMode === 'string' ? meta.permissionMode as string : undefined, meta?.yoloMode === true)
     void broadcastAvailableCommands(record)
     // Rebuild the up-arrow history from the persisted user prompts so
     // x.ai/prompt_history serves them after resume.
@@ -2289,6 +2426,243 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
+  const forkSession = async (clientId: number, params: unknown): Promise<unknown> => {
+    const p = paramRecord(params, 'x.ai/session/fork')
+    const sourceId = typeof p.sourceSessionId === 'string' ? SessionId(p.sourceSessionId) : undefined
+    const source = sourceId === undefined ? undefined : ownedRecord(clientId, sourceId)
+    if (source === undefined) throw invalidParams('unknown source session: ' + String(p.sourceSessionId))
+    const newCwd = typeof p.newCwd === 'string' && isAbsolute(p.newCwd) ? p.newCwd : source.agent.session.header.cwd
+    if (typeof newCwd !== 'string' || !isAbsolute(newCwd)) throw invalidParams('newCwd must be an absolute path')
+    const suppliedId = typeof p.newSessionId === 'string' && p.newSessionId.length > 0 ? p.newSessionId : undefined
+    const sessionId = suppliedId === undefined ? SessionId(randomUUID()) : SessionId(suppliedId)
+    if (sessions.has(sessionId)) throw invalidParams('session id is already in use: ' + String(sessionId))
+    const events = source.agent.session.events
+    const last = events.at(-1)
+    // dsh's fork refuses to end inside an open turn; mirror that fail-closed.
+    if (last?.type === 'turn/start') throw invalidParams('cannot fork while a turn is open')
+    const seed = [...events]
+    const preset = await composePreset(source.agent.session.header.agentPreset)
+    const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
+    const defaultSelection = defaultModel?.currentSelection?.()
+    const selection: ModelSelectionRef = {
+      current: modelSelectionFromRequest(config, defaultSelection, p),
+      assembled: undefined,
+    }
+    const handle = await agents.create({
+      sessionId,
+      seed,
+      meta: {
+        cwd: newCwd,
+        parentSession: source.agent.session.id,
+        seedLength: seed.length,
+        ...preset.agentPreset === undefined ? {} : { agentPreset: preset.agentPreset },
+      },
+      agentOptions: agentOptions(config),
+      setup: (agentCtx) => {
+        installModelSelection(agentCtx, selection)
+        return preset.mount === undefined ? undefined : preset.mount(agentCtx)
+      },
+    })
+    if (closed) {
+      await handle.dispose()
+      throw internalError('the grok leader was disposed during session/fork')
+    }
+    const record: SessionRecord = {
+      agent: handle.agent,
+      dispose: () => handle.dispose(),
+      clientId,
+      selection,
+      yolo: false,
+      lastSeq: -1,
+      turnStartMs: undefined,
+      eventSeq: 1,
+      inputTokens: 0,
+      outputTokens: 0,
+      turnCount: 0,
+      toolCallCount: 0,
+      messageCount: 0,
+      pendingToolCalls: new Map(),
+      textStreamed: false,
+      prompts: [],
+      promptQueue: [],
+      runningPromptId: undefined,
+      runningText: undefined,
+      runningCombinedTexts: undefined,
+      cancelTrigger: undefined,
+      editHolds: new Set(),
+      mcpInitTimer: undefined,
+      inflight: undefined,
+      promotionScheduled: false,
+      steered: [],
+    }
+    sessions.set(sessionId, record)
+    applyPermissionMode(record, typeof p?.permissionMode === 'string' ? p.permissionMode as string : undefined, p?.yoloMode === true)
+    void broadcastAvailableCommands(record)
+    const conn = connections.get(clientId)
+    if (conn !== undefined) {
+      record.mcpInitTimer = setTimeout(() => {
+        record.mcpInitTimer = undefined
+        if (ownedRecord(clientId, sessionId) === record && connections.get(clientId) === conn) {
+          sendNotification(conn, '_x.ai/mcp_initialized', { sessionId })
+        }
+      }, 50)
+    }
+    return { newSessionId: String(sessionId) }
+  }
+
+  const listMcpServers = (record: SessionRecord | undefined): { servers: Array<Record<string, unknown>> } => {
+    const tools = record?.agent.ctx.get('tools') as
+      | { schemas(scope?: unknown): Array<{ name: string }> }
+      | undefined
+    const schemas = tools === undefined ? [] : tools.schemas(record?.agent)
+    const counts = new Map<string, number>()
+    for (const schema of schemas) {
+      if (!schema.name.startsWith('mcp__')) continue
+      const rest = schema.name.slice('mcp__'.length)
+      const idx = rest.lastIndexOf('__')
+      if (idx <= 0 || idx + 2 >= rest.length) continue
+      const server = rest.slice(0, idx)
+      counts.set(server, (counts.get(server) ?? 0) + 1)
+    }
+    return {
+      servers: [...counts.entries()].map(([name, toolCount]) => ({
+        name,
+        displayName: name,
+        source: 'local',
+        sourceLabel: 'plugin: dsh',
+        session: {
+          enabled: true,
+          status: 'connected',
+          tools: [],
+          authRequired: false,
+          setupRequired: false,
+        },
+        _meta: { toolCount },
+      })),
+    }
+  }
+
+  const listSkills = async (record: SessionRecord | undefined): Promise<{ skills: Array<Record<string, unknown>> }> => {
+    const skillsService = record?.agent.ctx.get('skills') as
+      | {
+          list(): Promise<Array<{
+            name: string
+            description: string
+            whenToUse?: string
+            invocation?: { userInvocable?: boolean; modelInvocable?: boolean }
+            source?: string
+            provider?: string
+            path?: string
+          }>>
+        }
+      | undefined
+    const rows = skillsService === undefined ? [] : await skillsService.list()
+    return {
+      skills: rows.map(skill => ({
+        name: skill.name,
+        display_name: skill.name,
+        description: skill.description,
+        has_user_specified_description: false,
+        when_to_use: skill.whenToUse,
+        short_description: skill.description,
+        path: skill.path ?? '',
+        scope: 'plugin',
+        user_invocable: skill.invocation?.userInvocable ?? true,
+        enabled: true,
+      })),
+    }
+  }
+
+  const setSessionMode = async (clientId: number, params: unknown): Promise<unknown> => {
+    const p = paramRecord(params, 'session/set_mode')
+    const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
+    const record = ownedRecord(clientId, sessionId)
+    if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
+    const modeId = typeof p.modeId === 'string' ? p.modeId : ''
+    // dsh's plan-mode service is mounted per agent preset; only plan/default
+    // map cleanly. Anything not "plan" is treated as leaving plan mode.
+    const active = modeId === 'plan'
+    const planMode = record.agent.ctx.get('planMode') as
+      | { set(agent: unknown, active: boolean): unknown }
+      | undefined
+    if (planMode === undefined) throw internalError('plan mode is not available in this agent preset')
+    planMode.set(record.agent, active)
+    return {}
+  }
+
+  const btw = async (clientId: number, params: unknown): Promise<unknown> => {
+    const p = paramRecord(params, 'x.ai/btw')
+    const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
+    const record = ownedRecord(clientId, sessionId)
+    if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
+    const question = typeof p.question === 'string' ? p.question : ''
+    if (question.trim().length === 0) throw invalidParams('empty btw question')
+    if (presetIsMinimal(record)) {
+      throw internalError('/btw is not available in the minimal preset (no subagent provider)')
+    }
+    const subagents = ctx.get('subagents') as
+      | {
+          start(
+            provider: string,
+            request: {
+              parent: unknown
+              prompt: Array<{ type: 'text'; text: string }>
+              signal: AbortSignal
+              label?: string
+            },
+          ): Promise<{
+            result: Promise<{ output: Array<{ type?: string; text?: string }>; stopReason: { kind?: string } | string }>
+            dispose(): Promise<void>
+          }>
+          list?(): string[]
+        }
+      | undefined
+    if (subagents === undefined) {
+      throw internalError('subagents are not available in this agent preset')
+    }
+    const providers = typeof subagents.list === 'function' ? subagents.list() : []
+    const provider = providers.includes('spawn') ? 'spawn' : providers.includes('fork') ? 'fork' : providers[0]
+    if (provider === undefined) {
+      throw internalError('no subagent provider is registered')
+    }
+    const controller = new AbortController()
+    const run = await subagents.start(provider, {
+      parent: record.agent,
+      prompt: [{ type: 'text', text: question }],
+      signal: controller.signal,
+      label: 'btw',
+    })
+    try {
+      const result = await run.result
+      const answer = (result.output ?? []).map(block => block.text ?? '').join('').trim()
+      return { result: { answer: answer.length > 0 ? answer : '(no answer)' } }
+    } finally {
+      controller.abort()
+      await run.dispose().catch(() => undefined)
+    }
+  }
+
+  const renameSession = async (clientId: number, params: unknown): Promise<unknown> => {
+    const p = paramRecord(params, 'x.ai/session/rename')
+    const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
+    const record = ownedRecord(clientId, sessionId)
+    if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
+    const titleService = ctx.get('sessionTitle') as
+      | { rename(session: unknown, title: string): unknown; refresh?(session: unknown): Promise<unknown> }
+      | undefined
+    if (titleService === undefined) throw internalError('session title service is not configured')
+    const resetToAuto = p.reset_to_auto === true || p.resetToAuto === true
+    if (resetToAuto) {
+      if (titleService.refresh === undefined) throw internalError('session title refresh is not available')
+      await titleService.refresh(record.agent.session)
+      return {}
+    }
+    const title = typeof p.title === 'string' ? p.title : ''
+    if (title.trim().length === 0) throw invalidParams('title must be a non-empty string')
+    titleService.rename(record.agent.session, title)
+    return {}
+  }
+
   const closeSession = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'session/close')
     const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
@@ -2322,6 +2696,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return await listSessions()
       case WIRE.sessionSetModel:
         return await setSessionModel(clientId, params)
+      case WIRE.sessionSetMode:
+        return await setSessionMode(clientId, params)
+      case 'x.ai/session/fork':
+        return await forkSession(clientId, params)
+      case 'x.ai/session/rename':
+        return await renameSession(clientId, params)
       case WIRE.sessionClose:
         return await closeSession(clientId, params)
       case WIRE.modelsList:
@@ -2332,6 +2712,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return await updateProvider(params)
       case WIRE.providersRemove:
         return await removeProvider(params)
+      case 'x.ai/btw':
+        return await btw(clientId, params)
       case 'x.ai/interject': {
         // Mid-turn interjection (grok ext method): merge the text into the
         // running turn at the harness's next step boundary WITHOUT cancelling
@@ -2364,6 +2746,21 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return promptHistory(clientId, params)
       case 'x.ai/marketplace/list':
         return { sources: [] }
+      case 'x.ai/skills/list': {
+        const p = paramRecord(params, 'x.ai/skills/list')
+        const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
+        const record = sessionId === undefined ? undefined : ownedRecord(clientId, sessionId)
+        return await listSkills(record)
+      }
+      case 'x.ai/mcp/list': {
+        const p = paramRecord(params, 'x.ai/mcp/list')
+        const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
+        const record = sessionId === undefined ? undefined : ownedRecord(clientId, sessionId)
+        return listMcpServers(record)
+      }
+      case 'x.ai/workflows/list':
+        // TODO(deepseek): enumerate dsh workflow runs from the workflow engine.
+        return { workflows: [] }
       case 'x.ai/billing':
         return { config: null, onDemandEnabled: false, subscriptionTier: null }
       case 'x.ai/bundle/status':
@@ -2457,6 +2854,20 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
+  const applyPermissionMode = (record: SessionRecord, mode: string | undefined, yolo: boolean | undefined): void => {
+    if (mode === undefined && yolo === undefined) return
+    const permission = ctx.get('permissionPresets') as
+      | { set(session: unknown, preset: string): unknown }
+      | undefined
+    if (permission === undefined) return
+    const preset = mode === 'always-approve' || yolo === true || mode === 'bypassPermissions' || mode === 'dontAsk'
+      ? 'danger-full-access'
+      : mode === 'acceptEdits' || mode === 'default' || mode === 'workspace-write'
+        ? 'workspace-write'
+        : undefined
+    if (preset !== undefined) permission.set(record.agent.session, preset)
+  }
+
   const handleNotification = (clientId: number, method: string, params: unknown): void => {
     // Ext notifications ride as {method:'_x.ai/foo', params:{method:'x.ai/foo', params:{...}}}.
     const outer = params as Record<string, unknown> | undefined
@@ -2477,6 +2888,22 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       broadcastQueueChanged(record)
     }
     switch (method) {
+      case 'x.ai/yolo_mode_changed': {
+        const unwrappedYolo = params as Record<string, unknown> | undefined
+        const pYolo = unwrappedYolo !== undefined && typeof unwrappedYolo.params === 'object' && unwrappedYolo.params !== null
+          ? unwrappedYolo.params as Record<string, unknown>
+          : unwrappedYolo
+        const sessionId = typeof pYolo?.sessionId === 'string' ? SessionId(pYolo.sessionId) : undefined
+        const record = sessionId === undefined ? undefined : ownedRecord(clientId, sessionId)
+        if (record !== undefined) {
+          applyPermissionMode(
+            record,
+            typeof pYolo?.permission_mode === 'string' ? pYolo.permission_mode as string : undefined,
+            pYolo?.yolo_mode === true,
+          )
+        }
+        return
+      }
       case WIRE.sessionCancel:
         cancel(clientId, params)
         return
@@ -2896,6 +3323,202 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return quiescing
   }
 
+  // Bridge dsh background jobs into the TUI's /tasks notifications.
+  const jobs = ctx.get('jobs') as
+    | {
+        list(owner?: unknown): Array<Record<string, unknown>>
+        onJobsChanged?(listener: (owner: unknown) => void): unknown
+      }
+    | undefined
+  if (jobs !== undefined && typeof jobs.onJobsChanged === 'function') {
+    const emitJobsForRecord = (record: SessionRecord): void => {
+      const conn = connections.get(record.clientId)
+      if (conn === undefined) return
+      const cwd = record.agent.session.header.cwd ?? ''
+      const systemTime = (ms: number | undefined): unknown => {
+        const value = ms ?? Date.now()
+        const secs = Math.floor(value / 1000)
+        const nanos = (value % 1000) * 1_000_000
+        return { secs_since_epoch: secs, nanos_since_epoch: nanos }
+      }
+      for (const job of jobs.list(record.agent)) {
+        const id = String(job.id ?? '')
+        const label = String(job.label ?? '')
+        const status = String(job.status ?? 'running')
+        if (status === 'running' || status === 'stopping') {
+          sendNotification(conn, 'x.ai/task_backgrounded', {
+            sessionId: record.agent.session.id,
+            update: {
+              sessionUpdate: 'task_backgrounded',
+              tool_call_id: id,
+              task_id: id,
+              command: label,
+              cwd,
+              output_file: '',
+              description: label,
+            },
+          })
+        } else {
+          sendNotification(conn, 'x.ai/task_completed', {
+            sessionId: record.agent.session.id,
+            update: {
+              sessionUpdate: 'task_completed',
+              task_snapshot: {
+                task_id: id,
+                command: label,
+                display_command: label,
+                cwd,
+                start_time: systemTime(typeof job.startedAt === 'number' ? job.startedAt : undefined),
+                end_time: typeof job.finishedAt === 'number' ? systemTime(job.finishedAt) : null,
+                output: '',
+                output_file: '',
+                truncated: false,
+                exit_code: status === 'completed' ? 0 : 1,
+                signal: null,
+                completed: true,
+                kind: 'bash',
+                output_total_bytes: 0,
+              },
+            },
+          })
+        }
+      }
+    }
+    const emitForOwner = (owner: unknown): void => {
+      for (const record of sessions.values()) {
+        if (owner === undefined || record.agent === owner) emitJobsForRecord(record)
+      }
+    }
+    jobs.onJobsChanged(emitForOwner)
+    for (const record of sessions.values()) emitJobsForRecord(record)
+  }
+
+  // Bridge dsh subagent lifecycle events into the TUI's subagent notifications.
+  type SubagentRunInfoLike = { runId: unknown; provider: string; id: unknown; local: boolean }
+  type SubagentRunEndInfoLike = SubagentRunInfoLike & {
+    stopReason?: { kind?: string }
+    lastAssistantMessage?: unknown
+  }
+  const subagentStartHandler = (info: SubagentRunInfoLike): void => {
+    const childId = String(info.id)
+    const agents = ctx.get('agents') as
+      | { get(id: unknown): { session: { header: { parentSession?: unknown } } } | undefined }
+      | undefined
+    const child = agents?.get(info.id)
+    const parentId = child?.session.header.parentSession
+    const record = typeof parentId === 'string' ? sessions.get(SessionId(parentId)) : undefined
+    if (record === undefined) return
+    const conn = connections.get(record.clientId)
+    if (conn === undefined) return
+    sendNotification(conn, 'x.ai/session_notification', {
+      sessionId: record.agent.session.id,
+      update: {
+        sessionUpdate: 'subagent_spawned',
+        subagent_id: childId,
+        parent_session_id: String(record.agent.session.id),
+        child_session_id: childId,
+        subagent_type: info.provider || 'general-purpose',
+        description: info.provider || 'subagent',
+      },
+    })
+  }
+  const subagentEndHandler = (info: SubagentRunEndInfoLike): void => {
+    const childId = String(info.id)
+    const agents = ctx.get('agents') as
+      | { get(id: unknown): { session: { header: { parentSession?: unknown } } } | undefined }
+      | undefined
+    const child = agents?.get(info.id)
+    const parentId = child?.session.header.parentSession
+    const record = typeof parentId === 'string' ? sessions.get(SessionId(parentId)) : undefined
+    if (record === undefined) return
+    const conn = connections.get(record.clientId)
+    if (conn === undefined) return
+    const kind = info.stopReason?.kind
+    const status = kind === 'completed' || kind === 'max-tokens' ? 'completed'
+      : kind === 'interrupted' || kind === 'aborted' || kind === 'cancelled' ? 'cancelled'
+        : 'failed'
+    sendNotification(conn, 'x.ai/session_notification', {
+      sessionId: record.agent.session.id,
+      update: {
+        sessionUpdate: 'subagent_finished',
+        subagent_id: childId,
+        child_session_id: childId,
+        status,
+        error: status === 'failed' ? 'subagent failed' : undefined,
+        tool_calls: 0,
+        turns: 0,
+        duration_ms: 0,
+        tokens_used: 0,
+        output: undefined,
+      },
+    })
+  }
+  ;(ctx as unknown as { on(event: string, listener: (info: SubagentRunInfoLike) => void): void }).on('subagent/start', subagentStartHandler)
+  ;(ctx as unknown as { on(event: string, listener: (info: SubagentRunEndInfoLike) => void): void }).on('subagent/end', subagentEndHandler)
+
+  // Bridge dsh goal changes into the TUI's GoalUpdated notifications.
+  type GoalChangedLike = {
+    operation: string
+    ref?: { id?: unknown; revision?: unknown }
+    goal?: {
+      id?: unknown
+      revision?: unknown
+      objective?: unknown
+      phase?: unknown
+      blockedReason?: { code?: unknown; message?: unknown }
+      maxGoalRounds?: unknown
+      roundsStarted?: unknown
+      createdAt?: unknown
+      updatedAt?: unknown
+    }
+  }
+  const goalChangedHandler = (payload: { agent: unknown; change: GoalChangedLike }): void => {
+    const agent = payload.agent as { session?: { id?: unknown } } | undefined
+    const sessionId = agent?.session?.id
+    const record = typeof sessionId === 'string' ? sessions.get(SessionId(sessionId)) : undefined
+    if (record === undefined) return
+    const conn = connections.get(record.clientId)
+    if (conn === undefined) return
+    const goal = payload.change.goal
+    if (goal === undefined) {
+      // Clear tombstone.
+      sendNotification(conn, 'x.ai/session_notification', {
+        sessionId: record.agent.session.id,
+        update: {
+          sessionUpdate: 'goal_updated',
+          goal_id: String(payload.change.ref?.id ?? ''),
+          objective: '',
+          status: 'cleared',
+          phase: 'idle',
+          elapsed_ms: 0,
+          total_deliverables: 0,
+          completed_deliverables: 0,
+          total_worker_rounds: 0,
+          total_verify_rounds: 0,
+        },
+      })
+      return
+    }
+    const phase = String(goal.phase ?? 'active')
+    const status = phase === 'complete' ? 'complete' : phase === 'blocked' ? 'blocked' : phase === 'paused' ? 'user_paused' : 'active'
+    sendNotification(conn, 'x.ai/session_notification', {
+      sessionId: record.agent.session.id,
+      update: {
+        sessionUpdate: 'goal_updated',
+        goal_id: String(goal.id ?? ''),
+        objective: String(goal.objective ?? ''),
+        status,
+        phase: 'idle',
+        elapsed_ms: 0,
+        total_deliverables: 0,
+        completed_deliverables: 0,
+        total_worker_rounds: typeof goal.roundsStarted === 'number' ? goal.roundsStarted : 0,
+        total_verify_rounds: 0,
+      },
+    })
+  }
+  ;(ctx as unknown as { on(event: string, listener: (payload: { agent: unknown; change: GoalChangedLike }) => void): void }).on('goal/changed', goalChangedHandler)
+
   const socketPath = config.socketPath ?? '/tmp/dsh-grok-leader.sock'
   const server: Server = createServer((socket) => { handleSocket(socket) })
   let socketFailure: NodeJS.ErrnoException | undefined
@@ -3141,10 +3764,20 @@ function diffBlocksFromCall(prior: { name: string; arguments: unknown } | undefi
     }
     return undefined
   }
-  if (lower === 'edit' || lower === 'str_replace_editor') {
-    const oldText = stringField('old_string', 'oldString', 'old_str')
+  if (lower === 'edit') {
+    const oldText = stringField('old_string', 'oldString')
+    const newText = stringField('new_string', 'newString')
+    if (newText === undefined) return []
+    return [{ type: 'diff', path, ...(oldText !== undefined ? { oldText } : {}), newText }]
+  }
+  if (lower === 'str_replace_editor') {
+    const command = stringField('command')
+    // `view` is a read; never synthesize an edit diff for it.
+    if (command === 'view') return []
+    const oldText = stringField('old_str')
     // file_text: str_replace_editor `create` carries the whole file there.
-    const newText = stringField('new_string', 'newString', 'new_str', 'content', 'file_text')
+    const newText = stringField('new_str', 'file_text')
+      ?? (command === 'str_replace' ? '' : undefined)
     if (newText === undefined) return []
     return [{ type: 'diff', path, ...(oldText !== undefined ? { oldText } : {}), newText }]
   }

@@ -982,8 +982,6 @@ pub(crate) async fn run(
     }
     let headless_only: &[(&str, bool)] = &[
         ("--agents", args.agents_json.is_some()),
-        ("--tools", args.cli_tools.is_some()),
-        ("--disallowed-tools", args.cli_disallowed_tools.is_some()),
         ("--max-turns", args.max_turns.is_some()),
     ];
     for &(flag, set) in headless_only {
@@ -1003,6 +1001,12 @@ pub(crate) async fn run(
         .as_deref()
         .map(agent_client_protocol::ModelId::new);
     app.cli_effort_token = args.reasoning_effort.clone();
+    app.cli_permission_mode = args.permission_mode_flag.clone();
+    app.cli_sandbox = args.sandbox.clone();
+    app.cli_system_prompt_override = args.system_prompt_override.clone();
+    app.cli_rules = args.rules.clone();
+    app.cli_tools = args.cli_tools.clone();
+    app.cli_disallowed_tools = args.cli_disallowed_tools.clone();
     app.auth_use_oauth = args.oauth;
     app.show_resolved_model = remote_settings
         .as_ref()
@@ -4066,6 +4070,14 @@ pub(crate) fn session_flags_for_effects(
             app.default_yolo,
             matches!(app.current_ui.permission_mode.as_deref(), Some("auto")),
         ),
+        model: app.cli_model_override.as_ref().map(|m| m.to_string()),
+        reasoning_effort: app.cli_effort_token.clone(),
+        permission_mode: app.cli_permission_mode.clone(),
+        sandbox: app.cli_sandbox.clone(),
+        system_prompt_override: app.cli_system_prompt_override.clone(),
+        rules: app.cli_rules.clone(),
+        tools: app.cli_tools.clone(),
+        disallowed_tools: app.cli_disallowed_tools.clone(),
         chat_mode: {
             #[cfg(feature = "local-workspace")]
             {

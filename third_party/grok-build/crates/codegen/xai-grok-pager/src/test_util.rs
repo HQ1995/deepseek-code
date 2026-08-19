@@ -32,6 +32,7 @@ pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent
         available_commands: Vec::new(),
         available_commands_generation: 0,
         available_tools: None,
+        available_capabilities: None,
         model_switch_pending: false,
         user_model_preference: None,
         deferred_model_switch: None,

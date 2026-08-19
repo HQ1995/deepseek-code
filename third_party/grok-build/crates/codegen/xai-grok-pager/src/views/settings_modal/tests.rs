@@ -12,8 +12,8 @@ use super::state::*;
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
 use crate::settings::{
-    EnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey,
-    SettingKind, SettingMeta, SettingOwner, SettingValue, SettingsRegistry, StringValidator,
+    EnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey, SettingKind, SettingMeta,
+    SettingOwner, SettingValue, SettingsRegistry, StringValidator,
 };
 use crate::theme::Theme;
 use xai_grok_shell::agent::config::UiConfig;
@@ -6786,7 +6786,6 @@ fn hover_breadcrumb_flips_state_and_returns_changed() {
     );
 }
 
-
 /// The row-list-with-search-bar layout reserves row 1 (below
 /// the search bar) for a `─` divider in `gray_dim` — palette
 /// parity.
@@ -7882,5 +7881,3 @@ fn preview_remains_clamped_when_pending_exceeds_widened_width() {
         "clamped note must render when pending > interior, even after widening",
     );
 }
-
-

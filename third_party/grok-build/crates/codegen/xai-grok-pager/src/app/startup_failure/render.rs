@@ -139,7 +139,9 @@ impl NextStep {
     fn text(self) -> &'static str {
         match self {
             Self::Retry => "Start Dscode again.",
-            Self::CheckNetworkThenRetry => "Check your network connection, then start Dscode again.",
+            Self::CheckNetworkThenRetry => {
+                "Check your network connection, then start Dscode again."
+            }
             Self::RestartSharedLeader => {
                 "Stop it with the command below, which also stops any other Dscode \
                  session using it, then start Dscode again."

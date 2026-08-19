@@ -388,10 +388,8 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                                         .get("apiKeyEnv")
                                         .and_then(|v| v.as_str())
                                         .map(str::to_string);
-                                    let api = row
-                                        .get("api")
-                                        .and_then(|v| v.as_str())
-                                        .map(str::to_string);
+                                    let api =
+                                        row.get("api").and_then(|v| v.as_str()).map(str::to_string);
                                     let base_url = row
                                         .get("baseURL")
                                         .and_then(|v| v.as_str())

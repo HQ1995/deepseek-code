@@ -663,7 +663,9 @@ pub async fn run(
     } else {
         match refreshed_auth {
             Some(auth) => xai_grok_shell::agent::models::start_early_prefetch_with_auth(Some(auth)),
-            None => xai_grok_shell::agent::models::start_early_prefetch(Some(grok_com_config.clone())),
+            None => {
+                xai_grok_shell::agent::models::start_early_prefetch(Some(grok_com_config.clone()))
+            }
         }
     };
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
