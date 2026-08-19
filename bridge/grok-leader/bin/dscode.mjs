@@ -26,9 +26,9 @@
 // cache → left alone (developer-managed).
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { chmodSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import { delimiter as pathDelimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -73,6 +73,23 @@ const dshCommand = () => {
   return ['npx', '--yes', spec]
 }
 
+
+/** Ensure a `pnpm` executable is available for the dsh plugin command.
+ *  Prefers a real pnpm on PATH; otherwise creates a temporary shim that
+ *  delegates to Corepack, so users do not need to install pnpm manually. */
+const ensurePnpm = () => {
+  const pnpmCheck = spawnSync('pnpm', ['--version'], { encoding: 'utf8' })
+  if (!pnpmCheck.error && pnpmCheck.status === 0) return undefined
+  const corepackCheck = spawnSync('corepack', ['--version'], { encoding: 'utf8' })
+  if (corepackCheck.error || corepackCheck.status !== 0) {
+    throw new Error('pnpm is required for dsh plugin installs; enable it with: corepack enable')
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'dscode-pnpm-'))
+  const shim = join(dir, 'pnpm')
+  writeFileSync(shim, '#!/bin/sh\nexec corepack pnpm "$@"\n', { mode: 0o755 })
+  return dir
+}
+
 /** First run: register this plugin into the leader profile via the official
  *  dsh CLI. No-op when the profile already has it (the normal case once
  *  installed — including when this launcher IS the profile's copy). */
@@ -82,13 +99,15 @@ export const ensureProfilePlugin = () => {
   console.error(`dscode: first run — registering ${spec} in the ${PROFILE_NAME} dsh profile...`)
   const argv = [...dshCommand(), 'plugin', '--profile', PROFILE_NAME, 'add', spec]
   if (process.env.DSCODE_DEBUG !== undefined) console.error(`dscode: running: ${argv.join(' ')}`)
-  const pnpmCheck = spawnSync('pnpm', ['--version'], { encoding: 'utf8' })
-  if (pnpmCheck.error || pnpmCheck.status !== 0) {
-    throw new Error('pnpm is required for dsh plugin installs; enable it with: corepack enable')
+  const pnpmShimDir = ensurePnpm()
+  const env = { ...process.env }
+  if (pnpmShimDir !== undefined) {
+    env.PATH = `${pnpmShimDir}${pathDelimiter}${env.PATH ?? ''}`
   }
   const result = spawnSync(argv[0], argv.slice(1), {
     stdio: ['ignore', 'inherit', 'inherit'],
     timeout: 120000,
+    env,
   })
   if (result.error?.code === 'ETIMEDOUT') {
     throw new Error(`plugin registration timed out; run manually: ${argv.join(' ')}`)
