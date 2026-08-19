@@ -722,6 +722,11 @@ pub fn channel_name() -> Option<&'static str> {
     use std::sync::OnceLock;
     static NAME: OnceLock<Option<&'static str>> = OnceLock::new();
     *NAME.get_or_init(|| {
+        // Dev builds are not a release channel; don't call them "stable" just
+        // because the cached stable pointer is ahead of the -dev prerelease.
+        if xai_grok_version::VERSION.contains("-dev") {
+            return None;
+        }
         let stable = cached_stable_version()?;
         derive_channel(xai_grok_version::VERSION, &stable)
     })
@@ -740,6 +745,11 @@ pub fn channel_label() -> &'static str {
     use std::sync::OnceLock;
     static LABEL: OnceLock<&'static str> = OnceLock::new();
     LABEL.get_or_init(|| {
+        // Dev builds carry the -dev suffix already; don't append a misleading
+        // release-channel label.
+        if xai_grok_version::VERSION.contains("-dev") {
+            return "";
+        }
         let stable = match cached_stable_version() {
             Some(s) => s,
             None => return "",
