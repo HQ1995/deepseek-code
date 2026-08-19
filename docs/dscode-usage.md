@@ -102,9 +102,10 @@ the bridge adapts protocol and manages plugin packages; every feature lives
 in a dsh plugin, reaching the TUI through generic rails — plugin-registered
 commands auto-surface as slash commands, `llm`-service providers surface in
 `/provider` & `/model`, and free-text provider notes are relayed verbatim.
-Neither the TUI nor the bridge grows per-plugin code — plugins that need
-adapting get adapted in plugin space (see the subscriptions wrapper below),
-never inside the product.
+Neither the TUI nor the bridge grows per-plugin code. Plugins that ignore
+the rails are not ours to adapt: the fix belongs upstream (register
+commands) or in plugin space (anyone can publish a wrapper plugin) — never
+inside the product.
 
 ```
 /dsh plugins                      list installed plugins
@@ -141,17 +142,13 @@ Verified example — [dsh-plugin-subscriptions](https://github.com/V1ki/dsh-plug
 (use ChatGPT/Claude/Grok subscriptions as providers via OAuth):
 
 ```sh
-/dsh add dsh-plugin-subscriptions @hqzhao95/dsh-subscriptions-commands
+/dsh add dsh-plugin-subscriptions
 ```
 
 Its providers (ChatGPT (Codex), Claude (Subscription), Grok (Subscription))
 appear in the roster immediately; models appear after the one-time OAuth
-login. The second package is the plugin-space adapter
-([@hqzhao95/dsh-subscriptions-commands](https://www.npmjs.com/package/@hqzhao95/dsh-subscriptions-commands)):
-it registers `/login <codex|claude|grok>`, `/code <pasted-url>`, `/logout`,
-and `/subscriptions-status` through the dsh command registry, so after a
-restart they appear as ordinary dscode slash commands. Terminal-script
-alternative — no dscode needed:
+login. The plugin ships its login UI only in the dsh web profile; from a
+terminal, use the repo script:
 
 ```sh
 node scripts/subscriptions-login.mjs codex    # or claude / grok
