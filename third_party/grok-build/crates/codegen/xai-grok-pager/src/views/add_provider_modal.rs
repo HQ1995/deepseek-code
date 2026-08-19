@@ -104,6 +104,9 @@ pub struct AddProviderForm {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
+    /// Preset template row (add mode only): Left/Right cycles, prefilling
+    /// the fields below. Skipped in edit mode.
+    Preset,
     Id,
     DisplayName,
     ApiKeyEnv,
@@ -113,7 +116,8 @@ pub enum Field {
 }
 
 impl Field {
-    const ALL: [Field; 6] = [
+    const ALL: [Field; 7] = [
+        Field::Preset,
         Field::Id,
         Field::DisplayName,
         Field::ApiKeyEnv,
@@ -132,6 +136,7 @@ impl Field {
 
     fn label(self) -> &'static str {
         match self {
+            Field::Preset => "preset",
             Field::Id => "id",
             Field::DisplayName => "displayName",
             Field::ApiKeyEnv => "apiKeyEnv",
@@ -170,7 +175,7 @@ impl AddProviderModalState {
         let mut state = Self {
             window: ModalWindowState::new(),
             preset: 0,
-            field: Field::Id,
+            field: Field::Preset,
             id: LineEditor::default(),
             display_name: LineEditor::default(),
             api_key_env: LineEditor::default(),
@@ -237,6 +242,7 @@ impl AddProviderModalState {
             Field::Id => &self.id,
             Field::DisplayName => &self.display_name,
             Field::ApiKeyEnv => &self.api_key_env,
+            Field::Preset => &self.id, // unused placeholder; Preset has no editor
             Field::Api => &self.id, // unused placeholder; Api has no editor
             Field::BaseUrl => &self.base_url,
             Field::ApiKey => &self.api_key,
@@ -248,6 +254,7 @@ impl AddProviderModalState {
             Field::Id => &mut self.id,
             Field::DisplayName => &mut self.display_name,
             Field::ApiKeyEnv => &mut self.api_key_env,
+            Field::Preset => &mut self.id, // unused placeholder
             Field::Api => &mut self.id, // unused placeholder
             Field::BaseUrl => &mut self.base_url,
             Field::ApiKey => &mut self.api_key,
@@ -274,7 +281,7 @@ impl AddProviderModalState {
         let mut next = field;
         for _ in 0..Field::ALL.len() {
             next = next.next();
-            if !editing || next != Field::Id {
+            if !editing || (next != Field::Id && next != Field::Preset) {
                 return next;
             }
         }
@@ -291,7 +298,7 @@ impl AddProviderModalState {
             } else {
                 idx - 1
             }];
-            if !editing || prev != Field::Id {
+            if !editing || (prev != Field::Id && prev != Field::Preset) {
                 return prev;
             }
         }
@@ -342,21 +349,37 @@ pub fn handle_add_provider_key(
         return AddProviderOutcome::Unchanged;
     }
     match key.code {
+        // Consistency contract: Up/Down ALWAYS move the row focus (like every
+        // picker); Left/Right change the focused row's value where the row is
+        // a chooser (preset, api). Presets never steal arrow keys from
+        // field navigation again.
         KeyCode::Up => {
+            state.field = AddProviderModalState::prev_field(state.field, state.editing.is_some());
+            AddProviderOutcome::Changed
+        }
+        KeyCode::Down => {
+            state.field = AddProviderModalState::next_field(state.field, state.editing.is_some());
+            AddProviderOutcome::Changed
+        }
+        KeyCode::Left if state.field == Field::Preset => {
             let next = state.preset.saturating_sub(1);
             if next != state.preset {
                 state.apply_preset(next);
-                return AddProviderOutcome::Changed;
             }
-            AddProviderOutcome::Unchanged
+            AddProviderOutcome::Changed
         }
-        KeyCode::Down => {
+        KeyCode::Right if state.field == Field::Preset => {
             let next = (state.preset + 1).min(PRESETS.len());
             if next != state.preset {
                 state.apply_preset(next);
-                return AddProviderOutcome::Changed;
             }
-            AddProviderOutcome::Unchanged
+            AddProviderOutcome::Changed
+        }
+        // Enter on the preset row advances into the form instead of
+        // submitting a barely-seen prefill.
+        KeyCode::Enter if state.field == Field::Preset => {
+            state.field = AddProviderModalState::next_field(state.field, state.editing.is_some());
+            AddProviderOutcome::Changed
         }
         KeyCode::Tab => {
             state.field = AddProviderModalState::next_field(state.field, state.editing.is_some());
@@ -415,7 +438,7 @@ pub fn handle_add_provider_paste(
     state: &mut AddProviderModalState,
     text: &str,
 ) -> AddProviderOutcome {
-    if state.submitting || state.field == Field::Api {
+    if state.submitting || state.field == Field::Api || state.field == Field::Preset {
         return AddProviderOutcome::Unchanged;
     }
     match state.editor_mut(state.field).insert_paste(text) {
@@ -439,6 +462,9 @@ fn row_specs(state: &AddProviderModalState) -> Vec<RowSpec> {
     let cursor = |editor: &LineEditor| editor.viewport(usize::MAX).cursor_display_column;
     let value = |field: Field| -> (String, usize, bool) {
         let focused = state.field == field;
+        if field == Field::Preset {
+            return (format!("\u{2039} {} \u{203a}", preset_label(state.preset)), 0, focused);
+        }
         if field == Field::Api {
             let api = APIS.get(state.api_idx).map_or("(unset)", |value| *value);
             return (api.to_string(), 0, focused);
@@ -450,7 +476,9 @@ fn row_specs(state: &AddProviderModalState) -> Vec<RowSpec> {
         }
         (editor.text().to_string(), cursor(editor), focused)
     };
+    let editing = state.editing.is_some();
     let fields = [
+        Field::Preset,
         Field::Id,
         Field::DisplayName,
         Field::ApiKeyEnv,
@@ -460,6 +488,7 @@ fn row_specs(state: &AddProviderModalState) -> Vec<RowSpec> {
     ];
     fields
         .iter()
+        .filter(|field| !(editing && **field == Field::Preset))
         .map(|field| {
             let (text, cursor_col, focused) = value(*field);
             RowSpec {
@@ -492,7 +521,7 @@ pub fn render_add_provider_modal(buf: &mut Buffer, area: Rect, state: &mut AddPr
             id: 0,
         },
         Shortcut {
-            label: "↑/↓ preset  Tab field",
+            label: "\u{2191}/\u{2193} field  \u{2190}/\u{2192} value",
             clickable: false,
             id: 0,
         },
@@ -541,11 +570,10 @@ pub fn render_add_provider_modal(buf: &mut Buffer, area: Rect, state: &mut AddPr
             Span::styled(" (id is fixed)", dim),
         ]));
     } else {
-        lines.push(Line::from(vec![
-            Span::styled("Preset ", Style::default().fg(theme.gray)),
-            Span::styled("↑/↓ ", dim),
-            Span::styled(preset_label(state.preset), focused_style),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            "New provider (\u{2190}/\u{2192} pick a preset on the first row)",
+            Style::default().fg(theme.gray),
+        )]));
     }
     lines.push(Line::from(""));
 
@@ -627,11 +655,14 @@ mod tests {
     #[test]
     fn tab_cycles_fields_and_left_right_cycles_protocol() {
         let mut state = AddProviderModalState::new();
-        assert_eq!(state.field, Field::Id);
+        // Add mode opens on the preset chooser row; Down (or Tab) moves rows.
+        assert_eq!(state.field, Field::Preset);
         assert!(matches!(
-            handle_add_provider_key(&mut state, &key(KeyCode::Tab)),
+            handle_add_provider_key(&mut state, &key(KeyCode::Down)),
             AddProviderOutcome::Changed
         ));
+        assert_eq!(state.field, Field::Id);
+        handle_add_provider_key(&mut state, &key(KeyCode::Tab));
         assert_eq!(state.field, Field::DisplayName);
         for _ in 0..2 {
             handle_add_provider_key(&mut state, &key(KeyCode::Tab));
@@ -649,6 +680,10 @@ mod tests {
     fn submit_validates_kebab_id() {
         let mut state = AddProviderModalState::new();
         state.apply_preset(PRESETS.len());
+        // Enter on the preset row advances into the form; validation fires
+        // on Enter from any field row.
+        handle_add_provider_key(&mut state, &key(KeyCode::Enter));
+        assert_eq!(state.field, Field::Id);
         state.id.set_text("Bad_Id!");
         assert!(matches!(
             handle_add_provider_key(&mut state, &key(KeyCode::Enter)),

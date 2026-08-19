@@ -106,6 +106,19 @@ branding (our identity). Keep this list current on every sync.
   /login, /logout, /share, /feedback, /imagine, /imagine_video, /import_claude,
   /gboom, /voice, /release_notes, /announcements, /recap, /timeline. /preset
   remains the only preset picker; /usage is adapted to session stats (above).
+- Slash commands hard-hidden because dsh has no matching surface: /cd (no
+  Agent Dashboard), /auto (no dsh auto permission-mode classifier), plus the
+  already-hidden /hooks, /plugins, /marketplace, /skills, /dashboard, /rewind.
+- Bridge now maps dsh capabilities onto grok RPCs: x.ai/session/rename →
+  dsh session-title, session/set_mode → dsh plan-mode, x.ai/session/fork →
+  dsh sessions.fork + agents.create(seed), x.ai/mcp/list → dsh MCP tool
+  names, x.ai/yolo_mode_changed → dsh permission-presets. session/new and
+  session/load also accept _meta.provider/_meta.model/_meta.reasoningEffort
+  for future CLI wiring.
+- dscode CLI surfaces hidden because they have no dsh counterpart or are not
+  worth exposing yet: login, logout, plugin, memory, setup, trace, worktree,
+  dashboard, --worktree, --worktree-ref, --restore-code, --oauth. They remain
+  parseable for compatibility/guidance but are omitted from --help.
 ## Patch
 
 - crates/codegen/xai-grok-shell/src/session/acp_session_tests/tool_layer_images_bridge_tests.rs:
@@ -304,3 +317,15 @@ refuses removing the in-use provider), `a` opens the add form. The typed
 `/provider <id>` form still works. Rationale: the completion dropdown is a
 typing surface, not a management surface — picking/editing providers wants
 a highlighted list ("上下选到哪个就指向哪个").
+
+### Provider form: arrows move fields; presets are a chooser row
+
+Up/Down in the add/edit provider form previously cycled PRESETS — every
+press rewrote all fields (data loss mid-edit) while Tab was the only way
+to move rows. Now Up/Down always move the row focus (the picker
+contract), presets are the form's first row cycled with Left/Right (the
+same interaction as the api row), and Enter on the preset row advances
+into the form instead of submitting a barely-seen prefill. Additionally
+Action::SetDefaultModel's idempotent branch now toasts ("Already on X")
+so picking the current provider/model in any picker gives feedback
+instead of silence.

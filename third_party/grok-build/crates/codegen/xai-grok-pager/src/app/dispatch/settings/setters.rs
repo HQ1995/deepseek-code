@@ -1744,8 +1744,11 @@ pub(in crate::app::dispatch) fn set_default_model(
         return vec![];
     }
 
-    // Idempotent: same model already active → no-op.
+    // Idempotent: same model already active → no state change, but ALWAYS
+    // feedback — a silent no-op reads as "nothing happened" from picker
+    // flows (e.g. selecting the current provider in /provider).
     if prev_id.as_ref() == Some(&new_id) {
+        app.show_toast(&format!("\u{2713} Already on {new_display}"));
         return vec![];
     }
 
