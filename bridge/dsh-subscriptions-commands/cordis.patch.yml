@@ -1,0 +1,8 @@
+# dsh-subscriptions-commands: one plugin row. The package adapts
+# dsh-plugin-subscriptions (which ships only a web-profile login UI) to the
+# dsh command registry, so terminal surfaces get /login, /logout, /code and
+# /subscriptions-status as ordinary slash commands. Pure plugin-space
+# adapter: no host, bridge, or TUI carries any subscriptions knowledge.
+- insert:
+    - id: subscriptions-commands
+      name: '@hqzhao95/dsh-subscriptions-commands'

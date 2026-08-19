@@ -1894,7 +1894,7 @@ describe('grok leader over a unix socket', () => {
     expect(agent!.internals.followups).toEqual(['one']) // the queued prompt never ran
   })
 
-  it('annotates an empty subscription provider with its /dsh login note', async () => {
+  it('annotates every empty provider with the generic setup note', async () => {
     const subscriptionLlm = {
       listProviders: () => [
         { id: 'deepseek', name: 'DeepSeek' },
@@ -1911,14 +1911,14 @@ describe('grok leader over a unix socket', () => {
 
     const models = await c.request(1, 'x.ai/models/list', {})
     const providers = (models.result as { _meta: { providers: Array<{ id: string; note?: string }> } })._meta.providers
+    // Every empty provider gets the same GENERIC note: the bridge carries no
+    // plugin-specific knowledge of which login or key a provider wants (that
+    // belongs to the provider's own plugin, e.g. a registered /login command).
+    const genericNote = 'no models yet — the provider may need a login or API key (its plugin may register a /login command)'
     expect(providers).toEqual([
       { id: 'deepseek', name: 'DeepSeek' },
-      // The bridge owns /dsh login, so the remedy pointer is its knowledge;
-      // the TUI relays the note verbatim (no hardcoded semantics there).
-      { id: 'codex', name: 'ChatGPT (Codex)', note: 'not logged in — /dsh login codex' },
-      // An empty non-subscription provider gets no note: the bridge only
-      // states remedies it actually owns.
-      { id: 'bare-api', name: 'Bare API' },
+      { id: 'codex', name: 'ChatGPT (Codex)', note: genericNote },
+      { id: 'bare-api', name: 'Bare API', note: genericNote },
     ])
   })
 
@@ -1964,7 +1964,7 @@ describe('grok leader over a unix socket', () => {
     })._meta
     expect(meta.cancelRewind).toBe(false)
     expect(meta.availableCommands).toEqual([
-      { name: 'dsh', description: 'Manage dsh plugins and subscription logins', input: { hint: 'plugins | add <package> | remove <name> | inspect <name> | login <codex|claude|grok> | code <pasted-url>' } },
+      { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | add <package> | remove <name> | inspect <name>' } },
       { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | code | minimal | cordis' } },
     ])
 
@@ -1976,7 +1976,7 @@ describe('grok leader over a unix socket', () => {
     const commands = await c.request(3, 'x.ai/commands/list', { sessionId })
     expect(commands.result).toEqual({
       commands: [
-        { name: 'dsh', description: 'Manage dsh plugins and subscription logins', input: { hint: 'plugins | add <package> | remove <name> | inspect <name> | login <codex|claude|grok> | code <pasted-url>' } },
+        { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | add <package> | remove <name> | inspect <name>' } },
         { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | code | minimal | cordis' } },
       ],
     })

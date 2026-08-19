@@ -58,6 +58,11 @@ export interface GrokLeaderConfig {
 }
 
 export const Config: Schema<GrokLeaderConfig> = Schema.object({
+  // Deliberate deviation from the harness config convention (defaults on
+  // schema fields): provider/model/followUpBehavior resolve as
+  // `config value ?? env ?? fallback` in apply(), which requires ABSENCE to
+  // be observable — a schema default would fill the slot before the env
+  // layer could speak.
   socketPath: Schema.string().default('/tmp/dsh-grok-leader.sock'),
   provider: Schema.string(),
   model: Schema.string(),
@@ -586,23 +591,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return urls
   }
 
-  /** COMPAT SHIM — the one plugin-specific carve-out in this bridge.
-   *
-   *  Layering rule (see docs/dscode-usage.md "Plugins"): the TUI renders
-   *  generic data; the bridge adapts protocol and manages plugin packages
-   *  (/dsh add|remove|plugins); EVERY feature belongs in a dsh plugin,
-   *  surfaced through generic rails (the @deepseek-ai/dsh-commands registry
-   *  auto-surfaces plugin slash commands; the llm service surfaces provider
-   *  catalogs; provider `note` relays display text).
-   *
-   *  dsh-plugin-subscriptions 0.3.x predates the commands registry and ships
-   *  only a web-profile login UI, so the bridge carries /dsh login + /dsh code
-   *  (and the empty-provider note below) as a shim. RETIRE when the plugin
-   *  (or a wrapper) registers login/logout commands itself — they would then
-   *  auto-surface as slash commands with zero bridge involvement. Do not add
-   *  further plugin-specific knowledge here. */
-  const SUBSCRIPTION_PROVIDERS = ['codex', 'claude', 'grok'] as const
-  type SubscriptionProvider = typeof SUBSCRIPTION_PROVIDERS[number]
+  // The one-time COMPAT SHIM (/dsh login + /dsh code for the pre-registry
+  // subscriptions plugin) is RETIRED: @hqzhao95/dsh-subscriptions-commands
+  // registers /login, /logout, /code, /subscriptions-status through the dsh
+  // command registry, so they auto-surface as slash commands with zero
+  // bridge involvement. The bridge carries no plugin-specific code.
 
   /** Rebuild the flattened wire catalog plus the provider ownership the bare ids hide. */
   const refreshCatalog = async (): Promise<ModelCatalog> => {
@@ -616,12 +609,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const modelCount = new Map(rows.map(row => [row.provider, row.models.length]))
     const providers = llm === undefined ? [] : llm.listProviders().map(p => {
       const profile = providerUserProfile(userSection, p.id)
-      // Display-only status for an empty provider. The TUI relays notes
-      // verbatim and attaches no semantics, so the remedy knowledge stays
-      // here: the bridge owns /dsh login, so it may point at it.
+      // Display-only status for an empty provider; generic on purpose (the
+      // TUI relays notes verbatim, and the bridge carries no plugin-specific
+      // knowledge of WHICH login or key a given provider wants).
       const note = (modelCount.get(p.id) ?? 0) > 0 ? undefined
-        : (SUBSCRIPTION_PROVIDERS as readonly string[]).includes(p.id) ? 'not logged in — /dsh login ' + p.id
-        : undefined
+        : 'no models yet — the provider may need a login or API key (its plugin may register a /login command)'
       return {
         id: p.id,
         ...p.name === undefined ? {} : { name: p.name },
@@ -1056,8 +1048,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const availableCommands = async (): Promise<Array<{ name: string; description: string; input?: { hint: string } }>> => {
     const commands: Array<{ name: string; description: string; input?: { hint: string } }> = [{
       name: 'dsh',
-      description: 'Manage dsh plugins and subscription logins',
-      input: { hint: 'plugins | add <package> | remove <name> | inspect <name> | login <codex|claude|grok> | code <pasted-url>' },
+      description: 'Manage dsh plugins',
+      input: { hint: 'plugins | add <package> | remove <name> | inspect <name>' },
     }]
     const roster = agentPresets()
     const presets = roster === undefined ? [] : await roster.list()
@@ -1588,8 +1580,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   const execFileAsync = promisify(execFile)
-  /** One OAuth login attempt at a time; /dsh code feeds it a pasted callback. */
-  let pendingLogin: { provider: SubscriptionProvider; attempt: { manual(input: string): void; cancel(): void } } | undefined
 
   /** Stream a turnless agent message into the session transcript. */
   const notifySession = (record: SessionRecord, message: string): void => {
@@ -1613,14 +1603,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const profile = (dsh.profile ?? (dsh.profile = {})) as Record<string, unknown>
     profile.bundles = bundles
     await writeFile(join(dir, 'package.json'), JSON.stringify(raw, null, 2) + '\n')
-  }
-
-  /** Import a module from the installed dsh-plugin-subscriptions by path
-   *  (its export map only exposes the plugin entry). */
-  const subscriptionsModule = async (dir: string, rel: string): Promise<Record<string, any> | undefined> => {
-    const path = join(dir, 'node_modules', 'dsh-plugin-subscriptions', 'lib', rel)
-    if (!existsSync(path)) return undefined
-    return await import(pathToFileURL(path).href) as Record<string, any>
   }
 
   /** The dsh plugin command registry, when the composition mounts it. */
@@ -1696,7 +1678,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       notifySession(record, message)
       return promptSettled(record, id, 'end_turn')
     }
-    const usage = 'Usage: /dsh plugins | /dsh add <package|git-url|file:path> | /dsh remove <name> | /dsh inspect <name> | /dsh login <codex|claude|grok> | /dsh code <pasted-callback>'
+    const usage = 'Usage: /dsh plugins | /dsh add <package|git-url|file:path> | /dsh remove <name> | /dsh inspect <name>'
     const [verb, ...rest] = text.split(/\s+/).slice(1)
     const dir = dshProfileDir()
     if (dir === undefined) {
@@ -1716,11 +1698,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           return settle('Plugins in ' + dir + ':\n' + lines.join('\n') + '\n\n' + usage)
         }
         case 'add': {
-          const spec = rest.join(' ').trim()
-          if (spec.length === 0) return settle('Missing package. ' + usage)
+          const specs = rest.filter(part => part.length > 0)
+          if (specs.length === 0) return settle('Missing package. ' + usage)
           const before = new Set(Object.keys((await readProfileManifest(dir)).dependencies))
-          notifySession(record, 'Installing ' + spec + ' into the leader profile (a dsh plugin runs with full process authority — only add plugins you trust)...')
-          await execFileAsync('pnpm', ['add', spec], { cwd: dir, timeout: 180_000 })
+          notifySession(record, 'Installing ' + specs.join(' ') + ' into the leader profile (a dsh plugin runs with full process authority — only add plugins you trust)...')
+          await execFileAsync('pnpm', ['add', ...specs], { cwd: dir, timeout: 180_000 })
           const manifest = await readProfileManifest(dir)
           const added = Object.keys(manifest.dependencies).filter(name => !before.has(name))
           if (added.length === 0) return settle('Nothing new was installed (already present?). Current bundles: ' + manifest.bundles.join(', '))
@@ -1770,53 +1752,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           const after = await readProfileManifest(dir)
           await writeProfileBundles(dir, after.raw, manifest.bundles.filter(bundle => bundle !== name))
           return settle('Removed ' + name + '.\nRestart dscode to unload it.')
-        }
-        case 'login': {
-          const provider = rest[0] as SubscriptionProvider | undefined
-          if (provider === undefined || !SUBSCRIPTION_PROVIDERS.includes(provider)) {
-            return settle('Usage: /dsh login <codex|claude|grok>')
-          }
-          const flowMod = await subscriptionsModule(dir, 'auth/oauth-flow.js')
-          const providerMod = await subscriptionsModule(dir, 'providers/' + provider + '.js')
-          const storeMod = await subscriptionsModule(dir, 'auth/store.js')
-          if (flowMod === undefined || providerMod === undefined || storeMod === undefined) {
-            return settle('dsh-plugin-subscriptions is not installed. Install it first: /dsh add dsh-plugin-subscriptions')
-          }
-          pendingLogin?.attempt.cancel()
-          const spec = provider === 'codex' ? providerMod.codexFlow
-            : provider === 'claude' ? providerMod.claudeFlow
-            : await providerMod.grokFlow()
-          const manager = new flowMod.OAuthFlowManager()
-          const attempt = await manager.start(provider, spec)
-          pendingLogin = { provider, attempt }
-          // The exchange completes in the background after this reply settles;
-          // progress lands as turnless messages in the same session.
-          void (async () => {
-            try {
-              const code = await attempt.waitCode()
-              const session = provider === 'codex'
-                ? await providerMod.exchangeCodexCode(code, attempt.pkce.verifier, attempt.redirectUri)
-                : provider === 'claude'
-                  ? await providerMod.exchangeClaudeCode(code, attempt.pkce.verifier, attempt.redirectUri, attempt.state)
-                  : await providerMod.exchangeGrokCode(code, attempt.pkce.verifier, attempt.redirectUri, attempt.pkce.challenge)
-              await storeMod.saveSession(provider, session)
-              notifySession(record, provider + ': logged in. Tokens stored at ' + String(storeMod.authFilePath()) + '. Restart dscode to load the subscription models.')
-            } catch (error: unknown) {
-              notifySession(record, provider + ' login failed: ' + (error instanceof Error ? error.message : String(error)))
-            } finally {
-              if (pendingLogin?.provider === provider) pendingLogin = undefined
-            }
-          })()
-          return settle('Open this URL in a browser to log in to ' + provider + ':\n\n' + String(attempt.authorizeUrl)
-            + '\n\nSame machine: the browser redirect completes the login automatically.'
-            + '\nRemote/SSH: paste the callback URL back with:  /dsh code <pasted-url>')
-        }
-        case 'code': {
-          const input = rest.join(' ').trim()
-          if (pendingLogin === undefined) return settle('No login attempt is waiting for a code. Start one with /dsh login <provider>.')
-          if (input.length === 0) return settle('Missing pasted callback URL or code. Usage: /dsh code <pasted-url>')
-          pendingLogin.attempt.manual(input)
-          return settle('Code received; completing the ' + pendingLogin.provider + ' login...')
         }
         default:
           return settle('Unknown /dsh subcommand "' + String(verb) + '". ' + usage)

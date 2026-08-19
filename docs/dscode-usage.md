@@ -102,18 +102,15 @@ the bridge adapts protocol and manages plugin packages; every feature lives
 in a dsh plugin, reaching the TUI through generic rails — plugin-registered
 commands auto-surface as slash commands, `llm`-service providers surface in
 `/provider` & `/model`, and free-text provider notes are relayed verbatim.
-Neither the TUI nor the bridge grows per-plugin code; the one existing
-exception (`/dsh login` for the pre-registry subscriptions plugin) is marked
-as a compat shim in the bridge and retires once that plugin registers its
-own commands.
+Neither the TUI nor the bridge grows per-plugin code — plugins that need
+adapting get adapted in plugin space (see the subscriptions wrapper below),
+never inside the product.
 
 ```
 /dsh plugins                      list installed plugins
 /dsh add <package|git-url>        install a plugin into the leader profile
 /dsh remove <name>                uninstall a plugin
 /dsh inspect <name>               what a loaded plugin actually brought (services, effects)
-/dsh login <codex|claude|grok>    subscription OAuth login (subscriptions plugin)
-/dsh code <pasted-callback-url>   finish a login over SSH (manual code paste)
 ```
 
 `/dsh add` validates the bundle before registering it (a broken composition
@@ -128,7 +125,7 @@ Plugins that register human commands (the `@deepseek-ai/dsh-commands`
 registry, `ctx.commands.register(...)`) surface automatically as top-level
 slash commands in dscode — with completion and hints — and route back to the
 plugin's handler; nothing to configure per plugin. `/dsh` itself stays narrow:
-it is the bridge-owned profile manager (install/remove/login), not a bucket
+it is the bridge-owned profile manager (install/remove/inspect), not a bucket
 for plugin commands. (Unrelated: the TUI's builtin `/plugin` manages grok-build's
 own pager plugins, not dsh plugins — use `/dsh` for those.)
 
@@ -144,12 +141,17 @@ Verified example — [dsh-plugin-subscriptions](https://github.com/V1ki/dsh-plug
 (use ChatGPT/Claude/Grok subscriptions as providers via OAuth):
 
 ```sh
-dsh plugin --profile deepseek-leader add dsh-plugin-subscriptions
+/dsh add dsh-plugin-subscriptions @hqzhao95/dsh-subscriptions-commands
 ```
 
 Its providers (ChatGPT (Codex), Claude (Subscription), Grok (Subscription))
 appear in the roster immediately; models appear after the one-time OAuth
-login. Log in from the terminal — no web profile needed:
+login. The second package is the plugin-space adapter
+([@hqzhao95/dsh-subscriptions-commands](https://www.npmjs.com/package/@hqzhao95/dsh-subscriptions-commands)):
+it registers `/login <codex|claude|grok>`, `/code <pasted-url>`, `/logout`,
+and `/subscriptions-status` through the dsh command registry, so after a
+restart they appear as ordinary dscode slash commands. Terminal-script
+alternative — no dscode needed:
 
 ```sh
 node scripts/subscriptions-login.mjs codex    # or claude / grok

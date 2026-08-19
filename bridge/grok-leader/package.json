@@ -31,7 +31,6 @@
   },
   "files": [
     "lib/",
-    "src/",
     "bin/",
     "cordis.patch.yml"
   ],
