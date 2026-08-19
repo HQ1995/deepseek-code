@@ -28,6 +28,17 @@ dscode update
 rm -rf ~/.dsh/profiles/dscode ~/.dsh/dsc-tui ~/.local/bin/dscode
 ```
 
+## Presets
+
+Use `/preset` or `Ctrl+Y` to switch presets.
+
+Shipped presets:
+
+- `standard`
+- `code`
+- `minimal`
+- `cordis`
+
 ## Plugins
 
 Manage dsh plugins from inside dscode:
