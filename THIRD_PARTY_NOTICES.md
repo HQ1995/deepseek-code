@@ -34,7 +34,7 @@ repository.
 
 ## grok-leader bridge
 
-`bridge/grok-leader/` is first-party code licensed under Apache-2.0. It has no
-external npm dependencies beyond the `@deepseek-ai/dsh-*` packages and vendored
-cordis/schemastery (all MIT), resolved from the official npm packages. Its
+`bridge/grok-leader/` is first-party code licensed under Apache-2.0. It depends
+on the official `@deepseek-ai/dsh-*` npm packages and their transitive
+dependencies (including cordis/schemastery, MIT), resolved from npm. Its
 build-only devDependencies are TypeScript (Apache-2.0) and `@types/node` (MIT).
