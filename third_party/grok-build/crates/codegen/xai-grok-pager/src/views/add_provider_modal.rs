@@ -26,7 +26,11 @@ pub const MODAL_TITLE: &str = "Add provider";
 pub const EDIT_MODAL_TITLE: &str = "Edit provider";
 
 /// Wire protocols the official dsh seam accepts (llm-pi-ai supportedProtocols).
-pub const APIS: [&str; 3] = ["openai-completions", "openai-responses", "anthropic-messages"];
+pub const APIS: [&str; 3] = [
+    "openai-completions",
+    "openai-responses",
+    "anthropic-messages",
+];
 
 /// One pre-fill template. Empty fields stay empty so the user completes them.
 #[derive(Debug, Clone, Copy)]
@@ -79,8 +83,10 @@ pub const PRESETS: &[ProviderPreset] = &[
 
 pub const CUSTOM_PRESET_LABEL: &str = "Custom (empty form)";
 
-/// v1 auth constraint, shown in the form: no oauth flows, env key only.
-pub const AUTH_NOTE: &str = "v1 auth is env-key only: the API key must be exported as the named env var.";
+/// Auth note shown in the form: paste a key (stored in the dsh credentials
+/// store) or name an env var — either resolves at request time.
+pub const AUTH_NOTE: &str =
+    "apiKey is stored in the dsh credentials store; leave it empty to use the named env var instead.";
 
 /// The submitted form. Empty optional fields ride as empty strings; the bridge
 /// treats them as unset before the official settings write.
@@ -91,6 +97,9 @@ pub struct AddProviderForm {
     pub api_key_env: String,
     pub api: String,
     pub base_url: String,
+    /// Literal API key to store in the dsh credentials store (empty = none;
+    /// the named env var is used instead). Never echoed back in edit mode.
+    pub api_key: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,15 +109,17 @@ pub enum Field {
     ApiKeyEnv,
     Api,
     BaseUrl,
+    ApiKey,
 }
 
 impl Field {
-    const ALL: [Field; 5] = [
+    const ALL: [Field; 6] = [
         Field::Id,
         Field::DisplayName,
         Field::ApiKeyEnv,
         Field::Api,
         Field::BaseUrl,
+        Field::ApiKey,
     ];
 
     fn index(self) -> usize {
@@ -126,6 +137,7 @@ impl Field {
             Field::ApiKeyEnv => "apiKeyEnv",
             Field::Api => "api",
             Field::BaseUrl => "baseURL",
+            Field::ApiKey => "apiKey",
         }
     }
 }
@@ -142,6 +154,7 @@ pub struct AddProviderModalState {
     /// Index into APIS, or APIS.len() for "(unset)" (empty api = catalog default).
     pub api_idx: usize,
     pub(crate) base_url: LineEditor,
+    pub(crate) api_key: LineEditor,
     /// Some(route id) while the form edits an existing provider: the id row
     /// is locked (routes cannot be renamed) and submit goes to
     /// x.ai/providers/update. None = the add flow.
@@ -163,6 +176,7 @@ impl AddProviderModalState {
             api_key_env: LineEditor::default(),
             api_idx: 0,
             base_url: LineEditor::default(),
+            api_key: LineEditor::default(),
             editing: None,
             submitting: false,
             error: None,
@@ -186,6 +200,7 @@ impl AddProviderModalState {
         Self::set_editor(&mut self.display_name, "");
         Self::set_editor(&mut self.api_key_env, api_key_env);
         Self::set_editor(&mut self.base_url, base_url);
+        Self::set_editor(&mut self.api_key, "");
         self.api_idx = APIS
             .iter()
             .position(|candidate| *candidate == api)
@@ -224,6 +239,7 @@ impl AddProviderModalState {
             Field::ApiKeyEnv => &self.api_key_env,
             Field::Api => &self.id, // unused placeholder; Api has no editor
             Field::BaseUrl => &self.base_url,
+            Field::ApiKey => &self.api_key,
         }
     }
 
@@ -234,6 +250,7 @@ impl AddProviderModalState {
             Field::ApiKeyEnv => &mut self.api_key_env,
             Field::Api => &mut self.id, // unused placeholder
             Field::BaseUrl => &mut self.base_url,
+            Field::ApiKey => &mut self.api_key,
         }
     }
 
@@ -246,6 +263,7 @@ impl AddProviderModalState {
                 .get(self.api_idx)
                 .map_or(String::new(), |value| (*value).to_string()),
             base_url: self.base_url.text().to_string(),
+            api_key: self.api_key.text().to_string(),
         }
     }
 
@@ -268,7 +286,11 @@ impl AddProviderModalState {
         let mut prev = field;
         for _ in 0..Field::ALL.len() {
             let idx = prev.index();
-            prev = Field::ALL[if idx == 0 { Field::ALL.len() - 1 } else { idx - 1 }];
+            prev = Field::ALL[if idx == 0 {
+                Field::ALL.len() - 1
+            } else {
+                idx - 1
+            }];
             if !editing || prev != Field::Id {
                 return prev;
             }
@@ -368,7 +390,10 @@ pub fn handle_add_provider_key(
             }
             state.error = None;
             state.submitting = true;
-            AddProviderOutcome::Submit(AddProviderForm { id: id.to_string(), ..form })
+            AddProviderOutcome::Submit(AddProviderForm {
+                id: id.to_string(),
+                ..form
+            })
         }
         _ => {
             if state.field == Field::Api {
@@ -415,12 +440,14 @@ fn row_specs(state: &AddProviderModalState) -> Vec<RowSpec> {
     let value = |field: Field| -> (String, usize, bool) {
         let focused = state.field == field;
         if field == Field::Api {
-            let api = APIS
-                .get(state.api_idx)
-                .map_or("(unset)", |value| *value);
+            let api = APIS.get(state.api_idx).map_or("(unset)", |value| *value);
             return (api.to_string(), 0, focused);
         }
         let editor = state.editor(field);
+        // Secrets never render: the key cell shows a fixed-width mask.
+        if field == Field::ApiKey && !editor.text().is_empty() {
+            return ("\u{2022}".repeat(editor.text().chars().count()), cursor(editor), focused);
+        }
         (editor.text().to_string(), cursor(editor), focused)
     };
     let fields = [
@@ -429,6 +456,7 @@ fn row_specs(state: &AddProviderModalState) -> Vec<RowSpec> {
         Field::ApiKeyEnv,
         Field::Api,
         Field::BaseUrl,
+        Field::ApiKey,
     ];
     fields
         .iter()
@@ -445,9 +473,7 @@ fn row_specs(state: &AddProviderModalState) -> Vec<RowSpec> {
 }
 
 fn preset_label(preset: usize) -> &'static str {
-    PRESETS
-        .get(preset)
-        .map_or(CUSTOM_PRESET_LABEL, |p| p.label)
+    PRESETS.get(preset).map_or(CUSTOM_PRESET_LABEL, |p| p.label)
 }
 
 pub fn render_add_provider_modal(buf: &mut Buffer, area: Rect, state: &mut AddProviderModalState) {
@@ -486,14 +512,17 @@ pub fn render_add_provider_modal(buf: &mut Buffer, area: Rect, state: &mut AddPr
         footer_lines: 2,
     };
     let config = ModalWindowConfig {
-        title: if editing { EDIT_MODAL_TITLE } else { MODAL_TITLE },
+        title: if editing {
+            EDIT_MODAL_TITLE
+        } else {
+            MODAL_TITLE
+        },
         tabs: None,
         shortcuts: &shortcuts,
         sizing,
         fold_info: None,
     };
-    let Some(mca) = mw::render_modal_window(buf, area, &mut state.window, &config, &theme)
-    else {
+    let Some(mca) = mw::render_modal_window(buf, area, &mut state.window, &config, &theme) else {
         return;
     };
     let content = mca.content;
@@ -530,7 +559,11 @@ pub fn render_add_provider_modal(buf: &mut Buffer, area: Rect, state: &mut AddPr
             Span::styled(prefix, Style::default().fg(theme.accent_user)),
             Span::styled(
                 format!("{:<12}", row.label),
-                Style::default().fg(if id_locked { theme.gray_dim } else { theme.gray }),
+                Style::default().fg(if id_locked {
+                    theme.gray_dim
+                } else {
+                    theme.gray
+                }),
             ),
         ];
         if id_locked {
@@ -665,7 +698,9 @@ mod tests {
         assert_eq!(state.field, Field::DisplayName);
         handle_add_provider_key(&mut state, &key(KeyCode::Tab));
         assert_eq!(state.field, Field::ApiKeyEnv);
-        for _ in 0..4 {
+        // Five more tabs walk Api -> BaseUrl -> ApiKey -> DisplayName ->
+        // ApiKeyEnv: a full wrap that never lands on the locked Id.
+        for _ in 0..5 {
             handle_add_provider_key(&mut state, &key(KeyCode::Tab));
         }
         assert_eq!(state.field, Field::ApiKeyEnv);

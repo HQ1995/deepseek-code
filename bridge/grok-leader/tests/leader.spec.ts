@@ -327,7 +327,7 @@ async function collectIds(client: ClientHandle, ids: number[]): Promise<Map<numb
 }
 
 async function makeHarness(
-  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; settings?: unknown; commands?: unknown; userQuestions?: unknown; combineQueuedPrompts?: boolean; followUpBehavior?: 'queue' | 'steer'; idleExitMs?: number } = {},
+  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; settings?: unknown; commands?: unknown; userQuestions?: unknown; credentials?: unknown; combineQueuedPrompts?: boolean; followUpBehavior?: 'queue' | 'steer'; idleExitMs?: number } = {},
 ): Promise<LeaderHarness> {
   const ctx = new Context()
   const registry = makeMockRegistry(ctx, options.manualIdle === true)
@@ -340,6 +340,7 @@ async function makeHarness(
   ctx.provide('settings', (options.settings ?? { mutate: async () => {} }) as unknown as Context['settings'])
   if (options.commands !== undefined) ctx.provide('commands', options.commands as never)
   if (options.userQuestions !== undefined) ctx.provide('userQuestions', options.userQuestions as never)
+  if (options.credentials !== undefined) ctx.provide('credentials', options.credentials as never)
   ctx.provide('sessionPersistence', persistence as unknown as Context['sessionPersistence'])
   ctx.provide('sessions', mockSessionsStore as unknown as Context['sessions'])
   if (presets !== undefined) ctx.provide('agentPresets', presets as unknown as Context['agentPresets'])
@@ -2187,9 +2188,9 @@ describe('x.ai/providers/add', () => {
     client = undefined
   })
 
-  const startWithSettings = async (settings: SettingsMock) => {
+  const startWithSettings = async (settings: SettingsMock, credentials?: unknown) => {
     const llm = makeLlm(settings)
-    const made = await makeHarness({ llm, settings })
+    const made = await makeHarness({ llm, settings, credentials })
     harness = made
     client = await makeClient(made.socketPath)
     register(client)
@@ -2227,6 +2228,55 @@ describe('x.ai/providers/add', () => {
         baseURL: 'https://acme.test/v1',
       },
     }])
+  })
+
+  it('stores a pasted apiKey in the credentials service under a derived ref', async () => {
+    const stored: Array<{ ref: string; value: string }> = []
+    const credentials = { set: async (ref: string, value: string) => { stored.push({ ref, value }) } }
+    const settings = makeSettings()
+    const { client } = await startWithSettings(settings, credentials)
+    const res = await client.request(1, 'x.ai/providers/add', {
+      id: 'acme-gateway',
+      api: 'openai-completions',
+      baseURL: 'https://acme.test/v1',
+      apiKey: 'sk-secret-123',
+    })
+    expect(res.error).toBeUndefined()
+    // The literal key lands ONLY in the credentials store; the settings route
+    // carries the derived reference name.
+    expect(stored).toEqual([{ ref: 'ACME_GATEWAY_API_KEY', value: 'sk-secret-123' }])
+    expect(settings.calls[0].ops[0].value).toEqual({
+      apiKeyEnv: 'ACME_GATEWAY_API_KEY',
+      api: 'openai-completions',
+      baseURL: 'https://acme.test/v1',
+    })
+  })
+
+  it('a pasted apiKey honors an explicit apiKeyEnv name', async () => {
+    const stored: Array<{ ref: string; value: string }> = []
+    const credentials = { set: async (ref: string, value: string) => { stored.push({ ref, value }) } }
+    const settings = makeSettings()
+    const { client } = await startWithSettings(settings, credentials)
+    const res = await client.request(1, 'x.ai/providers/add', {
+      id: 'acme-gateway',
+      apiKeyEnv: 'MY_ACME_KEY',
+      baseURL: 'https://acme.test/v1',
+      apiKey: 'sk-secret-456',
+    })
+    expect(res.error).toBeUndefined()
+    expect(stored).toEqual([{ ref: 'MY_ACME_KEY', value: 'sk-secret-456' }])
+  })
+
+  it('refuses a pasted apiKey when no credentials service exists', async () => {
+    const settings = makeSettings()
+    const { client } = await startWithSettings(settings)
+    const res = await client.request(1, 'x.ai/providers/add', {
+      id: 'acme-gateway',
+      baseURL: 'https://acme.test/v1',
+      apiKey: 'sk-secret-789',
+    })
+    expect(res.error).toBeDefined()
+    expect(settings.calls).toHaveLength(0)
   })
 
   it('refuses a duplicate id without writing settings', async () => {
@@ -2453,9 +2503,9 @@ const manageLlm = (settings: ManageSettingsMock) => ({
     : [{ provider, id: provider + '-model', name: provider + ' Model' }],
 })
 
-async function startManageHarness(settings: ManageSettingsMock, model?: string): Promise<{ client: ClientHandle; settings: ManageSettingsMock }> {
+async function startManageHarness(settings: ManageSettingsMock, model?: string, credentials?: unknown): Promise<{ client: ClientHandle; settings: ManageSettingsMock }> {
   const llm = manageLlm(settings)
-  const made = await makeHarness({ llm, settings: settings as unknown as Context['settings'], model })
+  const made = await makeHarness({ llm, settings: settings as unknown as Context['settings'], model, credentials })
   const client = await makeClient(made.socketPath)
   register(client)
   await client.next() // registered

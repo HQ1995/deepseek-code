@@ -3544,6 +3544,7 @@ pub(crate) fn execute(
                         "apiKeyEnv": form.api_key_env,
                         "api": form.api,
                         "baseURL": form.base_url,
+                        "apiKey": form.api_key,
                     }),
                     None => serde_json::json!({
                         "id": form.id,
@@ -3551,6 +3552,7 @@ pub(crate) fn execute(
                         "apiKeyEnv": form.api_key_env,
                         "api": form.api,
                         "baseURL": form.base_url,
+                        "apiKey": form.api_key,
                     }),
                 };
                 let method = if provider_id.is_some() {

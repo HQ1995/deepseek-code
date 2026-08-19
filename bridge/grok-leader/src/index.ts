@@ -2070,6 +2070,20 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (llm !== undefined && llm.listProviders().some(provider => provider.id === id)) {
       throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" already exists')
     }
+    // Paste-a-key path: a literal apiKey lands in the credentials service
+    // ($DSH_HOME/.credentials.yaml via dsh-credentials-local), NEVER in the
+    // settings document. The route still references it by name (apiKeyEnv,
+    // derived from the id when the form left it blank) — the same reference
+    // llm-pi-ai resolves credentials-first with env fallback, so an
+    // exported env var keeps working exactly as before.
+    const pastedKey = p.apiKey
+    if (typeof pastedKey === 'string' && pastedKey.length > 0) {
+      const credentials = ctx.get('credentials') as { set(ref: string, value: string): Promise<void> } | undefined
+      if (credentials === undefined) throw internalError('cannot store the API key: no credentials service is configured')
+      const ref = nonEmpty(p.apiKeyEnv) ? p.apiKeyEnv as string : id.toUpperCase().replace(/[^A-Z0-9]+/g, '_') + '_API_KEY'
+      await credentials.set(ref, pastedKey)
+      p.apiKeyEnv = ref
+    }
     await mutateProviderRoute(providerService, id, editableProfile(p), p, 'add')
     const current = await refreshCatalog()
     return { providers: current.providers, currentProviderId: current.currentProviderId }
@@ -2077,7 +2091,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   /** Reject malformed form fields before any settings write. */
   const validateProviderForm = (p: Record<string, unknown>): void => {
-    for (const field of ['displayName', 'apiKeyEnv', 'baseURL'] as const) {
+    for (const field of ['displayName', 'apiKeyEnv', 'baseURL', 'apiKey'] as const) {
       const value = p[field]
       if (value !== undefined && value !== null && typeof value !== 'string') {
         throw invalidParams(field + ' must be a string')
@@ -2174,6 +2188,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (providerService === undefined) throw internalError('the settings service is not configured')
     if (llm === undefined || !llm.listProviders().some(provider => provider.id === providerId)) {
       throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + providerId + '" does not exist')
+    }
+    // Same paste-a-key path as add: key → credentials store, name → route.
+    const pastedKey = p.apiKey
+    if (typeof pastedKey === 'string' && pastedKey.length > 0) {
+      const credentials = ctx.get('credentials') as { set(ref: string, value: string): Promise<void> } | undefined
+      if (credentials === undefined) throw internalError('cannot store the API key: no credentials service is configured')
+      const ref = nonEmpty(p.apiKeyEnv) ? p.apiKeyEnv as string : providerId.toUpperCase().replace(/[^A-Z0-9]+/g, '_') + '_API_KEY'
+      await credentials.set(ref, pastedKey)
+      p.apiKeyEnv = ref
     }
     const currentProfile = providerUserProfile(providerUserSection(providerService), providerId)
     const next = mergeEditable(currentProfile, p)
