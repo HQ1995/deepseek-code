@@ -1,5 +1,5 @@
 deepseek-code
-Copyright 2026 DeepSeek
+Copyright 2026 HQ1995
 
 This product is licensed under the Apache License, Version 2.0. See LICENSE.
 
@@ -21,7 +21,7 @@ remains under its own license; nothing in this notice changes those terms.
   See the upstream deepseek-ai/deepseek-harness repository.
 
 - grok-leader bridge (bridge/grok-leader/)
-  Copyright 2026 DeepSeek
+  Copyright 2026 HQ1995
   License: Apache License, Version 2.0
   See bridge/grok-leader/LICENSE.
 
