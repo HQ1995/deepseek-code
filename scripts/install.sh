@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # deepseek-code installer: the official @deepseek-ai/dsh CLI from npm, the
-# grok-leader bridge as an out-of-tree plugin in the deepseek-leader profile,
+# grok-leader bridge as an out-of-tree plugin in the dscode profile,
 # the prebuilt grok TUI into this repo tree, and launchers into ~/.local/bin.
 # The deepseek-harness submodule is dev/upgrade-only and never required.
 #
-# Known gap: published dsh 0.1.0-rc.6 lacks the EMFILE/ENOSPC watch-capacity
-# fix carried by the fork (upstream PR planned); watch-driven hot reload can
-# degrade under heavy watch pressure until it lands upstream.
+# Known gap: the pinned npm dsh may still lack the EMFILE/ENOSPC watch-capacity
+# and persistent-bash-prompt fixes carried by the fork (upstream PRs planned);
+# watch-driven hot reload can degrade under heavy watch pressure and persistent
+# bash sessions may fall back to idle-silence timeouts until they land upstream.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -40,33 +41,46 @@ if ! command -v pnpm >/dev/null 2>&1; then
   exit 1
 fi
 
+# dsh is pinned to the exact version this dscode release was tested against.
+# Bump it deliberately in bridge/grok-leader/package.json (dsh.testedVersion)
+# and re-run the full bridge/e2e suite before releasing.
+DSH_VERSION="$(node -p "require('$ROOT/bridge/grok-leader/package.json').dsh.testedVersion")"
+if [[ -z "$DSH_VERSION" ]]; then
+  echo "error: dsh.testedVersion is missing in bridge/grok-leader/package.json" >&2
+  exit 1
+fi
+
 # Official dsh CLI. The launcher prefers this global binary and falls back to
 # npx on demand, so a failed global install is a warning, not a stop.
 DSH_BIN="$(npm prefix -g)/bin/dsh"
-if npm install -g @deepseek-ai/dsh@next >/dev/null; then
-  echo "  installed @deepseek-ai/dsh@next ($("$DSH_BIN" --version))"
+if npm install -g "@deepseek-ai/dsh@$DSH_VERSION" >/dev/null; then
+  echo "  installed @deepseek-ai/dsh@$DSH_VERSION ($("$DSH_BIN" --version))"
 else
-  echo "  warning: 'npm install -g @deepseek-ai/dsh@next' failed; the launcher will use: npx --yes @deepseek-ai/dsh" >&2
+  echo "  warning: 'npm install -g @deepseek-ai/dsh@$DSH_VERSION' failed; the launcher will use: npx --yes @deepseek-ai/dsh@$DSH_VERSION" >&2
 fi
 if [[ -x "$DSH_BIN" ]]; then
   DSH_RUN=("$DSH_BIN")
 else
-  DSH_RUN=(npx --yes @deepseek-ai/dsh)
+  DSH_RUN=(npx --yes "@deepseek-ai/dsh@$DSH_VERSION")
 fi
 
+# The dsh profile used by the TUI leader.
+PROFILE_NAME="dscode"
+PROFILE_DIR="$HOME/.dsh/profiles/$PROFILE_NAME"
+
 # Build the bridge against its pinned npm peers, then install it as a plugin
-# into the deepseek-leader profile. The official CLI initializes the profile
+# into the dscode profile. The official CLI initializes the profile
 # with the dsh-base bundle and reconciles the bridge's cordis.patch.yml layer.
 echo "  building the grok-leader bridge..."
 ( cd "$ROOT/bridge/grok-leader" && pnpm install && pnpm run build )
-echo "  installing the bridge into the deepseek-leader profile..."
-"${DSH_RUN[@]}" plugin --profile deepseek-leader add "file:$ROOT/bridge/grok-leader"
+echo "  installing the bridge into the $PROFILE_NAME profile..."
+"${DSH_RUN[@]}" plugin --profile "$PROFILE_NAME" add "file:$ROOT/bridge/grok-leader"
 # pnpm materializes the file: dependency as hard links through its store, so
 # on a RE-install over an existing profile the copy keeps serving the build
 # that was current when it was first linked (tsc replaces inodes). Rebuild
 # the copy from scratch so re-running this installer picks up the current
 # bridge; scripts/update-bridge.sh is the standalone form of this step.
-profile_dir="$HOME/.dsh/profiles/deepseek-leader"
+profile_dir="$PROFILE_DIR"
 if [[ -d "$profile_dir/node_modules" ]]; then
   rm -rf "$profile_dir/node_modules"
   ( cd "$profile_dir" && pnpm install --force )
@@ -86,7 +100,6 @@ BIN_PATH="$ROOT/third_party/grok-build/target/release/dscode"
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)   ASSET="dscode-linux-x86_64" ;;
   Darwin-arm64)   ASSET="dscode-macos-aarch64" ;;
-  Darwin-x86_64)  ASSET="dscode-macos-x86_64" ;;
   *)              ASSET="" ;;
 esac
 
@@ -221,5 +234,6 @@ fi
 echo
 echo "done. run: dscode"
 echo "  (make sure $HOME/.local/bin is on PATH)"
-echo "  note: published dsh 0.1.0-rc.6 lacks the EMFILE/ENOSPC watch-capacity"
-echo "  fix carried by the fork; watch-driven hot reload may degrade under load."
+echo "  note: the pinned npm dsh may still lack the EMFILE/ENOSPC watch-capacity"
+echo "  and persistent-bash-prompt fixes carried by the fork; watch-driven hot"
+echo "  reload may degrade under load and persistent bash may use idle timeouts."

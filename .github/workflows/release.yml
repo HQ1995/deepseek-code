@@ -20,12 +20,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Both build on the arm64 runner: GitHub retired the free Intel
-          # (macos-13) runners — their queue never advances. x86_64 is a
-          # cross-compile (same Apple SDK, clang -arch handles it) and the
-          # version check runs the produced binary under Rosetta.
+          # Apple Silicon only: GitHub retired the free Intel runners, and
+          # Intel-mac support is explicitly out of scope.
           - { asset: dscode-macos-aarch64, target: aarch64-apple-darwin }
-          - { asset: dscode-macos-x86_64, target: x86_64-apple-darwin }
     runs-on: macos-latest
     env:
       TAG: ${{ inputs.tag || github.ref_name }}

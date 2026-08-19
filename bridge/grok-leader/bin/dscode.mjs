@@ -7,7 +7,7 @@
 //
 //   npx @hqzhao95/dscode
 //
-// On first run it registers this plugin into the deepseek-leader dsh
+// On first run it registers this plugin into the dscode dsh
 // profile (through the official dsh CLI — resolved from DSH_BIN, PATH, or
 // `npx --yes @deepseek-ai/dsh`), materializes the matching TUI binary from
 // GitHub Releases, and links `dscode` into ~/.local/bin; afterwards plain
@@ -42,10 +42,11 @@ const fail = (message) => {
   process.exit(1)
 }
 
+// Supported prebuilts: Linux x86_64 and macOS Apple Silicon (Intel macs
+// are out of scope — build from a checkout).
 const assetName = () => ({
   'linux-x64': 'dscode-linux-x86_64',
   'darwin-arm64': 'dscode-macos-aarch64',
-  'darwin-x64': 'dscode-macos-x86_64',
 }[`${process.platform}-${process.arch}`])
 
 const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
@@ -54,9 +55,12 @@ const binPath = join(binDir, 'dscode')
 
 // The dsh profile the TUI spawns its leader with (xai-grok-pager
 // dsh_leader.rs hardcodes the same name) — internal, never user-typed.
-const PROFILE_NAME = 'deepseek-leader'
+const PROFILE_NAME = 'dscode'
 const profileDir = join(dshHome, 'profiles', PROFILE_NAME)
 const profileLauncher = join(profileDir, 'node_modules', ...pkg.name.split('/'), 'bin', 'dscode.mjs')
+
+/** The exact dsh version this release was tested against. */
+const dshTestedVersion = pkg.dsh?.testedVersion
 
 /** dsh CLI argv: DSH_BIN, then dsh on PATH, then npx on demand — the same
  *  resolution order the TUI uses to spawn the leader (dsh_leader.rs). */
@@ -65,7 +69,8 @@ const dshCommand = () => {
   for (const dir of (process.env.PATH ?? '').split(':')) {
     if (dir !== '' && existsSync(join(dir, 'dsh'))) return [join(dir, 'dsh')]
   }
-  return ['npx', '--yes', '@deepseek-ai/dsh']
+  const spec = dshTestedVersion ? `@deepseek-ai/dsh@${dshTestedVersion}` : '@deepseek-ai/dsh'
+  return ['npx', '--yes', spec]
 }
 
 /** First run: register this plugin into the leader profile via the official

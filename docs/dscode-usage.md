@@ -1,90 +1,170 @@
 # dscode 使用手册
 
-`dscode` is the deepseek-build terminal interface: the grok-build TUI (vendored,
-Apache-2.0) driving the DeepSeek Harness agent runtime.
+`dscode` is the DeepSeek Harness terminal UI: the grok-build TUI (vendored,
+Apache-2.0) driving the DeepSeek Harness runtime through a dsh plugin.
 
-## Build / update
+## Install
 
-```sh
-dscode update                   # self-update the TUI (stable channel: latest deepseek-code GitHub release)
-dscode update --beta            # switch to the beta channel (prereleases; --stable switches back)
-scripts/install.sh              # install official dsh (npm/npx), build+install the bridge, fetch the TUI
-DSC_CHANNEL=beta scripts/install.sh  # install from the beta channel
-scripts/release.sh              # cut a release from the repo VERSION file (X.Y.Z stable, X.Y.Z-beta.N prerelease)
-scripts/update-bridge.sh        # (dev) rebuild the bridge and force-refresh the leader profile copy
-scripts/build-deepseek-tui.sh   # (dev) cargo build --release of the vendored TUI (version from VERSION + -dev)
-scripts/uninstall.sh            # remove launchers, leader profile, TUI state (identity-checked)
-```
-
-Plugin-native install — dscode itself is a dsh plugin, published on npm as
-[`@hqzhao95/dscode`](https://www.npmjs.com/package/@hqzhao95/dscode) (`scripts/publish-npm.sh`;
-the npm version equals the product release it pins). One package carries the
-grok-leader bridge plus a `dscode` launcher that materializes the
-release-pinned TUI binary on first run (GitHub Releases, SHA-256 verified,
-cached at `~/.dsh/dsc-tui/bin/`):
+### Quick start
 
 ```sh
-npx @hqzhao95/dscode      # first run: registers the plugin in the leader
-                          # profile, fetches the binary, links ~/.local/bin/dscode
-dscode                    # every run after that
+npx @hqzhao95/dscode
 ```
 
-(`npm i -g @deepseek-ai/dsh@next` first is optional — the launcher and the
-TUI resolve dsh from DSH_BIN, PATH, or an `npx` fallback, in that order.)
-
-(`add dscode-plugin.tgz` from the GitHub release assets is the equivalent
-registry-free form, published from v0.0.6 on.) Updating means updating the
-plugin: the launcher follows the package's release pin. It never replaces a
-newer or `-dev` binary in the cache (dev builds are developer-managed;
-`dscode update` remains the in-TUI escape hatch).
-
-Dev loop on a repo checkout (the launcher is not involved;
-`~/.local/bin/dscode` symlinks straight to the build output):
+First run registers the plugin, downloads the TUI binary, and creates the
+`dscode` launcher:
 
 ```sh
-scripts/build-deepseek-tui.sh   # TUI (Rust) change -> next dscode launch runs it
-scripts/update-bridge.sh        # bridge (TS) change -> restart dscode to reload
+dscode
 ```
 
-The version shown on the hero screen and by `--version` comes from the repo
-`VERSION` file (compiled in via `GROK_VERSION`); release builds carry the
-exact tag version, dev builds a `-dev` suffix. The status-bar channel label
-(`[stable]` / `[beta]`) compares the running version against the cached
-stable release pointer.
+`dscode` is distributed as a dsh plugin (`@hqzhao95/dscode`) plus a launcher
+that materializes the release-pinned TUI binary. The plugin lives in the
+`dscode` dsh profile at `~/.dsh/profiles/dscode`; the TUI binary is cached at
+`~/.dsh/dsc-tui/bin/dscode`.
+
+### Prerequisites
+
+- Node.js `^22.19.0 || >=24`
+- `pnpm` (required by dsh plugin installs; enable with `corepack enable`)
+- Linux x86_64 and macOS Apple Silicon (arm64) for prebuilt TUI binaries; other platforms build from a checkout
+- Other platforms: use a source checkout and `bash scripts/install.sh`
+
+## dsh resolution
+
+When dscode needs dsh, it resolves in this order:
+
+```text
+DSH_BIN environment variable
+  → `dsh` on PATH
+  → `npx --yes @deepseek-ai/dsh@0.1.0-rc.8`
+```
+
+- If you already have dsh installed and on PATH, dscode uses it directly.
+- If you set `DSH_BIN`, that path is authoritative.
+- If no dsh is found, dscode falls back to the pinned npm version.
+
+### dsh version policy
+
+- Tested: `0.1.0-rc.8`
+- Supported: `>=0.1.0-rc.7 <0.2.0`
+
+The values are recorded in `bridge/grok-leader/package.json`:
+
+```json
+"dsh": {
+  "testedVersion": "0.1.0-rc.8",
+  "supportedRange": ">=0.1.0-rc.7 <0.2.0"
+}
+```
+
+`testedVersion` is the release dscode was validated against. `supportedRange`
+is the compatibility window for existing installs.
+
+## Upgrade
+
+### Update the TUI binary
+
+```sh
+dscode update          # stable
+dscode update --beta   # beta channel
+```
+
+This updates only the Rust TUI binary.
+
+### Update the full dscode package
+
+To get a new bridge, new dsh pin, or new launcher behavior:
+
+```sh
+npm i -g @hqzhao95/dscode@latest
+npx @hqzhao95/dscode
+```
+
+If the profile still has the old plugin, re-register it:
+
+```sh
+dsh plugin --profile dscode remove @hqzhao95/dscode
+dsh plugin --profile dscode add @hqzhao95/dscode@latest
+```
+
+From a source checkout:
+
+```sh
+bash scripts/install.sh
+```
+
+## Uninstall
+
+Remove dscode's own files:
+
+```sh
+rm -rf ~/.dsh/profiles/dscode \
+       ~/.dsh/dsc-tui \
+       ~/.local/bin/dscode
+```
+
+Optionally remove the official dsh CLI:
+
+```sh
+npm uninstall -g @deepseek-ai/dsh
+```
+
+For source-checkout installs:
+
+```sh
+bash scripts/uninstall.sh
+bash scripts/uninstall.sh --remove-dsh   # also remove official dsh
+```
+
+## Development / source checkout
+
+```sh
+bash scripts/install.sh                 # full install from a checkout
+DSC_CHANNEL=beta bash scripts/install.sh  # install from the beta channel
+bash scripts/update-bridge.sh           # rebuild the bridge and refresh the profile copy
+bash scripts/build-deepseek-tui.sh      # cargo build the TUI (version from VERSION + -dev)
+bash scripts/release.sh                 # cut a release from the repo VERSION file
+```
+
+Dev launchers point directly at the build output, so after changing TUI or
+bridge code, restart `dscode` to pick up the new build.
 
 ## Launch
 
 ```sh
-dscode                            # after install; the TUI binary bootstraps the dsh leader itself
-third_party/grok-build/target/release/dscode "run the tests"   # dev: direct binary, with an initial prompt
+dscode                            # normal launch
+dscode "run the tests"            # launch with an initial prompt
 ```
+
+The TUI bootstraps the dsh leader itself through the `dscode` profile.
 
 ## Keys
 
 - `Enter` send · `Alt+Enter` newline · `Shift+Tab` mode
-- `/preset` or `Ctrl+Y` open the preset picker; Enter selects, the session reloads immediately
+- `/preset` or `Ctrl+Y` open the preset picker
 - `Ctrl+S` resume session · `Ctrl+W` new worktree · `Ctrl+Q` quit
-- `/model` pick provider and model; the harness catalog is live from your dsh settings
+- `/model` pick provider and model
 
 ## Providers and models
 
-The harness owns providers: the shipped `deepseek-official` route plus any
-`llm-pi-ai` routes configured in `$DSH_HOME/settings.yaml` (OpenAI-compatible
-gateways included). `/model` lists them live; the selection is saved as the
-harness default. Adding one is `/provider --add`: pick a template, fill the
-baseURL, paste the API key, done — the key lands in the dsh credentials
-store (never in settings.yaml); naming an env var instead also works.
+The harness owns providers. The shipped `deepseek-official` route is always
+available; additional `llm-pi-ai` routes can be configured in
+`$DSH_HOME/settings.yaml`.
+
+- `/model` lists models live and saves the selection as the harness default.
+- `/provider --add` adds a provider: pick a template, fill base URL, paste an
+  API key (stored in the dsh credentials store, not in settings.yaml).
 
 ## Presets
 
-Four shipped presets: `standard`, `code`, `minimal`, `cordis`, plus any custom
-presets in `~/.dsh/.agent-presets/`. Select in the picker (`/preset`); the
-current session reloads under the chosen preset and the footer shows it.
+Shipped presets: `standard`, `code`, `minimal`, `cordis`, plus custom presets
+in `~/.dsh/.agent-presets/`.
 
-Default preset override (profile layer):
+Select with `/preset` or `Ctrl+Y`. Override the default in the profile layer:
 
 ```sh
-cat >> ~/.dsh/profiles/deepseek-leader/cordis.patch.yml <<'YAML'
+cat >> ~/.dsh/profiles/dscode/cordis.patch.yml <<'YAML'
 - id: agent-presets
   config:
     default: minimal
@@ -93,84 +173,41 @@ YAML
 
 ## Plugins
 
-Any dsh plugin installs into the leader profile and its capabilities compose
-into every session (the grok-leader bridge itself is installed through the
-same mechanism). Manage plugins from inside dscode — no CLI or web profile
-needed:
+Any dsh plugin can be installed into the `dscode` profile and its capabilities
+compose into every session.
 
-**Design rule (plugin-first, any plugin kind):** the TUI keeps core
-interaction only (transcript, composer, pickers) and renders generic data;
-the bridge adapts protocol and manages plugin packages; every feature lives
-in a dsh plugin, reaching the TUI through generic rails — plugin-registered
-commands auto-surface as slash commands, `llm`-service providers surface in
-`/provider` & `/model`, and free-text provider notes are relayed verbatim.
-Neither the TUI nor the bridge grows per-plugin code. Plugins that ignore
-the rails are not ours to adapt: the fix belongs upstream (register
-commands) or in plugin space (anyone can publish a wrapper plugin) — never
-inside the product.
+From inside dscode:
 
-```
+```text
 /dsh plugins                      list installed plugins
-/dsh add <package|git-url>        install a plugin into the leader profile
+/dsh add <package|git-url>        install a plugin
 /dsh remove <name>                uninstall a plugin
-/dsh inspect <name>               what a loaded plugin actually brought (services, effects)
+/dsh inspect <name>               inspect what a plugin brought
 ```
 
-`/dsh add` validates the bundle before registering it (a broken composition
-layer is rolled back instead of bricking the profile) and discloses what the
-layer does: rows inserted/overridden/disabled, touches to the
-sandbox/approval spine, and any `!!js` expressions (code that runs at leader
-boot). `/dsh inspect` is the runtime half: it attributes live services and
-effects to the plugin generically (cordis fiber parentage), naming even
-capabilities dscode has no rail for.
-
-Plugins that register human commands (the `@deepseek-ai/dsh-commands`
-registry, `ctx.commands.register(...)`) surface automatically as top-level
-slash commands in dscode — with completion and hints — and route back to the
-plugin's handler; nothing to configure per plugin. `/dsh` itself stays narrow:
-it is the bridge-owned profile manager (install/remove/inspect), not a bucket
-for plugin commands. (Unrelated: the TUI's builtin `/plugin` manages grok-build's
-own pager plugins, not dsh plugins — use `/dsh` for those.)
-
-A dsh plugin runs with full process authority once loaded (there is no
-runtime containment in cordis) — only add plugins you trust; the trust
-decision happens at install time. Install scripts are blocked by pnpm by
-default. Restart dscode after add/remove (the leader exits with its last client and
-reloads the profile on the next launch). LLM-provider plugins surface
-automatically in `/provider` and `/model` through the bridge's model catalog.
-The CLI equivalent remains `dsh plugin --profile deepseek-leader add <spec>`.
-
-Verified example — [dsh-plugin-subscriptions](https://github.com/V1ki/dsh-plugin-subscriptions)
-(use ChatGPT/Claude/Grok subscriptions as providers via OAuth):
+CLI equivalent:
 
 ```sh
-/dsh add dsh-plugin-subscriptions
+dsh plugin --profile dscode add <pkg>
 ```
 
-Its providers (ChatGPT (Codex), Claude (Subscription), Grok (Subscription))
-appear in the roster immediately; models appear after the one-time OAuth
-login. The plugin ships its login UI only in the dsh web profile; from a
-terminal, use the repo script:
-
-```sh
-node scripts/subscriptions-login.mjs codex    # or claude / grok
-node scripts/subscriptions-login.mjs status   # login state + token store path
-```
-
-The script drives the plugin's own OAuth engine: open the printed authorize
-URL in any browser (same machine: the loopback callback finishes
-automatically; remote/SSH: paste the callback URL back into the prompt).
-Tokens land in the plugin's 0600 store shared by every dsh profile; restart
-dscode afterwards. (The plugin's built-in login UI lives in the dsh web
-profile's Settings page — that route also works if you already run one.)
+Restart dscode after adding or removing plugins so the leader reloads the
+profile.
 
 ## Sessions
 
-Sessions persist under `$DSH_HOME/sessions`. `Ctrl+S` lists them; resume replays
-the full transcript and continues. On exit the TUI prints the resume command.
+Sessions persist under `$DSH_HOME/sessions`. Use `Ctrl+S` to list and resume;
+on exit dscode prints the resume command.
 
 ## Architecture
 
-See docs/upgrade-strategy.md and docs/grok-leader-protocol.md. Harness
-upgrades flow as a plain merge of upstream; the compatibility contract is
-docs/harness-updates.md.
+- TUI: vendored grok-build, speaks the grok leader protocol.
+- Bridge: `bridge/grok-leader`, a dsh plugin that adapts the leader protocol
+  to DeepSeek Harness services.
+- Harness: official `@deepseek-ai/dsh` npm package, pinned per release.
+
+See also:
+
+- [docs/upgrade-strategy.md](upgrade-strategy.md)
+- [docs/harness-updates.md](harness-updates.md)
+- [docs/grok-leader-protocol.md](grok-leader-protocol.md)
