@@ -26,9 +26,9 @@
 // cache → left alone (developer-managed).
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
-import { delimiter as pathDelimiter, dirname, join } from 'node:path'
+import { chmodSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -74,47 +74,59 @@ const dshCommand = () => {
 }
 
 
-/** Ensure a `pnpm` executable is available for the dsh plugin command.
- *  Prefers a real pnpm on PATH; otherwise creates a temporary shim that
- *  delegates to Corepack, so users do not need to install pnpm manually. */
-const ensurePnpm = () => {
-  const pnpmCheck = spawnSync('pnpm', ['--version'], { encoding: 'utf8' })
-  if (!pnpmCheck.error && pnpmCheck.status === 0) return undefined
-  const corepackCheck = spawnSync('corepack', ['--version'], { encoding: 'utf8' })
-  if (corepackCheck.error || corepackCheck.status !== 0) {
-    throw new Error('pnpm is required for dsh plugin installs; enable it with: corepack enable')
-  }
-  const dir = mkdtempSync(join(tmpdir(), 'dscode-pnpm-'))
-  const shim = join(dir, 'pnpm')
-  writeFileSync(shim, '#!/bin/sh\nexec corepack pnpm "$@"\n', { mode: 0o755 })
-  return dir
-}
+const PROFILE_PATCH_TEMPLATE = `# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; \`!!js\` expressions allowed).
+[]
+`
 
-/** First run: register this plugin into the leader profile via the official
- *  dsh CLI. No-op when the profile already has it (the normal case once
- *  installed — including when this launcher IS the profile's copy). */
+/** First run: register this plugin into the dscode dsh profile without
+ *  requiring the dsh CLI or pnpm. This mirrors what `dsh plugin add` does,
+ *  but uses npm with --legacy-peer-deps so the dsh-provided peer packages
+ *  are not downloaded again. */
 export const ensureProfilePlugin = () => {
-  if (existsSync(join(profileDir, 'node_modules', ...pkg.name.split('/'), 'package.json'))) return
-  const spec = `${pkg.name}@${pkg.version}`
-  console.error(`dscode: first run — registering ${spec} in the ${PROFILE_NAME} dsh profile...`)
-  const argv = [...dshCommand(), 'plugin', '--profile', PROFILE_NAME, 'add', spec]
-  if (process.env.DSCODE_DEBUG !== undefined) console.error(`dscode: running: ${argv.join(' ')}`)
-  const pnpmShimDir = ensurePnpm()
-  const env = { ...process.env }
-  if (pnpmShimDir !== undefined) {
-    env.PATH = `${pnpmShimDir}${pathDelimiter}${env.PATH ?? ''}`
+  const pluginDir = join(profileDir, 'node_modules', ...pkg.name.split('/'))
+  if (existsSync(join(pluginDir, 'package.json'))) return
+
+  mkdirSync(profileDir, { recursive: true })
+
+  const manifestPath = join(profileDir, 'package.json')
+  if (!existsSync(manifestPath)) {
+    writeFileSync(manifestPath, JSON.stringify({
+      name: 'dsh-profile-dscode',
+      private: true,
+      dependencies: {},
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
+    }, null, 2) + '\n')
   }
-  const result = spawnSync(argv[0], argv.slice(1), {
+
+  const patchPath = join(profileDir, 'cordis.patch.yml')
+  if (!existsSync(patchPath)) writeFileSync(patchPath, PROFILE_PATCH_TEMPLATE)
+
+  const spec = `${pkg.name}@${pkg.version}`
+  console.error(`dscode: first run — installing ${spec} into the ${PROFILE_NAME} dsh profile...`)
+  const argv = ['install', '--prefix', profileDir, spec, '--no-audit', '--no-fund', '--legacy-peer-deps']
+  if (process.env.DSCODE_DEBUG !== undefined) console.error(`dscode: running: npm ${argv.join(' ')}`)
+  const result = spawnSync('npm', argv, {
     stdio: ['ignore', 'inherit', 'inherit'],
     timeout: 120000,
-    env,
   })
   if (result.error?.code === 'ETIMEDOUT') {
-    throw new Error(`plugin registration timed out; run manually: ${argv.join(' ')}`)
+    throw new Error(`plugin install timed out; run manually: npm ${argv.join(' ')}`)
   }
-  if (result.status !== 0 || !existsSync(join(profileDir, 'node_modules', ...pkg.name.split('/'), 'package.json'))) {
-    throw new Error(`plugin registration failed; run manually: ${argv.join(' ')}`)
+  if (result.status !== 0 || !existsSync(join(pluginDir, 'package.json'))) {
+    throw new Error(`plugin install failed; run manually: npm ${argv.join(' ')}`)
   }
+
+  // Reconcile the profile manifest: add this plugin as a bundle layer.
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  const bundles = manifest.dsh?.profile?.bundles ?? ['@deepseek-ai/dsh-base']
+  if (!bundles.includes(pkg.name)) bundles.push(pkg.name)
+  manifest.dsh = {
+    ...manifest.dsh,
+    profile: { ...manifest.dsh?.profile, bundles },
+  }
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
 }
 
 /** Pinned release for this package build: X.Y.Z, no leading v. */

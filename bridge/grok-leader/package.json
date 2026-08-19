@@ -1,7 +1,7 @@
 {
   "name": "@hqzhao95/dscode",
   "description": "dscode - DeepSeek Harness coding TUI, distributed as a dsh plugin (grok-leader bridge + launcher)",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "publishConfig": {
     "access": "public"
   },
