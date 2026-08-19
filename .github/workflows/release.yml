@@ -20,9 +20,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { asset: dscode-macos-aarch64, runner: macos-latest }
-          - { asset: dscode-macos-x86_64, runner: macos-13 }
-    runs-on: ${{ matrix.runner }}
+          # Both build on the arm64 runner: GitHub retired the free Intel
+          # (macos-13) runners — their queue never advances. x86_64 is a
+          # cross-compile (same Apple SDK, clang -arch handles it) and the
+          # version check runs the produced binary under Rosetta.
+          - { asset: dscode-macos-aarch64, target: aarch64-apple-darwin }
+          - { asset: dscode-macos-x86_64, target: x86_64-apple-darwin }
+    runs-on: macos-latest
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
     steps:
@@ -41,14 +45,15 @@ jobs:
         # out old tags whose script may carry host-specific wrappers.
         run: |
           VERSION="${TAG#v}"
-          ( cd third_party/grok-build && GROK_VERSION="$VERSION" cargo build --release -p xai-grok-pager-bin )
-          banner="$(third_party/grok-build/target/release/dscode --version)"
+          rustup target add ${{ matrix.target }}
+          ( cd third_party/grok-build && GROK_VERSION="$VERSION" cargo build --release -p xai-grok-pager-bin --target ${{ matrix.target }} )
+          banner="$(third_party/grok-build/target/${{ matrix.target }}/release/dscode --version)"
           echo "binary: $banner"
           case "$banner" in *"$VERSION"*) ;; *) echo "version mismatch" >&2; exit 1 ;; esac
       - name: Stage
         run: |
           mkdir -p dist
-          cp third_party/grok-build/target/release/dscode "dist/${{ matrix.asset }}"
+          cp "third_party/grok-build/target/${{ matrix.target }}/release/dscode" "dist/${{ matrix.asset }}"
           ( cd dist && shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256" )
           cat "dist/${{ matrix.asset }}.sha256"
       - name: Upload to the release
