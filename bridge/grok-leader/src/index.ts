@@ -2,8 +2,8 @@
  * Grok leader-protocol unix-socket server driving harness agents.
  *
  * Outer envelope: grok leader framing (codec.ts / protocol.ts), verified
- * against the real TUI capture in tests/fixtures/grok-tui-messages.jsonl,
- * docs/grok-tui-connect.md, and docs/grok-leader-protocol.md. Inner dialect:
+ * against the real TUI capture in tests/fixtures/grok-tui-messages.jsonl and
+ * the contract in docs/grok-leader-protocol.md. Inner dialect:
  * ACP JSON-RPC strings mapped onto the harness services the ACP bridge drives
  * (agents.create/resume, agent.followup / whenIdle / cancel, session/event,
  * approval/request, sessions.flush, llm.listProviders/listModels,
@@ -14,16 +14,17 @@
 
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, statSync, unlinkSync } from 'node:fs'
-import { readFile, writeFile } from 'node:fs/promises'
+import { chmodSync, existsSync, readFileSync, statSync, unlinkSync } from 'node:fs'
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server, type Socket } from 'node:net'
-import { homedir } from 'node:os'
-import { isAbsolute, join, sep } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import { installModelSelection, type Agent, type AgentOptions, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-agent-presets'
 import { CallId, ReasoningEffortId, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -71,11 +72,27 @@ export const Config: Schema<GrokLeaderConfig> = Schema.object({
   idleExitMs: Schema.number().default(2000),
 })
 
-// Probe-verified against the real TUI: docs/grok-tui-connect.md records that
+// Probe-verified by the captured TUI handshake and protocol contract:
 // leader_binary_version must be at least the client version or the client
 // evicts and respawns the leader. TODO(verify): derive from the package
 // version instead of pinning 1.0.4 (protocol.rs LEADER_VERSION mismatch rule).
 const LEADER_BINARY_VERSION = '1.0.4'
+
+const packageVersion = (): string => {
+  let dir = dirname(fileURLToPath(import.meta.url))
+  for (;;) {
+    const candidate = join(dir, 'package.json')
+    if (existsSync(candidate)) {
+      const manifest = JSON.parse(readFileSync(candidate, 'utf8')) as { name?: string; version?: string }
+      if (manifest.name === '@hqzhao95/dscode' && typeof manifest.version === 'string') return manifest.version
+    }
+    const parent = dirname(dir)
+    if (parent === dir) throw new Error('could not locate @hqzhao95/dscode package.json')
+    dir = parent
+  }
+}
+
+const PACKAGE_VERSION = packageVersion()
 
 /** How long an unregistered connection may sit before it is dropped (server.rs). */
 const REGISTRATION_TIMEOUT_MS = 30_000
@@ -218,6 +235,7 @@ interface ModelCatalog {
   currentProviderId: string
   availableModels: Array<{ modelId: string; name: string; description?: string; _meta?: { provider: string; supportsReasoningEffort?: boolean; reasoningEfforts?: string[]; reasoningEffort?: string } }>
   providerByModel: Map<string, string>
+  providerModelToWireId: Map<string, string>
 }
 
 interface ClientConnection {
@@ -314,7 +332,7 @@ interface PromptSettleResult {
 /** Structural read of the persistence service: list and load only. */
 interface PersistenceLike {
   list(signal?: AbortSignal): Promise<Array<{ id: string; createdAt: number; cwd?: string }>>
-  load(id: SessionId): Promise<{ meta: { agentPreset?: string }; events: readonly SessionEvent[] }>
+  load(id: SessionId): Promise<{ meta: { agentPreset?: string; cwd?: string }; events: readonly SessionEvent[] }>
 }
 
 /** Structural read of the user-questions service: provider registration only. */
@@ -410,7 +428,7 @@ function modelSelectionFromRequest(
   const effort = typeof meta?.reasoningEffort === 'string' ? meta.reasoningEffort : undefined
   const reasoningEffort = effort
     ?? (fromDefault ? defaultSelection.reasoningEffort : undefined)
-    ?? rememberedEfforts?.get(model)
+    ?? rememberedEfforts?.get(modelEffortKey(provider, model))
   return {
     provider,
     model,
@@ -418,11 +436,13 @@ function modelSelectionFromRequest(
   }
 }
 
-/** Structural read of the preset roster: list, resolve, and mount. */
+/** Structural read of the preset roster: discovery plus per-agent composition. */
 interface AgentPresetsLike {
   list(): Promise<Array<{ id: string; name?: string; description?: string; trust?: 'system' | 'user' }>>
   resolve(id?: string): Promise<{ id: string }>
   mount(agentCtx: Context, id?: string): Promise<unknown>
+  recompose(agentCtx: Context, id: string): Promise<unknown>
+  composedPreset?(agentCtx: Context): string | undefined
 }
 
 /**
@@ -463,7 +483,9 @@ export function analyzeBundlePatch(patchText: string): BundlePatchAnalysis {
     if (Array.isArray(patch.insert)) {
       for (const row of patch.insert) {
         const r = row as { id?: unknown; name?: unknown } | null
-        analysis.insertedRows.push(String(r?.id ?? r?.name ?? '?'))
+        const id = String(r?.id ?? r?.name ?? '?')
+        analysis.insertedRows.push(id)
+        if (SENSITIVE_ROW_IDS.has(id)) analysis.sensitiveRows.push(id)
       }
       continue
     }
@@ -474,6 +496,53 @@ export function analyzeBundlePatch(patchText: string): BundlePatchAnalysis {
     }
   }
   return analysis
+}
+
+/** Minimal shell-style tokenizer for slash commands (quotes and backslash). */
+export function parseCommandLine(input: string): string[] {
+  const tokens: string[] = []
+  let token = ''
+  let quote: '"' | "'" | undefined
+  let escaped = false
+  let started = false
+  for (const char of input) {
+    if (escaped) {
+      token += char
+      escaped = false
+      started = true
+      continue
+    }
+    if (char === '\\' && quote !== "'") {
+      escaped = true
+      started = true
+      continue
+    }
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined
+      else token += char
+      started = true
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      started = true
+      continue
+    }
+    if (/\s/.test(char)) {
+      if (started) {
+        tokens.push(token)
+        token = ''
+        started = false
+      }
+      continue
+    }
+    token += char
+    started = true
+  }
+  if (escaped) throw new Error('unterminated escape')
+  if (quote !== undefined) throw new Error('unterminated quote')
+  if (started) tokens.push(token)
+  return tokens
 }
 
 /** Structural view of cordis internals for runtime capability attribution.
@@ -558,7 +627,7 @@ export function inspectPluginRuntime(ctx: Context, packageName: string): string 
 
 export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const agents = ctx.agents
-  const llm = ctx.get('llm') as LlmLike | undefined
+  const llm = (): LlmLike | undefined => ctx.get('llm') as LlmLike | undefined
   const logger = ctx.logger
   // Build provenance banner: three caches can pin stale bridge code (the
   // profile's node_modules copy, a live leader process, a stale lib build),
@@ -584,6 +653,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const agentPresets = (): AgentPresetsLike | undefined => ctx.get('agentPresets') as AgentPresetsLike | undefined
   const sessions = new Map<SessionId, SessionRecord>()
   const connections = new Map<number, ClientConnection>()
+  const persistedSessionIdInUse = async (sessionId: SessionId): Promise<boolean> => {
+    const store = persistence()
+    return store === undefined
+      ? false
+      : (await store.list()).some(header => header.id === sessionId)
+  }
   let clientSeq = 0
   let closed = false
   let catalog: ModelCatalog | undefined
@@ -601,6 +676,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const DEFAULT_SESSION_LIST_LIMIT = 50
   /** First user prompt per session id, memoized across x.ai/session/list calls. */
   const firstPromptCache = new Map<string, string>()
+  /** Latest durable session title and activity timestamp for list/resume. */
+  const sessionTitleCache = new Map<string, string>()
+  const sessionActivityCache = new Map<string, number>()
+  const sessionProjectionInspected = new Set<string>()
   /** First-prompt loads in flight; concurrent list calls share them and never
    * cache the '' placeholder as a successful title. */
   const firstPromptInFlight = new Set<string>()
@@ -638,6 +717,27 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
     return ''
   }
+  const foldedSessionTitle = (events: readonly SessionEvent[]): string => {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index] as { type: string; data: unknown } | undefined
+      if (event?.type !== 'session/title') continue
+      const title = (event.data as { title?: unknown }).title
+      if (typeof title === 'string' && title.trim().length > 0) return title.trim()
+    }
+    return ''
+  }
+  const cacheSessionProjection = (
+    sessionId: string,
+    createdAt: number,
+    events: readonly SessionEvent[],
+  ): void => {
+    const title = foldedSessionTitle(events)
+    if (title === '') sessionTitleCache.delete(sessionId)
+    else sessionTitleCache.set(sessionId, title)
+    const latest = events.reduce((time, event) => Math.max(time, event.time), createdAt)
+    sessionActivityCache.set(sessionId, latest)
+    sessionProjectionInspected.add(sessionId)
+  }
 
   /** Raw user section of the llm-pi-ai namespace, when the settings service exposes it. */
   const providerUserSection = (providerService?: SettingsLike): Record<string, unknown> | undefined => {
@@ -654,6 +754,17 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       : undefined
     return profile !== null && typeof profile === 'object' ? profile as Record<string, unknown> : {}
   }
+
+  const hasUserProviderRoute = (providerService: SettingsLike | undefined, id: string): boolean => {
+    const providers = providerUserSection(providerService)?.providers
+    return providers !== null
+      && typeof providers === 'object'
+      && Object.prototype.hasOwnProperty.call(providers, id)
+  }
+
+  const providerExists = (providerService: SettingsLike | undefined, id: string): boolean =>
+    hasUserProviderRoute(providerService, id)
+    || llm()?.listProviders().some(provider => provider.id === id) === true
 
   /** baseURLs of the provider routes already persisted in the user settings
    * section: the only endpoints a resolved env secret may be sent to. */
@@ -677,13 +788,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   /** Rebuild the flattened wire catalog plus the provider ownership the bare ids hide. */
   const refreshCatalog = async (): Promise<ModelCatalog> => {
+    const llmService = llm()
     const userSection = providerUserSection(settings())
     const providerService = settings()
-    const rows = llm === undefined
+    const rows = llmService === undefined
       ? []
-      : await Promise.all(llm.listProviders().map(async provider => {
+      : await Promise.all(llmService.listProviders().map(async provider => {
         const profile = providerUserProfile(userSection, provider.id)
-        const staticModels = await llm.listModels(provider.id)
+        const staticModels = await llmService.listModels(provider.id)
         const baseURL = typeof profile.baseURL === 'string' ? profile.baseURL : undefined
         const api = typeof profile.api === 'string' ? profile.api : undefined
         let models = staticModels
@@ -691,7 +803,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         // pull the provider's current /models once and use that as the source
         // of truth. A stale settings list (e.g. old prefixed ids) is refreshed
         // in place, and failures fall back to the configured catalog.
-        if (llm?.discoverModels !== undefined
+        if (llmService.discoverModels !== undefined
           && baseURL !== undefined
           && (api === 'openai-completions' || api === 'openai-responses')) {
           try {
@@ -748,7 +860,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return { provider: provider.id, models }
       }))
     const modelCount = new Map(rows.map(row => [row.provider, row.models.length]))
-    const providers = llm === undefined ? [] : llm.listProviders().map(p => {
+    const providers = llmService === undefined ? [] : llmService.listProviders().map(p => {
       const profile = providerUserProfile(userSection, p.id)
       // Display-only status for an empty provider; generic on purpose (the
       // TUI relays notes verbatim, and the bridge carries no plugin-specific
@@ -787,9 +899,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         // one-size-fits-all grok menu, so a provider that has no low/medium/
         // xhigh does not advertise them.
         let reasoning: { defaultEffort?: string; efforts?: Array<{ id: string; name?: string }> } | undefined
-        if (llm?.resolveModelInfo !== undefined) {
+        if (llmService?.resolveModelInfo !== undefined) {
           try {
-            const info = await llm.resolveModelInfo(row.provider, model.id)
+            const info = await llmService.resolveModelInfo(row.provider, model.id)
             reasoning = info.reasoning
           } catch (error) {
             logger.warn('grok-leader: could not resolve model metadata for ' + row.provider + '/' + model.id + ': ' + (error instanceof Error ? error.message : String(error)))
@@ -842,16 +954,19 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // ride the catalog or it is forgotten across restarts. When the user has
     // not chosen one yet, surface the adapter-configured default (DeepSeek's
     // adapter defaults to high) so the status bar is not empty on first run.
-    let selectedEffort = defaultSelection?.reasoningEffort
+    let selectedEffort = defaultSelection?.provider === currentProviderId
+      && defaultSelection.model === currentRawModel
+      ? defaultSelection.reasoningEffort
+      : undefined
     if (typeof selectedEffort !== 'string' || selectedEffort.length === 0) {
-      selectedEffort = modelEfforts.get(currentRawModel)
+      selectedEffort = modelEfforts.get(modelEffortKey(currentProviderId, currentRawModel))
     }
     if ((typeof selectedEffort !== 'string' || selectedEffort.length === 0)
       && currentModelId !== ''
       && currentProviderId !== ''
-      && llm?.resolveModelInfo !== undefined) {
+      && llmService?.resolveModelInfo !== undefined) {
       try {
-        const info = await llm.resolveModelInfo(currentProviderId, currentRawModel)
+        const info = await llmService.resolveModelInfo(currentProviderId, currentRawModel)
         selectedEffort = info.reasoning?.defaultEffort
       } catch (error) {
         logger.warn('grok-leader: could not resolve model effort for ' + currentModelId + ': ' + (error instanceof Error ? error.message : String(error)))
@@ -875,6 +990,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       currentProviderId,
       availableModels,
       providerByModel,
+      providerModelToWireId,
     }
     return catalog
   }
@@ -1077,6 +1193,20 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   ctx.on('session/event', (session, event: SessionEvent) => {
     const record = sessions.get(session.header.id)
     if (record === undefined || record.agent.session !== session) return
+    sessionActivityCache.set(session.header.id, Math.max(
+      sessionActivityCache.get(session.header.id) ?? session.header.createdAt,
+      event.time,
+    ))
+    sessionProjectionInspected.add(session.header.id)
+    const rawEvent = event as { type: string; data: unknown }
+    if (rawEvent.type === 'session/title') {
+      const title = (rawEvent.data as { title?: unknown }).title
+      if (typeof title === 'string' && title.trim().length > 0) {
+        sessionTitleCache.set(session.header.id, title.trim())
+      }
+    } else if (event.type === 'user/message' && cachedFirstPrompt(session.header.id) === undefined) {
+      cacheFirstPrompt(session.header.id, firstUserPrompt([event]))
+    }
     const conn = connections.get(record.clientId)
     if (conn === undefined) return
     try {
@@ -1250,17 +1380,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   /**
    * Bridge-owned slash commands advertised over ACP: /dsh (plugin
    * management, executed in prompt()) and /preset (from the live preset
-   * roster). Plugin-registered commands are appended by
-   * broadcastAvailableCommands, not here. Note the TUI merges
-   * agent-advertised commands under builtin names losing, so its own
-   * /preset picker shadows this advert there — the entry is kept for
-   * headless/other ACP clients, where /preset reaches the model as text.
+   * roster). Plugin-registered commands are appended per session by
+   * commandCatalog(). The TUI's builtin /preset picker shadows the advert;
+   * headless/other ACP clients use the bridge's raw /preset handler.
    */
   const availableCommands = async (): Promise<Array<{ name: string; description: string; input?: { hint: string } }>> => {
     const commands: Array<{ name: string; description: string; input?: { hint: string } }> = [{
       name: 'dsh',
       description: 'Manage dsh plugins',
-      input: { hint: 'plugins | add <package> | remove <name> | inspect <name>' },
+      input: { hint: 'plugins | add [--trust] <package> | remove <name> | inspect <name>' },
     }]
     const roster = agentPresets()
     const presets = roster === undefined ? [] : await roster.list()
@@ -1289,7 +1417,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       // auth gate treats the leader as authenticated; the harness providers
       // own credentials, so the bridge answers authenticate with no meta.
       authMethods: [{ id: 'xai.api_key', name: 'API key' }],
-      agentInfo: { name: 'deepseek-harness-grok-leader', version: '0.0.10' },
+      agentInfo: { name: 'deepseek-harness-grok-leader', version: PACKAGE_VERSION },
       // cancelRewind is false: the bridge cancels turns but does not implement
       // the client-side rewind composer restore, so it stays unadvertised.
       // modelState flattens provider-scoped dsh model ids into one global
@@ -1325,6 +1453,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
    * @param meta - session/new or session/load _meta.
    * @returns the requested preset id, or undefined for the roster default.
    */
+  const GROK_PROFILE_FALLBACKS = new Set(['grok-build-plan', 'grok-build-ask-user'])
+
   const presetRequestFromMeta = (meta: Record<string, unknown> | null | undefined): string | undefined => {
     if (meta === undefined || meta === null) return undefined
     const native = meta.agentPreset
@@ -1334,7 +1464,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
     const profile = meta.agentProfile
     if (profile === undefined) return undefined
-    if (typeof profile === 'string') return profile
+    if (typeof profile === 'string') {
+      if (profile === 'grok-build-plan-no-subagents') {
+        throw invalidParams('--no-subagents is not supported by this dscode bridge; choose a preset without subagents instead')
+      }
+      return profile
+    }
     if (typeof profile === 'object' && profile !== null && !Array.isArray(profile)) {
       // TODO(verify): an inline grok AgentDefinition (upload/turn.rs:286,
       // AgentDefinition::from_json) has no dsh equivalent; reject instead of
@@ -1363,10 +1498,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     try {
       resolved = await roster.resolve(presetRequest)
     } catch (error: unknown) {
-      // Grok built-in profile names (grok-build-plan, …) have no dsh
-      // counterpart and arrive on every session/new from this TUI snapshot;
-      // fall back to the roster default instead of failing the session.
-      process.stderr.write('grok-leader: unknown preset request fell back to the default: ' + String(error) + '\n')
+      // Only the two known grok-build profiles may bridge to the deployment
+      // default. A user-provided typo must fail instead of silently selecting a
+      // different tool composition.
+      if (presetRequest === undefined || !GROK_PROFILE_FALLBACKS.has(presetRequest)) {
+        throw invalidParams('unknown agent preset "' + String(presetRequest) + '": ' + (error instanceof Error ? error.message : String(error)))
+      }
       resolved = await roster.resolve(undefined)
     }
     return {
@@ -1391,6 +1528,75 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
+  /** The composition a persisted/live session actually runs, newest switch winning. */
+  const sessionPresetFromLog = (
+    header: { agentPreset?: string },
+    events: readonly SessionEvent[],
+  ): string | undefined => {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event?.type !== 'agent-preset/selected') continue
+      const selected = (event.data as { agentPreset?: unknown }).agentPreset
+      if (typeof selected === 'string' && selected.length > 0) return selected
+    }
+    return header.agentPreset
+  }
+
+  /** A preset may change only before the session has produced model-visible history. */
+  const presetSwitchLocked = (events: readonly SessionEvent[]): boolean =>
+    events.some(event => event.type === 'user/message'
+      || event.type === 'assistant/message'
+      || event.type === 'tool/result')
+
+  const appendPresetSelection = (record: SessionRecord, agentPreset: string): void => {
+    record.agent.session.append('agent-preset/selected', { agentPreset })
+  }
+
+  /** Fail closed for CLI metadata this bridge cannot currently enforce. */
+  const validateSessionMeta = (
+    meta: Record<string, unknown> | null | undefined,
+    method: string,
+  ): void => {
+    if (meta === undefined || meta === null) return
+    if (meta.yoloMode !== undefined && typeof meta.yoloMode !== 'boolean') {
+      throw invalidParams('_meta.yoloMode must be a boolean')
+    }
+    if (meta.autoMode !== undefined && typeof meta.autoMode !== 'boolean') {
+      throw invalidParams('_meta.autoMode must be a boolean')
+    }
+    if (meta.askUserQuestion !== undefined && typeof meta.askUserQuestion !== 'boolean') {
+      throw invalidParams('_meta.askUserQuestion must be a boolean')
+    }
+    if (meta.permissionMode !== undefined && typeof meta.permissionMode !== 'string') {
+      throw invalidParams('_meta.permissionMode must be a string')
+    }
+    if (meta.sandbox !== undefined && typeof meta.sandbox !== 'string') {
+      throw invalidParams('_meta.sandbox must be a string')
+    }
+    if (meta.noReplay !== undefined && typeof meta.noReplay !== 'boolean') {
+      throw invalidParams('_meta.noReplay must be a boolean')
+    }
+    if (meta.subagents === false) {
+      throw invalidParams('--no-subagents is not supported by this dscode bridge; choose a preset without subagents instead')
+    }
+    const unsupported: string[] = []
+    if (meta.autoMode === true) unsupported.push('autoMode')
+    if (meta.askUserQuestion === false) unsupported.push('askUserQuestion')
+    if (typeof meta.permissionMode === 'string'
+      && !SUPPORTED_PERMISSION_MODES.has(meta.permissionMode)) {
+      unsupported.push('permissionMode=' + JSON.stringify(meta.permissionMode))
+    }
+    if (typeof meta.sandbox === 'string' && meta.sandbox !== 'off' && meta.sandbox !== 'none') {
+      unsupported.push('sandbox=' + JSON.stringify(meta.sandbox))
+    }
+    for (const key of ['systemPromptOverride', 'rules', 'tools', 'disallowedTools'] as const) {
+      if (meta[key] !== undefined) unsupported.push(key)
+    }
+    if (unsupported.length > 0) {
+      throw invalidParams(method + ' cannot enforce _meta.' + unsupported.join(', _meta.') + '; refusing to run with silently weakened CLI settings')
+    }
+  }
+
   /** session/new and session/load share the workspace gate: an absolute cwd
    * and no MCP servers (an empty array only; any other mcpServers value is
    * invalid, never silently ignored). Returns the validated cwd. */
@@ -1412,12 +1618,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const additionalDirectories = p.additionalDirectories
     if (Array.isArray(additionalDirectories) && additionalDirectories.length > 0) throw invalidParams('additionalDirectories is not supported')
     const meta = p._meta as Record<string, unknown> | null | undefined
+    validateSessionMeta(meta, 'session/new')
     // Clients may pin the session id through _meta.sessionId; absent one, mint it.
     const suppliedId = meta?.sessionId
     const sessionId = typeof suppliedId === 'string' && suppliedId.length > 0 ? SessionId(suppliedId) : SessionId(randomUUID())
     // A pinned id that is already live must not silently replace the record:
     // that would strand the old agent and re-route its reverse channels.
-    if (sessions.has(sessionId)) {
+    if (sessions.has(sessionId)
+      || (typeof suppliedId === 'string' && await persistedSessionIdInUse(sessionId))) {
       throw invalidParams('session id is already in use: ' + String(sessionId))
     }
     // TODO(verify): the grok leader also injects autoMode, modelId,
@@ -1480,12 +1688,21 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       promotionScheduled: false,
       steered: [],
     }
+    try {
+      applyPermissionMode(
+        record,
+        typeof meta?.permissionMode === 'string' ? meta.permissionMode : undefined,
+        typeof meta?.yoloMode === 'boolean' ? meta.yoloMode : undefined,
+      )
+    } catch (error) {
+      await handle.dispose()
+      throw error
+    }
     sessions.set(sessionId, record)
-    applyPermissionMode(record, typeof meta?.permissionMode === 'string' ? meta.permissionMode as string : undefined, meta?.yoloMode === true)
     void broadcastAvailableCommands(record)
     // The pager parks on "Starting session…" until this arrives (the probe
     // worker's scripted fake sends it 50 ms after the session/new result;
-    // docs/grok-tui-connect.md).
+    // see docs/grok-leader-protocol.md).
     const conn = connections.get(clientId)
     if (conn !== undefined) {
       record.mcpInitTimer = setTimeout(() => {
@@ -1805,7 +2022,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   const capabilitiesFor = (record: SessionRecord): string[] => {
     const capabilities: string[] = []
-    if (ctx.get('subagents') !== undefined || record.agent.ctx.get('subagents') !== undefined) capabilities.push('subagents')
+    if (!presetIsMinimal(record)
+      && (ctx.get('subagents') !== undefined || record.agent.ctx.get('subagents') !== undefined)) {
+      capabilities.push('subagents')
+    }
     if (record.agent.ctx.get('skills') !== undefined) capabilities.push('skills')
     if (record.agent.ctx.get('planMode') !== undefined) capabilities.push('plan')
     if (record.agent.ctx.get('goals') !== undefined) capabilities.push('goal')
@@ -1829,7 +2049,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const dsh = (raw.dsh ?? (raw.dsh = {})) as Record<string, unknown>
     const profile = (dsh.profile ?? (dsh.profile = {})) as Record<string, unknown>
     profile.bundles = bundles
-    await writeFile(join(dir, 'package.json'), JSON.stringify(raw, null, 2) + '\n')
+    const target = join(dir, 'package.json')
+    const temporary = join(dir, '.package.json.' + String(process.pid) + '.' + randomUUID() + '.tmp')
+    try {
+      await writeFile(temporary, JSON.stringify(raw, null, 2) + '\n')
+      await rename(temporary, target)
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined)
+      throw error
+    }
   }
 
   /** The dsh plugin command registry, when the composition mounts it. */
@@ -1839,45 +2067,68 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
    *  available_commands_update). Plugin commands come from the dsh command
    *  registry, so any plugin's ctx.commands.register() surfaces as a pager
    *  slash command with completion — no bridge or TUI change per plugin. */
-  const broadcastAvailableCommands = async (record: SessionRecord): Promise<void> => {
-    const conn = connections.get(record.clientId)
-    if (conn === undefined) return
+  const commandCatalog = async (record?: SessionRecord): Promise<Array<{ name: string; description: string; input?: { hint: string } }>> => {
+    const commands = await availableCommands()
+    if (record === undefined) return commands
     const registry = dshCommands()
     const fromPlugins = registry === undefined ? [] : registry.list(record.agent).map(command => ({
       name: command.name,
       description: command.description,
       ...command.input === undefined ? {} : { input: { hint: command.input.hint } },
     }))
+    const claimed = new Set(commands.map(command => command.name.toLowerCase()))
+    for (const command of fromPlugins) {
+      if (claimed.has(command.name.toLowerCase())) continue
+      claimed.add(command.name.toLowerCase())
+      commands.push(command)
+    }
+    return commands
+  }
+
+  const broadcastAvailableCommands = async (record: SessionRecord): Promise<void> => {
+    const conn = connections.get(record.clientId)
+    if (conn === undefined) return
     // Sent directly, not through emitUpdate: a roster refresh is ambient, not
     // a turn event, so it must not consume eventSeq or carry a promptId.
     sendNotification(conn, WIRE.sessionUpdate, {
       sessionId: record.agent.session.id,
       update: {
         sessionUpdate: 'available_commands_update',
-        availableCommands: [...await availableCommands(), ...fromPlugins],
+        availableCommands: await commandCatalog(record),
         meta: { capabilities: capabilitiesFor(record) },
       },
     })
   }
 
-  /** Broadcast the current flattened model catalog to every connected client.
-   *  The TUI uses this to refresh model metadata after a switch, so a
-   *  remembered reasoning effort is visible immediately instead of waiting
-   *  for the next models/list roundtrip. */
-  const broadcastModelsUpdate = (): void => {
+  /** Refresh model state only for the session that changed it. */
+  const notifyModelsUpdate = (record: SessionRecord): void => {
     const current = catalog
     if (current === undefined) return
+    const conn = connections.get(record.clientId)
+    if (conn === undefined) return
+    const selection = record.selection.current
+    if (selection === undefined) return
+    const selectedId = current.providerModelToWireId.get(modelEffortKey(selection.provider, selection.model))
+      ?? current.currentModelId
+    const availableModels = current.availableModels.map(model => {
+      if (model.modelId !== selectedId || model._meta === undefined) return model
+      return {
+        ...model,
+        _meta: {
+          ...model._meta,
+          ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
+        },
+      }
+    })
     const params = {
-      currentModelId: current.currentModelId,
-      availableModels: current.availableModels,
+      currentModelId: selectedId,
+      availableModels,
       _meta: {
-        currentProviderId: current.currentProviderId,
+        currentProviderId: selection.provider,
         providers: current.providers,
       },
     }
-    for (const conn of connections.values()) {
-      sendNotification(conn, WIRE.modelsUpdate, params)
-    }
+    sendNotification(conn, WIRE.modelsUpdate, params)
   }
 
   // Live refresh: a plugin registering or removing commands re-advertises to
@@ -1889,12 +2140,19 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     for (const record of sessions.values()) void broadcastAvailableCommands(record)
   })
 
+  type BundleInspection =
+    | { kind: 'plain' }
+    | { kind: 'bundle'; analysis: BundlePatchAnalysis }
+    | { kind: 'broken'; error: string }
+
+  const CORE_PLUGIN_NAMES = new Set(['@deepseek-ai/dsh-base', '@hqzhao95/dscode', 'dscode', '@deepseek-ai/dsh-grok-leader'])
+
   /** Inspect one freshly installed package: plain dependency, valid bundle
    *  (with its patch analysis), or a bundle whose patch would brick the boot. */
   const inspectInstalledBundle = async (
     dir: string,
     name: string,
-  ): Promise<{ kind: 'plain' } | { kind: 'bundle'; analysis: BundlePatchAnalysis } | { kind: 'broken'; error: string }> => {
+  ): Promise<BundleInspection> => {
     const pkgDir = join(dir, 'node_modules', ...name.split('/'))
     try {
       const manifest = JSON.parse(await readFile(join(pkgDir, 'package.json'), 'utf8')) as { dsh?: { bundle?: { patch?: string } } }
@@ -1906,6 +2164,58 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       return { kind: 'broken', error: errorChain(error) }
     }
   }
+
+  const npmInstall = async (dir: string, specs: string[]): Promise<void> => {
+    await execFileAsync('npm', [
+      'install',
+      '--ignore-scripts',
+      '--no-audit',
+      '--no-fund',
+      '--legacy-peer-deps',
+      ...specs,
+    ], { cwd: dir, timeout: 180_000 })
+  }
+
+  const npmUninstall = async (dir: string, names: string[]): Promise<void> => {
+    await execFileAsync('npm', [
+      'uninstall',
+      '--ignore-scripts',
+      '--no-audit',
+      '--no-fund',
+      '--legacy-peer-deps',
+      ...names,
+    ], { cwd: dir, timeout: 180_000 })
+  }
+
+  const normalizeAuditSpec = (profileDir: string, spec: string): string => {
+    if (spec.startsWith('file:')) {
+      const path = spec.slice('file:'.length)
+      return 'file:' + (isAbsolute(path) ? path : resolve(profileDir, path))
+    }
+    if (spec.startsWith('./') || spec.startsWith('../')) return resolve(profileDir, spec)
+    return spec
+  }
+
+  /** Install without lifecycle scripts into an isolated directory and inspect
+   * every requested root package before the real profile is mutated. */
+  const auditPluginSpecs = async (
+    profileDir: string,
+    specs: string[],
+  ): Promise<Array<{ name: string; info: BundleInspection }>> => {
+    const stage = await mkdtemp(join(tmpdir(), 'dscode-plugin-audit-'))
+    try {
+      await writeFile(join(stage, 'package.json'), JSON.stringify({ private: true }, null, 2) + '\n')
+      await npmInstall(stage, specs.map(spec => normalizeAuditSpec(profileDir, spec)))
+      const manifest = await readProfileManifest(stage)
+      const names = Object.keys(manifest.dependencies)
+      if (names.length === 0) throw new Error('npm installed no root package for: ' + specs.join(', '))
+      return await Promise.all(names.map(async name => ({ name, info: await inspectInstalledBundle(stage, name) })))
+    } finally {
+      await rm(stage, { recursive: true, force: true })
+    }
+  }
+
+  const bundleRequiresTrust = (info: BundleInspection): boolean => info.kind === 'bundle'
 
   /** Human summary of a bundle's composition delta. */
   const describeAnalysis = (name: string, analysis: BundlePatchAnalysis): string => {
@@ -1926,8 +2236,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       notifySession(record, message)
       return promptSettled(record, id, 'end_turn')
     }
-    const usage = 'Usage: /dsh plugins | /dsh add <package|git-url|file:path> | /dsh remove <name> | /dsh inspect <name>'
-    const [verb, ...rest] = text.split(/\s+/).slice(1)
+    const usage = 'Usage: /dsh plugins | /dsh add [--trust] <package|git-url|file:path> | /dsh remove <name> | /dsh inspect <name>'
+    let words: string[]
+    try {
+      words = parseCommandLine(text).slice(1)
+    } catch (error) {
+      return settle('Could not parse /dsh command: ' + (error instanceof Error ? error.message : String(error)))
+    }
+    const [verb, ...rest] = words
     const dir = dshProfileDir()
     if (dir === undefined) {
       return settle('dsh plugin management is unavailable: no installed leader profile was found (running from a source checkout?). Use: dsh plugin --profile dscode add <package>')
@@ -1946,34 +2262,59 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           return settle('Plugins in ' + dir + ':\n' + lines.join('\n') + '\n\n' + usage)
         }
         case 'add': {
-          const specs = rest.filter(part => part.length > 0)
+          const trusted = rest.includes('--trust')
+          const specs = rest.filter(part => part !== '--trust' && part.length > 0)
           if (specs.length === 0) return settle('Missing package. ' + usage)
-          const before = new Set(Object.keys((await readProfileManifest(dir)).dependencies))
-          notifySession(record, 'Installing ' + specs.join(' ') + ' into the leader profile (a dsh plugin runs with full process authority — only add plugins you trust)...')
-          await execFileAsync('pnpm', ['add', ...specs], { cwd: dir, timeout: 180_000 })
+          const option = specs.find(spec => spec.startsWith('-'))
+          if (option !== undefined) return settle('Unsupported npm option "' + option + '". Package specs may not start with "-".')
+          notifySession(record, 'Auditing ' + specs.join(' ') + ' in an isolated npm stage (install scripts disabled)...')
+          const staged = await auditPluginSpecs(dir, specs)
+          const core = staged.find(entry => CORE_PLUGIN_NAMES.has(entry.name))
+          if (core !== undefined) return settle(core.name + ' is a core component; use dscode update instead of /dsh add.')
+          const broken = staged.find(entry => entry.info.kind === 'broken')
+          if (broken !== undefined && broken.info.kind === 'broken') {
+            return settle('Refused ' + broken.name + ' before profile mutation: its bundle cannot be inspected.\n' + broken.info.error)
+          }
+          const stagedReport = staged.map(({ name, info }) => info.kind === 'plain'
+            ? name + ': declares no dsh.bundle — it will remain a plain dependency.'
+            : info.kind === 'bundle'
+              ? describeAnalysis(name, info.analysis)
+              : '').filter(Boolean)
+          const executableBundle = staged.some(entry => bundleRequiresTrust(entry.info))
+          if (executableBundle && !trusted) {
+            return settle('Not installed. Review the requested composition changes:\n\n'
+              + stagedReport.join('\n\n')
+              + '\n\nIf you trust this code, rerun: /dsh add --trust ' + specs.map(spec => JSON.stringify(spec)).join(' '))
+          }
+          notifySession(record, 'Installing audited package(s) into the leader profile with npm (lifecycle scripts disabled)...')
+          await npmInstall(dir, specs)
           const manifest = await readProfileManifest(dir)
-          const added = Object.keys(manifest.dependencies).filter(name => !before.has(name))
-          if (added.length === 0) return settle('Nothing new was installed (already present?). Current bundles: ' + manifest.bundles.join(', '))
-          // Validate BEFORE registering: a bundle layer that loadProfile
-          // cannot parse bricks the whole profile on the next boot, and `add`
-          // alone never checks the patch. Broken → uninstall and report.
-          const bundles = [...manifest.bundles]
+          const names = staged.map(entry => entry.name)
+          const actual = await Promise.all(names.map(async name => ({ name, info: await inspectInstalledBundle(dir, name) })))
+          const invalid = actual.find(entry => entry.info.kind === 'broken' || (!trusted && bundleRequiresTrust(entry.info)))
+          if (invalid !== undefined) {
+            // The staged and real package differed. Disable every touched root
+            // before returning so an existing bundle cannot brick the next boot.
+            await writeProfileBundles(dir, manifest.raw, manifest.bundles.filter(bundle => !names.includes(bundle)))
+            const reason = invalid.info.kind === 'broken'
+              ? invalid.info.error
+              : 'the installed package introduced an executable bundle after staging'
+            return settle('Installed dependency was left disabled because post-install verification failed for ' + invalid.name + ':\n' + reason)
+          }
+          const bundles = new Set(manifest.bundles)
           const report: string[] = []
-          for (const name of added) {
-            const info = await inspectInstalledBundle(dir, name)
-            if (info.kind === 'broken') {
-              await execFileAsync('pnpm', ['remove', name], { cwd: dir, timeout: 180_000 }).catch(() => undefined)
-              return settle('Rolled back ' + name + ': its dsh bundle patch would break the profile at boot.\n' + info.error)
-            }
+          for (const { name, info } of actual) {
             if (info.kind === 'plain') {
+              bundles.delete(name)
               report.push(name + ': declares no dsh.bundle — installed as a plain dependency, not a profile layer.')
               continue
             }
-            if (!bundles.includes(name)) bundles.push(name)
+            if (info.kind === 'broken') continue
+            bundles.add(name)
             report.push(describeAnalysis(name, info.analysis))
           }
-          await writeProfileBundles(dir, manifest.raw, bundles)
-          return settle('Installed ' + added.join(', ') + '.\n\n' + report.join('\n\n') + '\n\nRestart dscode to load it (the leader exits with its last client).')
+          await writeProfileBundles(dir, manifest.raw, [...bundles])
+          return settle('Installed or updated ' + names.join(', ') + '.\n\n' + report.join('\n\n') + '\n\nRestart dscode to load it (the leader exits with its last client).')
         }
         case 'inspect': {
           const name = rest[0]
@@ -1989,16 +2330,23 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         case 'remove': {
           const name = rest[0]
           if (name === undefined) return settle('Missing plugin name. ' + usage)
-          if (name === '@hqzhao95/dscode' || name === 'dscode' || name === '@deepseek-ai/dsh-grok-leader' || name === '@deepseek-ai/dsh-base') {
+          if (rest.length !== 1) return settle('Usage: /dsh remove <name>')
+          if (CORE_PLUGIN_NAMES.has(name)) {
             return settle(name + ' is a core component of this leader; refusing to remove it.')
           }
           const manifest = await readProfileManifest(dir)
           if (manifest.dependencies[name] === undefined) {
             return settle(name + ' is not installed. Installed: ' + Object.keys(manifest.dependencies).join(', '))
           }
-          await execFileAsync('pnpm', ['remove', name], { cwd: dir, timeout: 180_000 })
-          const after = await readProfileManifest(dir)
-          await writeProfileBundles(dir, after.raw, manifest.bundles.filter(bundle => bundle !== name))
+          // Unregister first: a failed npm cleanup then leaves an inert package,
+          // never a profile entry pointing at a missing dependency.
+          await writeProfileBundles(dir, manifest.raw, manifest.bundles.filter(bundle => bundle !== name))
+          try {
+            await npmUninstall(dir, [name])
+          } catch (error) {
+            return settle('Unregistered ' + name + ', but npm could not remove the inert dependency: '
+              + (error instanceof Error ? error.message : String(error)))
+          }
           return settle('Removed ' + name + '.\nRestart dscode to unload it.')
         }
         default:
@@ -2010,87 +2358,57 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   const presetIsMinimal = (record: SessionRecord): boolean =>
-    record.agent.session.header.agentPreset === 'minimal'
+    sessionPresetFromLog(record.agent.session.header, record.agent.session.events) === 'minimal'
 
-  const runLoopCommand = async (record: SessionRecord, p: Record<string, unknown>, text: string): Promise<PromptSettleResult> => {
+  const settleBridgeCommand = (
+    record: SessionRecord,
+    p: Record<string, unknown>,
+    message: string,
+  ): PromptSettleResult => {
     const meta = p._meta as Record<string, unknown> | null | undefined
     const id = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
-    const settle = (message: string): PromptSettleResult => {
-      notifySession(record, message)
-      return promptSettled(record, id, 'end_turn')
-    }
-    if (presetIsMinimal(record)) {
-      return settle('/loop is not available in the minimal preset (dsh-schedule is not part of its two-tool composition)')
-    }
-    const args = text.replace(/^\/loop\s*/, '').trim()
-    const match = /^(\d+)([smhd])\s+(.+)$/.exec(args)
-    if (match === null) {
-      return settle('Usage: /loop <interval> <prompt>, e.g. /loop 5m check deploy status')
-    }
-    const count = Number(match[1])
-    const unit = match[2]
-    const promptText = match[3].trim()
-    const multiplier = unit === 's' ? 1 : unit === 'm' ? 60 : unit === 'h' ? 3600 : 86400
-    const seconds = count * multiplier
-    // dsh-schedule's fixed-rate floor is 5 minutes.
-    if (seconds < 300) {
-      return settle('/loop via dsh-schedule requires at least 5 minutes (300s); try /loop 5m <prompt>')
-    }
-    const tools = record.agent.ctx.get('tools') as
-      | { execute(input: { callId: unknown; name: string; arguments: unknown; agent?: unknown; signal: AbortSignal }): Promise<{ isError?: boolean; content?: Array<{ type?: string; text?: string }> }> }
-      | undefined
-    if (tools === undefined) {
-      return settle('dsh-schedule is not available in this agent preset')
-    }
-    try {
-      const result = await tools.execute({
-        callId: CallId('loop-' + randomUUID()),
-        name: 'schedule_create',
-        arguments: { prompt: promptText, every_seconds: seconds },
-        agent: record.agent,
-        signal: new AbortController().signal,
-      })
-      const body = (result.content ?? []).map(block => block.text ?? '').join('')
-      if (result.isError !== true) {
-        try {
-          const parsed = JSON.parse(body) as {
-            id?: string
-            prompt?: string
-            scheduledAt?: string
-            everySeconds?: number
-            kind?: string
-          }
-          if (typeof parsed.id === 'string' && parsed.id.length > 0) {
-            const conn = connections.get(record.clientId)
-            if (conn !== undefined) {
-              const every = typeof parsed.everySeconds === 'number' ? parsed.everySeconds : undefined
-              const human = every === undefined
-                ? 'scheduled'
-                : every % 86400 === 0
-                  ? `every ${every / 86400}d`
-                  : every % 3600 === 0
-                    ? `every ${every / 3600}h`
-                    : every % 60 === 0
-                      ? `every ${every / 60}m`
-                      : `every ${every}s`
-              sendNotification(conn, 'x.ai/scheduled_task_created', {
-                sessionId: record.agent.session.id,
-                taskId: parsed.id,
-                prompt: parsed.prompt ?? '',
-                humanSchedule: human,
-                nextFireAt: parsed.scheduledAt ?? null,
-              })
-            }
-          }
-        } catch {
-          // The schedule body is informational; a failed parse must not fail the command.
-        }
-      }
-      return settle(result.isError === true ? 'error: ' + body : body)
-    } catch (error: unknown) {
-      return settle('/loop failed: ' + (error instanceof Error ? error.message : String(error)))
-    }
+    notifySession(record, message)
+    return promptSettled(record, id, 'end_turn')
   }
+
+  /** Headless ACP clients use the advertised raw command; the TUI uses its picker. */
+  const runPresetCommand = async (record: SessionRecord, p: Record<string, unknown>, text: string): Promise<PromptSettleResult> => {
+    const roster = agentPresets()
+    if (roster === undefined) return settleBridgeCommand(record, p, 'Preset management is unavailable in this composition.')
+    const requested = text.replace(/^\/preset\s*/, '').trim()
+    if (requested.length === 0) {
+      const presets = await roster.list()
+      return settleBridgeCommand(record, p, 'Usage: /preset <id>\nAvailable: ' + presets.map(preset => preset.id).join(', '))
+    }
+    if (/\s/.test(requested)) return settleBridgeCommand(record, p, 'Usage: /preset <id>')
+    const resolved = await resolvePresetId(requested)
+    if (resolved === undefined) return settleBridgeCommand(record, p, 'Unknown preset "' + requested + '".')
+    const current = roster.composedPreset?.(record.agent.ctx)
+      ?? sessionPresetFromLog(record.agent.session.header, record.agent.session.events)
+    if (current === resolved) return settleBridgeCommand(record, p, 'Preset "' + resolved + '" is already active.')
+    if (record.runningPromptId !== undefined || presetSwitchLocked(record.agent.session.events)) {
+      return settleBridgeCommand(record, p, 'agent-preset-locked: a preset can only be changed before the session has produced history')
+    }
+    await roster.recompose(record.agent.ctx, resolved)
+    try {
+      appendPresetSelection(record, resolved)
+    } catch (error) {
+      if (current !== undefined) await roster.recompose(record.agent.ctx, current).catch(() => undefined)
+      throw error
+    }
+    const store = ctx.get('sessions') as SessionsLike | undefined
+    if (store !== undefined) await store.flush(record.agent.session)
+    void broadcastAvailableCommands(record)
+    return settleBridgeCommand(record, p, 'Switched to preset "' + resolved + '".')
+  }
+
+  const unsupportedSlashCommands = new Map([
+    ['compact', '/compact is not supported by the dsh session runtime yet.'],
+    ['delete', '/delete is not supported yet; use /exit to close without deleting durable history.'],
+    ['remember', '/remember is not supported by the dsh memory runtime yet.'],
+    ['mcps', '/mcps management is not supported by this bridge yet.'],
+    ['skills', '/skills management is not supported by this bridge yet.'],
+  ])
 
   const prompt = async (clientId: number, params: unknown): Promise<unknown> => {
     assertOpen()
@@ -2112,9 +2430,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (/^\/dsh(\s|$)/.test(text.trim())) {
       return runDshCommand(record, p, text.trim())
     }
-    // /loop is handled directly through dsh-schedule.
-    if (/^\/loop(\s|$)/.test(text.trim())) {
-      return runLoopCommand(record, p, text.trim())
+    if (/^\/preset(\s|$)/.test(text.trim())) {
+      return await runPresetCommand(record, p, text.trim())
+    }
+    const slashName = /^\/([^\s]+)/.exec(text.trim())?.[1]?.toLowerCase()
+    const unsupported = slashName === undefined ? undefined : unsupportedSlashCommands.get(slashName)
+    if (unsupported !== undefined) {
+      return settleBridgeCommand(record, p, unsupported)
     }
     // Plugin-registered slash commands (dsh command registry): execute() runs
     // only known names and returns undefined otherwise, so unknown slash text
@@ -2156,42 +2478,69 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (sessionId === undefined) throw invalidParams('session/load requires a sessionId')
     validateWorkspaceParams(p)
     const existing = sessions.get(sessionId)
-    if (existing !== undefined) {
-      // A live session has exactly one owning connection. The owner's own
-      // load is the preset-switch live reload; a foreign client never
-      // displaces a live owner and reads exactly like an unknown id (the
-      // session's existence must not leak). Once the owner's socket is gone
-      // the session is re-attachable: that is the TUI reconnect path, where a
-      // leader respawn hands the client a fresh clientId before it re-loads.
-      if (existing.clientId !== clientId && connections.get(existing.clientId) !== undefined) {
-        throw invalidParams('unknown session: ' + String(sessionId))
+    // A live session has exactly one owning connection. A foreign client never
+    // displaces a live owner and reads exactly like an unknown id.
+    if (existing !== undefined && existing.clientId !== clientId && connections.get(existing.clientId) !== undefined) {
+      throw invalidParams('unknown session: ' + String(sessionId))
+    }
+    const meta = p._meta as Record<string, unknown> | null | undefined
+    validateSessionMeta(meta, 'session/load')
+    const noReplay = meta?.noReplay === true
+    const store = persistence()
+    if (store === undefined) throw internalError('session persistence is not configured')
+    let inspection: { meta: { agentPreset?: string }; events: readonly SessionEvent[] } = existing === undefined
+      ? await store.load(sessionId)
+      : { meta: existing.agent.session.header, events: existing.agent.session.events }
+    const explicit = presetRequestFromMeta(meta)
+    const explicitPreset = explicit === undefined ? undefined : await resolvePresetId(explicit)
+    if (explicit !== undefined && explicitPreset === undefined && !GROK_PROFILE_FALLBACKS.has(explicit)) {
+      throw invalidParams('unknown agent preset "' + explicit + '"')
+    }
+    const persistedPreset = sessionPresetFromLog(inspection.meta, inspection.events)
+    const roster = agentPresets()
+    const livePreset = existing === undefined
+      ? undefined
+      : roster?.composedPreset?.(existing.agent.ctx)
+        ?? sessionPresetFromLog(existing.agent.session.header, existing.agent.session.events)
+    const currentPreset = livePreset ?? persistedPreset
+    const switchingPreset = explicitPreset !== undefined && explicitPreset !== currentPreset
+    if (switchingPreset) {
+      const events = existing?.agent.session.events ?? inspection.events
+      if (presetSwitchLocked(events)) {
+        throw invalidParams('agent-preset-locked: a preset can only be changed before the session has produced history')
       }
-      // Dispose the existing record first so the same id can be re-attached
-      // under a different preset (or by the reconnecting owner).
-      sessions.delete(sessionId)
+      if (existing !== undefined) {
+        if (roster === undefined) throw internalError('agent preset roster is not configured')
+        await roster.recompose(existing.agent.ctx, explicitPreset)
+        try {
+          appendPresetSelection(existing, explicitPreset)
+        } catch (error) {
+          if (currentPreset !== undefined) await roster.recompose(existing.agent.ctx, currentPreset).catch(() => undefined)
+          throw error
+        }
+      }
+    }
+    const presetRequest = explicitPreset ?? currentPreset
+    const preset = await composePreset(presetRequest)
+
+    if (existing !== undefined) {
+      // Dispose only after a requested switch has committed its composition and
+      // durable selection event. A failed validation leaves the live agent intact.
       existing.agent.cancel({ kind: 'user' })
       settlePrompt(existing, 'cancelled')
       discardPromptQueue(existing)
-      // The OLD owner's outstanding reverse requests must not outlive the
-      // takeover; the same-owner reload rejects its own pending roundtrips.
       rejectPendingFor(existing.clientId, sessionId)
       clearMcpInitTimer(existing)
-      const store = ctx.get('sessions') as SessionsLike | undefined
-      if (store !== undefined) await store.flush(existing.agent.session)
+      await existing.agent.whenIdle()
+      const liveStore = ctx.get('sessions') as SessionsLike | undefined
+      if (liveStore !== undefined) await liveStore.flush(existing.agent.session)
+      inspection = {
+        meta: existing.agent.session.header,
+        events: existing.agent.session.events,
+      }
       await existing.dispose()
+      sessions.delete(sessionId)
     }
-    const store = persistence()
-    if (store === undefined) throw internalError('session persistence is not configured')
-    const inspection = await store.load(sessionId)
-    // An explicitly requested preset id that names a real preset wins over
-    // the persisted header preset (preset switch); otherwise the persisted
-    // value wins, then the roster default for headers that predate presets.
-    const meta = p._meta as Record<string, unknown> | null | undefined
-    const explicit = presetRequestFromMeta(meta)
-    const presetRequest = explicit === undefined
-      ? inspection.meta.agentPreset
-      : (await resolvePresetId(explicit)) ?? inspection.meta.agentPreset
-    const preset = await composePreset(presetRequest)
     const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
     const defaultSelection = defaultModel?.currentSelection?.()
     const selection: ModelSelectionRef = {
@@ -2211,8 +2560,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       dispose: () => handle.dispose(),
       clientId,
       selection,
-      // TODO(verify): yoloMode/autoMode on session/load meta (server.rs:671-770).
-      yolo: false,
+      yolo: meta?.yoloMode === true,
       // -1 admits a first replayed event at seq 0 through the seq <= lastSeq gate.
       lastSeq: -1,
       turnStartMs: undefined,
@@ -2236,8 +2584,25 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       promotionScheduled: false,
       steered: [],
     }
+    if (switchingPreset && existing === undefined && explicitPreset !== undefined) {
+      try {
+        appendPresetSelection(record, explicitPreset)
+      } catch (error) {
+        await handle.dispose()
+        throw error
+      }
+    }
+    try {
+      applyPermissionMode(
+        record,
+        typeof meta?.permissionMode === 'string' ? meta.permissionMode : undefined,
+        typeof meta?.yoloMode === 'boolean' ? meta.yoloMode : undefined,
+      )
+    } catch (error) {
+      await handle.dispose()
+      throw error
+    }
     sessions.set(sessionId, record)
-    applyPermissionMode(record, typeof meta?.permissionMode === 'string' ? meta.permissionMode as string : undefined, meta?.yoloMode === true)
     void broadcastAvailableCommands(record)
     // Rebuild the up-arrow history from the persisted user prompts so
     // x.ai/prompt_history serves them after resume.
@@ -2248,19 +2613,21 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       const text = textBlocks(event.data.content).map(block => block.text).join('')
       if (text.trim().length > 0) record.prompts.push(text)
     }
-    // Replay the persisted transcript with isReplay stamps BEFORE the response,
-    // so the client renders history ahead of any live deltas. Live notifications
-    // racing the replay are dropped by the high-water mark; buffering them for a
-    // gap-free flush is deferred (server.rs MAX_BUFFERED_LIVE_PER_LOAD).
+    // Rebuild projection state from the persisted transcript. Interactive
+    // clients receive replay updates before the response; headless clients set
+    // noReplay so prior assistant text cannot contaminate the current result.
     const conn = connections.get(clientId)
-    if (conn !== undefined) {
-      for (const event of inspection.events) {
-        // Keep turnStartMs current so replayed updates carry streamStartMs
-        // and the pager renders ThinkingBlock durations on resume.
-        if (event.type === 'turn/start') record.turnStartMs = event.time
-        for (const item of mapEvent(record, event, true)) {
+    for (const event of inspection.events) {
+      // Keep turnStartMs current so replayed updates carry streamStartMs
+      // and the pager renders ThinkingBlock durations on resume.
+      if (event.type === 'turn/start') record.turnStartMs = event.time
+      const items = mapEvent(record, event, true)
+      if (!noReplay && conn !== undefined) {
+        for (const item of items) {
           emitUpdate(conn, record, event.seq, item, true, event.time)
         }
+      } else {
+        record.lastSeq = Math.max(record.lastSeq, event.seq)
       }
     }
     return {}
@@ -2303,18 +2670,26 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (!current.providerByModel.has(modelId)) {
       throw invalidParams('modelId is not in the catalog: ' + modelId)
     }
+    const advertisedModel = current.availableModels.find(model => model.modelId === modelId)
+    if (explicitEffort !== undefined) {
+      const efforts = advertisedModel?._meta?.reasoningEfforts
+      if (advertisedModel?._meta?.supportsReasoningEffort === false
+        || (efforts !== undefined && !efforts.includes(explicitEffort))) {
+        throw invalidParams('reasoningEffort "' + explicitEffort + '" is not supported by model ' + modelId)
+      }
+    }
     const parsed = parseWireModelId(modelId)
     const provider = parsed !== undefined && current.providerByModel.get(modelId) === parsed.provider
       ? parsed.provider
       : current.providerByModel.get(modelId) ?? record.agent.options.provider ?? config.provider ?? ''
     const rawModel = parsed !== undefined && provider === parsed.provider ? parsed.model : modelId
-    // Remember an explicitly chosen effort per raw model id, and re-apply it
-    // when the user later switches back to that model (even on another
-    // provider that exposes the same id) without naming an effort.
+    // Reasoning vocabularies belong to exact provider/model routes. Remembering
+    // by raw id alone leaks an effort to another provider exposing the same id.
+    const effortKey = modelEffortKey(provider, rawModel)
     if (explicitEffort !== undefined) {
-      modelEfforts.set(rawModel, explicitEffort)
+      modelEfforts.set(effortKey, explicitEffort)
     }
-    const effectiveEffort = explicitEffort ?? modelEfforts.get(rawModel)
+    const effectiveEffort = explicitEffort ?? modelEfforts.get(effortKey)
     const selection = {
       provider,
       model: rawModel,
@@ -2330,7 +2705,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // provider scope.
     if (catalog !== undefined) {
       await refreshCatalog()
-      broadcastModelsUpdate()
+      notifyModelsUpdate(record)
     }
     return {}
   }
@@ -2347,9 +2722,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     id: string,
     p: Record<string, unknown>,
   ): Promise<Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>> {
+    const llmService = llm()
     // Method call, not a detached const: the llm service method reads
     // this.discoveries (a detached reference would lose the receiver).
-    if (llm === undefined || llm.discoverModels === undefined) {
+    if (llmService === undefined || llmService.discoverModels === undefined) {
       throw internalError('cannot add provider "' + id + '": the installed catalog does not describe it and no model discovery is configured')
     }
     const apiKeyEnv = typeof p.apiKeyEnv === 'string' ? p.apiKeyEnv : undefined
@@ -2366,7 +2742,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         : apiKeyEnv
     let models
     try {
-      models = await llm.discoverModels(PROVIDER_SETTINGS_NS, {
+      models = await llmService.discoverModels(PROVIDER_SETTINGS_NS, {
         provider: id,
         ...typeof p.api === 'string' ? { api: p.api } : {},
         ...baseURL === undefined ? {} : { baseURL },
@@ -2418,7 +2794,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     validateProviderForm(p)
     const providerService = settings()
     if (providerService === undefined) throw internalError('the settings service is not configured')
-    if (llm !== undefined && llm.listProviders().some(provider => provider.id === id)) {
+    if (providerExists(providerService, id)) {
       throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" already exists')
     }
     // Paste-a-key path: a literal apiKey lands in the credentials service
@@ -2537,7 +2913,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     validateProviderForm(p)
     const providerService = settings()
     if (providerService === undefined) throw internalError('the settings service is not configured')
-    if (llm === undefined || !llm.listProviders().some(provider => provider.id === providerId)) {
+    if (!providerExists(providerService, providerId)) {
       throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + providerId + '" does not exist')
     }
     // Same paste-a-key path as add: key → credentials store, name → route.
@@ -2571,12 +2947,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
     const providerService = settings()
     if (providerService === undefined) throw internalError('the settings service is not configured')
-    if (llm === undefined || !llm.listProviders().some(provider => provider.id === id)) {
+    if (!providerExists(providerService, id)) {
       throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" does not exist')
     }
     const current = await refreshCatalog()
-    if (current.currentProviderId === id) {
+    const liveUse = [...sessions.values()].find(record => record.selection.current?.provider === id)
+    if (current.currentProviderId === id || liveUse !== undefined) {
       throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" is in use; switch to another provider first')
+    }
+    if (!hasUserProviderRoute(providerService, id)) {
+      throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" has no removable user route')
     }
     try {
       await providerService.mutate(PROVIDER_SETTINGS_NS, [{ op: 'unset', path: ['providers', id] }])
@@ -2644,20 +3024,42 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   const forkSession = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'x.ai/session/fork')
+    validateSessionMeta(p, 'x.ai/session/fork')
     const sourceId = typeof p.sourceSessionId === 'string' ? SessionId(p.sourceSessionId) : undefined
-    const source = sourceId === undefined ? undefined : ownedRecord(clientId, sourceId)
-    if (source === undefined) throw invalidParams('unknown source session: ' + String(p.sourceSessionId))
-    const newCwd = typeof p.newCwd === 'string' && isAbsolute(p.newCwd) ? p.newCwd : source.agent.session.header.cwd
+    if (sourceId === undefined) throw invalidParams('unknown source session: ' + String(p.sourceSessionId))
+    const liveSource = sessions.get(sourceId)
+    if (liveSource !== undefined && ownedRecord(clientId, sourceId) !== liveSource) {
+      throw invalidParams('unknown source session: ' + String(p.sourceSessionId))
+    }
+    let sourceHeader: { agentPreset?: string; cwd?: string }
+    let events: readonly SessionEvent[]
+    if (liveSource !== undefined) {
+      sourceHeader = liveSource.agent.session.header
+      events = liveSource.agent.session.events
+    } else {
+      const store = persistence()
+      if (store === undefined) throw internalError('session persistence is not configured')
+      try {
+        const inspection = await store.load(sourceId)
+        sourceHeader = inspection.meta
+        events = inspection.events
+      } catch {
+        throw invalidParams('unknown source session: ' + String(p.sourceSessionId))
+      }
+    }
+    const newCwd = typeof p.newCwd === 'string' && isAbsolute(p.newCwd) ? p.newCwd : sourceHeader.cwd
     if (typeof newCwd !== 'string' || !isAbsolute(newCwd)) throw invalidParams('newCwd must be an absolute path')
     const suppliedId = typeof p.newSessionId === 'string' && p.newSessionId.length > 0 ? p.newSessionId : undefined
     const sessionId = suppliedId === undefined ? SessionId(randomUUID()) : SessionId(suppliedId)
-    if (sessions.has(sessionId)) throw invalidParams('session id is already in use: ' + String(sessionId))
-    const events = source.agent.session.events
+    if (sessions.has(sessionId)
+      || (suppliedId !== undefined && await persistedSessionIdInUse(sessionId))) {
+      throw invalidParams('session id is already in use: ' + String(sessionId))
+    }
     const last = events.at(-1)
     // dsh's fork refuses to end inside an open turn; mirror that fail-closed.
     if (last?.type === 'turn/start') throw invalidParams('cannot fork while a turn is open')
     const seed = [...events]
-    const preset = await composePreset(source.agent.session.header.agentPreset)
+    const preset = await composePreset(sessionPresetFromLog(sourceHeader, events))
     const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
     const defaultSelection = defaultModel?.currentSelection?.()
     const selection: ModelSelectionRef = {
@@ -2669,7 +3071,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       seed,
       meta: {
         cwd: newCwd,
-        parentSession: source.agent.session.id,
+        parentSession: sourceId,
         seedLength: seed.length,
         ...preset.agentPreset === undefined ? {} : { agentPreset: preset.agentPreset },
       },
@@ -2688,7 +3090,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       dispose: () => handle.dispose(),
       clientId,
       selection,
-      yolo: false,
+      yolo: p.yoloMode === true,
       lastSeq: -1,
       turnStartMs: undefined,
       eventSeq: 1,
@@ -2711,8 +3113,17 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       promotionScheduled: false,
       steered: [],
     }
+    try {
+      applyPermissionMode(
+        record,
+        typeof p.permissionMode === 'string' ? p.permissionMode : undefined,
+        typeof p.yoloMode === 'boolean' ? p.yoloMode : undefined,
+      )
+    } catch (error) {
+      await handle.dispose()
+      throw error
+    }
     sessions.set(sessionId, record)
-    applyPermissionMode(record, typeof p?.permissionMode === 'string' ? p.permissionMode as string : undefined, p?.yoloMode === true)
     void broadcastAvailableCommands(record)
     const conn = connections.get(clientId)
     if (conn !== undefined) {
@@ -2956,8 +3367,18 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         }
         return {}
       }
-      case 'x.ai/commands/list':
-        return { commands: await availableCommands() }
+      case 'x.ai/commands/list': {
+        const p = paramRecord(params, 'x.ai/commands/list')
+        const rawSessionId = typeof p.sessionId === 'string'
+          ? p.sessionId
+          : typeof p.session_id === 'string'
+            ? p.session_id
+            : undefined
+        const sessionId = rawSessionId === undefined ? undefined : SessionId(rawSessionId)
+        const record = sessionId === undefined ? undefined : ownedRecord(clientId, sessionId)
+        if (sessionId !== undefined && record === undefined) throw invalidParams('unknown session: ' + rawSessionId)
+        return { commands: await commandCatalog(record) }
+      }
       case 'x.ai/prompt_history':
         return promptHistory(clientId, params)
       case 'x.ai/marketplace/list':
@@ -3019,11 +3440,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         // and the in-flight set stops concurrent list calls stacking loads.
         if (store !== undefined) {
           await Promise.all(headers.map(async header => {
-            if (firstPromptCache.has(header.id) || firstPromptInFlight.has(header.id)) return
+            if ((firstPromptCache.has(header.id) && sessionProjectionInspected.has(header.id))
+              || firstPromptInFlight.has(header.id)) return
             firstPromptInFlight.add(header.id)
             try {
               const inspection = await store.load(SessionId(header.id))
               cacheFirstPrompt(header.id, firstUserPrompt(inspection.events))
+              cacheSessionProjection(header.id, header.createdAt, inspection.events)
             } catch {
               // A broken artifact must not sink the list; the miss is retried.
             } finally {
@@ -3031,19 +3454,28 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
             }
           }))
         }
-        let rows = headers.map(header => ({
-          sessionId: header.id,
-          cwd: header.cwd ?? '',
-          createdAt: new Date(header.createdAt).toISOString(),
-          // No cheap updatedAt on the header; createdAt keeps old rows within the picker window.
-          updatedAt: new Date(header.createdAt).toISOString(),
-          firstPrompt: cachedFirstPrompt(header.id) ?? '',
-          // Chat-kind rows skip the TUI's local-store gate (grok's own session
-          // docs, which dsh sessions never enter) and load straight via session/load.
-          _meta: { 'x.ai/session': { kind: 'chat' } },
-        }))
-        if (cwd !== undefined) rows = rows.filter(row => row.cwd === cwd)
-        if (query !== undefined && query.length > 0) rows = rows.filter(row => (row.sessionId + ' ' + row.cwd + ' ' + row.firstPrompt).toLowerCase().includes(query))
+        let rows = headers.map(header => {
+          const title = sessionTitleCache.get(header.id) ?? ''
+          return {
+            sessionId: header.id,
+            cwd: header.cwd ?? '',
+            createdAt: new Date(header.createdAt).toISOString(),
+            updatedAt: new Date(sessionActivityCache.get(header.id) ?? header.createdAt).toISOString(),
+            firstPrompt: cachedFirstPrompt(header.id) ?? '',
+            title,
+            summary: title,
+            // Chat-kind rows skip the TUI's local-store gate (grok's own session
+            // docs, which dsh sessions never enter) and load straight via session/load.
+            _meta: { 'x.ai/session': { kind: 'chat' } },
+          }
+        })
+        if (cwd !== undefined) {
+          rows = rows.filter(row => row.cwd === cwd
+            || (query !== undefined && row.sessionId.toLowerCase() === query))
+        }
+        if (query !== undefined && query.length > 0) {
+          rows = rows.filter(row => (row.sessionId + ' ' + row.cwd + ' ' + row.title + ' ' + row.firstPrompt).toLowerCase().includes(query))
+        }
         rows.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         rows = rows.slice(0, limit)
         return { sessions: rows }
@@ -3070,18 +3502,37 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
+  const SUPPORTED_PERMISSION_MODES = new Set(['default', 'workspace-write', 'plan', 'bypassPermissions', 'always-approve'])
+
   const applyPermissionMode = (record: SessionRecord, mode: string | undefined, yolo: boolean | undefined): void => {
     if (mode === undefined && yolo === undefined) return
+    const effectiveMode = mode === undefined || SUPPORTED_PERMISSION_MODES.has(mode) ? mode : 'default'
+    if (mode !== undefined && effectiveMode !== mode) {
+      logger.warn('grok-leader: unsupported permission mode notification "' + mode + '" failed closed to default')
+    }
+    // An explicit permission mode wins over the legacy yolo bit. In
+    // particular, bypassPermissions must remain full access even though the
+    // pager emits yoloMode:false alongside every permissionMode value.
+    const fullAccess = effectiveMode === undefined
+      ? yolo === true
+      : effectiveMode === 'bypassPermissions' || effectiveMode === 'always-approve'
+    record.yolo = fullAccess
     const permission = ctx.get('permissionPresets') as
       | { set(session: unknown, preset: string): unknown }
       | undefined
-    if (permission === undefined) return
-    const preset = mode === 'always-approve' || yolo === true || mode === 'bypassPermissions' || mode === 'dontAsk'
+    const preset = fullAccess
       ? 'danger-full-access'
-      : mode === 'acceptEdits' || mode === 'default' || mode === 'workspace-write'
+      : effectiveMode !== undefined || yolo === false
         ? 'workspace-write'
         : undefined
-    if (preset !== undefined) permission.set(record.agent.session, preset)
+    if (preset !== undefined && permission !== undefined) permission.set(record.agent.session, preset)
+    const planMode = record.agent.ctx.get('planMode') as
+      | { set(agent: unknown, active: boolean): unknown }
+      | undefined
+    if (effectiveMode === 'plan' && planMode === undefined) {
+      throw invalidParams('permissionMode "plan" is not available in the selected agent preset')
+    }
+    if (planMode !== undefined) planMode.set(record.agent, effectiveMode === 'plan')
   }
 
   const handleNotification = (clientId: number, method: string, params: unknown): void => {
@@ -3112,11 +3563,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const sessionId = typeof pYolo?.sessionId === 'string' ? SessionId(pYolo.sessionId) : undefined
         const record = sessionId === undefined ? undefined : ownedRecord(clientId, sessionId)
         if (record !== undefined) {
-          applyPermissionMode(
-            record,
-            typeof pYolo?.permission_mode === 'string' ? pYolo.permission_mode as string : undefined,
-            pYolo?.yolo_mode === true,
-          )
+          try {
+            applyPermissionMode(
+              record,
+              typeof pYolo?.permission_mode === 'string' ? pYolo.permission_mode : undefined,
+              typeof pYolo?.yolo_mode === 'boolean' ? pYolo.yolo_mode : undefined,
+            )
+          } catch (error) {
+            logger.warn('grok-leader: permission mode notification failed: ' + errorChain(error))
+          }
         }
         return
       }
@@ -3452,7 +3907,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     socket.setTimeout(REGISTRATION_TIMEOUT_MS)
     socket.on('timeout', () => {
       if (!registered) {
-        // Envelope error code 3 per docs/grok-leader-protocol.md section 2.2.
+        // Envelope error code 3; see docs/grok-leader-protocol.md.
         send({ type: 'error', code: 3, message: 'Registration timeout' })
         socket.destroy()
       }
@@ -3499,7 +3954,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       }
       wireLog('in', msg)
       if (!registered && msg.type !== 'register') {
-        // Envelope error code 1 per docs/grok-leader-protocol.md section 2.2.
+        // Envelope error code 1; see docs/grok-leader-protocol.md.
         send({ type: 'error', code: 1, message: 'Expected Register message' })
         return
       }
@@ -3514,7 +3969,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           connections.set(conn.clientId, conn)
           cancelIdleExit()
           socket.setTimeout(0)
-          // Probe-verified reply (docs/grok-tui-connect.md): ready plus a
+          // Probe-verified reply: ready plus a
           // leader_binary_version at least the client version keeps the TUI
           // attached; it otherwise evicts and respawns the leader.
           send({

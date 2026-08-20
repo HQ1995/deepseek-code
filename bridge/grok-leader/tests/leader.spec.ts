@@ -1,7 +1,7 @@
 /**
  * End-to-end leader tests over a real unix socket against a mocked agent
- * registry, pinned to the captured TUI handshake
- * (tests/fixtures/grok-tui-messages.jsonl, docs/grok-tui-connect.md).
+ * registry, pinned to tests/fixtures/grok-tui-messages.jsonl and the
+ * docs/grok-leader-protocol.md contract.
  */
 import { randomUUID } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-llm'
-import { SessionId, type UserMessage } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent, type UserMessage } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -50,15 +50,21 @@ function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry {
   const created: Array<{ sessionId: string; cwd?: string }> = []
   const resumed: Array<{ sessionId: string }> = []
   const byId = new Map<string, MockAgent>()
-  const makeAgent = (sessionId: SessionId, cwd: string | undefined): MockAgent => {
+  const makeAgent = (sessionId: SessionId, cwd: string | undefined, agentPreset?: string): MockAgent => {
     const internals: MockAgentInternals = { cancelCalls: 0, followups: [], steered: [], messages: [], disposed: false, idleWaiters: [], status: 'idle' }
+    const events: Array<{ type: string; data: unknown; seq: number; time: number }> = []
     const agent = {
       id: sessionId,
       options: {} as AgentOptions,
       session: {
         id: sessionId,
-        header: { id: sessionId, version: 0, createdAt: 0, ...cwd === undefined ? {} : { cwd } },
-        events: [],
+        header: { id: sessionId, version: 0, createdAt: 0, ...cwd === undefined ? {} : { cwd }, ...agentPreset === undefined ? {} : { agentPreset } },
+        events,
+        append(type: string, data: unknown) {
+          const event = { type, data, seq: events.length, time: Date.now() }
+          events.push(event)
+          return event
+        },
       },
       inbox: {},
       get status() { return internals.status },
@@ -106,7 +112,7 @@ function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry {
         ...o.meta?.agentPreset === undefined ? {} : { agentPreset: o.meta.agentPreset },
       })
       if (o.setup !== undefined) await o.setup(ctx)
-      const agent = makeAgent(o.sessionId, o.meta?.cwd)
+      const agent = makeAgent(o.sessionId, o.meta?.cwd, o.meta?.agentPreset)
       return { agent, dispose: async () => { agent.internals.disposed = true; byId.delete(o.sessionId) } }
     },
     async resume(options) {
@@ -143,20 +149,24 @@ const collidingLlm = {
 function makeMockPersistence() {
   const header = { version: 0, id: SessionId('persisted-session'), createdAt: 0, cwd: '/tmp/proj', agentPreset: 'standard' }
   const loaded: string[] = []
+  const events: SessionEvent[] = []
   return {
     header,
     loaded,
+    events,
     list: async () => [header],
-    load: async (id: SessionId) => { loaded.push(id); return { meta: header, events: [] } },
+    load: async (id: SessionId) => { loaded.push(id); return { meta: header, events } },
   }
 }
 
 function makeMockPresets() {
   const resolved: Array<string | undefined> = []
   const mounted: string[] = []
+  const recomposed: string[] = []
   return {
     resolved,
     mounted,
+    recomposed,
     list: async () => [
       { id: 'standard', trust: 'system', name: '标准模式', description: 'standard desc' },
       { id: 'code', trust: 'system', name: 'PTC 模式', description: 'code desc' },
@@ -165,13 +175,17 @@ function makeMockPresets() {
     ],
     resolve: async (id?: string) => {
       resolved.push(id)
-      const chosen = id ?? 'standard'
+      const chosen = id ?? 'minimal'
       if (chosen === 'standard' || chosen === 'code' || chosen === 'minimal' || chosen === 'cordis') return { id: chosen }
       throw new Error('agent-presets: preset "' + chosen + '" not found (available: standard, cordis, minimal, code)')
     },
     mount: async (_agentCtx: unknown, id?: string) => {
-      mounted.push(id ?? 'standard')
-      return { id: id ?? 'standard' }
+      mounted.push(id ?? 'minimal')
+      return { id: id ?? 'minimal' }
+    },
+    recompose: async (_agentCtx: unknown, id: string) => {
+      recomposed.push(id)
+      return { id }
     },
   }
 }
@@ -203,6 +217,27 @@ interface LeaderHarness {
   registry: MockRegistry
   persistence: ReturnType<typeof makeMockPersistence>
   presets: ReturnType<typeof makeMockPresets> | undefined
+}
+
+interface HarnessOptions {
+  presets?: boolean
+  manualIdle?: boolean
+  llm?: unknown
+  model?: string
+  settings?: unknown
+  commands?: unknown
+  userQuestions?: unknown
+  credentials?: unknown
+  permissionPresets?: unknown
+  planMode?: unknown
+  sessionsStore?: unknown
+  tools?: unknown
+  skills?: unknown
+  subagents?: unknown
+  sessionTitle?: unknown
+  combineQueuedPrompts?: boolean
+  followUpBehavior?: 'queue' | 'steer'
+  idleExitMs?: number
 }
 
 interface ClientHandle {
@@ -330,7 +365,7 @@ async function collectIds(client: ClientHandle, ids: number[]): Promise<Map<numb
 }
 
 async function makeHarness(
-  options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; settings?: unknown; commands?: unknown; userQuestions?: unknown; credentials?: unknown; combineQueuedPrompts?: boolean; followUpBehavior?: 'queue' | 'steer'; idleExitMs?: number } = {},
+  options: HarnessOptions = {},
 ): Promise<LeaderHarness> {
   const ctx = new Context()
   const registry = makeMockRegistry(ctx, options.manualIdle === true)
@@ -344,8 +379,14 @@ async function makeHarness(
   if (options.commands !== undefined) ctx.provide('commands', options.commands as never)
   if (options.userQuestions !== undefined) ctx.provide('userQuestions', options.userQuestions as never)
   if (options.credentials !== undefined) ctx.provide('credentials', options.credentials as never)
+  if (options.permissionPresets !== undefined) ctx.provide('permissionPresets', options.permissionPresets as never)
+  if (options.planMode !== undefined) ctx.provide('planMode', options.planMode as never)
+  if (options.tools !== undefined) ctx.provide('tools', options.tools as never)
+  if (options.skills !== undefined) ctx.provide('skills', options.skills as never)
+  if (options.subagents !== undefined) ctx.provide('subagents', options.subagents as never)
+  if (options.sessionTitle !== undefined) ctx.provide('sessionTitle', options.sessionTitle as never)
   ctx.provide('sessionPersistence', persistence as unknown as Context['sessionPersistence'])
-  ctx.provide('sessions', mockSessionsStore as unknown as Context['sessions'])
+  ctx.provide('sessions', (options.sessionsStore ?? mockSessionsStore) as unknown as Context['sessions'])
   if (presets !== undefined) ctx.provide('agentPresets', presets as unknown as Context['agentPresets'])
   ctx.provide('agentDefaultModel', mockDefaultModel as unknown as Context['agentDefaultModel'])
   ctx.provide('appExit', mockAppExit.exit)
@@ -380,7 +421,7 @@ describe('grok leader over a unix socket', () => {
   })
 
   const start = async (
-    options: { presets?: boolean; manualIdle?: boolean; llm?: unknown; model?: string; commands?: unknown; userQuestions?: unknown; combineQueuedPrompts?: boolean; followUpBehavior?: 'queue' | 'steer'; idleExitMs?: number } = {},
+    options: HarnessOptions = {},
   ): Promise<LeaderHarness & { client: ClientHandle }> => {
     harness = await makeHarness(options)
     client = await makeClient(harness.socketPath)
@@ -1080,6 +1121,21 @@ describe('grok leader over a unix socket', () => {
     expect(prompted.result).toMatchObject({ stopReason: 'cancelled' })
   })
 
+  it('rejects a session/new id already present in durable persistence', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const duplicate = await c.request(1, 'session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { sessionId: 'persisted-session' },
+    })
+    expect(duplicate.error).toEqual({
+      code: -32602,
+      message: 'session id is already in use: persisted-session',
+    })
+  })
+
   it('a second client cannot touch the first client sessions', async () => {
     const { registry, client: c, socketPath } = await start({ manualIdle: true, followUpBehavior: 'queue' })
     register(c)
@@ -1187,6 +1243,79 @@ describe('grok leader over a unix socket', () => {
     const loaded = await waitForId(c, 2)
     expect(loaded.error).toBeUndefined()
     // The old owner's outstanding permission roundtrip is rejected by the reload.
+    await expect(decision).resolves.toBe('rejected')
+  })
+
+  it('keeps yolo approval active when a session is resumed', async () => {
+    const { registry, pluginCtx, client: c } = await start()
+    register(c)
+    await c.next()
+    const loaded = await c.request(1, 'session/load', {
+      sessionId: 'persisted-session',
+      cwd: '/tmp/proj',
+      mcpServers: [],
+      _meta: { yoloMode: true },
+    })
+    expect(loaded.error).toBeUndefined()
+    const agent = registry.byId.get('persisted-session')!
+    const waterfall = pluginCtx.waterfall as unknown as (name: string, ...args: unknown[]) => unknown
+    const decision = waterfall('approval/request', { agent, callId: 'tool-yolo', toolName: 'bash' }, async () => 'rejected' as const) as Promise<string>
+    await expect(decision).resolves.toBe('allowed-once')
+    expect(c.all.some(msg => msg.method === 'session/request_permission')).toBe(false)
+  })
+
+  it('lets bypassPermissions override the pager\'s explicit yoloMode false', async () => {
+    const permissionPresets: string[] = []
+    const { registry, pluginCtx, client: c } = await start({
+      permissionPresets: { set: (_session: unknown, preset: string) => { permissionPresets.push(preset) } },
+    })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { permissionMode: 'bypassPermissions', yoloMode: false },
+    })
+    expect(created.error).toBeUndefined()
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const waterfall = pluginCtx.waterfall as unknown as (name: string, ...args: unknown[]) => unknown
+    const decision = waterfall('approval/request', { agent, callId: 'tool-bypass', toolName: 'bash' }, async () => 'rejected' as const) as Promise<string>
+    await expect(decision).resolves.toBe('allowed-once')
+    expect(c.all.some(msg => msg.method === 'session/request_permission')).toBe(false)
+    expect(permissionPresets.at(-1)).toBe('danger-full-access')
+  })
+
+  it('applies plan permission mode without inheriting an explicit yolo bit', async () => {
+    const planCalls: Array<{ agent: unknown; active: boolean }> = []
+    const permissionPresets: string[] = []
+    const { registry, pluginCtx, client: c } = await start({
+      planMode: { set: (agent: unknown, active: boolean) => { planCalls.push({ agent, active }) } },
+      permissionPresets: { set: (_session: unknown, preset: string) => { permissionPresets.push(preset) } },
+    })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { permissionMode: 'plan', yoloMode: true },
+    })
+    expect(created.error).toBeUndefined()
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    expect(planCalls).toEqual([{ agent, active: true }])
+    expect(permissionPresets.at(-1)).toBe('workspace-write')
+    c.notify('x.ai/yolo_mode_changed', {
+      sessionId,
+      permission_mode: 'default',
+      yolo_mode: false,
+    })
+    await waitFor(() => planCalls.length === 2)
+    expect(planCalls).toEqual([{ agent, active: true }, { agent, active: false }])
+    const waterfall = pluginCtx.waterfall as unknown as (name: string, ...args: unknown[]) => unknown
+    const decision = waterfall('approval/request', { agent, callId: 'tool-plan', toolName: 'bash' }, async () => 'rejected' as const) as Promise<string>
+    await waitFor(() => c.all.some(msg => msg.method === 'session/request_permission'))
+    c.notify('session/cancel', { sessionId })
     await expect(decision).resolves.toBe('rejected')
   })
 
@@ -1310,12 +1439,100 @@ describe('grok leader over a unix socket', () => {
   })
 
   it('overrides the persisted preset on session/load when a valid preset is explicitly requested', async () => {
-    const { presets, client: c } = await start({ presets: true })
+    const { registry, presets, client: c } = await start({ presets: true })
     register(c)
     await c.next()
     const loaded = await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [], _meta: { agentProfile: 'minimal' } })
     expect(loaded.error).toBeUndefined()
     expect(presets?.mounted).toEqual(['minimal'])
+    expect(registry.byId.get('persisted-session')?.session.events.at(-1)).toMatchObject({
+      type: 'agent-preset/selected',
+      data: { agentPreset: 'minimal' },
+    })
+  })
+
+  it('switches a live blank session without requiring a persistence load first', async () => {
+    const { registry, persistence, presets, client: c } = await start({ presets: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'code' } })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const live = registry.byId.get(sessionId)!
+    const loaded = await c.request(2, 'session/load', { sessionId, cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'minimal' } })
+    expect(loaded.error).toBeUndefined()
+    expect(persistence.loaded).not.toContain(sessionId)
+    expect(presets?.recomposed).toEqual(['minimal'])
+    expect(mockSessionsStore.flushed).toContain(live.session)
+    expect(live.session.events.at(-1)).toMatchObject({
+      type: 'agent-preset/selected',
+      data: { agentPreset: 'minimal' },
+    })
+    expect(registry.resumed.map(entry => entry.sessionId)).toContain(sessionId)
+  })
+
+  it('keeps the live session owned when its reload flush fails', async () => {
+    const sessionsStore = { flush: async () => { throw new Error('flush failed') } }
+    const { registry, client: c } = await start({ presets: true, sessionsStore })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'code' } })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const live = registry.byId.get(sessionId)!
+    const loaded = await c.request(2, 'session/load', { sessionId, cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'minimal' } })
+    expect(loaded.error).toMatchObject({ code: -32603 })
+    expect(registry.byId.get(sessionId)).toBe(live)
+    expect(live.internals.disposed).toBe(false)
+  })
+
+  it('refuses to switch a persisted preset after the session has history', async () => {
+    const { registry, persistence, presets, client: c } = await start({ presets: true })
+    persistence.events.push({
+      type: 'user/message',
+      seq: 0,
+      time: 0,
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'already ran' }] },
+    } as SessionEvent)
+    register(c)
+    await c.next()
+    const loaded = await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [], _meta: { agentProfile: 'minimal' } })
+    expect(loaded.error).toEqual({
+      code: -32602,
+      message: 'agent-preset-locked: a preset can only be changed before the session has produced history',
+    })
+    expect(registry.resumed).toEqual([])
+    expect(presets?.mounted).toEqual([])
+  })
+
+  it('does not lock a blank preset switch on log-only session events', async () => {
+    const { persistence, presets, client: c } = await start({ presets: true })
+    persistence.events.push({
+      type: 'request/header',
+      seq: 0,
+      time: 0,
+      data: {},
+    } as SessionEvent)
+    register(c)
+    await c.next()
+    const loaded = await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [], _meta: { agentProfile: 'minimal' } })
+    expect(loaded.error).toBeUndefined()
+    expect(presets?.mounted).toEqual(['minimal'])
+  })
+
+  it('executes the advertised raw /preset command only while the session is blank', async () => {
+    const { registry, presets, client: c } = await start({ presets: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'code' } })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const switched = await c.request(2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/preset minimal' }] })
+    expect(switched.error).toBeUndefined()
+    expect(switched.result).toMatchObject({ stopReason: 'end_turn' })
+    expect(presets?.recomposed).toEqual(['minimal'])
+    expect(registry.byId.get(sessionId)?.session.events.at(-1)).toMatchObject({
+      type: 'agent-preset/selected',
+      data: { agentPreset: 'minimal' },
+    })
+    expect(registry.byId.get(sessionId)?.internals.followups).toEqual([])
   })
 
   it('keeps the persisted preset on session/load when no preset is explicitly requested', async () => {
@@ -1333,8 +1550,28 @@ describe('grok leader over a unix socket', () => {
     await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
-    expect(registry.created).toEqual([{ sessionId, cwd: process.cwd(), agentPreset: 'standard' }])
-    expect(presets?.mounted).toEqual(['standard'])
+    expect(registry.created).toEqual([{ sessionId, cwd: process.cwd(), agentPreset: 'minimal' }])
+    expect(presets?.mounted).toEqual(['minimal'])
+  })
+
+  it('does not advertise subagents for the minimal preset', async () => {
+    const { client: c } = await start({
+      presets: true,
+      subagents: { list: () => ['spawn'] },
+    })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { agentProfile: 'minimal' },
+    })
+    expect(created.error).toBeUndefined()
+    await waitFor(() => c.all.some(message => {
+      const update = (message.params as { update?: { sessionUpdate?: string; meta?: { capabilities?: string[] } } } | undefined)?.update
+      return update?.sessionUpdate === 'available_commands_update'
+        && update.meta?.capabilities?.includes('subagents') === false
+    }))
   })
 
   it('falls back to the default preset for grok built-ins and rejects JSON-object agent selections', async () => {
@@ -1345,6 +1582,198 @@ describe('grok leader over a unix socket', () => {
     expect(unknown.error).toBeUndefined()
     const objectProfile = await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: { name: 'custom' } } })
     expect(objectProfile.error).toEqual({ code: -32602, message: '_meta.agentProfile JSON definitions are not supported; send a preset id string' })
+    const typo = await c.request(3, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'stanard' } })
+    expect(typo.error).toMatchObject({ code: -32602 })
+    const noSubagents = await c.request(4, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'grok-build-plan-no-subagents' } })
+    expect(noSubagents.error).toEqual({
+      code: -32602,
+      message: '--no-subagents is not supported by this dscode bridge; choose a preset without subagents instead',
+    })
+  })
+
+  it('rejects CLI metadata the bridge cannot enforce instead of weakening it silently', async () => {
+    const { registry, client: c } = await start()
+    register(c)
+    await c.next()
+    const cases = [
+      { sandbox: 'workspace-write' },
+      { tools: 'bash,edit' },
+      { disallowedTools: 'web_search' },
+      { systemPromptOverride: 'override' },
+      { rules: 'extra rules' },
+      { askUserQuestion: false },
+      { autoMode: true },
+      { permissionMode: 'acceptEdits' },
+      { permissionMode: 'dontAsk' },
+      { permissionMode: 'auto' },
+      { permissionMode: 'unknown-mode' },
+    ]
+    for (const [index, meta] of cases.entries()) {
+      const response = await c.request(index + 1, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: meta })
+      expect(response.error).toMatchObject({ code: -32602 })
+      expect(String((response.error as { message?: string }).message)).toContain('refusing to run with silently weakened CLI settings')
+    }
+    const noSubagents = await c.request(cases.length + 1, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { subagents: false } })
+    expect(noSubagents.error).toEqual({
+      code: -32602,
+      message: '--no-subagents is not supported by this dscode bridge; choose a preset without subagents instead',
+    })
+    expect(registry.created).toEqual([])
+  })
+
+  it('accepts the explicit disabled sandbox emitted by the dscode launcher', async () => {
+    const { registry, client: c } = await start()
+    register(c)
+    await c.next()
+    const off = await c.request(1, 'session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { sandbox: 'off' },
+    })
+    const none = await c.request(2, 'session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { sandbox: 'none' },
+    })
+    expect(off.error).toBeUndefined()
+    expect(none.error).toBeUndefined()
+    expect(registry.created).toHaveLength(2)
+    const invalid = await c.request(3, 'session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { sandbox: false },
+    })
+    expect(invalid.error).toEqual({ code: -32602, message: '_meta.sandbox must be a string' })
+  })
+
+  it('drives the auxiliary dscode rails end to end for one owned session', async () => {
+    const planStates: boolean[] = []
+    const renamed: string[] = []
+    let titleRefreshes = 0
+    let subagentDisposed = false
+    const { registry, client: c } = await start({
+      presets: true,
+      planMode: { set: (_agent: unknown, active: boolean) => { planStates.push(active) } },
+      sessionTitle: {
+        rename: (_session: unknown, title: string) => { renamed.push(title) },
+        refresh: async () => { titleRefreshes += 1 },
+      },
+      tools: {
+        schemas: () => [
+          { name: 'mcp__github__search' },
+          { name: 'mcp__github__issues' },
+          { name: 'mcp__filesystem__read' },
+          { name: 'bash' },
+        ],
+      },
+      skills: {
+        list: async () => [{
+          name: 'review-code',
+          description: 'Review a change',
+          whenToUse: 'When code needs review',
+          path: '/skills/review-code',
+          invocation: { userInvocable: true, modelInvocable: true },
+        }],
+      },
+      subagents: {
+        list: () => ['spawn'],
+        start: async (provider: string, request: { prompt: Array<{ text: string }> }) => {
+          expect(provider).toBe('spawn')
+          expect(request.prompt).toEqual([{ type: 'text', text: 'check this independently' }])
+          return {
+            result: Promise.resolve({ output: [{ type: 'text', text: 'independent answer' }], stopReason: 'end_turn' }),
+            dispose: async () => { subagentDisposed = true },
+          }
+        },
+      },
+    })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { agentProfile: 'standard' },
+    })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+
+    expect((await c.request(2, 'session/set_mode', { sessionId, modeId: 'plan' })).result).toEqual({})
+    expect((await c.request(3, 'session/set_mode', { sessionId, modeId: 'default' })).result).toEqual({})
+    expect(planStates).toEqual([true, false])
+
+    expect((await c.request(4, 'x.ai/session/rename', { sessionId, title: 'Reviewed session' })).result).toEqual({})
+    expect((await c.request(5, 'x.ai/session/rename', { sessionId, resetToAuto: true })).result).toEqual({})
+    expect(renamed).toEqual(['Reviewed session'])
+    expect(titleRefreshes).toBe(1)
+
+    const skills = await c.request(6, 'x.ai/skills/list', { sessionId })
+    expect(skills.result).toEqual({
+      skills: [{
+        name: 'review-code',
+        display_name: 'review-code',
+        description: 'Review a change',
+        has_user_specified_description: false,
+        when_to_use: 'When code needs review',
+        short_description: 'Review a change',
+        path: '/skills/review-code',
+        scope: 'plugin',
+        user_invocable: true,
+        enabled: true,
+      }],
+    })
+    const mcp = await c.request(7, 'x.ai/mcp/list', { sessionId })
+    expect(mcp.result).toMatchObject({
+      servers: [
+        { name: 'github', _meta: { toolCount: 2 }, session: { status: 'connected' } },
+        { name: 'filesystem', _meta: { toolCount: 1 }, session: { status: 'connected' } },
+      ],
+    })
+
+    const btw = await c.request(8, 'x.ai/btw', { sessionId, question: 'check this independently' })
+    expect(btw.result).toEqual({ result: { answer: 'independent answer' } })
+    expect(subagentDisposed).toBe(true)
+
+    expect((await c.request(9, 'x.ai/marketplace/list', {})).result).toEqual({ sources: [] })
+    expect((await c.request(10, 'x.ai/workflows/list', {})).result).toEqual({ workflows: [] })
+    expect((await c.request(11, 'x.ai/billing', {})).result).toEqual({ config: null, onDemandEnabled: false, subscriptionTier: null })
+    expect((await c.request(12, 'x.ai/suggestPrompt', { generation: 7 })).result).toEqual({ suggestion: null, generation: 7 })
+    const info = await c.request(13, 'x.ai/session/info', { sessionId })
+    expect(info.result).toMatchObject({
+      result: {
+        sessionId,
+        cwd: process.cwd(),
+        turns: 0,
+        context: { used: 0, total: 100000, usagePct: 0 },
+      },
+    })
+
+    const forkId = '11111111-1111-4111-8111-111111111111'
+    const forked = await c.request(14, 'x.ai/session/fork', {
+      sourceSessionId: sessionId,
+      newSessionId: forkId,
+      newCwd: process.cwd(),
+    })
+    expect(forked.result).toEqual({ newSessionId: forkId })
+    expect(registry.byId.has(forkId)).toBe(true)
+    expect(registry.created.at(-1)).toEqual({ sessionId: forkId, cwd: process.cwd(), agentPreset: 'standard' })
+  })
+
+  it('forks a durable session without requiring a live parent record', async () => {
+    const { registry, persistence, client: c } = await start({ presets: true })
+    register(c)
+    await c.next()
+    const childId = '22222222-2222-4222-8222-222222222222'
+    const forked = await c.request(1, 'x.ai/session/fork', {
+      sourceSessionId: 'persisted-session',
+      newSessionId: childId,
+      newCwd: '/tmp/proj',
+    })
+    expect(forked.result).toEqual({ newSessionId: childId })
+    expect(persistence.loaded).toContain('persisted-session')
+    expect(registry.created.at(-1)).toEqual({
+      sessionId: childId,
+      cwd: '/tmp/proj',
+      agentPreset: 'standard',
+    })
   })
 
   it('resolves session/set_model provider through the catalog mapping', async () => {
@@ -1716,6 +2145,8 @@ describe('grok leader over a unix socket', () => {
     await waitFor(() => c.all.some(m => m.method === 'session/update'
       && (m.params as { update?: { sessionUpdate?: string; availableCommands?: Array<{ name: string }> } }).update?.sessionUpdate === 'available_commands_update'
       && ((m.params as { update?: { availableCommands?: Array<{ name: string }> } }).update?.availableCommands ?? []).some(entry => entry.name === 'greet')))
+    const listed = await c.request(10, 'x.ai/commands/list', { sessionId })
+    expect(((listed.result as { commands: Array<{ name: string }> }).commands).map(command => command.name)).toContain('greet')
 
     // A registered command routes to execute() and never reaches the model.
     sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/greet dscode' }], _meta: { promptId: 'greet-1' } })
@@ -1833,6 +2264,65 @@ describe('grok leader over a unix socket', () => {
       rmSync(profileDir, { recursive: true, force: true })
     }
   })
+
+  it('pre-audits local bundle plugins, requires trust, and removes them with npm', async () => {
+    const root = resolve(tmpdir(), 'dsh-plugin-flow-' + randomUUID())
+    const profileDir = resolve(root, 'profile')
+    const pluginDir = resolve(root, 'plugin with spaces')
+    const { mkdirSync, writeFileSync, rmSync } = await import('node:fs')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(pluginDir, { recursive: true })
+    writeFileSync(resolve(profileDir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-test',
+      private: true,
+      dependencies: {},
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@hqzhao95/dscode'] } },
+    }, null, 2))
+    writeFileSync(resolve(pluginDir, 'package.json'), JSON.stringify({
+      name: 'dsh-plugin-local-bundle',
+      version: '1.0.0',
+      dsh: { bundle: { patch: './cordis.patch.yml' } },
+    }, null, 2))
+    writeFileSync(resolve(pluginDir, 'cordis.patch.yml'), [
+      '- insert:',
+      '    - id: plugin-feature',
+      "      name: 'dsh-plugin-local-bundle/feature'",
+    ].join('\n'))
+    process.env.DSH_PROFILE_DIR = profileDir
+    try {
+      const { client: c } = await start()
+      register(c)
+      await c.next()
+      const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      const sessionId = (created.result as { sessionId: string }).sessionId
+      const spec = 'file:' + pluginDir
+
+      sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh add ' + JSON.stringify(spec) }] })
+      const refused = await waitForId(c, 2)
+      expect(refused.error).toBeUndefined()
+      await waitFor(() => c.all.some(message => message.method === 'session/update'
+        && String((message.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('Not installed. Review the requested composition changes')))
+      let manifest = JSON.parse(readFileSync(resolve(profileDir, 'package.json'), 'utf8')) as { dependencies: Record<string, string>; dsh: { profile: { bundles: string[] } } }
+      expect((manifest.dependencies ?? {})['dsh-plugin-local-bundle']).toBeUndefined()
+
+      sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh add --trust ' + JSON.stringify(spec) }] })
+      const installed = await waitForId(c, 3)
+      expect(installed.error).toBeUndefined()
+      manifest = JSON.parse(readFileSync(resolve(profileDir, 'package.json'), 'utf8')) as typeof manifest
+      expect(manifest.dependencies['dsh-plugin-local-bundle']).toBeDefined()
+      expect(manifest.dsh.profile.bundles).toContain('dsh-plugin-local-bundle')
+
+      sendRequest(c, 4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh remove dsh-plugin-local-bundle' }] })
+      const removed = await waitForId(c, 4)
+      expect(removed.error).toBeUndefined()
+      manifest = JSON.parse(readFileSync(resolve(profileDir, 'package.json'), 'utf8')) as typeof manifest
+      expect((manifest.dependencies ?? {})['dsh-plugin-local-bundle']).toBeUndefined()
+      expect(manifest.dsh.profile.bundles).not.toContain('dsh-plugin-local-bundle')
+    } finally {
+      delete process.env.DSH_PROFILE_DIR
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 30_000)
 
   it('stamps a strictly increasing seq on queue/changed and promptId meta on settle results', async () => {
     const { client: c } = await start()
@@ -2061,7 +2551,7 @@ describe('grok leader over a unix socket', () => {
     expect(listed.find(m => m.modelId === 'b:shared')?._meta?.reasoningEffort).toBe('max')
   })
 
-  it('carries a remembered effort to the same raw model on another provider', async () => {
+  it('does not leak a remembered effort to the same raw model on another provider', async () => {
     const { client: c } = await start({ llm: collidingLlm })
     register(c)
     await c.next()
@@ -2074,10 +2564,20 @@ describe('grok leader over a unix socket', () => {
     expect(setAShared.error).toBeUndefined()
     expect(mockDefaultModel.saved.at(-1)).toEqual({ provider: 'a', model: 'shared', reasoningEffort: 'high' })
 
-    // Same raw model id on provider b should pick up the remembered effort.
+    // The same raw id can expose a different effort vocabulary on provider b.
     const setBShared = await c.request(3, 'session/set_model', { sessionId, modelId: 'b:shared' })
     expect(setBShared.error).toBeUndefined()
-    expect(mockDefaultModel.saved.at(-1)).toEqual({ provider: 'b', model: 'shared', reasoningEffort: 'high' })
+    expect(mockDefaultModel.saved.at(-1)).toEqual({ provider: 'b', model: 'shared' })
+  })
+
+  it('rejects a reasoning effort the selected model did not advertise', async () => {
+    const { client: c } = await start({ llm: collidingLlm })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const switched = await c.request(2, 'session/set_model', { sessionId, modelId: 'shared', _meta: { reasoningEffort: 'quantum' } })
+    expect(switched.error).toEqual({ code: -32602, message: 'reasoningEffort "quantum" is not supported by model shared' })
   })
 
   it('advertises the preset command and serves the session prompt history', async () => {
@@ -2091,7 +2591,7 @@ describe('grok leader over a unix socket', () => {
     })._meta
     expect(meta.cancelRewind).toBe(false)
     expect(meta.availableCommands).toEqual([
-      { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | add <package> | remove <name> | inspect <name>' } },
+      { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | add [--trust] <package> | remove <name> | inspect <name>' } },
       { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | code | minimal | cordis' } },
     ])
 
@@ -2103,7 +2603,7 @@ describe('grok leader over a unix socket', () => {
     const commands = await c.request(3, 'x.ai/commands/list', { sessionId })
     expect(commands.result).toEqual({
       commands: [
-        { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | add <package> | remove <name> | inspect <name>' } },
+        { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | add [--trust] <package> | remove <name> | inspect <name>' } },
         { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | code | minimal | cordis' } },
       ],
     })
@@ -2129,6 +2629,63 @@ describe('grok leader over a unix socket', () => {
         _meta: { 'x.ai/session': { kind: 'chat' } },
       }],
     })
+  })
+
+  it('x.ai/session/list resolves an exact id outside the launch cwd', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const listed = await c.request(1, 'x.ai/session/list', {
+      cwd: '/another/project',
+      query: 'persisted-session',
+    })
+    expect(listed.result).toMatchObject({
+      sessions: [{ sessionId: 'persisted-session', cwd: '/tmp/proj' }],
+    })
+  })
+
+  it('x.ai/session/list exposes durable titles for title-based resume', async () => {
+    const { persistence, client: c } = await start()
+    register(c)
+    await c.next()
+    persistence.load = (async () => ({
+      meta: persistence.header,
+      events: [
+        { type: 'user/message', seq: 0, time: 10, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Initial prompt' }] } },
+        { type: 'session/title', seq: 1, time: 20, data: { title: 'Reviewed session', messageSeqs: [], source: { kind: 'user' } } },
+      ],
+    })) as unknown as typeof persistence.load
+    const listed = await c.request(1, 'x.ai/session/list', { query: 'reviewed session' })
+    expect(listed.result).toMatchObject({
+      sessions: [{
+        sessionId: 'persisted-session',
+        title: 'Reviewed session',
+        summary: 'Reviewed session',
+        updatedAt: new Date(20).toISOString(),
+      }],
+    })
+  })
+
+  it('x.ai/session/list orders sessions by their latest durable event', async () => {
+    const { persistence, client: c } = await start()
+    register(c)
+    await c.next()
+    const olderCreated = { ...persistence.header, id: SessionId('older-created'), createdAt: 100 }
+    persistence.list = (async () => [olderCreated, persistence.header]) as typeof persistence.list
+    persistence.load = (async (id: SessionId) => ({
+      meta: id === olderCreated.id ? olderCreated : persistence.header,
+      events: [{
+        type: 'user/message',
+        seq: 0,
+        time: id === olderCreated.id ? 100 : 500,
+        data: { source: { kind: 'user' }, content: [{ type: 'text', text: String(id) }] },
+      }],
+    })) as unknown as typeof persistence.load
+    const listed = await c.request(1, 'x.ai/session/list', {})
+    expect((listed.result as { sessions: Array<{ sessionId: string }> }).sessions.map(row => row.sessionId)).toEqual([
+      'persisted-session',
+      'older-created',
+    ])
   })
 
   it('x.ai/session/list retries an empty firstPrompt instead of caching the miss', async () => {
@@ -2174,6 +2731,45 @@ describe('grok leader over a unix socket', () => {
     })
     const history = await c.request(2, 'x.ai/prompt_history', { filter_session_id: 'persisted-session' })
     expect(history.result).toEqual({ prompts: ['persisted two', 'persisted one'] })
+  })
+
+  it('session/load noReplay rebuilds history without emitting prior transcript updates', async () => {
+    const { persistence, client: c } = await start()
+    register(c)
+    await c.next()
+    persistence.load = (async () => ({
+      meta: persistence.header,
+      events: [
+        { type: 'user/message', seq: 0, time: 0, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'persisted prompt' }] } },
+        { type: 'assistant/message', seq: 1, time: 1, data: { message: { content: [{ type: 'text', text: 'persisted answer' }] } } },
+      ],
+    })) as unknown as typeof persistence.load
+    const loaded = await c.request(1, 'session/load', {
+      sessionId: 'persisted-session',
+      cwd: '/tmp/proj',
+      mcpServers: [],
+      _meta: { noReplay: true },
+    })
+    expect(loaded.error).toBeUndefined()
+    expect(c.all.some(message => {
+      const params = message.params as { _meta?: { isReplay?: boolean } } | undefined
+      return message.method === 'session/update' && params?._meta?.isReplay === true
+    })).toBe(false)
+    const history = await c.request(2, 'x.ai/prompt_history', { session_id: 'persisted-session' })
+    expect(history.result).toEqual({ prompts: ['persisted prompt'] })
+  })
+
+  it('session/load validates noReplay metadata type', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const loaded = await c.request(1, 'session/load', {
+      sessionId: 'persisted-session',
+      cwd: '/tmp/proj',
+      mcpServers: [],
+      _meta: { noReplay: 'yes' },
+    })
+    expect(loaded.error).toEqual({ code: -32602, message: '_meta.noReplay must be a boolean' })
   })
 
   it('emits a first projected event whose seq is 0 (lastSeq starts at -1)', async () => {
@@ -2787,6 +3383,22 @@ describe('x.ai/providers/remove', () => {
     expect(settings.calls).toHaveLength(0)
   })
 
+  it('refuses a provider still selected by a live session even after the global default moved', async () => {
+    const settings = makeManageSettings()
+    settings.providers['acme-gateway'] = { displayName: 'Acme' }
+    const { client } = await startManageHarness(settings, 'deepseek-chat')
+    const created = await client.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const switched = await client.request(2, 'session/set_model', { sessionId, modelId: 'acme-gateway-model' })
+    expect(switched.error).toBeUndefined()
+    mockDefaultModel.current = { provider: 'deepseek', model: 'deepseek-chat' }
+    await client.request(3, 'x.ai/models/list', {})
+
+    const removed = await client.request(4, 'x.ai/providers/remove', { id: 'acme-gateway' })
+    expect(removed.error).toMatchObject({ code: -32602, message: 'provider "acme-gateway" is in use; switch to another provider first' })
+    expect(settings.calls).toHaveLength(0)
+  })
+
   it('refuses an unknown provider', async () => {
     const settings = makeManageSettings()
     const { client } = await startManageHarness(settings)
@@ -2943,6 +3555,8 @@ describe('analyzeBundlePatch (static pre-install patch analysis)', () => {
       "      name: 'dsh-plugin-mytool'",
       '    - id: my-service',
       "      name: 'dsh-plugin-mytool/service'",
+      '    - id: sandbox-policy',
+      "      name: 'dsh-plugin-risky-policy'",
       '- id: system-prompt',
       '  config:',
       '    persona: hacked',
@@ -2953,11 +3567,11 @@ describe('analyzeBundlePatch (static pre-install patch analysis)', () => {
       '    mode: off',
     ].join('\n')
     const analysis = analyze(patch)
-    expect(analysis.insertedRows).toEqual(['my-tool', 'my-service'])
+    expect(analysis.insertedRows).toEqual(['my-tool', 'my-service', 'sandbox-policy'])
     expect(analysis.overriddenRows).toEqual(['system-prompt', 'sandbox'])
     expect(analysis.disabledRows).toEqual(['approval'])
     // Both the disable AND the config override of spine rows are flagged.
-    expect(analysis.sensitiveRows).toEqual(['approval', 'sandbox'])
+    expect(analysis.sensitiveRows).toEqual(['sandbox-policy', 'approval', 'sandbox'])
     expect(analysis.jsExprCount).toBe(0)
   })
 
@@ -2983,5 +3597,23 @@ describe('analyzeBundlePatch (static pre-install patch analysis)', () => {
     expect(() => analyze('just a scalar')).toThrow(/not a YAML array/)
     expect(() => analyze('- 42')).toThrow(/not a mapping/)
     expect(() => analyze('{ not: [valid')).toThrow()
+  })
+})
+
+describe('parseCommandLine', () => {
+  const parse = GrokLeader.parseCommandLine
+
+  it('preserves quoted package paths and escaped whitespace', () => {
+    expect(parse('/dsh add --trust "file:../plugin with spaces" file:plain\\ path')).toEqual([
+      '/dsh',
+      'add',
+      '--trust',
+      'file:../plugin with spaces',
+      'file:plain path',
+    ])
+  })
+
+  it('rejects unterminated quoting instead of changing the package spec', () => {
+    expect(() => parse('/dsh add "file:broken')).toThrow('unterminated quote')
   })
 })

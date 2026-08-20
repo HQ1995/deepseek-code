@@ -1,6 +1,6 @@
 /**
- * Frame codec and envelope tests pinned to the real grok TUI capture:
- * tests/fixtures/grok-tui-messages.jsonl (docs/grok-tui-connect.md).
+ * Frame codec and envelope tests pinned to the real grok TUI capture in
+ * tests/fixtures/grok-tui-messages.jsonl and docs/grok-leader-protocol.md.
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
