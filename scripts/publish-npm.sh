@@ -30,7 +30,7 @@ NPM_TAG="latest"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/platform.sh"
 missing=()
 for asset in "${DSCODE_REQUIRED_ASSETS[@]}"; do
-  for required in "$asset" "$asset.sha256"; do
+  for required in "$asset" "$asset.sha256" "$asset.gz"; do
     if ! curl -fsIL "https://github.com/HQ1995/deepseek-code/releases/download/v$PIN/$required" >/dev/null; then
       missing+=("$required")
     fi
@@ -38,7 +38,7 @@ for asset in "${DSCODE_REQUIRED_ASSETS[@]}"; do
 done
 if [[ ${#missing[@]} -gt 0 ]]; then
   echo "error: release v$PIN is missing required assets: ${missing[*]}" >&2
-  echo "  both platform binaries and their SHA-256 files must exist before npm" >&2
+  echo "  both raw and compressed platform binaries plus SHA-256 files must exist before npm" >&2
   exit 1
 fi
 

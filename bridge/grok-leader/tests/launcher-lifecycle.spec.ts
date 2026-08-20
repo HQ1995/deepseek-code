@@ -52,12 +52,12 @@ while [ "$#" -gt 0 ]; do
 done
 case "$prefix" in
   */runtime)
-    mkdir -p "$prefix/node_modules/.bin"
-    cat > "$prefix/node_modules/.bin/dsh" <<'EOF'
+    mkdir -p "$prefix/bin"
+    cat > "$prefix/bin/dsh" <<'EOF'
 #!/bin/sh
 echo '0.1.0-rc.8'
 EOF
-    chmod +x "$prefix/node_modules/.bin/dsh"
+    chmod +x "$prefix/bin/dsh"
     ;;
   *)
     mkdir -p "$prefix/node_modules/@hqzhao95/dscode/bin"
@@ -89,11 +89,11 @@ esac
     expect(JSON.parse(readFileSync(join(plugin, 'package.json'), 'utf8')).version).toBe(packageVersion)
     const manifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')) as { dsh: { profile: { bundles: string[] } } }
     expect(manifest.dsh.profile.bundles).toContain('@hqzhao95/dscode')
-    expect(existsSync(join(profile, 'runtime', 'node_modules', '.bin', 'dsh'))).toBe(true)
+    expect(existsSync(join(profile, 'runtime', 'bin', 'dsh'))).toBe(true)
     const launcherLink = join(home, '.local', 'bin', 'dscode')
     expect(readlinkSync(launcherLink)).toBe(join(plugin, 'bin', 'dscode.mjs'))
     const launched = readFileSync(tuiLog, 'utf8')
-    expect(launched).toContain(`DSH_BIN=${join(profile, 'runtime', 'node_modules', '.bin', 'dsh')}`)
+    expect(launched).toContain(`DSH_BIN=${join(profile, 'runtime', 'bin', 'dsh')}`)
     expect(launched).toContain(`DSCODE_HOME=${profile}`)
     expect(launched).toContain(`DSH_PROFILE_DIR=${profile}`)
     expect(launched).toContain('ARGS=<inspect><--json>')

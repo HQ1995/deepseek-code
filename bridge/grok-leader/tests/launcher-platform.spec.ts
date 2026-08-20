@@ -1,6 +1,11 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { gzipSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
 import {
   TUI_ASSETS,
+  downloadGzipIfAvailable,
   dshRuntimeBin,
   nodeVersionSupported,
   ownedLauncherTarget,
@@ -18,6 +23,19 @@ describe('tuiAssetName', () => {
   it('maps the two shipped prebuilts', () => {
     expect(tuiAssetName('linux', 'x64')).toBe('dscode-linux-x86_64')
     expect(tuiAssetName('darwin', 'arm64')).toBe('dscode-macos-aarch64')
+  })
+
+  it('expands the compressed release asset before checksum verification', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dscode-gzip-'))
+    const dest = join(dir, 'dscode')
+    try {
+      const compressed = gzipSync('dscode-binary')
+      const url = `data:application/gzip;base64,${compressed.toString('base64')}`
+      await expect(downloadGzipIfAvailable(url, dest)).resolves.toBe(true)
+      expect(readFileSync(dest, 'utf8')).toBe('dscode-binary')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('leaves Intel Mac and other arches to a from-source build', () => {
@@ -74,10 +92,10 @@ describe('installation lifecycle', () => {
     expect(parseCliVersion('unknown')).toBeUndefined()
   })
 
-  it('enforces the dsh node floor while keeping future majors valid', () => {
-    expect(nodeVersionSupported('22.18.0')).toBe(false)
+  it('mirrors the pinned dsh dependency tree node floor', () => {
+    expect(nodeVersionSupported('22.18.9')).toBe(false)
     expect(nodeVersionSupported('22.19.0')).toBe(true)
-    expect(nodeVersionSupported('23.9.0')).toBe(false)
+    expect(nodeVersionSupported('23.0.0')).toBe(true)
     expect(nodeVersionSupported('24.0.0')).toBe(true)
   })
 

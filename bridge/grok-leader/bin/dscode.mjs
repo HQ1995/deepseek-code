@@ -32,6 +32,7 @@ import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { createGunzip } from 'node:zlib'
 
 const RELEASE_REPO = 'HQ1995/deepseek-code'
 const here = dirname(fileURLToPath(import.meta.url))
@@ -63,17 +64,21 @@ const binDir = join(profileDir, 'bin')
 const binPath = join(binDir, 'dscode')
 export const profileLauncher = join(profileDir, 'node_modules', ...pkg.name.split('/'), 'bin', 'dscode.mjs')
 const runtimeDir = join(profileDir, 'runtime')
-export const dshRuntimeBin = join(runtimeDir, 'node_modules', '.bin', process.platform === 'win32' ? 'dsh.cmd' : 'dsh')
+export const dshRuntimeBin = join(runtimeDir, 'bin', process.platform === 'win32' ? 'dsh.cmd' : 'dsh')
 
 /** The exact dsh version this release was tested against. */
 const dshTestedVersion = pkg.dsh?.testedVersion
 
+/** Effective floor of the pinned dsh dependency tree (pi-ai 0.82.1). */
 export const nodeVersionSupported = (version) => {
   const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version)
   if (match === null) return false
-  const major = Number(match[1])
-  const minor = Number(match[2])
-  return (major === 22 && minor >= 19) || major >= 24
+  const actual = match.slice(1, 4).map(Number)
+  const minimum = [22, 19, 0]
+  for (let index = 0; index < minimum.length; index += 1) {
+    if (actual[index] !== minimum[index]) return actual[index] > minimum[index]
+  }
+  return true
 }
 
 export const parseCliVersion = (output) =>
@@ -95,24 +100,43 @@ const cliVersion = (binary) => {
   return parseCliVersion(probe.stdout.trim())
 }
 
-const installOwnedDsh = (spec) => {
-  mkdirSync(runtimeDir, { recursive: true })
-  const argv = ['install', '--prefix', runtimeDir, spec, '--omit=dev', '--no-audit', '--no-fund']
-  console.error(`dscode: installing the tested dsh runtime — npm ${argv.join(' ')}`)
-  const result = spawnSync('npm', argv, {
-    stdio: ['ignore', 'inherit', 'inherit'],
-    timeout: 600000,
+const runInstaller = (argv) => new Promise((resolveRun, rejectRun) => {
+  const child = spawn('npm', argv, { stdio: ['ignore', 'inherit', 'inherit'] })
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    child.kill('SIGTERM')
+  }, 600000)
+  child.once('error', (error) => {
+    clearTimeout(timer)
+    rejectRun(error)
   })
-  if (result.error?.code === 'ETIMEDOUT') {
-    throw new Error(`dsh install timed out; run manually: npm ${argv.join(' ')}`)
-  }
-  if (result.status !== 0) {
-    throw new Error(`dsh install failed; run manually: npm ${argv.join(' ')}`)
+  child.once('exit', (code, signal) => {
+    clearTimeout(timer)
+    if (timedOut) rejectRun(new Error('timed out'))
+    else if (code === 0) resolveRun()
+    else rejectRun(new Error(signal === null ? `exited with status ${code ?? 1}` : `terminated by ${signal}`))
+  })
+})
+
+const installOwnedDsh = async (spec) => {
+  rmSync(runtimeDir, { recursive: true, force: true })
+  mkdirSync(runtimeDir, { recursive: true })
+  // npm's normal project layout spends minutes resolving dsh's large peer
+  // graph. Global layout under a private custom prefix resolves the same
+  // complete runtime quickly without touching npm's real global prefix.
+  const argv = ['install', '--global', '--prefix', runtimeDir, spec, '--omit=dev', '--no-audit', '--no-fund']
+  console.error(`dscode: installing the tested dsh runtime — npm ${argv.join(' ')}`)
+  try {
+    await runInstaller(argv)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`dsh install failed (${message}); run manually: npm ${argv.join(' ')}`)
   }
 }
 
 /** Use an explicit override, a tested dsh on PATH, or the profile-owned pin. */
-export const ensureDshCli = () => {
+export const ensureDshCli = async () => {
   const envBin = process.env.DSH_BIN
   if (envBin !== undefined && envBin !== '' && existsSync(envBin)) return envBin
 
@@ -120,7 +144,7 @@ export const ensureDshCli = () => {
   if (existing !== undefined && cliVersion(existing) === dshTestedVersion) return existing
 
   const spec = dshTestedVersion ? `@deepseek-ai/dsh@${dshTestedVersion}` : '@deepseek-ai/dsh'
-  if (cliVersion(dshRuntimeBin) !== dshTestedVersion) installOwnedDsh(spec)
+  if (cliVersion(dshRuntimeBin) !== dshTestedVersion) await installOwnedDsh(spec)
   const installedVersion = cliVersion(dshRuntimeBin)
   if (installedVersion !== dshTestedVersion) {
     throw new Error(`dsh runtime reports ${installedVersion ?? 'no version'}, expected ${dshTestedVersion}`)
@@ -280,13 +304,23 @@ const download = async (url, dest) => {
   await pipeline(Readable.fromWeb(res.body), createWriteStream(dest))
 }
 
+/** Prefer the smaller release asset while retaining raw-asset compatibility. */
+export const downloadGzipIfAvailable = async (url, dest) => {
+  const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(120000) })
+  if (res.status === 404) return false
+  if (!res.ok || res.body === null) throw new Error(`${res.status} ${res.statusText} for ${url}`)
+  await pipeline(Readable.fromWeb(res.body), createGunzip(), createWriteStream(dest))
+  return true
+}
+
 const installBinary = async (release, asset) => {
   mkdirSync(binDir, { recursive: true })
   const base = `https://github.com/${RELEASE_REPO}/releases/download/v${release}`
   const tmp = `${binPath}.download-${process.pid}`
   console.error(`dscode: downloading v${release} (${asset}) from GitHub Releases...`)
   try {
-    await download(`${base}/${asset}`, tmp)
+    const compressed = await downloadGzipIfAvailable(`${base}/${asset}.gz`, tmp)
+    if (!compressed) await download(`${base}/${asset}`, tmp)
     const shaRes = await fetch(`${base}/${asset}.sha256`, { redirect: 'follow' })
     if (shaRes.ok) {
       const expected = (await shaRes.text()).trim().split(/\s+/)[0]
@@ -458,7 +492,7 @@ const main = async () => {
     return
   }
   if (!nodeVersionSupported(process.versions.node)) {
-    throw new Error(`node ^22.19.0 or >=24.0.0 is required; found ${process.versions.node}`)
+    throw new Error(`the pinned dsh runtime requires node >=22.19.0; found ${process.versions.node}. dscode will not install or switch node for you`)
   }
   if (process.env.DSCODE_BIN === undefined || process.env.DSCODE_BIN === '') {
     if (refreshPackageForUpdate()) return
@@ -466,7 +500,16 @@ const main = async () => {
     healLauncherLink()
     migrateLegacyTuiHome()
   }
-  const dshBin = ensureDshCli()
+  // The two large first-run operations are independent: install the private
+  // dsh runtime while the platform TUI downloads, instead of serializing
+  // roughly 270 MB of npm packages before a roughly 153 MB release asset.
+  const requestedBin = process.env.DSCODE_BIN
+  const [dshBin, bin] = await Promise.all([
+    ensureDshCli(),
+    requestedBin !== undefined && requestedBin !== ''
+      ? Promise.resolve(requestedBin)
+      : ensureBinary(),
+  ])
   const localBin = join(homedir(), '.local', 'bin')
   const path = process.env.PATH ?? ''
   const pathParts = path.split(delimiter)
@@ -480,11 +523,6 @@ const main = async () => {
     DSC_HOME: tuiHome,
     DSH_PROFILE_DIR: profileDir,
   }
-  if (process.env.DSCODE_BIN !== undefined && process.env.DSCODE_BIN !== '') {
-    spawnTui(process.env.DSCODE_BIN, env)
-    return
-  }
-  const bin = await ensureBinary()
   spawnTui(bin, env)
 }
 

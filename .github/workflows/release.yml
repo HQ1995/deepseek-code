@@ -65,6 +65,8 @@ jobs:
           else
             ( cd dist && shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256" )
           fi
+          gzip -9 -c "dist/${{ matrix.asset }}" > "dist/${{ matrix.asset }}.gz"
+          ls -lh "dist/${{ matrix.asset }}" "dist/${{ matrix.asset }}.gz"
           cat "dist/${{ matrix.asset }}.sha256"
       - name: Upload to the release
         env:
@@ -77,4 +79,5 @@ jobs:
             echo "waiting for release $TAG ($i)"; sleep 15
           done
           gh release upload "$TAG" \
-            "dist/${{ matrix.asset }}" "dist/${{ matrix.asset }}.sha256" --clobber
+            "dist/${{ matrix.asset }}" "dist/${{ matrix.asset }}.sha256" \
+            "dist/${{ matrix.asset }}.gz" --clobber

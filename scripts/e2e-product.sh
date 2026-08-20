@@ -32,24 +32,16 @@ for arg in "$@"; do
   esac
 done
 
-node_supported() {
-  "$1" -e 'const [M,m]=process.versions.node.split(".").map(Number); process.exit((M===22&&m>=19)||M>=24?0:1)' >/dev/null 2>&1
-}
-
 if [[ -n "${DSCODE_E2E_NODE_BIN:-}" ]]; then
   NODE_BIN="$DSCODE_E2E_NODE_BIN"
-elif command -v node >/dev/null 2>&1 && node_supported "$(command -v node)"; then
+elif command -v node >/dev/null 2>&1; then
   NODE_BIN="$(command -v node)"
-elif command -v npx >/dev/null 2>&1; then
-  NODE_BIN="$(npx --yes node@24 -p 'process.execPath')"
 else
-  echo "error: Node ^22.19.0 or >=24 is required (and npx is unavailable)" >&2
+  echo "error: Node >=22.19.0 is required" >&2
   exit 1
 fi
-if ! node_supported "$NODE_BIN"; then
-  echo "error: unsupported Node at $NODE_BIN ($("$NODE_BIN" --version 2>/dev/null || true))" >&2
-  exit 1
-fi
+"$NODE_BIN" -e 'const a=process.versions.node.split(".").map(Number), b=[22,19,0]; process.exit(a[0]>b[0] || (a[0]===b[0] && (a[1]>b[1] || (a[1]===b[1] && a[2]>=b[2]))) ? 0 : 1)' \
+  || { echo "error: pinned dsh requires Node >=22.19.0 (got $($NODE_BIN --version))" >&2; exit 1; }
 export DSCODE_E2E_NODE_BIN="$NODE_BIN"
 export PATH="$(dirname "$NODE_BIN"):$PATH"
 

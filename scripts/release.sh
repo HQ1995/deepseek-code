@@ -80,8 +80,10 @@ if [[ -n "$HOST_ASSET" ]] && command -v cargo >/dev/null 2>&1; then
   echo "  binary: $banner"
   cp "$BIN" "$DIST/$HOST_ASSET"
   dscode_write_sha256 "$DIST/$HOST_ASSET" "$DIST/$HOST_ASSET.sha256"
+  gzip -9 -c "$DIST/$HOST_ASSET" > "$DIST/$HOST_ASSET.gz"
   echo "  $(cat "$DIST/$HOST_ASSET.sha256")"
-  HOST_FILES=("$DIST/$HOST_ASSET" "$DIST/$HOST_ASSET.sha256")
+  echo "  compressed: $(du -h "$DIST/$HOST_ASSET.gz" | awk '{print $1}')"
+  HOST_FILES=("$DIST/$HOST_ASSET" "$DIST/$HOST_ASSET.sha256" "$DIST/$HOST_ASSET.gz")
 elif [[ -n "$HOST_ASSET" ]]; then
   echo "  no cargo on PATH; CI will publish $HOST_ASSET"
 else
@@ -156,7 +158,7 @@ echo "created draft release $TAG"
 echo "  waiting for CI to attach both platform binaries and checksums..."
 deadline=$((SECONDS + 2400))
 for asset in "${DSCODE_REQUIRED_ASSETS[@]}"; do
-  for required in "$asset" "$asset.sha256"; do
+  for required in "$asset" "$asset.sha256" "$asset.gz"; do
     while ! gh release view "$TAG" --repo "$RELEASE_REPO" --json assets --jq '.assets[].name' \
       | grep -Fxq "$required"; do
       if (( SECONDS >= deadline )); then

@@ -5,7 +5,8 @@
 # A release is not complete until every name in DSCODE_REQUIRED_ASSETS is
 # published. Other hosts (Intel Mac, Linux ARM) build from source.
 
-# Assets `npx @hqzhao95/dscode` and `dscode update` expect on every release.
+# Raw assets keep older updater clients working; launchers prefer the matching
+# .gz asset and verify the decompressed binary with the raw .sha256 file.
 DSCODE_REQUIRED_ASSETS=(dscode-linux-x86_64 dscode-macos-aarch64)
 
 # Run the repo-pinned pnpm through an installed shim or Corepack.

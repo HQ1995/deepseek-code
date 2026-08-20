@@ -30,8 +30,10 @@ To upgrade dsh:
 
 1. bump the tested version and range when needed;
 2. update the `@deepseek-ai/dsh-*` development dependencies and lockfile;
-3. rebuild the bridge and run the complete E2E suite;
-4. update launcher arguments only if the dsh CLI contract changed.
+3. mirror that pinned dsh dependency tree's Node floor in the launcher and npm
+   metadata, but never install or switch the user's Node runtime;
+4. rebuild the bridge and run the complete E2E suite;
+5. update launcher arguments only if the dsh CLI contract changed.
 
 The launcher may reuse an exact matching `dsh` from `PATH`; otherwise it owns a
 private runtime under the dscode profile. It never upgrades a global install.

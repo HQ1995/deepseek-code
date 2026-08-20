@@ -19,18 +19,15 @@ TUI_RELEASE="${DEEPSEEK_CODE_TUI_RELEASE:-v0.0.4}"
 echo "deepseek-code installer"
 echo "  repo: $ROOT"
 
-# Toolchain gates: node ^22.19.0 || >=24.0.0, npm beside it, and pnpm (the
-# official dsh plugin command forwards to pnpm). Fail with a clear message
-# instead of an opaque pnpm failure deep in the plugin step.
+# Toolchain gates: pinned dsh currently requires Node >=22.19.0. Validate that
+# floor, but never install or switch the user's runtime.
 node_version="$(node -p 'process.version.slice(1)' 2>/dev/null || true)"
 if [[ -z "$node_version" ]]; then
-  echo "error: node is required (^22.19.0 || >=24.0.0); install it first" >&2
+  echo "error: node >=22.19.0 is required; install it first" >&2
   exit 1
 fi
-node_major="$(echo "$node_version" | cut -d. -f1)"
-node_minor="$(echo "$node_version" | cut -d. -f2)"
-if ! { [[ "$node_major" == 22 && "$node_minor" -ge 19 ]] || [[ "$node_major" -ge 24 ]]; }; then
-  echo "error: node ^22.19.0 || >=24.0.0 required, found $node_version" >&2
+if ! node -e 'const a=process.versions.node.split(".").map(Number), b=[22,19,0]; process.exit(a[0]>b[0] || (a[0]===b[0] && (a[1]>b[1] || (a[1]===b[1] && a[2]>=b[2]))) ? 0 : 1)'; then
+  echo "error: pinned dsh requires node >=22.19.0; found $node_version" >&2
   exit 1
 fi
 if ! command -v npm >/dev/null 2>&1; then
@@ -167,8 +164,16 @@ verify_or_fail() { # $1 = expected sha (may be empty), exits on mismatch
 
 download_dscode() {
   echo "  downloading prebuilt dscode ($TUI_RELEASE)..."
-  curl -fL -o "$BIN_PATH" \
-    "https://github.com/$RELEASE_REPO/releases/download/$TUI_RELEASE/$ASSET"
+  local base tmp
+  base="https://github.com/$RELEASE_REPO/releases/download/$TUI_RELEASE"
+  tmp="$BIN_PATH.download-$$"
+  if curl -fL "$base/$ASSET.gz" | gzip -dc > "$tmp"; then
+    mv "$tmp" "$BIN_PATH"
+  else
+    rm -f "$tmp"
+    curl -fL -o "$tmp" "$base/$ASSET"
+    mv "$tmp" "$BIN_PATH"
+  fi
 }
 
 if [[ -n "$ASSET" ]]; then
