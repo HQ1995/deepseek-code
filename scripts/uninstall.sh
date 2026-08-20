@@ -6,6 +6,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=platform.sh
+source "$(cd "$(dirname "$0")" && pwd)/platform.sh"
 PROFILE="$HOME/.dsh/profiles/dscode"
 FLAG="${1:-}"
 
@@ -56,18 +58,16 @@ else
   note "no profile at $PROFILE"
 fi
 
-# 3. The TUI local state (session list mirror, changelog, logs). DSC_HOME
-#    overrides the default; only remove what the identity check proves ours.
-TUI_HOME="${DSC_HOME:-}"
-if [ -z "$TUI_HOME" ]; then TUI_HOME="$HOME/.dsh/dsc-tui"; fi
-# Resolve symlinks and check ownership first: the identity check must never
-# recurse through a link, and the basename alone is not an identity.
-TUI_REAL="$(realpath "$TUI_HOME" 2>/dev/null || true)"
-if [[ -d "$TUI_HOME" && ! -L "$TUI_HOME" && "$(basename "$TUI_REAL")" == "dsc-tui" && "$(stat -c %u "$TUI_REAL" 2>/dev/null || true)" == "$UID" ]]; then
-  rm -rf "$TUI_HOME"
-  echo "  removed $TUI_HOME"
-else
-  note "kept $TUI_HOME (not ours: link, wrong name, or not owned by this user)"
+# 3. Leftover TUI home from before it lived inside the profile
+#    (~/.dsh/profiles/dscode, removed with the profile above).
+legacy_tui="$HOME/.dsh/dsc-tui"
+custom_home="${DSCODE_HOME:-${DSC_HOME:-}}"
+if [[ -n "$custom_home" && -d "$custom_home" && "$(dscode_file_uid "$custom_home" 2>/dev/null || true)" == "$UID" ]]; then
+  rm -rf "$custom_home"
+  echo "  removed $custom_home"
+elif [[ -d "$legacy_tui" && ! -L "$legacy_tui" && "$(dscode_file_uid "$legacy_tui" 2>/dev/null || true)" == "$UID" ]]; then
+  rm -rf "$legacy_tui"
+  echo "  removed $legacy_tui"
 fi
 
 # 4. The official dsh CLI, only with --remove-dsh (it is the upstream
@@ -81,5 +81,5 @@ echo
 echo "kept on purpose:"
 echo "  this repository itself ($ROOT) - delete it if you no longer want the source"
 echo "  ~/.dsh/sessions and ~/.dsh/storages (owned by dsh, shared with other dsh use)"
-echo "  ~/.grok (never touched by dscode: GROK_HOME is always overridden to the dsc-tui home)"
+echo "  ~/.grok (never touched by dscode: GROK_HOME is overridden to the profile tui/ dir)"
 echo "  the official @deepseek-ai/dsh npm package (rerun with --remove-dsh to drop it)"

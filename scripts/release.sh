@@ -12,13 +12,21 @@
 #   scripts/release.sh --dry-run  # build + checksum only, no tag/publish
 #
 # Consumers of the published artifacts:
-#   - scripts/install.sh (channel resolution + dscode-linux-x86_64.sha256)
+#   - scripts/install.sh / npx launcher (dscode-linux-x86_64 + dscode-macos-aarch64)
 #   - dscode update (xai-grok-update install_dscode_release)
+#
+# This script can run on Linux or macOS. It attaches the *native* TUI
+# binary when cargo is available, creates the GitHub release, and waits for
+# CI (.github/workflows/release.yml) to upload the other platform before
+# publishing npm. Do not hardcode one OS as the asset name: a Darwin binary
+# shipped as dscode-linux-x86_64 would break Linux installs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=platform.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/platform.sh"
 RELEASE_REPO="HQ1995/deepseek-code"
-ASSET="dscode-linux-x86_64"
+HOST_ASSET="$(dscode_prebuilt_asset)"
 DRY_RUN=0
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
 
@@ -51,22 +59,29 @@ if [[ "$DRY_RUN" == 0 ]]; then
 fi
 
 echo "releasing deepseek-code $TAG"
-echo "  building with GROK_VERSION=$VERSION..."
-GROK_VERSION="$VERSION" bash "$ROOT/scripts/build-deepseek-tui.sh"
-
-BIN="$ROOT/third_party/grok-build/target/release/dscode"
-banner="$("$BIN" --version)"
-if [[ "$banner" != *"$VERSION"* ]]; then
-  echo "error: built binary reports '$banner', expected it to carry $VERSION" >&2
-  exit 1
-fi
-echo "  binary: $banner"
-
 DIST="$ROOT/dist"
 mkdir -p "$DIST"
-cp "$BIN" "$DIST/$ASSET"
-( cd "$DIST" && sha256sum "$ASSET" > "$ASSET.sha256" )
-echo "  $(cat "$DIST/$ASSET.sha256")"
+HOST_FILES=()
+
+if [[ -n "$HOST_ASSET" ]] && command -v cargo >/dev/null 2>&1; then
+  echo "  building native TUI ($HOST_ASSET) with GROK_VERSION=$VERSION..."
+  GROK_VERSION="$VERSION" bash "$ROOT/scripts/build-deepseek-tui.sh"
+  BIN="$ROOT/third_party/grok-build/target/release/dscode"
+  banner="$("$BIN" --version)"
+  if [[ "$banner" != *"$VERSION"* ]]; then
+    echo "error: built binary reports '$banner', expected it to carry $VERSION" >&2
+    exit 1
+  fi
+  echo "  binary: $banner"
+  cp "$BIN" "$DIST/$HOST_ASSET"
+  dscode_write_sha256 "$DIST/$HOST_ASSET" "$DIST/$HOST_ASSET.sha256"
+  echo "  $(cat "$DIST/$HOST_ASSET.sha256")"
+  HOST_FILES=("$DIST/$HOST_ASSET" "$DIST/$HOST_ASSET.sha256")
+elif [[ -n "$HOST_ASSET" ]]; then
+  echo "  no cargo on PATH; CI will publish $HOST_ASSET"
+else
+  echo "  no prebuilt TUI for $(uname -s)-$(uname -m); CI publishes Linux x86_64 and macOS arm64"
+fi
 
 # Apache-2.0 §4: a binary distribution must carry the license and NOTICE.
 # Bundle the repo notices plus the vendored grok-build license and its
@@ -111,15 +126,38 @@ fi
 
 git -C "$ROOT" tag -a "$TAG" -m "deepseek-code $TAG"
 git -C "$ROOT" push origin "$TAG"
+# Bash 3.2 (macOS /bin/bash) treats "${empty[@]}" as unbound under set -u.
+gh_files=("$LICENSES" "$DIST/dscode-plugin.tgz")
+if [[ ${#HOST_FILES[@]} -gt 0 ]]; then
+  gh_files=("${HOST_FILES[@]}" "${gh_files[@]}")
+fi
 gh release create "$TAG" \
   --repo "$RELEASE_REPO" \
   --title "deepseek-code $TAG" \
   --notes "deepseek-code $TAG (channel: $([[ "$VERSION" == *-* ]] && echo beta || echo stable))
 
+Prebuilt TUI: Linux x86_64 (\`dscode-linux-x86_64\`) and macOS Apple Silicon (\`dscode-macos-aarch64\`).
+
 License and attribution for this binary: dscode-licenses.tar.gz (Apache-2.0; includes the vendored grok-build license and modification ledger)." \
   "${PRERELEASE_FLAGS[@]}" \
-  "$DIST/$ASSET" "$DIST/$ASSET.sha256" "$LICENSES" "$DIST/dscode-plugin.tgz"
+  "${gh_files[@]}"
 echo "published $TAG"
+
+echo "  waiting for CI to attach ${DSCODE_REQUIRED_ASSETS[*]}..."
+deadline=$((SECONDS + 2400))
+for asset in "${DSCODE_REQUIRED_ASSETS[@]}"; do
+  while ! curl -fsIL "https://github.com/$RELEASE_REPO/releases/download/$TAG/$asset" >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      echo "error: timed out waiting for $asset on $TAG" >&2
+      echo "  inspect: gh run list --repo $RELEASE_REPO --branch $TAG" >&2
+      echo "  then: scripts/publish-npm.sh --pin $VERSION" >&2
+      exit 1
+    fi
+    echo "    still waiting for $asset..."
+    sleep 20
+  done
+  echo "    $asset ready"
+done
 
 # npm: dscode@$VERSION pinned to this release. The npm account requires 2FA;
 # pass NPM_OTP or run scripts/publish-npm.sh manually afterwards.

@@ -24,8 +24,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "publishing dscode@$PIN to npm (binary pin: v$PIN)"
-if ! curl -fsIL "https://github.com/HQ1995/deepseek-code/releases/download/v$PIN/dscode-linux-x86_64" >/dev/null; then
-  echo "error: release v$PIN has no dscode-linux-x86_64 asset; the launcher pin would 404" >&2
+# shellcheck source=platform.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/platform.sh"
+missing=()
+for asset in "${DSCODE_REQUIRED_ASSETS[@]}"; do
+  if ! curl -fsIL "https://github.com/HQ1995/deepseek-code/releases/download/v$PIN/$asset" >/dev/null; then
+    missing+=("$asset")
+  fi
+done
+if [[ ${#missing[@]} -gt 0 ]]; then
+  echo "error: release v$PIN is missing prebuilt TUI assets: ${missing[*]}" >&2
+  echo "  linux x86_64 and macOS Apple Silicon must both be published before npm" >&2
   exit 1
 fi
 

@@ -8,6 +8,8 @@ A terminal UI for AI coding agents, powered by DeepSeek Harness.
 npx @hqzhao95/dscode
 ```
 
+Prebuilt on Linux x86_64 and macOS Apple Silicon.
+
 The first run sets everything up. After that, use:
 
 ```sh
@@ -31,10 +33,10 @@ npx @hqzhao95/dscode
 ## Uninstall
 
 ```sh
-rm -rf ~/.dsh/profiles/dscode ~/.dsh/dsc-tui ~/.local/bin/dscode
+rm -rf ~/.dsh/profiles/dscode ~/.local/bin/dscode
 ```
 
-Optionally remove dsh too:
+Optionally remove the official dsh CLI too:
 
 ```sh
 npm uninstall -g @deepseek-ai/dsh

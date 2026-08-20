@@ -1,16 +1,17 @@
-# macOS release binaries. scripts/release.sh (run locally) builds the Linux
-# asset, creates the GitHub release, and publishes npm; pushing the tag
-# triggers this workflow, which adds the macOS binaries to that release.
-# workflow_dispatch backfills an existing release (e.g. tag: v0.0.6).
+# Native TUI binaries for every supported OS. scripts/release.sh (Linux or
+# macOS) creates the GitHub release (plugin tarball + licenses, plus the
+# host binary when cargo is available); pushing the tag triggers this
+# workflow, which builds and uploads the remaining platforms.
+# workflow_dispatch backfills an existing release (e.g. tag: v0.0.10).
 # Asset names follow xai-grok-update detect_platform: dscode-{os}-{arch}.
-name: release-macos
+name: release
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing release tag to backfill (e.g. v0.0.6)'
+        description: 'Existing release tag to backfill (e.g. v0.0.10)'
         required: true
 permissions:
   contents: write
@@ -20,12 +21,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - { os: ubuntu-22.04, asset: dscode-linux-x86_64, target: x86_64-unknown-linux-gnu }
           # Apple Silicon only: GitHub retired the free Intel runners, and
           # Intel-mac support is explicitly out of scope.
-          - { asset: dscode-macos-aarch64, target: aarch64-apple-darwin }
-    runs-on: macos-latest
+          - { os: macos-latest, asset: dscode-macos-aarch64, target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.os }}
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
+      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,10 +36,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: third_party/grok-build
-      - name: Build tools
+      - name: Install protoc
         # xai-grok-tools-api build.rs needs protoc; the repo's bin/protoc is
         # a dotslash launcher that only works on the dev host.
-        run: brew install protobuf
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install protobuf
+          else
+            sudo apt-get update
+            sudo apt-get install -y protobuf-compiler
+          fi
       - name: Build
         # cargo directly (not scripts/build-deepseek-tui.sh): backfills check
         # out old tags whose script may carry host-specific wrappers.
@@ -51,7 +60,11 @@ jobs:
         run: |
           mkdir -p dist
           cp "third_party/grok-build/target/${{ matrix.target }}/release/dscode" "dist/${{ matrix.asset }}"
-          ( cd dist && shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256" )
+          if command -v sha256sum >/dev/null 2>&1; then
+            ( cd dist && sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256" )
+          else
+            ( cd dist && shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256" )
+          fi
           cat "dist/${{ matrix.asset }}.sha256"
       - name: Upload to the release
         env:

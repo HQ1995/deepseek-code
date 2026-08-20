@@ -10,6 +10,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=platform.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/platform.sh"
 # The prebuilt TUI is unchanged by harness migrations, so it keeps its own
 # release tag rather than tracking the repo release.
 TUI_RELEASE="${DEEPSEEK_CODE_TUI_RELEASE:-v0.0.4}"
@@ -49,16 +51,17 @@ if [[ -z "$DSH_VERSION" ]]; then
   exit 1
 fi
 
-# Official dsh CLI. The launcher prefers this global binary and falls back to
-# npx on demand, so a failed global install is a warning, not a stop.
-DSH_BIN="$(npm prefix -g)/bin/dsh"
-if npm install -g "@deepseek-ai/dsh@$DSH_VERSION" >/dev/null; then
-  echo "  installed @deepseek-ai/dsh@$DSH_VERSION ($("$DSH_BIN" --version))"
-else
-  echo "  warning: 'npm install -g @deepseek-ai/dsh@$DSH_VERSION' failed; the launcher will use: npx --yes @deepseek-ai/dsh@$DSH_VERSION" >&2
+# Official dsh CLI on PATH. Install the pin globally if `dsh` is missing;
+# fall back to npx only when that also fails.
+if ! command -v dsh >/dev/null 2>&1; then
+  if npm install -g "@deepseek-ai/dsh@$DSH_VERSION" >/dev/null; then
+    echo "  installed @deepseek-ai/dsh@$DSH_VERSION ($(dsh --version))"
+  else
+    echo "  warning: 'npm install -g @deepseek-ai/dsh@$DSH_VERSION' failed; using npx" >&2
+  fi
 fi
-if [[ -x "$DSH_BIN" ]]; then
-  DSH_RUN=("$DSH_BIN")
+if command -v dsh >/dev/null 2>&1; then
+  DSH_RUN=(dsh)
 else
   DSH_RUN=(npx --yes "@deepseek-ai/dsh@$DSH_VERSION")
 fi
@@ -96,11 +99,7 @@ DSC_CHANNEL="${DSC_CHANNEL:-stable}"
 RELEASE_REPO="HQ1995/deepseek-code"
 RELEASE_API="https://api.github.com/repos/$RELEASE_REPO/releases"
 BIN_PATH="$ROOT/third_party/grok-build/target/release/dscode"
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64)   ASSET="dscode-linux-x86_64" ;;
-  Darwin-arm64)   ASSET="dscode-macos-aarch64" ;;
-  *)              ASSET="" ;;
-esac
+ASSET="$(dscode_prebuilt_asset)"
 
 resolve_release_tag() {
   case "$DSC_CHANNEL" in
@@ -159,12 +158,8 @@ verify_or_fail() { # $1 = expected sha (may be empty), exits on mismatch
     echo "  warning: no checksum published for $TUI_RELEASE; skipping verification" >&2
     return 0
   fi
-  if ! command -v sha256sum >/dev/null 2>&1; then
-    echo "error: sha256sum is required to verify the prebuilt dscode" >&2
-    exit 1
-  fi
   local actual
-  actual="$(sha256sum "$BIN_PATH" | cut -d' ' -f1)"
+  actual="$(dscode_file_sha256 "$BIN_PATH")"
   if [[ "$actual" != "$1" ]]; then
     rm -f "$BIN_PATH"
     echo "error: dscode failed its SHA-256 check for $TUI_RELEASE (got $actual, want $1)" >&2
@@ -182,7 +177,7 @@ if [[ -n "$ASSET" ]]; then
   expected_sha="$(expected_dscode_sha256)"
   if [[ -x "$BIN_PATH" && -n "$expected_sha" ]]; then
     echo "  prebuilt dscode already present; verifying its SHA-256 before use"
-    actual_sha="$(sha256sum "$BIN_PATH" | cut -d' ' -f1)"
+    actual_sha="$(dscode_file_sha256 "$BIN_PATH")"
     if [[ "$actual_sha" == "$expected_sha" ]]; then
       echo "  prebuilt dscode verified"
     else

@@ -1,0 +1,31 @@
+# Dual-platform PR checks. Compile the TUI only on tagged releases
+# (.github/workflows/release.yml); this job is the cheap gate that catches
+# Linux vs macOS script/launcher drift without bouncing machines.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Scripts (bash 3.2-safe on macOS)
+        run: bash scripts/check.sh
+      - name: Bridge tests
+        working-directory: bridge/grok-leader
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec vitest run

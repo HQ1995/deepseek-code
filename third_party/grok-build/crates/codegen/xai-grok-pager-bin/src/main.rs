@@ -1842,17 +1842,17 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     true
 }
 fn main() {
-    // dscode isolation: the TUI local state (session list, changelog, logs,
-    // caches) must never land in ~/.grok, so a real grok-build install on the
-    // same machine cannot share or clobber it. DSC_HOME is the only public
-    // knob; default $DSH_HOME/dsc-tui, else ~/.dsh/dsc-tui. GROK_HOME is used
-    // purely as an internal transport and is ALWAYS overwritten - an ambient
-    // GROK_HOME (set for the real grok) is ignored, not honored.
-    let tui_home = std::env::var_os("DSC_HOME").filter(|v| !v.is_empty())
+    // dscode isolation: TUI state must never land in ~/.grok.
+    // Public knob: DSCODE_HOME. dsh-native: DSH_PROFILE_DIR. 0.0.10 alias: DSC_HOME.
+    // Default: ~/.dsh/profiles/dscode. GROK_HOME is internal and always overwritten.
+    let first_dir = |key: &str| std::env::var_os(key).filter(|v| !v.is_empty());
+    let tui_home = first_dir("DSCODE_HOME")
+        .or_else(|| first_dir("DSH_PROFILE_DIR"))
+        .or_else(|| first_dir("DSC_HOME"))
         .or_else(|| std::env::var_os("DSH_HOME").filter(|v| !v.is_empty())
-            .map(|h| std::path::Path::new(&h).join("dsc-tui").into_os_string()))
+            .map(|h| std::path::Path::new(&h).join("profiles").join("dscode").into_os_string()))
         .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty())
-            .map(|h| std::path::Path::new(&h).join(".dsh").join("dsc-tui").into_os_string()));
+            .map(|h| std::path::Path::new(&h).join(".dsh").join("profiles").join("dscode").into_os_string()));
     if let Some(tui_home) = tui_home {
         // SAFETY: startup is single-threaded here.
         unsafe { std::env::set_var("GROK_HOME", tui_home) };

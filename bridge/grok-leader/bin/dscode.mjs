@@ -8,16 +8,16 @@
 //   npx @hqzhao95/dscode
 //
 // On first run it registers this plugin into the dscode dsh
-// profile (through the official dsh CLI — resolved from DSH_BIN, PATH, or
-// `npx --yes @deepseek-ai/dsh`), materializes the matching TUI binary from
-// GitHub Releases, and links `dscode` into ~/.local/bin; afterwards plain
-// `dscode` is the command. The profile name is an internal detail the user
-// never types.
+// profile, installs the official dsh CLI with `npm i -g` if `dsh` is not
+// on PATH, materializes the matching TUI binary from GitHub Releases, and
+// links `dscode` into ~/.local/bin; afterwards plain `dscode` is the command.
+// The profile name is an internal detail the user never types. The TUI
+// must not be left to `npx` the leader after it has entered the alt screen.
 //
-// The binary lives in the dsc-tui home (~/.dsh/dsc-tui/bin/dscode), NOT in
-// the package dir, so profile reinstalls never re-download 200MB — and the
-// TUI's own updater (`dscode update` writes to canonicalize(current_exe))
-// lands in the same file, keeping one source of truth.
+// TUI binary + grok-home state live in the dscode profile directory
+// itself (`~/.dsh/profiles/dscode`), the same place dsh already gives the
+// plugin. Not node_modules (reinstalls wipe it), not a sibling ~/.dsh/dsc-tui,
+// and not an extra tui/ folder inside the profile.
 //
 // Version policy mirrors the Rust updater's dev guard: the pinned release
 // comes from package.json `dscode.release` (stamped by scripts/release.sh);
@@ -26,7 +26,7 @@
 // cache → left alone (developer-managed).
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -43,36 +43,85 @@ const fail = (message) => {
 }
 
 // Supported prebuilts: Linux x86_64 and macOS Apple Silicon (Intel macs
-// are out of scope — build from a checkout).
-const assetName = () => ({
+// and other arches build from a checkout). Keys are node
+// `${process.platform}-${process.arch}`.
+export const TUI_ASSETS = {
   'linux-x64': 'dscode-linux-x86_64',
   'darwin-arm64': 'dscode-macos-aarch64',
-}[`${process.platform}-${process.arch}`])
+}
+export const tuiAssetName = (platform, arch) => TUI_ASSETS[`${platform}-${arch}`]
+const assetName = () => tuiAssetName(process.platform, process.arch)
 
 const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-const binDir = join(dshHome, 'dsc-tui', 'bin')
-const binPath = join(binDir, 'dscode')
-
 // The dsh profile the TUI spawns its leader with (xai-grok-pager
 // dsh_leader.rs hardcodes the same name) — internal, never user-typed.
 const PROFILE_NAME = 'dscode'
-const profileDir = join(dshHome, 'profiles', PROFILE_NAME)
+export const profileDir = join(dshHome, 'profiles', PROFILE_NAME)
+/** DSCODE_HOME defaults to the profile dsh already owns. */
+export const tuiHome = profileDir
+const binDir = join(profileDir, 'bin')
+const binPath = join(binDir, 'dscode')
 const profileLauncher = join(profileDir, 'node_modules', ...pkg.name.split('/'), 'bin', 'dscode.mjs')
 
 /** The exact dsh version this release was tested against. */
 const dshTestedVersion = pkg.dsh?.testedVersion
 
-/** dsh CLI argv: DSH_BIN, then dsh on PATH, then npx on demand — the same
- *  resolution order the TUI uses to spawn the leader (dsh_leader.rs). */
-const dshCommand = () => {
-  if (process.env.DSH_BIN !== undefined && process.env.DSH_BIN !== '') return [process.env.DSH_BIN]
-  for (const dir of (process.env.PATH ?? '').split(':')) {
-    if (dir !== '' && existsSync(join(dir, 'dsh'))) return [join(dir, 'dsh')]
-  }
-  const spec = dshTestedVersion ? `@deepseek-ai/dsh@${dshTestedVersion}` : '@deepseek-ai/dsh'
-  return ['npx', '--yes', spec]
+/** POSIX `command -v`: the shell's PATH lookup, not a handwritten split. */
+const commandV = (name) => {
+  const probe = spawnSync('/bin/sh', ['-c', 'command -v -- "$1"', 'sh', name], {
+    encoding: 'utf8',
+  })
+  const path = typeof probe.stdout === 'string' ? probe.stdout.trim() : ''
+  return probe.status === 0 && path !== '' ? path : undefined
 }
 
+/** Official dsh CLI on PATH, else `npm i -g` the pin. Same command a user would run. */
+export const ensureDshCli = () => {
+  const envBin = process.env.DSH_BIN
+  if (envBin !== undefined && envBin !== '' && existsSync(envBin)) return envBin
+
+  const existing = commandV('dsh')
+  if (existing !== undefined) return existing
+
+  const spec = dshTestedVersion ? `@deepseek-ai/dsh@${dshTestedVersion}` : '@deepseek-ai/dsh'
+  console.error(`dscode: first run — installing ${spec}...`)
+  const argv = ['install', '-g', spec, '--no-audit', '--no-fund']
+  const result = spawnSync('npm', argv, {
+    stdio: ['ignore', 'inherit', 'inherit'],
+    timeout: 600000,
+  })
+  if (result.error?.code === 'ETIMEDOUT') {
+    throw new Error(`dsh install timed out; run manually: npm ${argv.join(' ')}`)
+  }
+  if (result.status !== 0) {
+    throw new Error(`dsh install failed; run manually: npm ${argv.join(' ')}`)
+  }
+  const installed = commandV('dsh')
+  if (installed === undefined) {
+    throw new Error(`dsh installed but not on PATH; run manually: npm ${argv.join(' ')}`)
+  }
+  return installed
+}
+
+/** Pull an old TUI home (sibling ~/.dsh/dsc-tui, or profile/tui/) into the profile. */
+export const migrateLegacyTuiHome = () => {
+  mkdirSync(profileDir, { recursive: true })
+  const destRoot = realpathSync(profileDir)
+  for (const from of [join(dshHome, 'dsc-tui'), join(profileDir, 'tui')]) {
+    if (!existsSync(from) || realpathSync(from) === destRoot) continue
+    for (const name of readdirSync(from)) {
+      const src = join(from, name)
+      const dest = join(profileDir, name)
+      if (!existsSync(dest)) renameSync(src, dest)
+    }
+    rmSync(from, { recursive: true, force: true })
+  }
+}
+
+const spawnTui = (bin, env) => {
+  const child = spawn(bin, process.argv.slice(2), { stdio: 'inherit', env })
+  child.on('exit', (code, signal) => process.exit(signal !== null ? 1 : code ?? 1))
+}
 
 const PROFILE_PATCH_TEMPLATE = `# Your patch layer for this dsh profile, applied after every bundle layer:
 # a top-level YAML array of loader patch entries (id-targeted config
@@ -245,16 +294,26 @@ export const ensureBinary = async () => {
 }
 
 const main = async () => {
+  if (process.env.DSCODE_BIN === undefined || process.env.DSCODE_BIN === '') {
+    ensureProfilePlugin()
+    healLauncherLink()
+    migrateLegacyTuiHome()
+  }
+  const dshBin = ensureDshCli()
+  const env = {
+    ...process.env,
+    DSH_BIN: dshBin,
+    DSCODE_HOME: tuiHome,
+    // 0.0.10 TUI only reads DSC_HOME; drop after that binary is gone.
+    DSC_HOME: tuiHome,
+    DSH_PROFILE_DIR: profileDir,
+  }
   if (process.env.DSCODE_BIN !== undefined && process.env.DSCODE_BIN !== '') {
-    const child = spawn(process.env.DSCODE_BIN, process.argv.slice(2), { stdio: 'inherit' })
-    child.on('exit', (code, signal) => process.exit(signal !== null ? 1 : code ?? 1))
+    spawnTui(process.env.DSCODE_BIN, env)
     return
   }
-  ensureProfilePlugin()
-  healLauncherLink()
   const bin = await ensureBinary()
-  const child = spawn(bin, process.argv.slice(2), { stdio: 'inherit' })
-  child.on('exit', (code, signal) => process.exit(signal !== null ? 1 : code ?? 1))
+  spawnTui(bin, env)
 }
 
 const invokedDirectly = (() => {

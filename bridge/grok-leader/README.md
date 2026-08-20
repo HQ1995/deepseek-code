@@ -4,13 +4,13 @@ DeepSeek Harness coding TUI, distributed as a dsh plugin: this package
 carries the grok-leader bridge (the dsh-side server the TUI drives) plus the
 `dscode` launcher, which materializes the release-pinned TUI binary from
 GitHub Releases on first run (SHA-256 verified, cached at
-`~/.dsh/dsc-tui/bin/`).
+`~/.dsh/profiles/dscode/bin/`).
 
 ```sh
-npm i -g @deepseek-ai/dsh@0.1.0-rc.8
-dsh plugin --profile dscode add @hqzhao95/dscode
-~/.dsh/profiles/dscode/node_modules/.bin/dscode   # first run links ~/.local/bin/dscode
+npx @hqzhao95/dscode
 ```
+
+First run runs `npm i -g @deepseek-ai/dsh@<pin>` if `dsh` is not already on PATH, downloads the TUI binary, and links `dscode`. You do not install dsh yourself.
 
 > **Personal project** — not affiliated with, endorsed by, or sponsored by
 > DeepSeek or xAI; their names appear only to describe the open-source

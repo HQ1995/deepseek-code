@@ -53,7 +53,11 @@ snap() { tmux -L "$SESSION" -f /dev/null capture-pane -p -t "$SESSION:0.0" > "$O
 
 boot_and_wait() {
   local label="$1" sock="$2"
-  tmux -L "$SESSION" -f /dev/null new-session -d -s "$SESSION" -x 200 -y 50 "cd $ROOT && exec numactl --cpunodebind=1 --membind=1 $BIN"
+  local cmd="$BIN"
+  if command -v numactl >/dev/null 2>&1; then
+    cmd="numactl --cpunodebind=1 --membind=1 $BIN"
+  fi
+  tmux -L "$SESSION" -f /dev/null new-session -d -s "$SESSION" -x 200 -y 50 "cd $ROOT && exec $cmd"
   for _ in $(seq 1 120); do
     snap "$label-wait"
     if [ -S "$sock" ] && [ -s "$OUT/frame-$RUN_ID-$label-wait.txt" ]; then sleep 5; return 0; fi

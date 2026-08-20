@@ -43,6 +43,23 @@ through its own pipeline; the other side does not change.
   3. update the launcher/installer if the CLI invocation changes;
   4. cut a new dscode release.
 
+## Linux and macOS
+
+Sit on one machine. Do not bounce Linux/macOS for every change.
+
+Portable by construction: the TUI is Rust (`cfg!(target_os)`), the launcher
+maps `process.platform` to a GitHub asset, and `scripts/platform.sh` hides
+`sha256sum` vs `shasum` / GNU vs BSD `stat`. `numactl` is optional host
+policy, never required.
+
+CI is the other OS:
+- `.github/workflows/ci.yml` — every PR, Ubuntu + macOS: script smoke +
+  bridge vitest. Run the same locally with `bash scripts/check.sh`.
+- `.github/workflows/release.yml` — tags only: compile both TUI binaries.
+
+Eyeball the TUI on the other OS only when you change startup, install, or
+the leader spawn path.
+
 ## Bridge (bridge/grok-leader)
 
 - Owned by dscode, out-of-tree from the harness. It implements the leader
