@@ -8,6 +8,8 @@ import { nodeVersionSupported } from '../bin/dscode.mjs'
 
 const launcher = fileURLToPath(new URL('../bin/dscode.mjs', import.meta.url))
 const packageVersion = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
+const [packageMajor, packageMinor, packagePatch] = packageVersion.split(/[.-]/).slice(0, 3).map(Number)
+const updatedPackageVersion = `${packageMajor}.${packageMinor}.${packagePatch + 1}-beta.1`
 const homes: string[] = []
 const productNode = process.env.DSCODE_E2E_NODE_BIN
   ?? (nodeVersionSupported(process.versions.node) ? process.execPath : undefined)
@@ -132,7 +134,7 @@ while [ "$#" -gt 0 ]; do
   if [ "$1" = '--prefix' ]; then prefix="$2"; shift 2; else shift; fi
 done
 mkdir -p "$prefix/node_modules/@hqzhao95/dscode/bin"
-printf '%s' '{"name":"@hqzhao95/dscode","version":"0.0.11-beta.1"}' > "$prefix/node_modules/@hqzhao95/dscode/package.json"
+printf '%s' '{"name":"@hqzhao95/dscode","version":"${updatedPackageVersion}"}' > "$prefix/node_modules/@hqzhao95/dscode/package.json"
 cat > "$prefix/node_modules/@hqzhao95/dscode/bin/dscode.mjs" <<'EOF'
 #!/bin/sh
 printf 'RECONCILED=%s\nARGS=' "\${DSCODE_PACKAGE_RECONCILED:-}" > ${reexecLog}
@@ -154,7 +156,7 @@ chmod +x "$prefix/node_modules/@hqzhao95/dscode/bin/dscode.mjs"
     })
 
     expect(result.status, result.stderr).toBe(0)
-    expect(JSON.parse(readFileSync(join(plugin, 'package.json'), 'utf8')).version).toBe('0.0.11-beta.1')
+    expect(JSON.parse(readFileSync(join(plugin, 'package.json'), 'utf8')).version).toBe(updatedPackageVersion)
     expect(readFileSync(reexecLog, 'utf8')).toBe('RECONCILED=1\nARGS=<--debug><update><--alpha>\n')
   })
 
