@@ -24,21 +24,25 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "publishing dscode@$PIN to npm (binary pin: v$PIN)"
+NPM_TAG="latest"
+[[ "$PIN" == *-* ]] && NPM_TAG="beta"
 # shellcheck source=platform.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/platform.sh"
 missing=()
 for asset in "${DSCODE_REQUIRED_ASSETS[@]}"; do
-  if ! curl -fsIL "https://github.com/HQ1995/deepseek-code/releases/download/v$PIN/$asset" >/dev/null; then
-    missing+=("$asset")
-  fi
+  for required in "$asset" "$asset.sha256"; do
+    if ! curl -fsIL "https://github.com/HQ1995/deepseek-code/releases/download/v$PIN/$required" >/dev/null; then
+      missing+=("$required")
+    fi
+  done
 done
 if [[ ${#missing[@]} -gt 0 ]]; then
-  echo "error: release v$PIN is missing prebuilt TUI assets: ${missing[*]}" >&2
-  echo "  linux x86_64 and macOS Apple Silicon must both be published before npm" >&2
+  echo "error: release v$PIN is missing required assets: ${missing[*]}" >&2
+  echo "  both platform binaries and their SHA-256 files must exist before npm" >&2
   exit 1
 fi
 
-( cd "$ROOT/bridge/grok-leader" && pnpm install --silent && pnpm run --silent build )
+( cd "$ROOT/bridge/grok-leader" && dscode_pnpm install --silent && dscode_pnpm run --silent build )
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 cp -r "$ROOT/bridge/grok-leader/lib" "$ROOT/bridge/grok-leader/src" \
@@ -51,6 +55,6 @@ pkg["version"] = sys.argv[3]
 pkg["dscode"] = {"release": sys.argv[3]}
 f = open(sys.argv[2], "w"); json.dump(pkg, f, indent=2, ensure_ascii=False); f.write("\n")
 PY
-( cd "$stage" && npm publish --access public ${OTP:+--otp="$OTP"} \
+( cd "$stage" && npm publish --access public --tag "$NPM_TAG" ${OTP:+--otp="$OTP"} \
     ${NPM_TOKEN:+--//registry.npmjs.org/:_authToken="$NPM_TOKEN"} )
-echo "published: npm view @hqzhao95/dscode version -> $(npm view @hqzhao95/dscode version)"
+echo "published: npm view @hqzhao95/dscode@$NPM_TAG version -> $(npm view "@hqzhao95/dscode@$NPM_TAG" version)"

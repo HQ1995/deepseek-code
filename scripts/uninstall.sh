@@ -81,5 +81,5 @@ echo
 echo "kept on purpose:"
 echo "  this repository itself ($ROOT) - delete it if you no longer want the source"
 echo "  ~/.dsh/sessions and ~/.dsh/storages (owned by dsh, shared with other dsh use)"
-echo "  ~/.grok (never touched by dscode: GROK_HOME is overridden to the profile tui/ dir)"
-echo "  the official @deepseek-ai/dsh npm package (rerun with --remove-dsh to drop it)"
+echo "  ~/.grok (never touched by dscode: TUI state lives in the removed profile)"
+echo "  any external/global @deepseek-ai/dsh package (rerun with --remove-dsh to drop it)"

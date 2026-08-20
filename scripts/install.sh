@@ -51,17 +51,15 @@ if [[ -z "$DSH_VERSION" ]]; then
   exit 1
 fi
 
-# Official dsh CLI on PATH. Install the pin globally if `dsh` is missing;
-# fall back to npx only when that also fails.
-if ! command -v dsh >/dev/null 2>&1; then
-  if npm install -g "@deepseek-ai/dsh@$DSH_VERSION" >/dev/null; then
-    echo "  installed @deepseek-ai/dsh@$DSH_VERSION ($(dsh --version))"
-  else
-    echo "  warning: 'npm install -g @deepseek-ai/dsh@$DSH_VERSION' failed; using npx" >&2
-  fi
-fi
+# Source installs never mutate the user's global npm prefix. Use an existing
+# tested dsh or the exact npx pin for the one-time profile operation.
 if command -v dsh >/dev/null 2>&1; then
-  DSH_RUN=(dsh)
+  installed_dsh_version="$(dsh --version 2>/dev/null | head -1 || true)"
+  if [[ "$installed_dsh_version" == "$DSH_VERSION" ]]; then
+    DSH_RUN=(dsh)
+  else
+    DSH_RUN=(npx --yes "@deepseek-ai/dsh@$DSH_VERSION")
+  fi
 else
   DSH_RUN=(npx --yes "@deepseek-ai/dsh@$DSH_VERSION")
 fi
@@ -74,7 +72,7 @@ PROFILE_DIR="$HOME/.dsh/profiles/$PROFILE_NAME"
 # into the dscode profile. The official CLI initializes the profile
 # with the dsh-base bundle and reconciles the bridge's cordis.patch.yml layer.
 echo "  building the grok-leader bridge..."
-( cd "$ROOT/bridge/grok-leader" && pnpm install && pnpm run build )
+( cd "$ROOT/bridge/grok-leader" && dscode_pnpm install && dscode_pnpm run build )
 echo "  installing the bridge into the $PROFILE_NAME profile..."
 "${DSH_RUN[@]}" plugin --profile "$PROFILE_NAME" add "file:$ROOT/bridge/grok-leader"
 # pnpm materializes the file: dependency as hard links through its store, so
@@ -85,7 +83,7 @@ echo "  installing the bridge into the $PROFILE_NAME profile..."
 profile_dir="$PROFILE_DIR"
 if [[ -d "$profile_dir/node_modules" ]]; then
   rm -rf "$profile_dir/node_modules"
-  ( cd "$profile_dir" && pnpm install --force )
+  ( cd "$profile_dir" && dscode_pnpm install --force )
 fi
 
 # Prebuilt TUI binary into the repo tree. The release channel picks which

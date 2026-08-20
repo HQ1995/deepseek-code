@@ -8,9 +8,9 @@
 //   npx @hqzhao95/dscode
 //
 // On first run it registers this plugin into the dscode dsh
-// profile, installs the official dsh CLI with `npm i -g` if `dsh` is not
-// on PATH, materializes the matching TUI binary from GitHub Releases, and
-// links `dscode` into ~/.local/bin; afterwards plain `dscode` is the command.
+// profile, provisions the tested dsh CLI inside that profile when no compatible
+// CLI is on PATH, materializes the matching TUI binary from GitHub Releases,
+// and links `dscode` into ~/.local/bin; afterwards plain `dscode` is the command.
 // The profile name is an internal detail the user never types. The TUI
 // must not be left to `npx` the leader after it has entered the alt screen.
 //
@@ -28,7 +28,7 @@ import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { chmodSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -61,10 +61,23 @@ export const profileDir = join(dshHome, 'profiles', PROFILE_NAME)
 export const tuiHome = profileDir
 const binDir = join(profileDir, 'bin')
 const binPath = join(binDir, 'dscode')
-const profileLauncher = join(profileDir, 'node_modules', ...pkg.name.split('/'), 'bin', 'dscode.mjs')
+export const profileLauncher = join(profileDir, 'node_modules', ...pkg.name.split('/'), 'bin', 'dscode.mjs')
+const runtimeDir = join(profileDir, 'runtime')
+export const dshRuntimeBin = join(runtimeDir, 'node_modules', '.bin', process.platform === 'win32' ? 'dsh.cmd' : 'dsh')
 
 /** The exact dsh version this release was tested against. */
 const dshTestedVersion = pkg.dsh?.testedVersion
+
+export const nodeVersionSupported = (version) => {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version)
+  if (match === null) return false
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  return (major === 22 && minor >= 19) || major >= 24
+}
+
+export const parseCliVersion = (output) =>
+  /(?:^|\s)(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\s|$)/.exec(output)?.[1]
 
 /** POSIX `command -v`: the shell's PATH lookup, not a handwritten split. */
 const commandV = (name) => {
@@ -75,9 +88,17 @@ const commandV = (name) => {
   return probe.status === 0 && path !== '' ? path : undefined
 }
 
-const npmInstallDsh = (spec, extraArgs = []) => {
-  const argv = ['install', '-g', spec, '--no-audit', '--no-fund', ...extraArgs]
-  console.error(`dscode: first run — npm ${argv.join(' ')}`)
+const cliVersion = (binary) => {
+  if (!existsSync(binary)) return undefined
+  const probe = spawnSync(binary, ['--version'], { encoding: 'utf8', timeout: 15000 })
+  if (probe.status !== 0 || typeof probe.stdout !== 'string') return undefined
+  return parseCliVersion(probe.stdout.trim())
+}
+
+const installOwnedDsh = (spec) => {
+  mkdirSync(runtimeDir, { recursive: true })
+  const argv = ['install', '--prefix', runtimeDir, spec, '--omit=dev', '--no-audit', '--no-fund']
+  console.error(`dscode: installing the tested dsh runtime — npm ${argv.join(' ')}`)
   const result = spawnSync('npm', argv, {
     stdio: ['ignore', 'inherit', 'inherit'],
     timeout: 600000,
@@ -85,31 +106,26 @@ const npmInstallDsh = (spec, extraArgs = []) => {
   if (result.error?.code === 'ETIMEDOUT') {
     throw new Error(`dsh install timed out; run manually: npm ${argv.join(' ')}`)
   }
-  return result.status === 0
+  if (result.status !== 0) {
+    throw new Error(`dsh install failed; run manually: npm ${argv.join(' ')}`)
+  }
 }
 
-/** Official dsh on PATH, else `npm i -g`. If /usr/local is not writable,
- *  install into ~/.local (same prefix as the dscode symlink). */
+/** Use an explicit override, a tested dsh on PATH, or the profile-owned pin. */
 export const ensureDshCli = () => {
   const envBin = process.env.DSH_BIN
   if (envBin !== undefined && envBin !== '' && existsSync(envBin)) return envBin
 
   const existing = commandV('dsh')
-  if (existing !== undefined) return existing
+  if (existing !== undefined && cliVersion(existing) === dshTestedVersion) return existing
 
   const spec = dshTestedVersion ? `@deepseek-ai/dsh@${dshTestedVersion}` : '@deepseek-ai/dsh'
-  const userPrefix = join(homedir(), '.local')
-  const userBin = join(userPrefix, 'bin', 'dsh')
-  if (!npmInstallDsh(spec) || commandV('dsh') === undefined) {
-    if (!npmInstallDsh(spec, ['--prefix', userPrefix]) || !existsSync(userBin)) {
-      throw new Error(`dsh install failed; run: npm install -g ${spec}`)
-    }
+  if (cliVersion(dshRuntimeBin) !== dshTestedVersion) installOwnedDsh(spec)
+  const installedVersion = cliVersion(dshRuntimeBin)
+  if (installedVersion !== dshTestedVersion) {
+    throw new Error(`dsh runtime reports ${installedVersion ?? 'no version'}, expected ${dshTestedVersion}`)
   }
-  const installed = commandV('dsh') ?? (existsSync(userBin) ? userBin : undefined)
-  if (installed === undefined) {
-    throw new Error(`dsh installed but not on PATH; add ${join(homedir(), '.local', 'bin')} to PATH`)
-  }
-  return installed
+  return dshRuntimeBin
 }
 
 /** Pull an old TUI home (sibling ~/.dsh/dsc-tui, or profile/tui/) into the profile. */
@@ -127,10 +143,12 @@ export const migrateLegacyTuiHome = () => {
   }
 }
 
-const spawnTui = (bin, env) => {
-  const child = spawn(bin, process.argv.slice(2), { stdio: 'inherit', env })
+const spawnAndExit = (bin, args, env) => {
+  const child = spawn(bin, args, { stdio: 'inherit', env })
   child.on('exit', (code, signal) => process.exit(signal !== null ? 1 : code ?? 1))
 }
+
+const spawnTui = (bin, env) => spawnAndExit(bin, process.argv.slice(2), env)
 
 const PROFILE_PATCH_TEMPLATE = `# Your patch layer for this dsh profile, applied after every bundle layer:
 # a top-level YAML array of loader patch entries (id-targeted config
@@ -138,31 +156,69 @@ const PROFILE_PATCH_TEMPLATE = `# Your patch layer for this dsh profile, applied
 []
 `
 
-/** First run: register this plugin into the dscode dsh profile without
- *  requiring the dsh CLI or pnpm. This mirrors what `dsh plugin add` does,
- *  but uses npm with --legacy-peer-deps so the dsh-provided peer packages
- *  are not downloaded again. */
-export const ensureProfilePlugin = () => {
-  const pluginDir = join(profileDir, 'node_modules', ...pkg.name.split('/'))
-  if (existsSync(join(pluginDir, 'package.json'))) return
+const pluginDir = join(profileDir, 'node_modules', ...pkg.name.split('/'))
+const pluginManifestPath = join(pluginDir, 'package.json')
+const profileManifestPath = join(profileDir, 'package.json')
 
+const readJsonFile = (path) => {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+
+export const packageNeedsInstall = (installedVersion, desiredVersion) =>
+  installedVersion !== desiredVersion
+
+const installedProfileVersion = () => {
+  const installed = readJsonFile(pluginManifestPath)
+  return typeof installed?.version === 'string' ? installed.version : undefined
+}
+
+const scaffoldProfile = () => {
   mkdirSync(profileDir, { recursive: true })
-
-  const manifestPath = join(profileDir, 'package.json')
-  if (!existsSync(manifestPath)) {
-    writeFileSync(manifestPath, JSON.stringify({
+  if (!existsSync(profileManifestPath)) {
+    writeFileSync(profileManifestPath, JSON.stringify({
       name: 'dsh-profile-dscode',
       private: true,
       dependencies: {},
       dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
     }, null, 2) + '\n')
   }
-
   const patchPath = join(profileDir, 'cordis.patch.yml')
   if (!existsSync(patchPath)) writeFileSync(patchPath, PROFILE_PATCH_TEMPLATE)
+}
 
-  const spec = `${pkg.name}@${pkg.version}`
-  console.error(`dscode: first run — installing ${spec} into the ${PROFILE_NAME} dsh profile...`)
+const reconcileProfileManifest = () => {
+  const manifest = readJsonFile(profileManifestPath)
+  if (manifest === undefined) throw new Error(`invalid profile manifest: ${profileManifestPath}`)
+  const bundles = manifest.dsh?.profile?.bundles ?? ['@deepseek-ai/dsh-base']
+  if (!bundles.includes(pkg.name)) bundles.push(pkg.name)
+  manifest.dsh = {
+    ...manifest.dsh,
+    profile: { ...manifest.dsh?.profile, bundles },
+  }
+  writeFileSync(profileManifestPath, JSON.stringify(manifest, null, 2) + '\n')
+}
+
+/** First run: register this plugin into the dscode dsh profile without
+ *  requiring the dsh CLI or pnpm. This mirrors what `dsh plugin add` does,
+ *  but uses npm with --legacy-peer-deps so the dsh-provided peer packages
+ *  are not downloaded again. */
+export const ensureProfilePlugin = ({
+  spec = `${pkg.name}@${pkg.version}`,
+  expectedVersion = pkg.version,
+  force = false,
+} = {}) => {
+  scaffoldProfile()
+  const before = installedProfileVersion()
+  if (!force && !packageNeedsInstall(before, pkg.version)) {
+    reconcileProfileManifest()
+    return { changed: false, version: before }
+  }
+
+  console.error(`dscode: ${before === undefined ? 'installing' : `upgrading ${pkg.name} ${before}`} → ${spec} in the ${PROFILE_NAME} profile...`)
   const argv = ['install', '--prefix', profileDir, spec, '--no-audit', '--no-fund', '--legacy-peer-deps']
   if (process.env.DSCODE_DEBUG !== undefined) console.error(`dscode: running: npm ${argv.join(' ')}`)
   const result = spawnSync('npm', argv, {
@@ -172,19 +228,16 @@ export const ensureProfilePlugin = () => {
   if (result.error?.code === 'ETIMEDOUT') {
     throw new Error(`plugin install timed out; run manually: npm ${argv.join(' ')}`)
   }
-  if (result.status !== 0 || !existsSync(join(pluginDir, 'package.json'))) {
+  const installedVersion = installedProfileVersion()
+  if (result.status !== 0 || installedVersion === undefined) {
     throw new Error(`plugin install failed; run manually: npm ${argv.join(' ')}`)
   }
-
-  // Reconcile the profile manifest: add this plugin as a bundle layer.
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-  const bundles = manifest.dsh?.profile?.bundles ?? ['@deepseek-ai/dsh-base']
-  if (!bundles.includes(pkg.name)) bundles.push(pkg.name)
-  manifest.dsh = {
-    ...manifest.dsh,
-    profile: { ...manifest.dsh?.profile, bundles },
+  if (expectedVersion !== null && installedVersion !== expectedVersion) {
+    throw new Error(`plugin install resolved ${installedVersion}, expected ${expectedVersion}`)
   }
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
+
+  reconcileProfileManifest()
+  return { changed: before !== installedVersion, version: installedVersion }
 }
 
 /** Pinned release for this package build: X.Y.Z, no leading v. */
@@ -240,7 +293,7 @@ const installBinary = async (release, asset) => {
       const actual = await sha256File(tmp)
       if (expected !== actual) throw new Error(`SHA-256 mismatch (got ${actual}, want ${expected})`)
     } else {
-      console.error('dscode: warning: no .sha256 asset published for this release; skipping verification')
+      throw new Error(`release v${release} has no ${asset}.sha256 asset`)
     }
     chmodSync(tmp, 0o755)
     renameSync(tmp, binPath)
@@ -280,6 +333,59 @@ export const healLauncherLink = () => {
   }
 }
 
+export const ownedLauncherTarget = (target) => resolve(target) === resolve(profileLauncher)
+
+const profileIsOwned = () => {
+  const installed = readJsonFile(pluginManifestPath)
+  if (installed?.name === pkg.name) return true
+  const manifest = readJsonFile(profileManifestPath)
+  if (manifest?.name === `dsh-profile-${PROFILE_NAME}` && manifest.private === true) return true
+  const bundles = manifest?.dsh?.profile?.bundles
+  return Array.isArray(bundles) && bundles.includes(pkg.name)
+}
+
+/** Remove only product-owned state. Shared dsh sessions/storages stay intact. */
+export const uninstallInstallation = () => {
+  if (existsSync(profileDir) && !profileIsOwned()) {
+    throw new Error(`refusing to remove ${profileDir}; it is not an owned dscode profile`)
+  }
+
+  const launcher = join(homedir(), '.local', 'bin', 'dscode')
+  let launcherStat
+  try {
+    launcherStat = lstatSync(launcher)
+  } catch {
+    launcherStat = undefined
+  }
+  if (launcherStat !== undefined) {
+    const stat = launcherStat
+    if (stat.isSymbolicLink()) {
+      const target = readlinkSync(launcher)
+      const absoluteTarget = resolve(dirname(launcher), target)
+      if (ownedLauncherTarget(absoluteTarget)) {
+        rmSync(launcher)
+        console.error(`dscode: removed ${launcher}`)
+      } else {
+        console.error(`dscode: kept ${launcher}; it points outside this installation`)
+      }
+    } else {
+      console.error(`dscode: kept ${launcher}; it is not a symlink`)
+    }
+  }
+
+  if (existsSync(profileDir)) {
+    rmSync(profileDir, { recursive: true, force: true })
+    console.error(`dscode: removed ${profileDir}`)
+  }
+
+  const legacyHome = join(dshHome, 'dsc-tui')
+  if (existsSync(legacyHome) && !lstatSync(legacyHome).isSymbolicLink()) {
+    rmSync(legacyHome, { recursive: true, force: true })
+    console.error(`dscode: removed legacy state ${legacyHome}`)
+  }
+  console.error(`dscode: kept shared state under ${join(dshHome, 'sessions')} and ${join(dshHome, 'storages')}`)
+}
+
 export const ensureBinary = async () => {
   const asset = assetName()
   if (asset === undefined) {
@@ -302,8 +408,40 @@ export const ensureBinary = async () => {
   return binPath
 }
 
+const refreshPackageForUpdate = () => {
+  if (process.argv[2] !== 'update' || process.env.DSCODE_PACKAGE_RECONCILED === '1') return false
+  const updateRef = packageUpdateRef(process.argv.slice(3))
+  const installed = ensureProfilePlugin({
+    spec: `${pkg.name}@${updateRef}`,
+    expectedVersion: null,
+    force: true,
+  })
+  if (installed.version === pkg.version) return false
+  if (!existsSync(profileLauncher)) throw new Error('updated profile launcher is missing')
+  spawnAndExit(profileLauncher, process.argv.slice(2), {
+    ...process.env,
+    DSCODE_PACKAGE_RECONCILED: '1',
+  })
+  return true
+}
+
+export const packageUpdateRef = (args) => {
+  const versionIndex = args.indexOf('--version')
+  const version = versionIndex === -1 ? undefined : args[versionIndex + 1]
+  if (version !== undefined && version !== '') return version
+  return args.includes('--beta') ? 'beta' : 'latest'
+}
+
 const main = async () => {
+  if (process.argv[2] === 'uninstall') {
+    uninstallInstallation()
+    return
+  }
+  if (!nodeVersionSupported(process.versions.node)) {
+    throw new Error(`node ^22.19.0 or >=24.0.0 is required; found ${process.versions.node}`)
+  }
   if (process.env.DSCODE_BIN === undefined || process.env.DSCODE_BIN === '') {
+    if (refreshPackageForUpdate()) return
     ensureProfilePlugin()
     healLauncherLink()
     migrateLegacyTuiHome()
@@ -311,9 +449,11 @@ const main = async () => {
   const dshBin = ensureDshCli()
   const localBin = join(homedir(), '.local', 'bin')
   const path = process.env.PATH ?? ''
+  const pathParts = path.split(delimiter)
+  const extraBins = [dirname(dshBin), localBin].filter(dir => !pathParts.includes(dir))
   const env = {
     ...process.env,
-    PATH: path.split(':').includes(localBin) ? path : `${localBin}:${path}`,
+    PATH: [...extraBins, ...pathParts].join(delimiter),
     DSH_BIN: dshBin,
     DSCODE_HOME: tuiHome,
     // 0.0.10 TUI only reads DSC_HOME; drop after that binary is gone.

@@ -327,6 +327,15 @@ instead of blank-polling the 30s timeout. Verified: a broken profile now
 errors in ~1s with the resolve error on screen (was: 30s black screen,
 then the xAI login).
 
+### Leader protocol mismatches fail during registration
+
+`xai-grok-shell/src/leader/client.rs` requires the leader to advertise exactly
+the client's `LEADER_PROTOCOL_VERSION` before any ACP traffic starts. Upstream
+stores mismatched metadata and rejects only later control commands, which lets
+an incompatible foreign leader fail piecemeal in session methods. dscode owns
+both adapters at this seam, so a missing or different version is a terminal
+registration error. The focused client test pins the fail-fast behavior.
+
 ### grok's pager-plugin surfaces are hidden (/hooks /plugins /marketplace /skills)
 
 `slash/registry.rs CommandRegistry::new` adds the four to the fail-closed

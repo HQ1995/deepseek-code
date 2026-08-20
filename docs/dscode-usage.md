@@ -9,6 +9,7 @@ npx @hqzhao95/dscode
 ```
 
 Prebuilt on Linux x86_64 and macOS Apple Silicon.
+Requires Node.js `^22.19.0` or `>=24.0.0`.
 
 The first run sets everything up. After that, use:
 
@@ -23,23 +24,22 @@ dscode update          # stable
 dscode update --beta   # beta channel
 ```
 
-To update the full dscode package:
-
-```sh
-npm i -g @hqzhao95/dscode@latest
-npx @hqzhao95/dscode
-```
+The launcher first updates the profile bridge from the matching npm ref
+(`latest`, `beta`, or `--version`), reconciles the tested profile-owned dsh
+runtime, then updates the same TUI channel.
 
 ## Uninstall
 
 ```sh
-rm -rf ~/.dsh/profiles/dscode ~/.local/bin/dscode
+dscode uninstall
 ```
 
-Optionally remove the official dsh CLI too:
+This removes the launcher, dscode profile, cached TUI, and product-owned dsh
+runtime. Shared `$DSH_HOME/sessions` and `$DSH_HOME/storages` remain. If the
+launcher is broken, the manual fallback is:
 
 ```sh
-npm uninstall -g @deepseek-ai/dsh
+rm -rf ~/.dsh/profiles/dscode ~/.local/bin/dscode
 ```
 
 ## Launch

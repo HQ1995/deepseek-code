@@ -8,6 +8,18 @@
 # Assets `npx @hqzhao95/dscode` and `dscode update` expect on every release.
 DSCODE_REQUIRED_ASSETS=(dscode-linux-x86_64 dscode-macos-aarch64)
 
+# Run the repo-pinned pnpm through an installed shim or Corepack.
+dscode_pnpm() {
+  if command -v pnpm >/dev/null 2>&1; then
+    pnpm "$@"
+  elif command -v corepack >/dev/null 2>&1; then
+    corepack pnpm "$@"
+  else
+    echo "error: pnpm or corepack is required" >&2
+    return 1
+  fi
+}
+
 # The prebuilt name for THIS machine, or empty if we do not ship one.
 dscode_prebuilt_asset() {
   case "$(uname -s)-$(uname -m)" in

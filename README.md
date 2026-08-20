@@ -13,6 +13,7 @@ npx @hqzhao95/dscode
 ```
 
 Prebuilt on Linux x86_64 and macOS Apple Silicon. Other hosts build the TUI from this repo (`scripts/build-deepseek-tui.sh`).
+Requires Node.js `^22.19.0` or `>=24.0.0`.
 
 The first run sets everything up. After that, use:
 
@@ -26,11 +27,15 @@ dscode
 dscode update
 ```
 
+This reconciles the npm bridge, tested dsh runtime, and release-pinned TUI.
+
 ## Uninstall
 
 ```sh
-rm -rf ~/.dsh/profiles/dscode ~/.local/bin/dscode
+dscode uninstall
 ```
+
+Shared dsh sessions and storages are kept.
 
 ## Presets
 

@@ -29,3 +29,28 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm exec vitest run
+  rust-check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: third_party/grok-build
+      - name: Install protoc
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install protobuf
+          else
+            sudo apt-get update
+            sudo apt-get install -y protobuf-compiler
+          fi
+      - name: Check dscode TUI
+        working-directory: third_party/grok-build
+        run: cargo check -p xai-grok-pager-bin
+      - name: Test leader protocol gate
+        working-directory: third_party/grok-build
+        run: cargo test -p xai-grok-shell wrong_protocol_version_fails_registration --lib

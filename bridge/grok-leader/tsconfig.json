@@ -13,6 +13,7 @@
     "types": ["node"],
     "declaration": true,
     "composite": true,
+    "tsBuildInfoFile": "node_modules/.cache/dscode/tsconfig.tsbuildinfo",
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
     "rootDir": "src",

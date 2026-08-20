@@ -7,15 +7,17 @@
 # replaces output files by inode, so after a rebuild the profile keeps
 # serving the OLD build, and `pnpm install --force` over an existing
 # node_modules does not re-link. Deleting node_modules and reinstalling is
-# the sequence that propagates a rebuild; the md5 gate below proves it did.
+# the sequence that propagates a rebuild; the SHA-256 gate below proves it did.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BRIDGE="$ROOT/bridge/grok-leader"
 PROFILE="$HOME/.dsh/profiles/dscode"
+# shellcheck source=platform.sh
+source "$ROOT/scripts/platform.sh"
 
 echo "building the grok-leader bridge..."
-( cd "$BRIDGE" && pnpm install --silent && pnpm run build )
+( cd "$BRIDGE" && dscode_pnpm install --silent && dscode_pnpm run build )
 
 if [[ ! -d "$PROFILE" ]]; then
   echo "error: profile not found at $PROFILE; run scripts/install.sh first" >&2
@@ -24,11 +26,11 @@ fi
 
 echo "refreshing the profile copy at $PROFILE..."
 rm -rf "$PROFILE/node_modules"
-( cd "$PROFILE" && pnpm install --force --silent )
+( cd "$PROFILE" && dscode_pnpm install --force --silent )
 
 sentinel="lib/types/index.js"
-want="$(md5sum "$BRIDGE/$sentinel" | cut -d' ' -f1)"
-got="$(md5sum "$PROFILE/node_modules/@hqzhao95/dscode/$sentinel" | cut -d' ' -f1)"
+want="$(dscode_file_sha256 "$BRIDGE/$sentinel")"
+got="$(dscode_file_sha256 "$PROFILE/node_modules/@hqzhao95/dscode/$sentinel")"
 if [[ "$want" != "$got" ]]; then
   echo "error: the profile copy still differs from the fresh build ($got != $want)" >&2
   exit 1

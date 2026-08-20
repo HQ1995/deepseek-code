@@ -59,8 +59,9 @@ and release before they ship.
 
 ## Bookkeeping (fix at next sync; no rebuild)
 
-- `third_party/grok-build/SOURCE_REV` (`7140ec`) is unfetchable upstream;
-  `UPSTREAM_REV` is UNKNOWN. Pin a real upstream commit.
+- `third_party/grok-build/SOURCE_REV` (`7140ec`) remains an unfetchable
+  upstream-internal value; `UPSTREAM_REV` now pins the verified public baseline
+  `d6a22a1aed70b58d30a0f82a1a2a76ce1301631e`.
 - TUI-DIVERGENCE.md: privacy_banner entry describes a file that no longer
   exists (banner is removed, not reworded). VENDORING.md: bin renamed to
   "deepseek" but the artifact is "dscode". Ledger should say so.

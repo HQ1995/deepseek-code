@@ -36,8 +36,13 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
   echo "error: VERSION file is not semver: '$VERSION'" >&2
   exit 1
 fi
-PRERELEASE_FLAGS=(--latest)
-[[ "$VERSION" == *-* ]] && PRERELEASE_FLAGS=(--prerelease)
+PACKAGE_VERSION="$(node -p "require('$ROOT/bridge/grok-leader/package.json').version")"
+if [[ "$PACKAGE_VERSION" != "$VERSION" ]]; then
+  echo "error: VERSION ($VERSION) and bridge package version ($PACKAGE_VERSION) differ" >&2
+  exit 1
+fi
+PUBLISH_FLAGS=(--latest)
+[[ "$VERSION" == *-* ]] && PUBLISH_FLAGS=(--prerelease)
 
 if [[ "$DRY_RUN" == 0 ]]; then
   if ! command -v gh >/dev/null 2>&1; then
@@ -103,7 +108,7 @@ echo "  bundled $(basename "$LICENSES")"
 #   dsh plugin --profile dscode add \
 #     https://github.com/HQ1995/deepseek-code/releases/latest/download/dscode-plugin.tgz
 echo "  building the plugin tarball..."
-( cd "$ROOT/bridge/grok-leader" && pnpm install --silent && pnpm run --silent build )
+( cd "$ROOT/bridge/grok-leader" && dscode_pnpm install --silent && dscode_pnpm run --silent build )
 plugin_stage="$(mktemp -d)"
 cp -r "$ROOT/bridge/grok-leader/lib" "$ROOT/bridge/grok-leader/src" \
       "$ROOT/bridge/grok-leader/bin" "$plugin_stage/"
@@ -111,6 +116,7 @@ cp "$ROOT/bridge/grok-leader/cordis.patch.yml" "$plugin_stage/"
 python3 - "$ROOT/bridge/grok-leader/package.json" "$plugin_stage/package.json" "$VERSION" <<'PY'
 import json, sys
 pkg = json.load(open(sys.argv[1]))
+pkg["version"] = sys.argv[3]
 pkg["dscode"] = {"release": sys.argv[3]}
 json.dump(pkg, open(sys.argv[2], "w"), indent=2)
 PY
@@ -131,38 +137,48 @@ gh_files=("$LICENSES" "$DIST/dscode-plugin.tgz")
 if [[ ${#HOST_FILES[@]} -gt 0 ]]; then
   gh_files=("${HOST_FILES[@]}" "${gh_files[@]}")
 fi
-gh release create "$TAG" \
-  --repo "$RELEASE_REPO" \
-  --title "deepseek-code $TAG" \
+release_args=(
+  --repo "$RELEASE_REPO"
+  --title "deepseek-code $TAG"
+  --draft
   --notes "deepseek-code $TAG (channel: $([[ "$VERSION" == *-* ]] && echo beta || echo stable))
 
 Prebuilt TUI: Linux x86_64 (\`dscode-linux-x86_64\`) and macOS Apple Silicon (\`dscode-macos-aarch64\`).
 
-License and attribution for this binary: dscode-licenses.tar.gz (Apache-2.0; includes the vendored grok-build license and modification ledger)." \
-  "${PRERELEASE_FLAGS[@]}" \
-  "${gh_files[@]}"
-echo "published $TAG"
+License and attribution for this binary: dscode-licenses.tar.gz (Apache-2.0; includes the vendored grok-build license and modification ledger)."
+)
+if [[ "$VERSION" == *-* ]]; then
+  release_args+=(--prerelease)
+fi
+gh release create "$TAG" "${release_args[@]}" "${gh_files[@]}"
+echo "created draft release $TAG"
 
-echo "  waiting for CI to attach ${DSCODE_REQUIRED_ASSETS[*]}..."
+echo "  waiting for CI to attach both platform binaries and checksums..."
 deadline=$((SECONDS + 2400))
 for asset in "${DSCODE_REQUIRED_ASSETS[@]}"; do
-  while ! curl -fsIL "https://github.com/$RELEASE_REPO/releases/download/$TAG/$asset" >/dev/null 2>&1; do
-    if (( SECONDS >= deadline )); then
-      echo "error: timed out waiting for $asset on $TAG" >&2
-      echo "  inspect: gh run list --repo $RELEASE_REPO --branch $TAG" >&2
-      echo "  then: scripts/publish-npm.sh --pin $VERSION" >&2
-      exit 1
-    fi
-    echo "    still waiting for $asset..."
-    sleep 20
+  for required in "$asset" "$asset.sha256"; do
+    while ! gh release view "$TAG" --repo "$RELEASE_REPO" --json assets --jq '.assets[].name' \
+      | grep -Fxq "$required"; do
+      if (( SECONDS >= deadline )); then
+        echo "error: timed out waiting for $required on draft $TAG" >&2
+        echo "  inspect: gh run list --repo $RELEASE_REPO --branch $TAG" >&2
+        exit 1
+      fi
+      echo "    still waiting for $required..."
+      sleep 20
+    done
+    echo "    $required ready"
   done
-  echo "    $asset ready"
 done
+
+gh release edit "$TAG" --repo "$RELEASE_REPO" --draft=false "${PUBLISH_FLAGS[@]}"
+echo "published $TAG with complete platform assets"
 
 # npm: dscode@$VERSION pinned to this release. The npm account requires 2FA;
 # pass NPM_OTP or run scripts/publish-npm.sh manually afterwards.
-if bash "$ROOT/scripts/publish-npm.sh" --pin "$VERSION"; then
-  echo "published dscode@$VERSION to npm"
-else
-  echo "warning: npm publish failed (2FA?); run: scripts/publish-npm.sh --otp <code> --pin $VERSION" >&2
+if ! bash "$ROOT/scripts/publish-npm.sh" --pin "$VERSION"; then
+  echo "error: GitHub release is live but npm publish failed; recover with:" >&2
+  echo "  scripts/publish-npm.sh --otp <code> --pin $VERSION" >&2
+  exit 1
 fi
+echo "published dscode@$VERSION to npm"

@@ -349,7 +349,7 @@ async function makeHarness(
   if (presets !== undefined) ctx.provide('agentPresets', presets as unknown as Context['agentPresets'])
   ctx.provide('agentDefaultModel', mockDefaultModel as unknown as Context['agentDefaultModel'])
   ctx.provide('appExit', mockAppExit.exit)
-  const socketPath = resolve(tmpdir(), 'dsh-grok-leader-' + String(process.pid) + '-' + randomUUID() + '.sock')
+  const socketPath = resolve('/tmp', 'dgl-' + String(process.pid) + '-' + randomUUID().slice(0, 12) + '.sock')
   let pluginCtx: Context | undefined
   await ctx.plugin({
     name: 'grok-leader-test',

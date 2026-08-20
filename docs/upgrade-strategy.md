@@ -30,12 +30,14 @@ through its own pipeline; the other side does not change.
 
 ## dsh npm release — pin and bump
 
-- End-user installs use the official npm dsh, pinned to the exact version
+- End-user installs use the official npm dsh pinned to the exact version
   recorded in `bridge/grok-leader/package.json` -> `dsh.testedVersion`
-  (currently `0.1.0-rc.8`).
-- The same manifest also records `dsh.supportedRange`
-  (`>=0.1.0-rc.8 <0.2.0`): versions in that range are allowed to run, while
-  `testedVersion` is the one we actually validated in CI.
+  (currently `0.1.0-rc.8`). The launcher reuses an exact PATH match or installs
+  a product-owned copy under the dscode profile; it never mutates global npm.
+- The same manifest records `dsh.supportedRange`
+  (`>=0.1.0-rc.8 <0.2.0`) for third-party plugin compatibility. The standalone
+  launcher deliberately runs `testedVersion` unless `DSH_BIN` explicitly
+  overrides it.
 - Do not switch `scripts/install.sh` or the launcher back to `@next`/`latest`.
   A dsh upgrade is a deliberate release step:
   1. bump `dsh.testedVersion`;

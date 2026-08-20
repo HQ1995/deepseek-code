@@ -16,6 +16,12 @@ for f in "$ROOT"/scripts/*.sh; do
 done
 echo "  bash -n ok"
 
+repo_version="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+package_version="$(node -p "require('$ROOT/bridge/grok-leader/package.json').version")"
+[[ "$repo_version" == "$package_version" ]] \
+  || fail "VERSION ($repo_version) != bridge package version ($package_version)"
+echo "  version sources agree: $repo_version"
+
 asset="$(dscode_prebuilt_asset)"
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64|Linux-amd64)

@@ -10,7 +10,14 @@ GitHub Releases on first run (SHA-256 verified, cached at
 npx @hqzhao95/dscode
 ```
 
-First run runs `npm i -g @deepseek-ai/dsh@<pin>` if `dsh` is not already on PATH, downloads the TUI binary, and links `dscode`. You do not install dsh yourself.
+First run reuses an exactly tested `dsh` on PATH or installs the pin under
+`~/.dsh/profiles/dscode/runtime`, downloads the TUI binary, and links
+`dscode`. It never mutates the global npm prefix.
+
+`dscode update` reconciles the profile package from the matching npm ref
+(`latest`, `beta`, or an explicit version) before updating the TUI.
+`dscode uninstall` removes only the owned profile and launcher; shared dsh
+sessions and storages remain.
 
 > **Personal project** — not affiliated with, endorsed by, or sponsored by
 > DeepSeek or xAI; their names appear only to describe the open-source

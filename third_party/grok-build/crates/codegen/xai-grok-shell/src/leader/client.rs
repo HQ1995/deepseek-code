@@ -389,6 +389,16 @@ async fn register(
         _ => return Err(ClientError::Registration("Unexpected response".into())),
     };
 
+    let protocol_version = registration.leader_protocol_version.ok_or_else(|| {
+        ClientError::Registration("leader did not advertise a protocol version".into())
+    })?;
+    if protocol_version != super::protocol::LEADER_PROTOCOL_VERSION {
+        return Err(ClientError::Registration(format!(
+            "leader protocol version {protocol_version} is incompatible with client version {}",
+            super::protocol::LEADER_PROTOCOL_VERSION
+        )));
+    }
+
     let client_id = registration.client_id;
 
     // If the leader was still initialising at registration time, block here until
@@ -672,10 +682,9 @@ mod tests {
         fake.cancel();
     }
 
-    /// Registration succeeds against a future-protocol leader (the field is
-    /// informational at registration time), but the control surface rejects it.
+    /// ACP must never start against an incompatible protocol; fail at registration.
     #[tokio::test(start_paused = true)]
-    async fn wrong_protocol_version_registers_but_rejects_control() {
+    async fn wrong_protocol_version_fails_registration() {
         let temp = TempDir::new().unwrap();
         let sock_path = temp.path().join("wrong-proto.sock");
         let fake = spawn_fake_leader(
@@ -690,26 +699,21 @@ mod tests {
         )
         .await;
 
-        let client = LeaderClient::connect(
+        let result = LeaderClient::connect(
             sock_path,
             "test",
             ClientMode::Stdio,
             ClientCapabilities::default(),
         )
-        .await
-        .unwrap();
-        assert_eq!(client.registration().leader_protocol_version, Some(999));
-
-        let err = client
-            .send_control(ControlCommand::GetLeaderInfo)
-            .await
-            .expect_err("control must be rejected for an unsupported protocol version");
+        .await;
+        let Err(err) = result else {
+            panic!("registration must reject an unsupported protocol version");
+        };
         assert!(
-            matches!(err, ClientError::UnsupportedControl(_)),
-            "expected UnsupportedControl, got {err:?}"
+            matches!(err, ClientError::Registration(ref message) if message.contains("incompatible")),
+            "expected an incompatible registration error, got {err:?}"
         );
 
-        client.cancel();
         fake.cancel();
     }
 
