@@ -9,7 +9,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$ROOT/third_party/grok-build/target/release/dscode"
+BIN="${DSCODE_TUI_BIN:-$ROOT/third_party/grok-build/target/release/dscode}"
+NODE_BIN="${DSCODE_E2E_NODE_BIN:-$(command -v node || true)}"
 OUT=/tmp/provmanage-e2e
 mkdir -p "$OUT"
 RUN_ID="$$"
@@ -19,11 +20,19 @@ SOCK2="$OUT/leader-$RUN_ID-boot2.sock"
 PORT=$((23000 + (RUN_ID % 15000)))
 GW_URL="http://127.0.0.1:$PORT/v1"
 SESSION="provmanage-$RUN_ID"
+MOCK_PID=""
 
-fail() { echo "FAIL: $1" >&2; cp "$SCRATCH/settings.yaml" "$OUT/settings-$RUN_ID-FAIL.yaml" 2>/dev/null || true; tmux -L "$SESSION" -f /dev/null capture-pane -p -t "$SESSION:0.0" > "$OUT/frame-$RUN_ID-FAIL.txt" 2>/dev/null || true; tmux -L "$SESSION" -f /dev/null kill-server 2>/dev/null || true; kill "$MOCK_PID" 2>/dev/null || true; exit 1; }
+cleanup() { tmux -L "$SESSION" -f /dev/null kill-server 2>/dev/null || true; if [[ -n "$MOCK_PID" ]]; then kill "$MOCK_PID" 2>/dev/null || true; wait "$MOCK_PID" 2>/dev/null || true; fi; }
+fail() { echo "FAIL: $1" >&2; cp "$SCRATCH/settings.yaml" "$OUT/settings-$RUN_ID-FAIL.yaml" 2>/dev/null || true; tmux -L "$SESSION" -f /dev/null capture-pane -p -t "$SESSION:0.0" > "$OUT/frame-$RUN_ID-FAIL.txt" 2>/dev/null || true; exit 1; }
+trap cleanup EXIT
+
+[[ -x "$BIN" ]] || fail "TUI binary is missing: $BIN"
+[[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || fail "Node is unavailable"
+"$NODE_BIN" -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit((major === 22 && minor >= 19) || major >= 24 ? 0 : 1)' || fail "Node ^22.19.0 or >=24 is required"
+export PATH="$(dirname "$NODE_BIN"):$PATH"
 
 # 1. Mock gateway (node stdlib): GET .../models answers one fake model.
-node -e '
+"$NODE_BIN" -e '
 const http = require("http");
 const port = Number(process.argv[1]);
 http.createServer((req, res) => {
@@ -37,15 +46,46 @@ MOCK_PID=$!
 for _ in $(seq 1 40); do grep -q 'mock ready' "$OUT/mock-$RUN_ID.log" 2>/dev/null && break; sleep 0.25; done
 grep -q 'mock ready' "$OUT/mock-$RUN_ID.log" || fail "mock gateway did not start"
 
-# 2. Isolated DSH_HOME seeded with the real settings, bridge installed.
-mkdir -p "$SCRATCH"
-cp "$HOME/.dsh/settings.yaml" "$SCRATCH/settings.yaml"
-DSH_HOME="$SCRATCH" "$ROOT/bin/dsh" plugin --profile dscode add "file:$ROOT/bridge/grok-leader" >"$OUT/plugin-$RUN_ID.log" 2>&1 || fail "dsh plugin add failed"
+# 2. Fully isolated DSH_HOME with one deterministic seed provider.
+mkdir -p "$SCRATCH/e2e-bin"
+if ! command -v pnpm >/dev/null 2>&1; then
+  command -v corepack >/dev/null 2>&1 || fail "pnpm or corepack is required"
+  COREPACK_BIN="$(command -v corepack)"
+  cat >"$SCRATCH/e2e-bin/pnpm" <<EOF
+#!/bin/sh
+exec "$COREPACK_BIN" pnpm "\$@"
+EOF
+  chmod +x "$SCRATCH/e2e-bin/pnpm"
+fi
+export PATH="$SCRATCH/e2e-bin:$PATH"
+if [[ -n "${DSCODE_E2E_DSH_BIN:-}" ]]; then
+  DSH_BIN="$DSCODE_E2E_DSH_BIN"
+elif command -v dsh >/dev/null 2>&1; then
+  DSH_BIN="$(command -v dsh)"
+else
+  DSH_BIN="$ROOT/bin/dsh"
+fi
+cat >"$SCRATCH/settings.yaml" <<EOF
+llm-pi-ai:
+  providers:
+    seed:
+      displayName: Seed Provider
+      apiKeyEnv: FAKE_KEY
+      api: openai-completions
+      baseURL: $GW_URL
+      models:
+        - id: fake-model
+agent-default-model:
+  provider: seed
+  model: fake-model
+EOF
+DSH_HOME="$SCRATCH" "$DSH_BIN" plugin --profile dscode add "file:$ROOT/bridge/grok-leader" >"$OUT/plugin-$RUN_ID.log" 2>&1 || fail "dsh plugin add failed"
 
 export TERM=xterm-256color
 export DSH_HOME="$SCRATCH"
 export DSCODE_SOCKET="$SOCK"
 export DSH_TELEMETRY_DISABLED=1
+export DSH_BIN
 export FAKE_KEY=e2e-fake-key
 export NO_COLOR=1
 
@@ -79,12 +119,12 @@ wait_frame() {
 
 clear_prompt() { tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" C-c; sleep 1; }
 
-# 3. First boot: add fake-gw through the modal (same flow as e2e-add-provider).
+# 3. First boot: choose the empty Custom preset, then add fake-gw.
 boot_and_wait boot1 "$SOCK"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "/provider add" Enter
 wait_frame modal "Add provider"
-tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Down Down Down Down Down
-tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "fake-gw"
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Right Right Right Right Right
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Down "fake-gw"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "Fake GW"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "FAKE_KEY"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab
@@ -147,8 +187,7 @@ clear_prompt
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "/provider "
 sleep 2
 snap all-rows
-CUR_ID="deepseek"
-if grep -q 'OpenCodex (current)' "$OUT/frame-$RUN_ID-all-rows.txt" 2>/dev/null; then CUR_ID="ocx"; fi
+CUR_ID="seed"
 clear_prompt
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "/provider $CUR_ID"
 sleep 2
@@ -159,6 +198,8 @@ sleep 1
 snap after-block-dismiss
 tmux -L "$SESSION" -f /dev/null kill-server 2>/dev/null || true
 kill "$MOCK_PID" 2>/dev/null || true
+wait "$MOCK_PID" 2>/dev/null || true
+MOCK_PID=""
 
 echo "PASS provider-manage e2e run $RUN_ID"
 echo "  artifacts: $OUT (frame-*-$RUN_ID*.txt, settings-$RUN_ID-*.yaml)"
