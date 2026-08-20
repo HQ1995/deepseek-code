@@ -165,6 +165,7 @@ fn test_app() -> AppView {
         next_auth_request_seq: 1,
         auth_url_poll_handle: None,
         deferred_startup: Default::default(),
+        startup_leader: None,
         auth_use_oauth: false,
         auth_clipboard_delivery: None,
         auth_clipboard_feedback_generation: 0,

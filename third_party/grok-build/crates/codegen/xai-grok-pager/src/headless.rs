@@ -41,7 +41,7 @@ pub use cli::{HeadlessPrompt, OutputFormat, parse_json_schema, parse_permission_
 pub(crate) use cli::{ResolvedAgent, resolve_agent_arg};
 use cli::{apply_agent_flag, parse_cli_agents, parse_comma_list, parse_permission_rules_strict};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HeadlessOptions {
     pub session_id: Option<String>,
     pub resume: Option<String>,
@@ -77,6 +77,12 @@ pub struct HeadlessOptions {
     pub wait_for_background: bool,
     /// Max time to wait for background quiescence after the first turn ends.
     pub background_wait_timeout: Duration,
+    /// Connect to the external dsh leader instead of spawning Grok in-process.
+    pub use_leader: bool,
+    pub plan_mode: bool,
+    pub subagents: bool,
+    pub ask_user: bool,
+    pub sandbox: Option<String>,
 }
 
 struct HeadlessEmitter {
@@ -524,11 +530,68 @@ struct OpenedSession {
     cwd: PathBuf,
 }
 
+fn build_headless_session_meta(
+    options: &HeadlessOptions,
+    auto_mode: bool,
+) -> anyhow::Result<acp::Meta> {
+    let mut meta = acp::Meta::new();
+    if let Some(agent) = options.agent.as_deref() {
+        let profile = match resolve_agent_arg(agent) {
+            ResolvedAgent::Name(name) => serde_json::Value::String(name),
+            ResolvedAgent::FilePath(path) => {
+                xai_grok_shell::agent::config::AgentDefinition::from_file(&path)
+                    .map_err(|error| anyhow::anyhow!("--agent: {error}"))?
+                    .to_json_value()
+            }
+        };
+        meta.insert("agentProfile".into(), profile);
+    } else if options.plan_mode {
+        meta.insert(
+            "agentProfile".into(),
+            serde_json::Value::String(if options.subagents {
+                "grok-build-plan".to_string()
+            } else {
+                "grok-build-plan-no-subagents".to_string()
+            }),
+        );
+    }
+    if !options.subagents {
+        meta.insert("subagents".into(), serde_json::Value::Bool(false));
+    }
+    if !options.ask_user {
+        meta.insert("askUserQuestion".into(), serde_json::Value::Bool(false));
+    }
+    meta.insert("yoloMode".into(), serde_json::Value::Bool(options.yolo));
+    meta.insert(
+        "autoMode".into(),
+        serde_json::Value::Bool(auto_mode && !options.yolo),
+    );
+    for (key, value) in [
+        ("model", options.model.as_ref()),
+        ("reasoningEffort", options.reasoning_effort.as_ref()),
+        ("permissionMode", options.permission_mode_flag.as_ref()),
+        ("sandbox", options.sandbox.as_ref()),
+        (
+            "systemPromptOverride",
+            options.system_prompt_override.as_ref(),
+        ),
+        ("rules", options.rules.as_ref()),
+        ("tools", options.cli_tools.as_ref()),
+        ("disallowedTools", options.cli_disallowed_tools.as_ref()),
+    ] {
+        if let Some(value) = value {
+            meta.insert(key.into(), serde_json::Value::String(value.clone()));
+        }
+    }
+    Ok(meta)
+}
+
 async fn open_session(
     acp_tx: &AcpAgentTx,
     cwd: &Path,
     session_id_flag: Option<&str>,
     restore_code: Option<bool>,
+    session_meta: Option<&acp::Meta>,
 ) -> anyhow::Result<OpenedSession> {
     // Sessions open before the agent resolves per-vendor compat; default all-on until it does.
     let mcp_servers =
@@ -539,7 +602,7 @@ async fn open_session(
             acp::LoadSessionRequest::new(acp::SessionId::new(sid.to_string()), cwd.to_path_buf())
                 .mcp_servers(mcp_servers.clone())
                 .meta({
-                    let mut m = acp::Meta::new();
+                    let mut m = session_meta.cloned().unwrap_or_default();
                     m.insert("noReplay".into(), serde_json::Value::Bool(true));
                     if let Some(rc) = restore_code {
                         m.insert("x.ai/restore_code".into(), serde_json::Value::Bool(rc));
@@ -560,7 +623,9 @@ async fn open_session(
     }
 
     let new_resp: acp::NewSessionResponse = acp_send(
-        acp::NewSessionRequest::new(cwd.to_path_buf()).mcp_servers(mcp_servers),
+        acp::NewSessionRequest::new(cwd.to_path_buf())
+            .mcp_servers(mcp_servers)
+            .meta(session_meta.cloned()),
         acp_tx,
     )
     .await?;
@@ -575,19 +640,21 @@ async fn open_session_with_id(
     acp_tx: &AcpAgentTx,
     cwd: &Path,
     session_id: &str,
+    session_meta: Option<&acp::Meta>,
 ) -> anyhow::Result<OpenedSession> {
-    let cwd_str = cwd.to_string_lossy();
-    crate::app::session_startup::ensure_session_id_available(session_id, &cwd_str)?;
     let mcp_servers =
         cli_config::load_mcp_servers(cwd, &xai_grok_tools::types::compat::CompatConfig::default());
     let new_resp: acp::NewSessionResponse = acp_send(
         acp::NewSessionRequest::new(cwd.to_path_buf())
             .mcp_servers(mcp_servers)
-            .meta(
-                serde_json::json!({ "sessionId": session_id })
-                    .as_object()
-                    .cloned(),
-            ),
+            .meta({
+                let mut meta = session_meta.cloned().unwrap_or_default();
+                meta.insert(
+                    "sessionId".into(),
+                    serde_json::Value::String(session_id.to_string()),
+                );
+                Some(meta)
+            }),
         acp_tx,
     )
     .await?;
@@ -605,18 +672,16 @@ async fn fork_then_open(
     parent_cwd: Option<&Path>,
     new_id: Option<&str>,
     restore_code: Option<bool>,
+    session_meta: Option<&acp::Meta>,
 ) -> anyhow::Result<OpenedSession> {
     use crate::app::session_startup::{
-        effective_fork_new_cwd, ensure_session_id_available, fork_response_error,
-        fork_response_new_session_id, fork_session_params, parent_session_is_worktree,
+        effective_fork_new_cwd, fork_response_error, fork_response_new_session_id,
+        fork_session_params, parent_session_is_worktree,
     };
     let launch_cwd_str = launch_cwd.to_string_lossy().into_owned();
     // Match interactive: child lands under the parent session cwd, not the launch cwd.
     let new_cwd_str = effective_fork_new_cwd(&launch_cwd_str, parent_cwd);
     let write_cwd = PathBuf::from(&new_cwd_str);
-    if let Some(nid) = new_id {
-        ensure_session_id_available(nid, &new_cwd_str)?;
-    }
     let parent_is_worktree = parent_session_is_worktree(parent_id, &write_cwd);
     let payload = fork_session_params(parent_id, &write_cwd, new_id, parent_is_worktree);
     let fork_params = serde_json::value::to_raw_value(&payload)
@@ -628,7 +693,7 @@ async fn fork_then_open(
     }
     let child = fork_response_new_session_id(resp.0.get())
         .ok_or_else(|| anyhow::anyhow!("fork response missing newSessionId"))?;
-    match open_session(acp_tx, &write_cwd, Some(&child), restore_code).await {
+    match open_session(acp_tx, &write_cwd, Some(&child), restore_code, session_meta).await {
         Ok(opened) => Ok(opened),
         Err(e) => Err(anyhow::anyhow!(
             "fork succeeded as {child} but load failed: {e}"
@@ -728,12 +793,14 @@ async fn apply_headless_model_and_effort(
 fn headless_materialize_ctx(
     resume_title_pinned: bool,
     restore_code: bool,
+    leader_session_store: bool,
 ) -> crate::app::session_startup::MaterializeCtx {
     crate::app::session_startup::MaterializeCtx {
         has_worktree: false,
         allow_remote_restore:
             crate::app::session_startup::MaterializeCtx::default_allow_remote_restore(),
         chat_mode: false,
+        leader_session_store,
         title_resolution: if resume_title_pinned {
             crate::app::session_startup::TitleResolution::PinnedPreSandbox
         } else {
@@ -742,6 +809,86 @@ fn headless_materialize_ctx(
         restore_code,
         restore_progress_on_stdout: false,
     }
+}
+
+async fn resolve_headless_leader_startup(
+    acp_tx: &AcpAgentTx,
+    startup: crate::app::session_startup::LeaderStartup,
+    cwd: &Path,
+) -> anyhow::Result<crate::app::session_startup::MaterializedStartup> {
+    use crate::app::session_startup::{LeaderResumeSelector, LeaderStartup, MaterializedStartup};
+    let selector = match &startup {
+        LeaderStartup::Resume(selector) | LeaderStartup::Fork { selector, .. } => selector,
+    };
+    let mut payload = serde_json::json!({
+        "cwd": cwd.to_string_lossy(),
+        "limit": 200,
+    });
+    if let LeaderResumeSelector::IdOrTitle(target) = selector {
+        payload["query"] = serde_json::Value::String(target.clone());
+    }
+    let params = serde_json::value::to_raw_value(&payload)
+        .map_err(|error| anyhow::anyhow!("serialize session list params: {error}"))?;
+    let response = acp_send(
+        acp::ExtRequest::new("x.ai/session/list", params.into()),
+        acp_tx,
+    )
+    .await?;
+    let value: serde_json::Value = serde_json::from_str(response.0.get())
+        .map_err(|error| anyhow::anyhow!("parse session list response: {error}"))?;
+    let sessions = value
+        .get("sessions")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("session list response has no sessions array"))?;
+    let current_cwd = cwd.to_string_lossy();
+    let selected = match selector {
+        LeaderResumeSelector::MostRecentForCwd => sessions
+            .iter()
+            .filter(|row| row.get("cwd").and_then(serde_json::Value::as_str) == Some(&current_cwd))
+            .max_by_key(|row| {
+                row.get("updatedAt")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+            }),
+        LeaderResumeSelector::IdOrTitle(target) => sessions.iter().find(|row| {
+            let field_matches = |name: &str| {
+                row.get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| value.eq_ignore_ascii_case(&target))
+            };
+            field_matches("sessionId")
+                || field_matches("title")
+                || field_matches("summary")
+                || field_matches("firstPrompt")
+        }),
+    }
+    .ok_or_else(|| anyhow::anyhow!("Session does not exist"))?;
+    let session_id = selected
+        .get("sessionId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("session list row has no sessionId"))?
+        .to_string();
+    let original_cwd = selected
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    Ok(match startup {
+        LeaderStartup::Resume(_) => MaterializedStartup::Resume {
+            session_id,
+            original_cwd,
+            title: None,
+            deferred_local_miss: false,
+            suppress_code_restore: false,
+        },
+        LeaderStartup::Fork { new_session_id, .. } => MaterializedStartup::Fork {
+            parent_session_id: session_id,
+            parent_cwd: original_cwd,
+            parent_title: None,
+            new_session_id,
+            suppress_code_restore: false,
+        },
+    })
 }
 
 /// Run a headless single-turn prompt: spawn the agent, drive the ACP lifecycle, stream to stdout.
@@ -828,6 +975,11 @@ pub async fn run_single_turn(
             .transpose()?,
     };
 
+    let session_meta = options
+        .use_leader
+        .then(|| build_headless_session_meta(&options, agent_config.default_auto_mode))
+        .transpose()?;
+
     if options.trust {
         xai_grok_shell::agent::folder_trust::grant_folder_trust(&cwd);
     }
@@ -836,26 +988,91 @@ pub async fn run_single_turn(
     let memory_config = agent_config.memory_config.clone();
     let mut pending_startup = Some(PendingStartup::new());
     let timer = xai_grok_telemetry::startup::begin(crate::acp::Owner::Client);
+    let agent_kind = if options.use_leader {
+        crate::acp::AgentKind::Leader
+    } else {
+        crate::acp::AgentKind::Embedded
+    };
     let mut report_startup_failure = |timer: &crate::acp::StartupTimer| {
-        timer.emit_telemetry(
-            crate::acp::AgentKind::Embedded,
-            crate::acp::StartupOutcome::Error,
-            None,
-            false,
-        );
+        timer.emit_telemetry(agent_kind, crate::acp::StartupOutcome::Error, None, false);
         PendingStartup::finish_held(&mut pending_startup, crate::acp::StartupOutcome::Error);
     };
-    let spawned = match spawn_grok_shell(agent_config, &cancel, memory_config).await {
-        Ok(s) => s,
-        Err(e) => {
-            report_startup_failure(&timer);
-            let msg = format!("Couldn't start session: {e}");
-            emitter.on_error(&msg, None);
-            anyhow::bail!("{msg}");
-        }
+    let (acp_tx, mut acp_rx, _agent_guard, is_api_key_auth) = if options.use_leader {
+        let flags = crate::acp::ConnectFlags {
+            subagents: options.subagents,
+            disable_web_search: options.disable_web_search,
+            client_identifier: Some(HEADLESS_CLIENT_TYPE.to_string()),
+            terminal: false,
+            fs_read: true,
+            fs_write: true,
+            system_prompt_override: options.system_prompt_override.clone(),
+            rules: options.rules.clone(),
+            reasoning_effort_override: options
+                .reasoning_effort
+                .as_deref()
+                .and_then(parse_canonical_effort_token),
+            default_yolo_mode: options.yolo,
+            default_auto_mode: agent_config.default_auto_mode && !options.yolo,
+            ..Default::default()
+        };
+        let leader_config = toml::Value::Table(Default::default());
+        let mut connection =
+            match crate::acp::connect_via_leader(&cancel, flags, &leader_config).await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    report_startup_failure(&timer);
+                    let message = format!("Couldn't start dsh session: {error}");
+                    emitter.on_error(&message, None);
+                    anyhow::bail!("{message}");
+                }
+            };
+        let guard = AgentShutdownGuard::new(cancel.clone(), connection.agent_thread.take());
+        (connection.tx, connection.rx, guard, true)
+    } else {
+        let spawned = match spawn_grok_shell(agent_config, &cancel, memory_config).await {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                report_startup_failure(&timer);
+                let message = format!("Couldn't start session: {error}");
+                emitter.on_error(&message, None);
+                anyhow::bail!("{message}");
+            }
+        };
+        let guard = AgentShutdownGuard::new(cancel.clone(), Some(spawned.thread_handle));
+        let (acp_tx, acp_rx) = (spawned.channel.tx, spawned.channel.rx);
+
+        let init_req = build_headless_init_request(
+            options.rules.as_deref(),
+            options.system_prompt_override.as_deref(),
+        );
+        xai_grok_telemetry::startup::enter(crate::acp::StartupPhase::AcpInitialize);
+        let init_resp: acp::InitializeResponse = match acp_send(init_req, &acp_tx).await {
+            Ok(response) => response,
+            Err(error) => {
+                report_startup_failure(&timer);
+                let message = format!("Couldn't initialize: {error}");
+                emitter.on_error(&message, None);
+                anyhow::bail!("{message}");
+            }
+        };
+        let default_auth_method_id =
+            crate::acp::parse_default_auth_method_id(init_resp.meta.as_ref());
+        let is_api_key_auth = match authenticate(
+            &acp_tx,
+            &init_resp.auth_methods,
+            default_auth_method_id.as_ref(),
+        )
+        .await
+        {
+            Ok(is_api_key) => is_api_key,
+            Err(error) => {
+                report_startup_failure(&timer);
+                emitter.on_error(&error.to_string(), None);
+                return Err(error);
+            }
+        };
+        (acp_tx, acp_rx, guard, is_api_key_auth)
     };
-    let _agent_guard = AgentShutdownGuard::new(cancel.clone(), Some(spawned.thread_handle));
-    let (acp_tx, mut acp_rx) = (spawned.channel.tx, spawned.channel.rx);
     crate::unified_log::init(acp_tx.clone());
     crate::unified_log::info(
         "pager started",
@@ -864,53 +1081,12 @@ pub async fn run_single_turn(
     );
     crate::unified_log::flush();
 
-    let init_req = build_headless_init_request(
-        options.rules.as_deref(),
-        options.system_prompt_override.as_deref(),
-    );
-    xai_grok_telemetry::startup::enter(crate::acp::StartupPhase::AcpInitialize);
-    let init_resp: acp::InitializeResponse = match acp_send(init_req, &acp_tx).await {
-        Ok(r) => r,
-        Err(e) => {
-            report_startup_failure(&timer);
-            let msg = format!("Couldn't initialize: {e}");
-            emitter.on_error(&msg, None);
-            anyhow::bail!("{msg}");
-        }
-    };
     tracing::debug!(
         elapsed_ms = t_spawn.elapsed().as_millis() as u64,
         "headless: spawn + initialize complete"
     );
-
-    let t_auth = Instant::now();
-    xai_grok_telemetry::startup::enter(crate::acp::StartupPhase::EagerAuth);
-    let default_auth_method_id = crate::acp::parse_default_auth_method_id(init_resp.meta.as_ref());
-    let is_api_key_auth = match authenticate(
-        &acp_tx,
-        &init_resp.auth_methods,
-        default_auth_method_id.as_ref(),
-    )
-    .await
-    {
-        Ok(is_api_key) => is_api_key,
-        Err(e) => {
-            report_startup_failure(&timer);
-            emitter.on_error(&e.to_string(), None);
-            return Err(e);
-        }
-    };
-    tracing::debug!(
-        elapsed_ms = t_auth.elapsed().as_millis() as u64,
-        "headless: authenticate complete"
-    );
     // Connect ends here; session phases stay out of the phase histogram.
-    timer.emit_telemetry(
-        crate::acp::AgentKind::Embedded,
-        crate::acp::StartupOutcome::Ok,
-        None,
-        false,
-    );
+    timer.emit_telemetry(agent_kind, crate::acp::StartupOutcome::Ok, None, false);
 
     use crate::app::session_startup::{self, MaterializedStartup, SessionStartupFlags};
     let has_resume_id = options.resume.as_deref().filter(|s| !s.is_empty());
@@ -931,7 +1107,11 @@ pub async fn run_single_turn(
 
     let cwd_str = cwd.to_string_lossy().to_string();
     let materialized = session_startup::materialize_startup_for_cwd(
-        headless_materialize_ctx(options.resume_title_pinned, options.restore_code),
+        headless_materialize_ctx(
+            options.resume_title_pinned,
+            options.restore_code,
+            options.use_leader,
+        ),
         intent,
         &cwd_str,
     )
@@ -939,6 +1119,12 @@ pub async fn run_single_turn(
     .inspect_err(|_| {
         PendingStartup::finish_held(&mut pending_startup, crate::acp::StartupOutcome::Error);
     })?;
+    let materialized = match materialized {
+        MaterializedStartup::Leader { startup } => {
+            resolve_headless_leader_startup(&acp_tx, startup, &cwd).await?
+        }
+        other => other,
+    };
 
     let restore_code = match &materialized {
         MaterializedStartup::Resume {
@@ -954,9 +1140,11 @@ pub async fn run_single_turn(
     let t_session = Instant::now();
     xai_grok_telemetry::startup::enter(crate::acp::StartupPhase::SessionCreate);
     let opened = match materialized {
-        MaterializedStartup::NewAuto => open_session(&acp_tx, &cwd, None, None).await,
+        MaterializedStartup::NewAuto => {
+            open_session(&acp_tx, &cwd, None, None, session_meta.as_ref()).await
+        }
         MaterializedStartup::NewWithId { session_id } => {
-            open_session_with_id(&acp_tx, &cwd, &session_id).await
+            open_session_with_id(&acp_tx, &cwd, &session_id, session_meta.as_ref()).await
         }
         MaterializedStartup::Resume {
             session_id,
@@ -964,7 +1152,17 @@ pub async fn run_single_turn(
             ..
         } => {
             let load_cwd = original_cwd.as_deref().unwrap_or(cwd.as_path());
-            open_session(&acp_tx, load_cwd, Some(session_id.as_str()), restore_code).await
+            open_session(
+                &acp_tx,
+                load_cwd,
+                Some(session_id.as_str()),
+                restore_code,
+                session_meta.as_ref(),
+            )
+            .await
+        }
+        MaterializedStartup::Leader { .. } => {
+            anyhow::bail!("leader-backed resume resolution is unavailable in headless mode")
         }
         MaterializedStartup::Fork {
             parent_session_id,
@@ -979,6 +1177,7 @@ pub async fn run_single_turn(
                 parent_cwd.as_deref(),
                 new_session_id.as_deref(),
                 restore_code,
+                session_meta.as_ref(),
             )
             .await
         }

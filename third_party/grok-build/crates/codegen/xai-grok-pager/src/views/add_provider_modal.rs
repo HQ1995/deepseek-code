@@ -85,8 +85,7 @@ pub const CUSTOM_PRESET_LABEL: &str = "Custom (empty form)";
 
 /// Auth note shown in the form: paste a key (stored in the dsh credentials
 /// store) or name an env var — either resolves at request time.
-pub const AUTH_NOTE: &str =
-    "apiKey is stored in the dsh credentials store; leave it empty to use the named env var instead.";
+pub const AUTH_NOTE: &str = "apiKey is stored in the dsh credentials store; leave it empty to use the named env var instead.";
 
 /// The submitted form. Empty optional fields ride as empty strings; the bridge
 /// treats them as unset before the official settings write.
@@ -243,7 +242,7 @@ impl AddProviderModalState {
             Field::DisplayName => &self.display_name,
             Field::ApiKeyEnv => &self.api_key_env,
             Field::Preset => &self.id, // unused placeholder; Preset has no editor
-            Field::Api => &self.id, // unused placeholder; Api has no editor
+            Field::Api => &self.id,    // unused placeholder; Api has no editor
             Field::BaseUrl => &self.base_url,
             Field::ApiKey => &self.api_key,
         }
@@ -255,7 +254,7 @@ impl AddProviderModalState {
             Field::DisplayName => &mut self.display_name,
             Field::ApiKeyEnv => &mut self.api_key_env,
             Field::Preset => &mut self.id, // unused placeholder
-            Field::Api => &mut self.id, // unused placeholder
+            Field::Api => &mut self.id,    // unused placeholder
             Field::BaseUrl => &mut self.base_url,
             Field::ApiKey => &mut self.api_key,
         }
@@ -463,7 +462,11 @@ fn row_specs(state: &AddProviderModalState) -> Vec<RowSpec> {
     let value = |field: Field| -> (String, usize, bool) {
         let focused = state.field == field;
         if field == Field::Preset {
-            return (format!("\u{2039} {} \u{203a}", preset_label(state.preset)), 0, focused);
+            return (
+                format!("\u{2039} {} \u{203a}", preset_label(state.preset)),
+                0,
+                focused,
+            );
         }
         if field == Field::Api {
             let api = APIS.get(state.api_idx).map_or("(unset)", |value| *value);
@@ -472,7 +475,11 @@ fn row_specs(state: &AddProviderModalState) -> Vec<RowSpec> {
         let editor = state.editor(field);
         // Secrets never render: the key cell shows a fixed-width mask.
         if field == Field::ApiKey && !editor.text().is_empty() {
-            return ("\u{2022}".repeat(editor.text().chars().count()), cursor(editor), focused);
+            return (
+                "\u{2022}".repeat(editor.text().chars().count()),
+                cursor(editor),
+                focused,
+            );
         }
         (editor.text().to_string(), cursor(editor), focused)
     };

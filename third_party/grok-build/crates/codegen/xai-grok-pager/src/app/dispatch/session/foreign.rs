@@ -179,12 +179,25 @@ pub(in crate::app::dispatch) fn dispatch_fetch_session_list(app: &mut AppView) -
         kind_filter.as_deref(),
         None,
     );
+    let resolving_leader_startup = app.startup_leader.is_some();
+    let startup_query = app.startup_leader.as_ref().and_then(|startup| {
+        use crate::app::session_startup::{LeaderResumeSelector, LeaderStartup};
+        let selector = match startup {
+            LeaderStartup::Resume(selector) | LeaderStartup::Fork { selector, .. } => selector,
+        };
+        match selector {
+            LeaderResumeSelector::MostRecentForCwd => None,
+            LeaderResumeSelector::IdOrTitle(target) => Some(target.clone()),
+        }
+    });
     let mut effects = vec![Effect::FetchSessionList {
-        query: None,
+        query: startup_query,
         seq: app.session_picker_list_seq,
         kind_filter,
     }];
-    let foreign_effect = if app.chat_mode {
+    let foreign_effect = if resolving_leader_startup {
+        None
+    } else if app.chat_mode {
         app.foreign_scan_coordinator.begin_request(foreign_seq);
         None
     } else {
@@ -231,6 +244,43 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
             Some(serde_json::json!({ "reason": format!("{partial:?}") })),
         );
     }
+    let leader_request_matches = app.startup_leader.as_ref().is_some_and(|startup| {
+        use crate::app::session_startup::{LeaderResumeSelector, LeaderStartup};
+        let selector = match startup {
+            LeaderStartup::Resume(selector) | LeaderStartup::Fork { selector, .. } => selector,
+        };
+        match selector {
+            LeaderResumeSelector::MostRecentForCwd => query.is_none(),
+            LeaderResumeSelector::IdOrTitle(target) => query.as_deref() == Some(target.as_str()),
+        }
+    });
+    let leader_startup = if leader_request_matches {
+        app.startup_leader.take()
+    } else {
+        None
+    };
+    let leader_match = leader_startup.as_ref().and_then(|startup| {
+        use crate::app::session_startup::{LeaderResumeSelector, LeaderStartup};
+        let selector = match startup {
+            LeaderStartup::Resume(selector) | LeaderStartup::Fork { selector, .. } => selector,
+        };
+        match selector {
+            LeaderResumeSelector::MostRecentForCwd => sessions
+                .iter()
+                .filter(|entry| entry.cwd == app.cwd.to_string_lossy())
+                .max_by_key(|entry| entry.last_active_at.unwrap_or(entry.updated_at))
+                .cloned(),
+            LeaderResumeSelector::IdOrTitle(target) => sessions
+                .iter()
+                .find(|entry| entry.id == *target)
+                .or_else(|| {
+                    sessions
+                        .iter()
+                        .find(|entry| entry.summary.eq_ignore_ascii_case(target))
+                })
+                .cloned(),
+        }
+    });
     let empty_notice = partial.map_or_else(
         || "No sessions found for this directory".to_owned(),
         |partial| partial.picker_notice().to_owned(),
@@ -314,6 +364,30 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
     if !scope.is_relaxed() && is_browse {
         app.session_picker_relaxed_notified_for = None;
     }
+    let leader_requested = leader_startup.is_some();
+    if let (Some(entry), Some(startup)) = (leader_match, leader_startup) {
+        use crate::app::session_startup::LeaderStartup;
+        let session_cwd = (!entry.cwd.is_empty()).then(|| std::path::PathBuf::from(entry.cwd));
+        return match startup {
+            LeaderStartup::Resume(_) => super::load::dispatch_load_session(
+                app,
+                entry.id,
+                session_cwd,
+                entry.source == "conversation",
+            ),
+            LeaderStartup::Fork { new_session_id, .. } => {
+                super::fork::dispatch_startup_fork_session(
+                    app,
+                    entry.id,
+                    session_cwd,
+                    new_session_id,
+                )
+            }
+        };
+    }
+    if leader_requested {
+        app.show_toast("Session does not exist");
+    }
     vec![]
 }
 
@@ -326,6 +400,7 @@ pub(in crate::app::dispatch) fn handle_session_list_failed(
     if seq != app.session_picker_list_seq {
         return vec![];
     }
+    app.startup_leader = None;
     app.session_picker_detail_generation += 1;
     tracing::warn!(error = %error, "session list fetch failed");
     let error_notice = format!("Couldn't load sessions: {error}");

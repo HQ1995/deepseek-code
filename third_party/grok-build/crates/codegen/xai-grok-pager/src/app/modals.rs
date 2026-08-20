@@ -642,9 +642,7 @@ impl AgentView {
 
         // Provider picker: an armed delete owns y/n first (same contract as
         // the composer dropdown's ProviderPendingDelete flow).
-        if provider_mode
-            && let crossterm::event::Event::Key(key) = ev
-        {
+        if provider_mode && let crossterm::event::Event::Key(key) = ev {
             use crate::slash::commands::provider::{
                 ProviderPendingDeleteKey, handle_provider_pending_delete_key,
             };
@@ -765,9 +763,9 @@ impl AgentView {
             ArgPickerStep::ProviderAdd => {
                 InputOutcome::Action(crate::app::actions::Action::OpenAddProvider)
             }
-            ArgPickerStep::ProviderEdit(provider_id) => InputOutcome::Action(
-                crate::app::actions::Action::OpenEditProvider { provider_id },
-            ),
+            ArgPickerStep::ProviderEdit(provider_id) => {
+                InputOutcome::Action(crate::app::actions::Action::OpenEditProvider { provider_id })
+            }
             ArgPickerStep::ProviderArmDelete {
                 provider_id,
                 name,

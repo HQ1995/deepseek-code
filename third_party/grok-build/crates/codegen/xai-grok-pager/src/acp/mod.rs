@@ -428,9 +428,6 @@ fn unsupported_leader_flags(flags: &ConnectFlags) -> Vec<&'static str> {
     if flags.storage_mode.is_some() {
         out.push("--storage-mode");
     }
-    if flags.subagents {
-        out.push("--subagents");
-    }
     if !flags.permission_rules.is_empty() {
         out.push("--allow/--deny permission rules");
     }
@@ -1074,15 +1071,13 @@ mod tests {
             memory_override_flag: Some("--experimental-memory"),
             disable_web_search: true,
             storage_mode: Some("writeback".into()),
-            subagents: true,
             ..Default::default()
         };
         let detected = unsupported_leader_flags(&flags);
-        assert_eq!(detected.len(), 4);
+        assert_eq!(detected.len(), 3);
         assert!(detected.contains(&"--experimental-memory"));
         assert!(detected.contains(&"--disable-web-search"));
         assert!(detected.contains(&"--storage-mode"));
-        assert!(detected.contains(&"--subagents"));
     }
 
     #[test]

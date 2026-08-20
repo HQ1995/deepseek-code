@@ -111,7 +111,9 @@ impl SlashCommand for LoopCommand {
     }
 
     fn visible(&self, ctx: &crate::slash::command::AppCtx) -> bool {
-        ctx.capabilities.as_ref().map_or(true, |caps| caps.contains("schedule"))
+        ctx.capabilities
+            .as_ref()
+            .map_or(true, |caps| caps.contains("schedule"))
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -128,7 +130,7 @@ impl SlashCommand for LoopCommand {
 
         // Show a concrete cadence only for an unambiguous leading token;
         // otherwise a neutral placeholder, since the authoritative schedule
-        // arrives via the model's scheduler_create -> ScheduledTaskCreated and
+        // arrives via the model's schedule_create -> ScheduledTaskCreated and
         // replaces this provisional entry.
         let human_schedule = match interval_token {
             Some(token) => interval_to_human(token),

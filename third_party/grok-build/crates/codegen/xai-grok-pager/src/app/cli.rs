@@ -620,7 +620,12 @@ pub struct PagerArgs {
     pub worktree: Option<String>,
     /// Branch, tag, or commit to base the worktree on (with `--worktree`).
     /// Defaults to the current HEAD of the source checkout when omitted.
-    #[arg(long = "worktree-ref", visible_alias = "ref", requires = "worktree", hide = true)]
+    #[arg(
+        long = "worktree-ref",
+        visible_alias = "ref",
+        requires = "worktree",
+        hide = true
+    )]
     pub worktree_ref: Option<String>,
     /// Restore the original session's repository snapshot when resuming.
     /// Remote sessions require `--worktree` (never checks out into the current

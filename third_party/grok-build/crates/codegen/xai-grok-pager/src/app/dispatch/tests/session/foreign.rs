@@ -1036,6 +1036,11 @@ fn native_fetch_effect_precedes_background_foreign_gate() {
 
     let effects = dispatch(Action::FetchSessionList, &mut app);
 
+    assert_eq!(
+        effects.len(),
+        1,
+        "leader startup must not launch a local foreign-session scan"
+    );
     assert!(matches!(
         effects.as_slice(),
         [
@@ -1044,4 +1049,59 @@ fn native_fetch_effect_precedes_background_foreign_gate() {
         ]
     ));
     assert!(app.session_picker_lanes.foreign_loading);
+}
+
+#[test]
+fn startup_leader_explicit_selector_becomes_a_server_query() {
+    use crate::app::session_startup::{LeaderResumeSelector, LeaderStartup};
+    let mut app = test_app();
+    app.startup_leader = Some(LeaderStartup::Resume(LeaderResumeSelector::IdOrTitle(
+        "older session title".into(),
+    )));
+
+    let effects = dispatch(Action::FetchSessionList, &mut app);
+
+    assert!(matches!(
+        effects.first(),
+        Some(Effect::FetchSessionList { query: Some(query), .. }) if query == "older session title"
+    ));
+}
+
+#[test]
+fn startup_leader_fork_resolves_the_parent_before_forking() {
+    use crate::app::session_startup::{LeaderResumeSelector, LeaderStartup};
+    let mut app = test_app();
+    let child = "33333333-3333-4333-8333-333333333333";
+    app.startup_leader = Some(LeaderStartup::Fork {
+        selector: LeaderResumeSelector::IdOrTitle("parent title".into()),
+        new_session_id: Some(child.into()),
+    });
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
+            sessions: vec![{
+                let mut entry = make_picker_entry("parent-id", "/leader/project");
+                entry.summary = "parent title".into();
+                entry.source = "conversation".into();
+                entry
+            }],
+            partial: None,
+            seq: app.session_picker_list_seq,
+            query: Some("parent title".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::ForkSession {
+            parent_session_id,
+            parent_cwd,
+            new_session_id: Some(new_session_id),
+            ..
+        } if parent_session_id.0.as_ref() == "parent-id"
+            && parent_cwd == &std::path::PathBuf::from("/leader/project")
+            && new_session_id == child
+    )));
 }

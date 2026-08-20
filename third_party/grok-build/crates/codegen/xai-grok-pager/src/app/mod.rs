@@ -747,6 +747,7 @@ pub async fn run(
         .session_startup_intent()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut materialize_ctx = session_startup::MaterializeCtx::from_pager_args(&args);
+    materialize_ctx.leader_session_store = use_leader;
     materialize_ctx.restore_progress_on_stdout =
         std::io::IsTerminal::is_terminal(&std::io::stdout());
     let materialized = session_startup::materialize_startup(materialize_ctx, intent).await?;

@@ -90,7 +90,9 @@ impl SlashCommand for SkillsCommand {
     }
 
     fn visible(&self, ctx: &crate::slash::command::AppCtx) -> bool {
-        ctx.capabilities.as_ref().map_or(true, |caps| caps.contains("skills"))
+        ctx.capabilities
+            .as_ref()
+            .map_or(true, |caps| caps.contains("skills"))
     }
 
     fn description(&self) -> &str {

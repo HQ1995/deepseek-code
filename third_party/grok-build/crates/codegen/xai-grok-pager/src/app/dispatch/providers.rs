@@ -44,7 +44,13 @@ pub(super) fn open_provider_picker(app: &mut AppView) -> Vec<Effect> {
     let Some(agent) = app.agents.get_mut(&id) else {
         return effects;
     };
-    let Some(cmd) = agent.prompt.slash_controller.registry().get("provider").cloned() else {
+    let Some(cmd) = agent
+        .prompt
+        .slash_controller
+        .registry()
+        .get("provider")
+        .cloned()
+    else {
         return effects;
     };
     let ctx = agent.prompt.slash_controller.app_ctx(&agent.session.models);

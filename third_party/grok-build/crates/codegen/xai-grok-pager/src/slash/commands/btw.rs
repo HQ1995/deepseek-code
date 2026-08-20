@@ -38,7 +38,9 @@ impl SlashCommand for BtwCommand {
     }
 
     fn visible(&self, ctx: &crate::slash::command::AppCtx) -> bool {
-        ctx.capabilities.as_ref().map_or(true, |caps| caps.contains("subagents"))
+        ctx.capabilities
+            .as_ref()
+            .map_or(true, |caps| caps.contains("subagents"))
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {

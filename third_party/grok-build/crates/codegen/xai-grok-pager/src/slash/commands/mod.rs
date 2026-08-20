@@ -606,10 +606,7 @@ mod tests {
         let reg = CommandRegistry::new(builtin_commands());
         // DIVERGENCE(deepseek): dsh has no Agent Dashboard, so /cd is
         // hard-hidden even though it remains a builtin.
-        assert!(
-            reg.get("cd").is_none(),
-            "/cd should be hidden in dscode"
-        );
+        assert!(reg.get("cd").is_none(), "/cd should be hidden in dscode");
     }
     #[test]
     fn queue_registered_in_builtin_commands() {

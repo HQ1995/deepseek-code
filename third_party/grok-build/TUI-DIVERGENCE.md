@@ -69,10 +69,10 @@ branding (our identity). Keep this list current on every sync.
   name when the bridge supplies one instead of raw route ids. When two
   providers expose the same raw model id, the bridge qualifies the later
   provider's copy as `provider:model` so both remain selectable, and the
-  remembered effort follows the raw model id across providers. The effort
-  menu is sourced from each model's adapter metadata instead of a hardcoded
-  grok list, so unsupported levels (e.g. medium/xhigh where absent) are not
-  offered. For OpenAI-compatible custom providers, the bridge refreshes the
+  remembered effort is isolated by the underlying provider/model pair. The
+  effort menu is sourced from each model's adapter metadata instead of a
+  hardcoded grok list, so unsupported levels (e.g. medium/xhigh where absent)
+  are not offered. For OpenAI-compatible custom providers, the bridge refreshes the
   model catalog from `GET /models` once per provider (and writes the refreshed
   list back to settings), so stale hand-entered lists are replaced by the
   provider's current models.
@@ -128,15 +128,16 @@ branding (our identity). Keep this list current on every sync.
   remains the only preset picker; /usage is adapted to session stats (above).
 - Slash commands hard-hidden because dsh has no matching surface: /cd (no
   Agent Dashboard), /auto (no dsh auto permission-mode classifier),
-  /workflows (dsh workflow has no list/run-history API yet), plus the
-  already-hidden /hooks, /plugins, /marketplace, /dashboard, /rewind.
-  /skills is available again because the bridge now serves dsh skills via
-  x.ai/skills/list.
+  /workflows (dsh workflow has no list/run-history API yet), /compact,
+  /delete, /remember, /mcps, /skills, plus the already-hidden /hooks,
+  /plugins, /marketplace, /dashboard, /rewind. The bridge explicitly refuses
+  the five typed dsh-extension commands so none can fall through to the model.
 - Bridge now maps dsh capabilities onto grok RPCs: x.ai/session/rename →
   dsh session-title, session/set_mode → dsh plan-mode, x.ai/session/fork →
   dsh sessions.fork + agents.create(seed), x.ai/mcp/list → dsh MCP tool
   names, x.ai/yolo_mode_changed → dsh permission-presets, /loop →
-  dsh-schedule. /tasks is fed from dsh jobs (task_backgrounded/task_completed),
+  a TUI-owned model scheduling instruction. /tasks is fed from dsh jobs
+  (task_backgrounded/task_completed),
   dsh subagent events (subagent_spawned/subagent_finished), and dsh-schedule
   (scheduled_task_created), x.ai/skills/list serves dsh skills,
   todo/write maps to ACP Plan updates, goal/changed maps to GoalUpdated,
@@ -144,9 +145,10 @@ branding (our identity). Keep this list current on every sync.
   session context, and AvailableCommandsUpdate.meta.capabilities drives
   runtime capability-aware slash visibility (subagents/skills/plan/todo/
   schedule/goal). session/new and session/load accept
-  _meta.provider/_meta.model/_meta.reasoningEffort/_meta.permissionMode/
-  _meta.sandbox/_meta.systemPromptOverride/_meta.rules/_meta.tools/
-  _meta.disallowedTools for CLI wiring. dsh-schedule is mounted in the
+  _meta.provider/_meta.model/_meta.reasoningEffort and the permission modes
+  the bridge can enforce exactly. Unsupported sandbox, prompt/rule/tool,
+  auto/acceptEdits/dontAsk, and no-subagents metadata are rejected fail-closed
+  instead of silently weakening CLI flags. dsh-schedule is mounted in the
   leader profile, and TUI /loop no longer requires grok's scheduler_create.
 - dscode CLI surfaces hidden because they have no dsh counterpart or are not
   worth exposing yet: login, logout, plugin, memory, setup, trace, worktree,
@@ -336,17 +338,20 @@ an incompatible foreign leader fail piecemeal in session methods. dscode owns
 both adapters at this seam, so a missing or different version is a terminal
 registration error. The focused client test pins the fail-fast behavior.
 
-### grok's pager-plugin surfaces are hidden (/hooks /plugins /marketplace /skills)
+### Unsupported extension surfaces are hard-hidden
 
-`slash/registry.rs CommandRegistry::new` adds the four to the fail-closed
-`hidden` set. They open grok-build's OWN pager-plugin system — a second
-plugin world dscode does not use, whose names collide head-on with the
-real one (dsh plugins, managed by /dsh). Note dsh itself DOES have skills
+`slash/registry.rs CommandRegistry::new` adds `/hooks`, `/plugins`,
+`/marketplace`, `/skills`, `/compact`, `/delete`, `/remember`, and `/mcps`
+to the fail-closed `hidden` set. The pager-plugin group opens grok-build's
+OWN plugin system — a second plugin world dscode does not use, whose names
+collide head-on with the real one (dsh plugins, managed by /dsh). Note dsh itself DOES have skills
 (the `skills` registry, packages/skill) and hooks (hooks-claude-code);
-those live harness-side and are unreachable from these TUI surfaces —
-the future path for exposing them is bridge-advertised ACP commands, not
-un-hiding grok's local UIs. Un-hide only if the pager-plugin system ever
-becomes a supported dscode surface.
+those live harness-side and are unreachable from these TUI management
+surfaces. The remaining commands require extension RPCs or session mutation
+semantics the bridge cannot complete. Typed commands reach the bridge's
+precise refusal; they never become model prompts. The future path for
+exposing harness-side features is bridge-advertised ACP commands, not
+un-hiding grok's local UIs.
 
 ### Bare /provider opens a list picker
 

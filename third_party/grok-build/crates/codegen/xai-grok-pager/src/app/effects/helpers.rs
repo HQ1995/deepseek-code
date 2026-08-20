@@ -288,6 +288,8 @@ pub(crate) fn sanitize_user_error(raw: &str) -> String {
 ///
 /// The `askUserQuestion` column is the value the pager stamps into `_meta`;
 /// `omitted` means the shell resolves the gate itself (default ON).
+/// Disabling subagents is also stamped independently as `subagents: false`;
+/// relying only on `agentProfile` loses `--no-subagents` when plan mode is off.
 ///
 /// | plan  | subagents | ask-user | agentProfile                   | askUserQuestion    |
 /// |-------|-----------|----------|--------------------------------|--------------------|
@@ -409,6 +411,9 @@ impl SessionFlags {
             if let Some(ref lw) = self.local_workspace {
                 stamp_local_workspace_meta(&mut meta, lw);
             }
+        }
+        if !self.subagents {
+            meta.insert("subagents".into(), serde_json::json!(false));
         }
         if !self.ask_user {
             meta.insert("askUserQuestion".into(), serde_json::json!(false));

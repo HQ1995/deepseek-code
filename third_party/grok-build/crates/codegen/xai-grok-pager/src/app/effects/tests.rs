@@ -1891,6 +1891,7 @@ fn plan_only_meta() {
     };
     let meta = flags.to_meta().unwrap();
     assert_eq!(meta["agentProfile"], "grok-build-plan-no-subagents");
+    assert_eq!(meta["subagents"], false);
     assert_eq!(meta["askUserQuestion"], false);
     assert_eq!(meta["yoloMode"], false);
 }
@@ -1923,6 +1924,7 @@ fn ask_user_alone_meta() {
     };
     let meta = flags.to_meta().unwrap();
     assert_eq!(meta["agentProfile"], "grok-build-ask-user");
+    assert_eq!(meta["subagents"], false);
     assert!(meta.get("askUserQuestion").is_none());
     assert_eq!(meta["yoloMode"], false);
 }
@@ -1939,6 +1941,7 @@ fn plan_with_ask_user_uses_plan_profile() {
     };
     let meta = flags.to_meta().unwrap();
     assert_eq!(meta["agentProfile"], "grok-build-plan-no-subagents");
+    assert_eq!(meta["subagents"], false);
     assert!(meta.get("askUserQuestion").is_none());
     assert_eq!(meta["yoloMode"], false);
 }
@@ -2021,6 +2024,51 @@ fn to_meta_omits_ask_user_question_when_enabled() {
                         "askUserQuestion must be absent when enabled (plan={plan}, subagents={subagents}); meta={meta:?}"
                     );
             }
+        }
+    }
+}
+/// `--no-subagents` must survive every profile combination as its own
+/// fail-closed metadata key. A leader that cannot enforce it can then reject
+/// the request instead of silently enabling TaskTool.
+#[test]
+fn to_meta_emits_subagents_false_when_disabled() {
+    for plan in [false, true] {
+        for ask_user in [false, true] {
+            let flags = SessionFlags {
+                plan_mode: plan,
+                subagents: false,
+                ask_user,
+                ..Default::default()
+            };
+            let meta = flags.to_meta().unwrap_or_else(|| {
+                panic!(
+                    "subagents=false must always emit meta (plan={plan}, ask_user={ask_user})"
+                )
+            });
+            assert_eq!(
+                meta["subagents"], false,
+                "subagents must be false (plan={plan}, ask_user={ask_user}); meta={meta:?}"
+            );
+        }
+    }
+}
+/// The positive/default case stays absent so older leaders are not sent a
+/// redundant extension key they may not recognize.
+#[test]
+fn to_meta_omits_subagents_when_enabled() {
+    for plan in [false, true] {
+        for ask_user in [false, true] {
+            let flags = SessionFlags {
+                plan_mode: plan,
+                subagents: true,
+                ask_user,
+                ..Default::default()
+            };
+            let meta = flags.to_meta().expect("permission seeds always emit meta");
+            assert!(
+                meta.get("subagents").is_none(),
+                "subagents must be absent when enabled (plan={plan}, ask_user={ask_user}); meta={meta:?}"
+            );
         }
     }
 }

@@ -695,6 +695,9 @@ pub enum MaterializedStartup {
         /// cannot checkout in-place on the new local child.
         suppress_code_restore: bool,
     },
+    /// Resolve the startup action through the connected leader's session
+    /// roster, then load or fork the canonical session id.
+    Leader { startup: LeaderStartup },
     /// Fork from a resolved parent, then load the child.
     Fork {
         parent_session_id: String,
@@ -704,6 +707,21 @@ pub enum MaterializedStartup {
         /// Same one-shot as [`Self::Resume::suppress_code_restore`]: the
         /// follow-up child `LoadSession` must not inherit agent restore-code.
         suppress_code_restore: bool,
+    },
+}
+/// A CLI resume selector whose source of truth is the connected leader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaderResumeSelector {
+    MostRecentForCwd,
+    IdOrTitle(String),
+}
+/// Session action deferred until the connected leader resolves its selector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaderStartup {
+    Resume(LeaderResumeSelector),
+    Fork {
+        selector: LeaderResumeSelector,
+        new_session_id: Option<String>,
     },
 }
 /// Whether materialization may resolve a non-id resume arg by title locally.
@@ -731,6 +749,9 @@ pub struct MaterializeCtx {
     /// the local disk store. Always `false` without the optional feature;
     /// setting it anyway errors rather than silently falling back to disk.
     pub chat_mode: bool,
+    /// The connected ACP leader, rather than the pager's GROK_HOME, owns
+    /// durable sessions. Resume selectors must be resolved after connect.
+    pub leader_session_store: bool,
     /// See [`TitleResolution`]; carried from the pre-sandbox pin outcome.
     pub title_resolution: TitleResolution,
     /// CLI `--restore-code`. Remote codebase restore is never applied in-place;
@@ -750,6 +771,7 @@ impl MaterializeCtx {
             has_worktree: args.worktree.is_some(),
             allow_remote_restore: Self::default_allow_remote_restore(),
             chat_mode: args.chat(),
+            leader_session_store: false,
             title_resolution: if args.resume_target_pinned {
                 TitleResolution::PinnedPreSandbox
             } else {
@@ -842,7 +864,7 @@ pub async fn materialize_startup_for_cwd(
     match intent {
         SessionStartupIntent::NewAuto => Ok(MaterializedStartup::NewAuto),
         SessionStartupIntent::NewWithId { session_id } => {
-            if !ctx.has_worktree {
+            if !ctx.has_worktree && !ctx.leader_session_store {
                 ensure_session_id_available(&session_id, cwd)?;
             } else if uuid::Uuid::try_parse(&session_id).is_err() {
                 anyhow::bail!("Error: --session-id must be a valid UUID (got '{session_id}').");
@@ -855,6 +877,11 @@ pub async fn materialize_startup_for_cwd(
         } => {
             if ctx.chat_mode {
                 anyhow::bail!("chat-mode resume requires a build with the `chat` cargo feature");
+            }
+            if ctx.leader_session_store {
+                return Ok(MaterializedStartup::Leader {
+                    startup: LeaderStartup::Resume(LeaderResumeSelector::MostRecentForCwd),
+                });
             }
             let started = std::time::Instant::now();
             let (id, title) = most_recent_session_id(cwd).await?;
@@ -876,6 +903,19 @@ pub async fn materialize_startup_for_cwd(
             most_recent_for_cwd: true,
             new_session_id,
         } => {
+            if ctx.leader_session_store {
+                if let Some(ref nid) = new_session_id
+                    && uuid::Uuid::try_parse(nid).is_err()
+                {
+                    anyhow::bail!("Error: --session-id must be a valid UUID (got '{nid}').");
+                }
+                return Ok(MaterializedStartup::Leader {
+                    startup: LeaderStartup::Fork {
+                        selector: LeaderResumeSelector::MostRecentForCwd,
+                        new_session_id,
+                    },
+                });
+            }
             if let Some(ref nid) = new_session_id {
                 ensure_session_id_available(nid, cwd)?;
             }
@@ -904,6 +944,11 @@ pub async fn materialize_startup_for_cwd(
                     suppress_code_restore: false,
                 });
             }
+            if ctx.leader_session_store {
+                return Ok(MaterializedStartup::Leader {
+                    startup: LeaderStartup::Resume(LeaderResumeSelector::IdOrTitle(session_id)),
+                });
+            }
             let r = resolve_existing_session(ctx, &session_id, cwd).await?;
             Ok(MaterializedStartup::Resume {
                 session_id: r.id,
@@ -918,6 +963,19 @@ pub async fn materialize_startup_for_cwd(
             new_session_id,
             ..
         } => {
+            if ctx.leader_session_store {
+                if let Some(ref nid) = new_session_id
+                    && uuid::Uuid::try_parse(nid).is_err()
+                {
+                    anyhow::bail!("Error: --session-id must be a valid UUID (got '{nid}').");
+                }
+                return Ok(MaterializedStartup::Leader {
+                    startup: LeaderStartup::Fork {
+                        selector: LeaderResumeSelector::IdOrTitle(session_id),
+                        new_session_id,
+                    },
+                });
+            }
             let r = resolve_existing_session(ctx, &session_id, cwd).await?;
             if let Some(ref nid) = new_session_id {
                 let new_cwd = effective_fork_new_cwd(cwd, r.original_cwd.as_deref());
@@ -1631,6 +1689,7 @@ mod tests {
             has_worktree: false,
             allow_remote_restore: true,
             chat_mode: true,
+            leader_session_store: false,
             title_resolution: TitleResolution::Allowed,
             restore_code: false,
             restore_progress_on_stdout: false,
@@ -1695,6 +1754,7 @@ mod tests {
             has_worktree,
             allow_remote_restore: true,
             chat_mode: false,
+            leader_session_store: false,
             title_resolution: TitleResolution::Allowed,
             restore_code,
             restore_progress_on_stdout: false,
@@ -1997,6 +2057,7 @@ mod tests {
             has_worktree: false,
             allow_remote_restore: false,
             chat_mode: false,
+            leader_session_store: false,
             title_resolution: TitleResolution::Allowed,
             restore_code: false,
             restore_progress_on_stdout: false,
@@ -2015,6 +2076,72 @@ mod tests {
             err.to_string().contains("does not exist"),
             "unexpected error: {err}"
         );
+    }
+    #[tokio::test]
+    async fn leader_resume_defers_most_recent_and_explicit_selectors() {
+        let ctx = MaterializeCtx {
+            has_worktree: false,
+            allow_remote_restore: false,
+            chat_mode: false,
+            leader_session_store: true,
+            title_resolution: TitleResolution::Allowed,
+            restore_code: false,
+            restore_progress_on_stdout: false,
+        };
+        let recent = materialize_startup_for_cwd(
+            ctx,
+            SessionStartupIntent::Resume {
+                session_id: None,
+                most_recent_for_cwd: true,
+            },
+            "/no/local/store",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            recent,
+            MaterializedStartup::Leader {
+                startup: LeaderStartup::Resume(LeaderResumeSelector::MostRecentForCwd)
+            }
+        ));
+
+        let explicit = materialize_startup_for_cwd(
+            ctx,
+            SessionStartupIntent::Resume {
+                session_id: Some("session id or title".into()),
+                most_recent_for_cwd: false,
+            },
+            "/no/local/store",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            explicit,
+            MaterializedStartup::Leader {
+                startup: LeaderStartup::Resume(LeaderResumeSelector::IdOrTitle(ref target))
+            } if target == "session id or title"
+        ));
+
+        let fork = materialize_startup_for_cwd(
+            ctx,
+            SessionStartupIntent::ForkFrom {
+                source_session_id: Some("parent title".into()),
+                most_recent_for_cwd: false,
+                new_session_id: Some("11111111-1111-4111-8111-111111111111".into()),
+            },
+            "/no/local/store",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            fork,
+            MaterializedStartup::Leader {
+                startup: LeaderStartup::Fork {
+                    selector: LeaderResumeSelector::IdOrTitle(ref target),
+                    new_session_id: Some(ref child),
+                }
+            } if target == "parent title" && child == "11111111-1111-4111-8111-111111111111"
+        ));
     }
     #[tokio::test]
     async fn materialize_fork_refused_under_chat_mode() {
@@ -2089,6 +2216,7 @@ mod tests {
                 has_worktree: false,
                 allow_remote_restore: false,
                 chat_mode: false,
+                leader_session_store: false,
                 title_resolution: TitleResolution::Allowed,
                 restore_code: false,
                 restore_progress_on_stdout: false,

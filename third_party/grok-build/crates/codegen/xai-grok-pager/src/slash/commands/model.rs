@@ -162,7 +162,9 @@ fn build_model_items(models: &ModelState, query: &str) -> Vec<ArgItem> {
     // If the current provider has no models, don't show an empty picker:
     // fall back to the full catalog so the user can still find another route.
     let scope_has_models = !scope.is_empty()
-        && models.listed_models().any(|(id, _)| models.provider_for(id) == scope);
+        && models
+            .listed_models()
+            .any(|(id, _)| models.provider_for(id) == scope);
     for (id, info) in models.listed_models() {
         let provider = models.provider_for(id);
         // Empty query: show the current provider's models first. A non-empty
@@ -212,7 +214,13 @@ fn build_model_items(models: &ModelState, query: &str) -> Vec<ArgItem> {
         } else if provider_label == provider {
             format!("{} {} {}", provider, info.name, id.0.as_ref())
         } else {
-            format!("{} {} {} {}", provider, provider_label, info.name, id.0.as_ref())
+            format!(
+                "{} {} {} {}",
+                provider,
+                provider_label,
+                info.name,
+                id.0.as_ref()
+            )
         };
 
         // Show the technical model id in the description column; the bridge's
@@ -391,14 +399,22 @@ mod tests {
             current_title: None,
         };
         let items = ModelCommand.suggest_args(&ctx, "").unwrap();
-        assert_eq!(items.len(), 2, "an empty /model query scopes to the current provider");
+        assert_eq!(
+            items.len(),
+            2,
+            "an empty /model query scopes to the current provider"
+        );
         assert_eq!(items[0].display, "DS Chat (current)");
         assert_eq!(items[1].display, "DS Reasoner");
 
         // Typing a query switches to the full global catalog, so a model on
         // another provider is still reachable in one step via search.
         let searched = ModelCommand.suggest_args(&ctx, "pi").unwrap();
-        assert_eq!(searched.len(), 3, "a non-empty query searches the full catalog");
+        assert_eq!(
+            searched.len(),
+            3,
+            "a non-empty query searches the full catalog"
+        );
         assert!(searched.iter().any(|i| i.display == "[pi] Pi Code"));
     }
 
@@ -439,7 +455,11 @@ mod tests {
             name: Some("DeepSeek".into()),
             ..Default::default()
         }];
-        let (id, info) = provider_model("deepseek-v4-flash", "DeepSeek V4 Flash", "deepseek-official");
+        let (id, info) = provider_model(
+            "deepseek-v4-flash",
+            "DeepSeek V4 Flash",
+            "deepseek-official",
+        );
         state.available.insert(id, info);
 
         let ctx = AppCtx {

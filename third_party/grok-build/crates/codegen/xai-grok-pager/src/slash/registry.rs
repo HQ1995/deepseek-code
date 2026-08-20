@@ -188,8 +188,16 @@ impl CommandRegistry {
         hidden.insert("hooks".to_string());
         hidden.insert("plugins".to_string());
         hidden.insert("marketplace".to_string());
-        // DIVERGENCE(deepseek): /skills is kept available because the bridge
-        // now serves real dsh skills through x.ai/skills/list.
+        // DIVERGENCE(deepseek): these builtins enter grok extension flows the
+        // dsh bridge cannot complete yet. Keep them out of completion instead
+        // of advertising actions that end in method-not-found. If typed
+        // explicitly they pass through, where the bridge returns a precise
+        // unsupported message rather than sending them to the model.
+        hidden.insert("compact".to_string());
+        hidden.insert("delete".to_string());
+        hidden.insert("remember".to_string());
+        hidden.insert("mcps".to_string());
+        hidden.insert("skills".to_string());
         // DIVERGENCE(deepseek): `/rewind` needs the x.ai/rewind/points and
         // x.ai/rewind/execute RPCs, which the grok-leader bridge does not
         // implement — the picker would die on method-not-found. Hidden (with
@@ -957,6 +965,31 @@ mod tests {
         // Hiding again removes it.
         registry.set_dashboard_visible(false);
         assert!(registry.get("dashboard").is_none());
+    }
+
+    #[test]
+    fn unsupported_dsh_extension_commands_are_hard_hidden() {
+        let builtins: Vec<Arc<dyn SlashCommand>> =
+            ["compact", "delete", "remember", "mcps", "skills", "exit"]
+                .into_iter()
+                .map(|name| Arc::new(DummyCommand { name, aliases: &[] }) as Arc<dyn SlashCommand>)
+                .collect();
+        let registry = CommandRegistry::new(builtins);
+
+        for name in ["compact", "delete", "remember", "mcps", "skills"] {
+            assert!(registry.get(name).is_none(), "{name} must not be offered");
+            assert!(
+                registry.get_for_dispatch(name).is_none(),
+                "{name} must pass through to the bridge's explicit refusal"
+            );
+            assert!(
+                !registry
+                    .triggers()
+                    .iter()
+                    .any(|trigger| trigger.canonical == name)
+            );
+        }
+        assert!(registry.get("exit").is_some());
     }
 
     // ── Builtin/skill name collisions ───────────────────────────────

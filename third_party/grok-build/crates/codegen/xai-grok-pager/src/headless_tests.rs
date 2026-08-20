@@ -257,7 +257,7 @@ fn headless_materialize_ctx_stays_non_chat() {
     use crate::app::session_startup::TitleResolution;
     for pinned in [false, true] {
         for restore_code in [false, true] {
-            let ctx = headless_materialize_ctx(pinned, restore_code);
+            let ctx = headless_materialize_ctx(pinned, restore_code, false);
             assert!(!ctx.chat_mode);
             assert!(
                 !ctx.has_worktree,
@@ -280,20 +280,20 @@ fn headless_materialize_ctx_stays_non_chat() {
 fn headless_remote_miss_restores_conversation_instead_of_deferring_worktree() {
     use crate::app::session_startup::{RemoteMissPlan, plan_remote_miss};
     for restore_code in [false, true] {
-        let ctx = headless_materialize_ctx(false, restore_code);
+        let ctx = headless_materialize_ctx(false, restore_code, false);
         assert!(!matches!(
             plan_remote_miss(ctx, true),
             RemoteMissPlan::DeferToWorktree { .. }
         ));
     }
     // when asserting the conversation / in-place-refuse arms.
-    let mut conv = headless_materialize_ctx(false, false);
+    let mut conv = headless_materialize_ctx(false, false, false);
     conv.allow_remote_restore = true;
     assert_eq!(
         plan_remote_miss(conv, true),
         RemoteMissPlan::RestoreConversation
     );
-    let mut code = headless_materialize_ctx(false, true);
+    let mut code = headless_materialize_ctx(false, true, false);
     code.allow_remote_restore = true;
     assert_eq!(
         plan_remote_miss(code, true),
@@ -534,4 +534,53 @@ fn handler_answers_ext_method_instead_of_dropping() {
     let parsed: AskUserQuestionExtResponse =
         serde_json::from_str(resp.0.get()).expect("typed wire reply");
     assert!(matches!(parsed, AskUserQuestionExtResponse::Cancelled));
+}
+
+#[test]
+fn leader_headless_meta_matches_interactive_session_flags() {
+    let options = super::HeadlessOptions {
+        plan_mode: true,
+        subagents: true,
+        ask_user: true,
+        model: Some("fake:model".into()),
+        reasoning_effort: Some("high".into()),
+        permission_mode_flag: Some("plan".into()),
+        sandbox: Some("off".into()),
+        ..Default::default()
+    };
+    let meta = super::build_headless_session_meta(&options, false).unwrap();
+    assert_eq!(meta["agentProfile"], "grok-build-plan");
+    assert_eq!(meta["yoloMode"], false);
+    assert_eq!(meta["autoMode"], false);
+    assert_eq!(meta["model"], "fake:model");
+    assert_eq!(meta["reasoningEffort"], "high");
+    assert_eq!(meta["permissionMode"], "plan");
+    assert_eq!(meta["sandbox"], "off");
+    assert!(meta.get("subagents").is_none());
+    assert!(meta.get("askUserQuestion").is_none());
+}
+
+#[test]
+fn leader_headless_meta_exposes_unsupported_overrides_to_fail_closed() {
+    let options = super::HeadlessOptions {
+        yolo: true,
+        plan_mode: false,
+        subagents: false,
+        ask_user: false,
+        system_prompt_override: Some("override".into()),
+        rules: Some("extra rules".into()),
+        cli_tools: Some("bash,edit".into()),
+        cli_disallowed_tools: Some("web_search".into()),
+        ..Default::default()
+    };
+    let meta = super::build_headless_session_meta(&options, true).unwrap();
+    assert!(meta.get("agentProfile").is_none());
+    assert_eq!(meta["subagents"], false);
+    assert_eq!(meta["askUserQuestion"], false);
+    assert_eq!(meta["yoloMode"], true);
+    assert_eq!(meta["autoMode"], false);
+    assert_eq!(meta["systemPromptOverride"], "override");
+    assert_eq!(meta["rules"], "extra rules");
+    assert_eq!(meta["tools"], "bash,edit");
+    assert_eq!(meta["disallowedTools"], "web_search");
 }

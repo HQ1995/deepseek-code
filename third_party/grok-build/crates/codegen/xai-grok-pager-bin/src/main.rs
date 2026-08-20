@@ -1849,10 +1849,25 @@ fn main() {
     let tui_home = first_dir("DSCODE_HOME")
         .or_else(|| first_dir("DSH_PROFILE_DIR"))
         .or_else(|| first_dir("DSC_HOME"))
-        .or_else(|| std::env::var_os("DSH_HOME").filter(|v| !v.is_empty())
-            .map(|h| std::path::Path::new(&h).join("profiles").join("dscode").into_os_string()))
-        .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty())
-            .map(|h| std::path::Path::new(&h).join(".dsh").join("profiles").join("dscode").into_os_string()));
+        .or_else(|| {
+            std::env::var_os("DSH_HOME")
+                .filter(|v| !v.is_empty())
+                .map(|h| {
+                    std::path::Path::new(&h)
+                        .join("profiles")
+                        .join("dscode")
+                        .into_os_string()
+                })
+        })
+        .or_else(|| {
+            std::env::var_os("HOME").filter(|v| !v.is_empty()).map(|h| {
+                std::path::Path::new(&h)
+                    .join(".dsh")
+                    .join("profiles")
+                    .join("dscode")
+                    .into_os_string()
+            })
+        });
     if let Some(tui_home) = tui_home {
         // SAFETY: startup is single-threaded here.
         unsafe { std::env::set_var("GROK_HOME", tui_home) };
@@ -1957,16 +1972,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             std::env::set_var(xai_grok_shell::agent::chat_modes::GROK_CHAT_MODE_ENV, "1");
         }
     }
-    // dscode single entry point: a plain TUI launch (no subcommand, no
-    // one-shot prompt, no --no-leader) always runs against the external dsh
-    // leader. These are the flags scripts/dscode.sh used to add; the actual
-    // connect-first/spawn happens in acp::connect_via_leader.
-    if args.command.is_none()
-        && args.single.is_none()
-        && args.prompt_json.is_none()
-        && args.prompt_file.is_none()
-        && !args.no_leader
-    {
+    // dscode single entry point: every session-producing launch (interactive
+    // or headless, but not standalone subcommands) runs against the external
+    // dsh leader unless --no-leader is explicit.
+    if args.command.is_none() && !args.no_leader {
         args.leader = true;
         if args.leader_socket.is_none() {
             args.leader_socket = Some(xai_grok_pager::dsh_leader::default_leader_socket());
@@ -2001,8 +2010,16 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     if let Some(Command::Wrap(ref wrap_args)) = args.command {
         return xai_grok_pager::wrap_cmd::run(wrap_args);
     }
-    args.pin_local_resume_target()?;
-    let saved_profile = args.saved_resume_profile();
+    // A leader owns its own session store. Resolving `--resume` against the
+    // pager's local GROK_HOME before connecting rejects every dscode/dsh
+    // session (or can pin a colliding stale Grok title). Leader mode resolves
+    // the selector through x.ai/session/list after the ACP connection exists.
+    if !args.leader {
+        args.pin_local_resume_target()?;
+    }
+    let saved_profile = (!args.leader)
+        .then(|| args.saved_resume_profile())
+        .flatten();
     let sandbox_profile_arg = match args.startup_sandbox_profile(saved_profile.as_deref()) {
         xai_grok_pager::app::cli::SandboxStartup::Apply(profile) => profile,
         xai_grok_pager::app::cli::SandboxStartup::Conflict { requested, saved } => {
@@ -2182,12 +2199,16 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             // parseable so users get a redirect instead of "unknown command".
             Command::Login { .. } => {
                 eprintln!("dscode has no xAI login: authentication belongs to the dsh side.");
-                eprintln!("  API providers:       add a key via /provider --add (or ~/.dsh/settings.yaml)");
+                eprintln!(
+                    "  API providers:       add a key via /provider --add (or ~/.dsh/settings.yaml)"
+                );
                 eprintln!("  Subscription logins: /dsh login <codex|claude|grok> inside dscode");
                 std::process::exit(2);
             }
             Command::Logout => {
-                eprintln!("dscode has no xAI login/logout: authentication belongs to the dsh side.");
+                eprintln!(
+                    "dscode has no xAI login/logout: authentication belongs to the dsh side."
+                );
                 eprintln!("  Remove providers via /provider (Ctrl+D) or ~/.dsh/settings.yaml.");
                 std::process::exit(2);
             }
@@ -2265,6 +2286,11 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 background_wait_timeout: std::time::Duration::from_secs(
                     args.background_wait_timeout_secs,
                 ),
+                use_leader: args.leader,
+                plan_mode: !args.no_plan,
+                subagents: !args.no_subagents,
+                ask_user: !args.no_ask_user,
+                sandbox: args.sandbox.clone(),
             },
         )
         .await;

@@ -1098,6 +1098,8 @@ pub struct AppView {
     pub auth_url_poll_handle: Option<(u64, tokio::task::AbortHandle)>,
     /// Every session/chat/worktree/prompt action deferred behind startup gates.
     pub deferred_startup: crate::app::session_startup::DeferredStartupActions,
+    /// CLI session action waiting for the connected leader's session list.
+    pub startup_leader: Option<crate::app::session_startup::LeaderStartup>,
     /// Whether deferred welcome-screen login should force OAuth.
     pub auth_use_oauth: bool,
     /// Delivery state from the last clipboard copy during auth.
@@ -1573,6 +1575,7 @@ impl AppView {
             next_auth_request_seq: 1,
             auth_url_poll_handle: None,
             deferred_startup: Default::default(),
+            startup_leader: None,
             auth_use_oauth: false,
             auth_clipboard_delivery: None,
             auth_clipboard_feedback_generation: 0,
@@ -4964,28 +4967,25 @@ impl AppView {
                                 self.dashboard_sessions_loading,
                                 dash_upgrade_cta,
                             );
-                            let (popup_cursor, popup_post_flush, drawn_popup_agent) = if let Some(
-                                agent_id,
-                            ) =
-                                dashboard.attached_agent
-                            {
-                                let theme = crate::theme::Theme::current();
-                                let popup_area = crate::views::dashboard::popup_rect(view_area);
-                                let title = agents
-                                    .get(&agent_id)
-                                    .map(crate::views::session_title::entry_title)
-                                    .unwrap_or_else(|| "(session)".to_string());
-                                let bundle_state = &self.bundle_state;
-                                let (cursor, post_flush, drawn) =
-                                    crate::views::dashboard::render_popup_overlay(
-                                        f.buffer_mut(),
-                                        popup_area,
-                                        &theme,
-                                        &title,
-                                        dashboard,
-                                        |inner, buf| {
-                                            if let Some(agent) = agents.get_mut(&agent_id) {
-                                                agent.draw(
+                            let (popup_cursor, popup_post_flush, drawn_popup_agent) =
+                                if let Some(agent_id) = dashboard.attached_agent {
+                                    let theme = crate::theme::Theme::current();
+                                    let popup_area = crate::views::dashboard::popup_rect(view_area);
+                                    let title = agents
+                                        .get(&agent_id)
+                                        .map(crate::views::session_title::entry_title)
+                                        .unwrap_or_else(|| "(session)".to_string());
+                                    let bundle_state = &self.bundle_state;
+                                    let (cursor, post_flush, drawn) =
+                                        crate::views::dashboard::render_popup_overlay(
+                                            f.buffer_mut(),
+                                            popup_area,
+                                            &theme,
+                                            &title,
+                                            dashboard,
+                                            |inner, buf| {
+                                                if let Some(agent) = agents.get_mut(&agent_id) {
+                                                    agent.draw(
                                                     inner,
                                                     buf,
                                                     registry,
@@ -5007,15 +5007,15 @@ impl AppView {
                                                         ..Default::default()
                                                     },
                                                 )
-                                            } else {
-                                                (None, None)
-                                            }
-                                        },
-                                    );
-                                (cursor, post_flush, drawn.then_some(agent_id))
-                            } else {
-                                (None, None, None)
-                            };
+                                                } else {
+                                                    (None, None)
+                                                }
+                                            },
+                                        );
+                                    (cursor, post_flush, drawn.then_some(agent_id))
+                                } else {
+                                    (None, None, None)
+                                };
                             let stale_clears =
                                 Self::dashboard_stale_image_clears(agents, drawn_popup_agent);
                             let popup_post_flush =

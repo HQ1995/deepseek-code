@@ -43,7 +43,9 @@ impl SlashCommand for PlanCommand {
     }
 
     fn visible(&self, ctx: &crate::slash::command::AppCtx) -> bool {
-        ctx.capabilities.as_ref().map_or(true, |caps| caps.contains("plan"))
+        ctx.capabilities
+            .as_ref()
+            .map_or(true, |caps| caps.contains("plan"))
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {

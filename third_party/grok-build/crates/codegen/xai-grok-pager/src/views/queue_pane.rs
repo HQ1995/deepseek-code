@@ -1747,8 +1747,14 @@ mod tests {
         let layout_cfg = crate::appearance::LayoutConfig::default();
         pane.render(area, &mut buf, true, &layout_cfg, None, true);
 
-        let steer = pane.steer_button.rect.expect("steer button renders mid-turn");
-        let send_now = pane.send_now.rect.expect("send now button renders mid-turn");
+        let steer = pane
+            .steer_button
+            .rect
+            .expect("steer button renders mid-turn");
+        let send_now = pane
+            .send_now
+            .rect
+            .expect("send now button renders mid-turn");
         assert_eq!(pane.steer_button.entry_id, Some(ids[0]));
         assert_eq!(
             steer.x + steer.width,

@@ -63,11 +63,7 @@ pub fn resolve_dsh_command() -> Result<Vec<OsString>, ConnectionError> {
         return Ok(vec![dsh.into_os_string()]);
     }
     if find_in_path("npx").is_some() {
-        return Ok(vec![
-            "npx".into(),
-            "--yes".into(),
-            DSH_NPM_SPEC.into(),
-        ]);
+        return Ok(vec!["npx".into(), "--yes".into(), DSH_NPM_SPEC.into()]);
     }
     Err(ConnectionError::SpawnFailed(
         "no dsh CLI found: set DSH_BIN, put dsh on PATH, or install npm/npx".into(),
@@ -206,8 +202,7 @@ mod tests {
     fn spawn_records_pid_and_log() {
         let _env = crate::test_util::EnvVarGuard::set(DSH_BIN_ENV, "/bin/sh");
         let log = std::env::temp_dir().join(format!("dsh-leader-test-{}.log", std::process::id()));
-        let _log_env =
-            crate::test_util::EnvVarGuard::set(DSCODE_LOG_ENV, log.to_str().unwrap());
+        let _log_env = crate::test_util::EnvVarGuard::set(DSCODE_LOG_ENV, log.to_str().unwrap());
         let sock =
             std::env::temp_dir().join(format!("dsh-leader-test-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);

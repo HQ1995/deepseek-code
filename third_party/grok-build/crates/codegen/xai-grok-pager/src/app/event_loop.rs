@@ -1841,6 +1841,10 @@ pub(crate) async fn run(
                 false,
             ))
         }
+        MaterializedStartup::Leader { startup } => {
+            app.startup_leader = Some(startup.clone());
+            Some(Action::FetchSessionList)
+        }
         MaterializedStartup::NewWithId { session_id } if args.worktree.is_some() => {
             // Stash preferred id; `dispatch_new_worktree_session` consumes it and
             // passes through `CreateWorktreeSession.preferred_session_id` so the
