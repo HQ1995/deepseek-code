@@ -36,16 +36,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: third_party/grok-build
-      - name: Install protoc
-        # xai-grok-tools-api build.rs needs protoc; the repo's bin/protoc is
-        # a dotslash launcher that only works on the dev host.
-        run: |
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            brew install protobuf
-          else
-            sudo apt-get update
-            sudo apt-get install -y protobuf-compiler
-          fi
+      - name: Install dotslash
+        # bin/protoc is a checked, cross-platform DotSlash launcher pinned to
+        # protoc 29.3. Avoid distro protobuf versions, which differ by runner.
+        run: cargo install --locked dotslash --version 0.5.7
       - name: Build
         # cargo directly (not scripts/build-deepseek-tui.sh): backfills check
         # out old tags whose script may carry host-specific wrappers.
