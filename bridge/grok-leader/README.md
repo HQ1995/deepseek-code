@@ -52,21 +52,23 @@ The package doubles as the dscode profile bundle: cordis.patch.yml mounts the se
 | register / registered | The first envelope frame must be register; the leader answers registered with ready: true and a leader_binary_version at least the client version, or the TUI evicts and respawns its own leader. A non-register first frame gets envelope error 1, a second registration error 2, and a 30 s registration timeout error 3. |
 | ping / pong | Keepalive pair exchanged every 30 s. |
 | initialize | Advertises protocol version 1 and the xai.api_key auth method (the pager fails closed on an empty list), plus the flattened model catalog in _meta.modelState. |
-| authenticate | No-op because the server advertises no authentication methods. |
-| session/new | Creates a fresh agent with an absolute cwd; mcpServers must be an empty array (any non-array or non-empty value rejects). _meta.sessionId pins the session id and _meta.yoloMode marks the session for pre-approved permission requests. _meta.agentProfile (a string preset id) or the dsh-native _meta.agentPreset resolves through the preset roster and is recorded as meta.agentPreset; absent either, the roster default composes. Inline JSON agent definitions reject. |
+| authenticate | No-op because credentials belong to the harness-side providers; the advertised compatibility method only satisfies the pager's auth gate. |
+| session/new | Creates a fresh agent with an absolute cwd; mcpServers must be an empty array (any non-array or non-empty value rejects). _meta.sessionId pins the session id. Permission modes `default`, `workspace-write`, `plan`, `bypassPermissions`, and `always-approve` map to dsh's permission/plan services; an explicit mode wins over _meta.yoloMode. Modes or CLI metadata the bridge cannot enforce (`auto`, `acceptEdits`, `dontAsk`, confining sandbox/tool/rule overrides, `--no-subagents`, and similar) reject instead of silently weakening the launch. `sandbox=off` and its `none` alias are accepted because they match the external dsh leader's actual unconfined execution. _meta.agentProfile (a string preset id) or the dsh-native _meta.agentPreset resolves through the preset roster and is recorded as meta.agentPreset; absent either, the roster default composes. Inline JSON agent definitions reject. |
 | session/prompt | Flattens text and resource-link blocks, permits one in-flight request per session, echoes a user_message_chunk for the accepted prompt, then settles at the correlated turn end with the grok stopReason vocabulary; a turnless admission settles cancelled. |
 | session/cancel | Cancels the addressed agent and settles its pending prompt as cancelled; unknown ids are no-ops. |
 | session/update | Streams user_message_chunk, agent_message_chunk, agent_thought_chunk, tool_call, and tool_call_update notifications with per-session eventSeq and promptId stamps. |
-| session/load | Validates cwd/mcpServers like session/new, then resumes the persisted session and replays its transcript as isReplay updates before responding. Only the owning client may load a live session; a foreign live owner reads as an unknown session, and a reconnecting client re-attaches once its previous socket is gone. The preset recorded on the persisted header recomposes; a header that predates presets falls back to the TUI's agentProfile, then the roster default. |
+| session/load | Validates cwd/mcpServers and CLI metadata like session/new, then resumes the durable session. Interactive loads replay the transcript as isReplay updates; `_meta.noReplay: true` rebuilds state without emitting prior text for headless output. Only the owning client may reload a live session. The latest durable preset selection wins, and a preset may change only before model-visible history exists. |
 | session/list | Lists persisted session headers. |
 | session/set_model | Switches the live selection and saves the default through agentDefaultModel; the provider comes from the catalog's modelId-to-provider mapping, then the agent's own route. A modelId outside the catalog rejects instead of persisting an unresolvable selection. |
+| session/set_mode | Maps `plan` to the selected preset's plan-mode service and all other ids to leaving plan mode; rejects when that service is not present. |
 | session/close | Cancels, flushes through ctx.sessions, and disposes the session. |
 | session/request_permission | Offers one-shot allow/reject choices for bridge-owned approval requests; YOLO sessions pre-approve without a roundtrip. |
 | x.ai/models/list | Returns the provider catalog as grok SessionModelState. |
 | x.ai/providers/add | Writes one provider route into the dsh settings document through the official settings seam (ctx.settings.mutate on the llm-pi-ai namespace); refuses duplicate ids; fills a non-catalog route's models from gateway discovery. Returns the refreshed provider roster. |
 | x.ai/providers/update | Merges the form fields over one route's user profile (empty fields unset, models preserved) through the same settings seam. Returns the refreshed roster. |
 | x.ai/providers/remove | Unsets one provider route through the settings seam; refuses the provider that owns the current model. Returns the refreshed roster. |
-| x.ai/session/list | Session-picker and dashboard list over persisted headers (cwd/query/limit filters, firstPrompt backfill cached per process, rows tagged chat-kind so the TUI bypasses its local-store gate and loads via session/load). |
+| x.ai/commands/list | Returns the built-in bridge commands plus commands registered by the live session's plugin composition. A supplied session id must belong to the caller. |
+| x.ai/session/list | Session-picker and dashboard list over persisted headers and logs (cwd/query/limit filters, durable title and firstPrompt projection, latest-event ordering, rows tagged chat-kind so the TUI bypasses its local-store gate and loads via session/load). |
 | notification wire form | Every extension notification (x.ai/*) rides the wire with the ACP '_' prefix (_x.ai/queue/changed, _x.ai/session/prompt_complete, …): the pager's agent-client-protocol decode strips the prefix before dispatching to its x.ai/* handlers and silently drops unprefixed unknown methods as method_not_found. session/update is the sole typed (unprefixed) notification. |
 | x.ai/queue/changed | Broadcast on every queue mutation: pending rows (id, version, kind, text, position) plus the running prompt (runningPromptId/runningText/runningKind). Each snapshot carries a strictly increasing seq (epoch-seeded, so a restarted leader outranks its predecessor); the TUI drops any snapshot whose seq is not strictly newer for the session and adopts current_prompt_id from the applied ones. |
 | x.ai/queue/interject, /remove, /reorder, /clear | Queue edit notifications. interject is grok send-now: the row jumps to front, the running turn is cancelled (prompt_complete carries cancelTrigger=send_now) and the row runs next. remove (running row falls back to cancel), reorder by orderedIds, clear. |
@@ -79,6 +81,12 @@ The package doubles as the dscode profile bundle: cordis.patch.yml mounts the se
 | other methods | Unknown requests get JSON-RPC -32601; unknown notifications are dropped with a warning. |
 
 One connection may own several sessions. Each session has an independent prompt slot, workspace, cancellation path, model selection, and disposer; a disconnected client releases exactly its own sessions.
+
+## Slash commands and plugins
+
+The bridge owns `/dsh` and the headless/raw `/preset` path. `/preset` changes composition only before model-visible history exists. Commands registered through the dsh command registry are merged into the session-specific command roster and delegated back to that registry. `/loop` remains TUI-owned because it rewrites the prompt into a scheduling instruction. Unsupported dsh extension commands (`/compact`, `/delete`, `/remember`, `/mcps`, and `/skills`) are hard-hidden in the TUI and explicitly refused by the bridge, so they never fall through as model prompts.
+
+`/dsh add [--trust] <spec>` first installs into an isolated npm stage with lifecycle scripts disabled, parses and reports every bundle's composition patch, and requires `--trust` before registering any executable bundle. The real profile install is re-verified before its bundle list is atomically updated. `/dsh remove <name>` unregisters the bundle before uninstalling the dependency, so an npm failure leaves inert files rather than a broken profile reference. Core profile packages cannot be added or removed through this path.
 
 ## Lifecycle
 
@@ -125,9 +133,9 @@ Append-only through the owning tool result.
 - Control plane stubbed — control commands answer a ControlResult error; GetLeaderInfo and CpuProfileStatus are unimplemented (protocol.rs ControlCommand).
 - Leader-version pin — leader_binary_version is pinned to 1.0.4 to satisfy the probe-verified TUI; it is not derived from the package version.
 - Transcript projection incomplete — plans, titles, and usage cards stay off the wire; cancelRewind and sessionRecap mirror the captured stub without verified semantics.
-- Provider-scoped model ids flattened — grok expects one global catalog of bare modelId strings; the leader keeps the modelId-to-provider mapping privately for session/set_model, so the bare-id wire contract costs no provider ownership on switch.
+- Provider-scoped model ids adapted — the first bare model id keeps the TUI-friendly spelling; collisions are qualified as `provider:model`, and reasoning-effort memory is keyed by the underlying provider/model pair.
 - Replay buffering — live notifications racing a session/load are dropped by the high-water mark instead of buffered for a gap-free flush (server.rs MAX_BUFFERED_LIVE_PER_LOAD).
-- Unverified surfaces — the x.ai/ask_user_question request and answer shapes, capability injection into session/new, the grok built-in agentProfile name mapping (grok-build-plan and friends have no dsh preset counterparts), and the lock-file singleton guard carry TODO(verify) markers with grok file:line citations.
+- Unverified surfaces — the x.ai/ask_user_question request and answer shapes, capability injection into session/new, and the lock-file singleton guard carry TODO(verify) markers with grok file:line citations.
 
 ## Running the tests
 

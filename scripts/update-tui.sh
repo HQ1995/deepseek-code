@@ -28,7 +28,6 @@ echo "Now port selected changes by hand into $TUI. Record the new baseline with:
 echo "  mv $TUI/UPSTREAM_REV.new $TUI/UPSTREAM_REV   (after updating the file's notes)"
 echo "  update TUI-DIVERGENCE.md"
 echo "Then rebuild and run the sync gate:"
-echo "  numactl --cpunodebind=1 --membind=1 cargo build --release"
-echo "  fake-leader replay + one real deepseek-v4-flash turn must pass"
+echo "  scripts/e2e-product.sh --full --provider-ui"
 echo
 echo "scratch upstream kept at: $SCRATCH/upstream"
