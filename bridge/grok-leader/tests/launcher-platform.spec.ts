@@ -9,6 +9,7 @@ import {
   parseCliVersion,
   profileDir,
   profileLauncher,
+  shouldReconcilePackageUpdate,
   tuiAssetName,
   tuiHome,
 } from '../bin/dscode.mjs'
@@ -51,7 +52,20 @@ describe('installation lifecycle', () => {
   it('keeps the npm package on the requested update channel', () => {
     expect(packageUpdateRef([])).toBe('latest')
     expect(packageUpdateRef(['--beta'])).toBe('beta')
+    expect(packageUpdateRef(['--alpha'])).toBe('beta')
     expect(packageUpdateRef(['--version', '0.0.8'])).toBe('0.0.8')
+    expect(packageUpdateRef(['--version=0.0.9'])).toBe('0.0.9')
+    expect(packageUpdateRef(['--stable'])).toBe('latest')
+    expect(packageUpdateRef(['--enterprise'])).toBe('enterprise')
+  })
+
+  it('finds update after global flags but keeps --check observational', () => {
+    expect(shouldReconcilePackageUpdate(['--debug', 'update', '--alpha'])).toBe(true)
+    expect(shouldReconcilePackageUpdate(['update', '--check'])).toBe(false)
+    expect(shouldReconcilePackageUpdate(['--debug'])).toBe(false)
+    expect(shouldReconcilePackageUpdate(['-p', 'update'])).toBe(false)
+    expect(shouldReconcilePackageUpdate(['--model', 'update'])).toBe(false)
+    expect(shouldReconcilePackageUpdate(['wrap', 'update'])).toBe(false)
   })
 
   it('parses the official dsh version output', () => {

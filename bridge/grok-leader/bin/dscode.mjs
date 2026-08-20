@@ -409,8 +409,11 @@ export const ensureBinary = async () => {
 }
 
 const refreshPackageForUpdate = () => {
-  if (process.argv[2] !== 'update' || process.env.DSCODE_PACKAGE_RECONCILED === '1') return false
-  const updateRef = packageUpdateRef(process.argv.slice(3))
+  const argv = process.argv.slice(2)
+  const updateIndex = updateCommandIndex(argv)
+  if (!shouldReconcilePackageUpdate(argv) || process.env.DSCODE_PACKAGE_RECONCILED === '1') return false
+  const updateArgs = argv.slice(updateIndex + 1)
+  const updateRef = packageUpdateRef(updateArgs)
   const installed = ensureProfilePlugin({
     spec: `${pkg.name}@${updateRef}`,
     expectedVersion: null,
@@ -425,11 +428,28 @@ const refreshPackageForUpdate = () => {
   return true
 }
 
+const updateCommandIndex = (args) => {
+  let index = 0
+  while (args[index] === '--debug') index += 1
+  return args[index] === 'update' ? index : -1
+}
+
+export const shouldReconcilePackageUpdate = (args) => {
+  const updateIndex = updateCommandIndex(args)
+  if (updateIndex === -1) return false
+  // `update --check` is observational. Do not mutate the npm profile before
+  // the TUI has reported whether an update exists.
+  return !args.slice(updateIndex + 1).includes('--check')
+}
+
 export const packageUpdateRef = (args) => {
   const versionIndex = args.indexOf('--version')
-  const version = versionIndex === -1 ? undefined : args[versionIndex + 1]
+  const equalsVersion = args.find(arg => arg.startsWith('--version='))?.slice('--version='.length)
+  const version = equalsVersion ?? (versionIndex === -1 ? undefined : args[versionIndex + 1])
   if (version !== undefined && version !== '') return version
-  return args.includes('--beta') ? 'beta' : 'latest'
+  if (args.includes('--alpha') || args.includes('--beta')) return 'beta'
+  if (args.includes('--enterprise')) return 'enterprise'
+  return 'latest'
 }
 
 const main = async () => {
