@@ -75,7 +75,21 @@ const commandV = (name) => {
   return probe.status === 0 && path !== '' ? path : undefined
 }
 
-/** Official dsh CLI on PATH, else `npm i -g` the pin. Same command a user would run. */
+const npmInstallDsh = (spec, extraArgs = []) => {
+  const argv = ['install', '-g', spec, '--no-audit', '--no-fund', ...extraArgs]
+  console.error(`dscode: first run — npm ${argv.join(' ')}`)
+  const result = spawnSync('npm', argv, {
+    stdio: ['ignore', 'inherit', 'inherit'],
+    timeout: 600000,
+  })
+  if (result.error?.code === 'ETIMEDOUT') {
+    throw new Error(`dsh install timed out; run manually: npm ${argv.join(' ')}`)
+  }
+  return result.status === 0
+}
+
+/** Official dsh on PATH, else `npm i -g`. If /usr/local is not writable,
+ *  install into ~/.local (same prefix as the dscode symlink). */
 export const ensureDshCli = () => {
   const envBin = process.env.DSH_BIN
   if (envBin !== undefined && envBin !== '' && existsSync(envBin)) return envBin
@@ -84,21 +98,16 @@ export const ensureDshCli = () => {
   if (existing !== undefined) return existing
 
   const spec = dshTestedVersion ? `@deepseek-ai/dsh@${dshTestedVersion}` : '@deepseek-ai/dsh'
-  console.error(`dscode: first run — installing ${spec}...`)
-  const argv = ['install', '-g', spec, '--no-audit', '--no-fund']
-  const result = spawnSync('npm', argv, {
-    stdio: ['ignore', 'inherit', 'inherit'],
-    timeout: 600000,
-  })
-  if (result.error?.code === 'ETIMEDOUT') {
-    throw new Error(`dsh install timed out; run manually: npm ${argv.join(' ')}`)
+  const userPrefix = join(homedir(), '.local')
+  const userBin = join(userPrefix, 'bin', 'dsh')
+  if (!npmInstallDsh(spec) || commandV('dsh') === undefined) {
+    if (!npmInstallDsh(spec, ['--prefix', userPrefix]) || !existsSync(userBin)) {
+      throw new Error(`dsh install failed; run: npm install -g ${spec}`)
+    }
   }
-  if (result.status !== 0) {
-    throw new Error(`dsh install failed; run manually: npm ${argv.join(' ')}`)
-  }
-  const installed = commandV('dsh')
+  const installed = commandV('dsh') ?? (existsSync(userBin) ? userBin : undefined)
   if (installed === undefined) {
-    throw new Error(`dsh installed but not on PATH; run manually: npm ${argv.join(' ')}`)
+    throw new Error(`dsh installed but not on PATH; add ${join(homedir(), '.local', 'bin')} to PATH`)
   }
   return installed
 }
@@ -300,8 +309,11 @@ const main = async () => {
     migrateLegacyTuiHome()
   }
   const dshBin = ensureDshCli()
+  const localBin = join(homedir(), '.local', 'bin')
+  const path = process.env.PATH ?? ''
   const env = {
     ...process.env,
+    PATH: path.split(':').includes(localBin) ? path : `${localBin}:${path}`,
     DSH_BIN: dshBin,
     DSCODE_HOME: tuiHome,
     // 0.0.10 TUI only reads DSC_HOME; drop after that binary is gone.

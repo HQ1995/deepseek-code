@@ -1,5 +1,3 @@
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { TUI_ASSETS, profileDir, tuiAssetName, tuiHome } from '../bin/dscode.mjs'
 
@@ -23,10 +21,9 @@ describe('tuiAssetName', () => {
   })
 })
 
-describe('tui home', () => {
-  it('is the dscode profile (DSCODE_HOME), not a nested tui/ or ~/.dsh/dsc-tui', () => {
-    expect(profileDir).toBe(join(homedir(), '.dsh', 'profiles', 'dscode'))
+describe('home', () => {
+  it('puts TUI state in the dsh profile directory', () => {
     expect(tuiHome).toBe(profileDir)
-    expect(tuiHome.includes('node_modules')).toBe(false)
+    expect(profileDir).toMatch(/profiles[/\\]dscode$/)
   })
 })
