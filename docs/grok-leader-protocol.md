@@ -71,6 +71,15 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
 - Interactive loads replay persisted updates with `isReplay`. Headless loads
   set `_meta.noReplay` so old assistant text does not contaminate the new JSON
   result; projection state and sequence high-water marks are still rebuilt.
+- A fresh profile may advertise no providers or models. Provider mutations
+  broadcast the refreshed catalog, and model/effort selections persist both as
+  the default for new sessions and as session-local durable events.
+- Custom-route discovery is stale-while-revalidate: initialization returns the
+  persisted catalog immediately, then broadcasts any background refresh.
+  Recognized OpenAI-compatible `/models` reasoning extensions are translated
+  into pi-ai per-model capabilities. Effort choices then come only from that
+  exact dsh metadata; stale unsupported values are omitted rather than guessed
+  from provider or model names.
 - Unknown JSON-RPC methods return `-32601`; invalid parameters return `-32602`.
 - Disconnect and plugin disposal cancel and flush only the sessions owned by
   that client.

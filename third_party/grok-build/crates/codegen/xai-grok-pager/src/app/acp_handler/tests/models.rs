@@ -113,6 +113,46 @@
     }
 
     #[test]
+    fn models_update_refreshes_provider_rosters_with_the_catalog() {
+        let mut app = make_app_with_agent("sess-1");
+        let params = serde_json::json!({
+            "currentModelId": "",
+            "availableModels": [{
+                "modelId": "ocx-model",
+                "name": "OCX Model",
+                "_meta": { "provider": "ocx" },
+            }],
+            "_meta": {
+                "currentProviderId": "",
+                "providers": [{
+                    "id": "ocx",
+                    "name": "OpenCodex",
+                    "baseURL": "http://127.0.0.1:10100/v1",
+                }],
+            },
+        });
+        let raw = serde_json::value::to_raw_value(&params).unwrap();
+        let notif = acp::ExtNotification::new(
+            "x.ai/models/update",
+            std::sync::Arc::from(raw),
+        );
+
+        assert!(handle_models_update(&notif, &mut app));
+        assert_eq!(app.models.providers.len(), 1);
+        assert_eq!(app.models.providers[0].id, "ocx");
+        assert_eq!(app.models.providers[0].name.as_deref(), Some("OpenCodex"));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(agent.session.models.providers, app.models.providers);
+        assert!(
+            agent
+                .session
+                .models
+                .available
+                .contains_key(&acp::ModelId::new(std::sync::Arc::from("ocx-model")))
+        );
+    }
+
+    #[test]
     fn models_update_preserves_each_agent_model_independently() {
         let mut app = make_app_with_agent("sess-A");
         insert_agent(&mut app, AgentId(1), Some("sess-B"));
@@ -388,4 +428,3 @@
             "unrelated-session broadcast must not touch this agent's model"
         );
     }
-

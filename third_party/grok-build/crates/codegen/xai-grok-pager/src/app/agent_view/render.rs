@@ -978,7 +978,7 @@ impl AgentView {
             .session
             .models
             .current_model_name()
-            .unwrap_or_else(|| "unknown".to_string());
+            .unwrap_or_else(|| "No model · /provider".to_string());
         let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
         let casual_commenting = self.is_casual_commenting();
         let prompt_focused = if self.plan_approval_view.is_some() {

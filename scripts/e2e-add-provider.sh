@@ -74,12 +74,12 @@ for _ in $(seq 1 60); do
 done
 grep -q 'Add provider' "$OUT/frame-$RUN_ID-modal.txt" || fail "add-provider modal did not open"
 
-# Custom preset (5 Down presses from "DeepSeek official"), then fill the form.
-tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Down Down Down Down Down
+# Custom is the neutral default; Down moves from preset to id.
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Down
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "fake-gw"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "Fake GW"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "FAKE_KEY"
-tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab Right
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "$GW_URL"
 snap filled
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Enter

@@ -28,7 +28,8 @@ trap cleanup EXIT
 
 [[ -x "$BIN" ]] || fail "TUI binary is missing: $BIN"
 [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || fail "Node is unavailable"
-"$NODE_BIN" -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit((major === 22 && minor >= 19) || major >= 24 ? 0 : 1)' || fail "Node ^22.19.0 or >=24 is required"
+"$NODE_BIN" -e 'const a=process.versions.node.split(".").map(Number), b=[22,19,0]; process.exit(a[0]>b[0] || (a[0]===b[0] && (a[1]>b[1] || (a[1]===b[1] && a[2]>=b[2]))) ? 0 : 1)' \
+  || fail "pinned dsh requires Node >=22.19.0 (got $($NODE_BIN --version))"
 export PATH="$(dirname "$NODE_BIN"):$PATH"
 
 # 1. Mock gateway (node stdlib): GET .../models answers one fake model.
@@ -119,15 +120,31 @@ wait_frame() {
 
 clear_prompt() { tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" C-c; sleep 1; }
 
-# 3. First boot: choose the empty Custom preset, then add fake-gw.
+wait_default_selection() {
+  local provider="$1" model="$2"
+  for _ in $(seq 1 40); do
+    if awk -v provider="$provider" -v model="$model" '
+      /^agent-default-model:/ { in_default = 1; next }
+      in_default && /^[^[:space:]]/ { in_default = 0 }
+      in_default && $1 == "provider:" && $2 == provider { provider_ok = 1 }
+      in_default && $1 == "model:" && $2 == model { model_ok = 1 }
+      END { exit !(provider_ok && model_ok) }
+    ' "$SCRATCH/settings.yaml"; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  fail "default selection did not become $provider/$model"
+}
+
+# 3. First boot: Custom is the neutral default; add fake-gw.
 boot_and_wait boot1 "$SOCK"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "/provider add" Enter
 wait_frame modal "Add provider"
-tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Right Right Right Right Right
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Down "fake-gw"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "Fake GW"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "FAKE_KEY"
-tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab Right
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "$GW_URL"
 snap filled
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Enter
@@ -136,12 +153,23 @@ cp "$SCRATCH/settings.yaml" "$OUT/settings-$RUN_ID-after-add.yaml"
 grep -q 'fake-gw:' "$SCRATCH/settings.yaml" || fail "settings.yaml missing fake-gw"
 grep -q 'fake-model' "$SCRATCH/settings.yaml" || fail "settings.yaml missing discovered model"
 
-# 4. Edit fake-gw: Ctrl+E opens the modal prefilled; rename displayName.
+# 4. Both providers expose fake-model. Switching providers keeps that raw
+# model id, while persisting the exact provider/model route.
+clear_prompt
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "/provider fake-gw" Enter
+wait_default_selection fake-gw fake-model
+snap same-model-switch
+clear_prompt
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "/provider seed" Enter
+wait_default_selection seed fake-model
+
+# 5. Edit fake-gw: Ctrl+E opens the modal prefilled; rename displayName.
 clear_prompt
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "/provider fake"
 sleep 2
 snap pre-edit-list
 grep -q 'Fake GW' "$OUT/frame-$RUN_ID-pre-edit-list.txt" || fail "/provider does not list Fake GW before the edit"
+grep -q '1 model' "$OUT/frame-$RUN_ID-pre-edit-list.txt" || fail "new provider still shows no models before restart"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" C-e
 wait_frame edit-modal "Edit provider"
 grep -q 'fake-gw' "$OUT/frame-$RUN_ID-edit-modal.txt" || fail "edit modal does not show the locked id"
@@ -162,7 +190,7 @@ snap post-edit-list
 grep -q 'Fake GW Renamed' "$OUT/frame-$RUN_ID-post-edit-list.txt" || fail "/provider does not show the renamed provider"
 tmux -L "$SESSION" -f /dev/null kill-server 2>/dev/null || true
 
-# 5. Second boot: the edited settings persist, then delete and the blocked check.
+# 6. Second boot: the edited settings persist, then delete and the blocked check.
 export DSCODE_SOCKET="$SOCK2"
 boot_and_wait boot2 "$SOCK2"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "/provider fake"

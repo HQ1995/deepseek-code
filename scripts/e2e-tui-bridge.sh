@@ -15,6 +15,8 @@ HEADLESS_SOCKET="$OUT/leader-$RUN_ID-headless.sock"
 HEADLESS_RESUME_SOCKET="$OUT/leader-$RUN_ID-headless-resume.sock"
 HEADLESS_FORK_SOCKET="$OUT/leader-$RUN_ID-headless-fork.sock"
 HEADLESS_REJECT_SOCKET="$OUT/leader-$RUN_ID-headless-reject.sock"
+PRESET_ROSTER_LOG="$OUT/preset-rosters-$RUN_ID.log"
+PRESET_SOCKETS=()
 LEADER_LOG="$OUT/leader-$RUN_ID.log"
 FRAME="$OUT/frame-$RUN_ID.txt"
 MOCK_LOG="$OUT/mock-$RUN_ID.log"
@@ -36,15 +38,49 @@ fail() {
   exit 1
 }
 
+leader_pid() {
+  local socket="$1"
+  local lock="${socket%.*}.lock"
+  local pid
+  pid="$(cat "$lock" 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
+    printf '%s\n' "$pid"
+    return 0
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    pid="$(lsof -t "$socket" 2>/dev/null | head -n 1 || true)"
+  elif command -v fuser >/dev/null 2>&1; then
+    pid="$(fuser "$socket" 2>/dev/null | tr -cd '0-9\n' | head -n 1 || true)"
+  else
+    pid=""
+  fi
+  [[ "$pid" =~ ^[0-9]+$ ]] && printf '%s\n' "$pid"
+  return 0
+}
+
+wait_leader_exit() {
+  local socket="$1"
+  local pid
+  for _ in $(seq 1 80); do
+    pid="$(leader_pid "$socket")"
+    [[ -z "$pid" ]] && return 0
+    sleep 0.1
+  done
+  fail "leader did not exit after its last client disconnected: $socket"
+}
+
 cleanup() {
   tmux -L "$SESSION" -f /dev/null kill-server >/dev/null 2>&1 || true
   for socket in \
     "$SOCKET" "$RESUME_SOCKET" "$HEADLESS_SOCKET" \
     "$HEADLESS_RESUME_SOCKET" "$HEADLESS_FORK_SOCKET" "$HEADLESS_REJECT_SOCKET"; do
-    if [[ -f "$socket.lock" ]]; then
-      pid="$(cat "$socket.lock" 2>/dev/null || true)"
-      [[ "$pid" =~ ^[0-9]+$ ]] && kill "$pid" >/dev/null 2>&1 || true
-    fi
+    pid="$(leader_pid "$socket")"
+    [[ -n "$pid" ]] && kill "$pid" >/dev/null 2>&1 || true
+  done
+  for socket in "${PRESET_SOCKETS[@]-}"; do
+    [[ -z "$socket" ]] && continue
+    pid="$(leader_pid "$socket")"
+    [[ -n "$pid" ]] && kill "$pid" >/dev/null 2>&1 || true
   done
   [[ -n "$MOCK_PID" ]] && kill "$MOCK_PID" >/dev/null 2>&1 || true
 }
@@ -53,8 +89,8 @@ trap cleanup EXIT
 [[ -x "$TUI_BIN" ]] || fail "TUI binary is missing: $TUI_BIN"
 [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || fail "Node is unavailable"
 command -v tmux >/dev/null 2>&1 || fail "tmux is required"
-"$NODE_BIN" -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit((major === 22 && minor >= 19) || major >= 24 ? 0 : 1)' \
-  || fail "Node ^22.19.0 or >=24 is required (got $($NODE_BIN --version))"
+"$NODE_BIN" -e 'const a=process.versions.node.split(".").map(Number), b=[22,19,0]; process.exit(a[0]>b[0] || (a[0]===b[0] && (a[1]>b[1] || (a[1]===b[1] && a[2]>=b[2]))) ? 0 : 1)' \
+  || fail "pinned dsh requires Node >=22.19.0 (got $($NODE_BIN --version))"
 
 mkdir -p "$OUT" "$SCRATCH" "$SCRATCH/e2e-bin" "$SCRATCH/fixture-plugin"
 export PATH="$(dirname "$NODE_BIN"):$SCRATCH/e2e-bin:$PATH"
@@ -84,6 +120,69 @@ else
   DSH_BIN="$DSH_PREFIX/node_modules/.bin/dsh"
 fi
 [[ -x "$DSH_BIN" ]] || fail "dsh executable is invalid: $DSH_BIN"
+
+# Install the bridge as the tarball users receive, not as a live file: link.
+# A later `dsh add` must not make pnpm resolve runtime peers from the checkout.
+BRIDGE_ARCHIVE_NAME="$(npm pack --silent --pack-destination "$SCRATCH" "$ROOT/bridge/grok-leader")" \
+  || fail "could not pack the local bridge"
+BRIDGE_ARCHIVE_NAME="${BRIDGE_ARCHIVE_NAME##*$'\n'}"
+BRIDGE_ARCHIVE="$SCRATCH/$BRIDGE_ARCHIVE_NAME"
+[[ -f "$BRIDGE_ARCHIVE" ]] || fail "packed bridge archive is missing: $BRIDGE_ARCHIVE"
+
+DSH_BIN_DIR="$(cd "$(dirname "$DSH_BIN")" && pwd)"
+SHIPPED_MINIMAL=""
+for candidate in \
+  "$DSH_BIN_DIR/../lib/node_modules/@deepseek-ai/dsh/config/agent-presets/minimal/agent.cordis.yml" \
+  "$DSH_BIN_DIR/../@deepseek-ai/dsh/config/agent-presets/minimal/agent.cordis.yml"; do
+  if [[ -f "$candidate" ]]; then
+    SHIPPED_MINIMAL="$candidate"
+    break
+  fi
+done
+[[ -n "$SHIPPED_MINIMAL" ]] || fail "could not locate the pinned dsh minimal preset"
+
+install_fixture_custom_preset() {
+CUSTOM_PRESET="$SCRATCH/.agent-presets/fixture-custom"
+mkdir -p "$CUSTOM_PRESET"
+cp "$SHIPPED_MINIMAL" "$CUSTOM_PRESET/agent.cordis.yml"
+cat >"$CUSTOM_PRESET/preset.yml" <<'EOF'
+name: Fixture custom preset
+description: User-authored minimal preset with one arbitrary plugin tool.
+order: 99
+EOF
+cat >"$CUSTOM_PRESET/fixture-tool.mjs" <<'EOF'
+export const name = 'fixture-tool'
+export const inject = ['tools']
+
+export function apply(ctx) {
+  ctx.tools.register({
+    name: 'fixture_echo',
+    description: 'Echo one string from a custom preset plugin.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { value: { type: 'string' } },
+      required: ['value'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { value: { type: 'string' } },
+        required: ['value'],
+      },
+      render: (_args, value) => [{ type: 'text', text: value.value }],
+    },
+    execute: async args => ({ value: args.value }),
+  })
+}
+EOF
+cat >>"$CUSTOM_PRESET/agent.cordis.yml" <<'EOF'
+
+- id: fixture-tool
+  name: './fixture-tool.mjs'
+EOF
+}
 
 PORT=$((24000 + (RUN_ID % 16000)))
 GATEWAY="http://127.0.0.1:$PORT/v1"
@@ -126,6 +225,11 @@ const chunk = (text, finishReason = null) => JSON.stringify({
   model: 'fake-model',
   choices: [{ index: 0, delta: text === '' ? {} : { role: 'assistant', content: text }, finish_reason: finishReason }],
 })
+const responsesEvent = (type, sequenceNumber, response) => JSON.stringify({
+  type,
+  sequence_number: sequenceNumber,
+  ...response,
+})
 
 http.createServer((request, response) => {
   let body = ''
@@ -135,7 +239,10 @@ http.createServer((request, response) => {
     const path = request.url?.split('?')[0] ?? ''
     if (request.method === 'GET' && path.endsWith('/models')) {
       response.writeHead(200, { 'content-type': 'application/json' })
-      response.end(JSON.stringify({ data: [{ id: 'fake-model', name: 'Fake Model' }] }))
+      const model = path.includes('/responses-api/')
+        ? { id: 'fake-responses-model', name: 'Fake Responses Model' }
+        : { id: 'fake-model', name: 'Fake Model' }
+      response.end(JSON.stringify({ data: [model] }))
       return
     }
     if (request.method === 'POST' && path.endsWith('/chat/completions')) {
@@ -143,6 +250,73 @@ http.createServer((request, response) => {
       response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
       response.write('data: ' + chunk(titleRequest ? 'E2E Session' : 'E2E_STREAM_OK') + '\n\n')
       response.write('data: ' + chunk('', 'stop') + '\n\n')
+      response.end('data: [DONE]\n\n')
+      return
+    }
+    if (request.method === 'POST' && path.endsWith('/responses')) {
+      const titleRequest = body.includes('Create a concise title')
+      const text = titleRequest ? 'E2E Session' : 'E2E_RESPONSES_OK'
+      const responseId = titleRequest ? 'resp_title' : 'resp_preset'
+      response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+      response.write('data: ' + responsesEvent('response.created', 0, {
+        response: {
+          id: responseId,
+          object: 'response',
+          created_at: 1,
+          model: 'fake-responses-model',
+          status: 'in_progress',
+          output: [],
+        },
+      }) + '\n\n')
+      response.write('data: ' + responsesEvent('response.output_item.added', 1, {
+        output_index: 0,
+        item: {
+          type: 'message',
+          id: 'msg_preset',
+          role: 'assistant',
+          status: 'in_progress',
+          content: [],
+        },
+      }) + '\n\n')
+      response.write('data: ' + responsesEvent('response.output_text.delta', 2, {
+        item_id: 'item_preset',
+        output_index: 0,
+        content_index: 0,
+        delta: text,
+      }) + '\n\n')
+      response.write('data: ' + responsesEvent('response.output_item.done', 3, {
+        output_index: 0,
+        item: {
+          type: 'message',
+          id: 'msg_preset',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text, annotations: [] }],
+        },
+      }) + '\n\n')
+      response.write('data: ' + responsesEvent('response.completed', 4, {
+        response: {
+          id: responseId,
+          object: 'response',
+          created_at: 1,
+          model: 'fake-responses-model',
+          status: 'completed',
+          output: [{
+            type: 'message',
+            id: 'msg_preset',
+            role: 'assistant',
+            status: 'completed',
+            content: [{ type: 'output_text', text, annotations: [] }],
+          }],
+          usage: {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens_details: { reasoning_tokens: 0 },
+          },
+        },
+      }) + '\n\n')
       response.end('data: [DONE]\n\n')
       return
     }
@@ -161,7 +335,7 @@ done
 grep -q '^READY$' "$MOCK_LOG" 2>/dev/null || fail "mock gateway did not start"
 
 DSH_HOME="$SCRATCH" "$DSH_BIN" plugin --profile dscode add \
-  "file:$ROOT/bridge/grok-leader" >"$PLUGIN_LOG" 2>&1 \
+  "file:$BRIDGE_ARCHIVE" >"$PLUGIN_LOG" 2>&1 \
   || fail "could not install the bridge into the isolated dsh profile"
 
 echo "[headless] compiled dscode -> dsh -> bridge -> mock gateway"
@@ -181,9 +355,120 @@ env PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-headless" \
 completion_count_after="$(grep -c 'POST /v1/chat/completions' "$MOCK_LOG" 2>/dev/null || true)"
 [[ "$completion_count_after" -gt "$completion_count_before" ]] \
   || fail "headless dscode did not call the mock gateway"
+"$NODE_BIN" -e '
+  const fs = require("node:fs")
+  const prefix = "POST /v1/chat/completions "
+  const requests = fs.readFileSync(process.argv[1], "utf8").split("\n")
+    .filter(line => line.startsWith(prefix))
+    .map(line => JSON.parse(line.slice(prefix.length)))
+  const request = requests.find(body => JSON.stringify(body.messages).includes("reply with the test marker"))
+  if (!request) throw new Error("minimal request was not captured")
+  const names = (request.tools ?? []).map(tool => tool.function?.name ?? tool.name).sort()
+  const expected = ["bash", "str_replace_editor"]
+  if (JSON.stringify(names) !== JSON.stringify(expected)) {
+    throw new Error(`minimal tool roster drifted: ${JSON.stringify(names)}`)
+  }
+' "$MOCK_LOG" || fail "minimal preset did not expose exactly bash + str_replace_editor"
 if grep -Eqi 'grok-4|api\.x\.ai|xai\.com' "$HEADLESS_OUT" "$HEADLESS_ERR"; then
   fail "headless dscode leaked to the embedded xAI path"
 fi
+wait_leader_exit "$HEADLESS_SOCKET"
+
+audit_responses_preset() {
+  preset="$1"
+  socket="$OUT/leader-$RUN_ID-preset-$preset.sock"
+  output="$OUT/preset-$preset-$RUN_ID.json"
+  error="$OUT/preset-$preset-$RUN_ID.log"
+  marker="capture responses roster for $preset"
+  PRESET_SOCKETS+=("$socket")
+
+  env PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-preset-$preset" \
+    DSCODE_SOCKET="$socket" DSCODE_LOG="$LEADER_LOG" DSH_BIN="$DSH_BIN" \
+    FAKE_KEY=e2e-key DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 TERM=xterm-256color \
+    "$TUI_BIN" -p "$marker" --output-format json --agent "$preset" \
+    --model fake-responses-model --no-plan --always-approve \
+    >"$output" 2>"$error" \
+    || fail "$preset preset failed through the Responses API"
+  "$NODE_BIN" -e '
+    const fs = require("node:fs")
+    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+    if (value.text !== "E2E_RESPONSES_OK") process.exit(1)
+  ' "$output" || fail "$preset preset did not return the Responses API marker"
+  "$NODE_BIN" -e '
+    const fs = require("node:fs")
+    const [logPath, preset, marker, rosterPath] = process.argv.slice(1)
+    const requests = fs.readFileSync(logPath, "utf8").split("\n")
+      .map(line => line.match(/^POST \S*\/responses (.*)$/))
+      .filter(Boolean)
+      .map(match => JSON.parse(match[1]))
+    const request = requests.find(body => JSON.stringify(body.input).includes(marker))
+    if (!request) throw new Error(`${preset} Responses request was not captured`)
+    const names = (request.tools ?? []).map(tool => tool.function?.name ?? tool.name).sort()
+    fs.appendFileSync(rosterPath, `${preset}\t${JSON.stringify(names)}\n`)
+    const standard = [
+      "ask_user_question", "bash", "create_goal", "edit", "exit_plan_mode",
+      "get_goal", "glob", "grep", "interrupt_agent", "job_kill", "job_list",
+      "job_output", "list_agents", "ralph", "read", "read_image", "send_message",
+      "skill", "subagent", "subagent_fork", "todo_write", "update_goal",
+      "web_search", "workflow", "write",
+    ].sort()
+    const expected = {
+      minimal: ["bash", "str_replace_editor"],
+      standard,
+      code: ["run_code"],
+      cordis: [
+        ...standard,
+        "cordis_define", "cordis_inspect_list", "cordis_inspect_query",
+        "cordis_inspect_self", "cordis_run", "cordis_stop", "cordis_undefine",
+      ].sort(),
+      "fixture-custom": ["bash", "fixture_echo", "str_replace_editor"],
+    }
+    const wanted = expected[preset]
+    if (JSON.stringify(names) !== JSON.stringify(wanted)) {
+      throw new Error(`${preset} tool roster drifted: ${JSON.stringify(names)}`)
+    }
+  ' "$MOCK_LOG" "$preset" "$marker" "$PRESET_ROSTER_LOG" \
+    || fail "$preset preset roster capture failed"
+  wait_leader_exit "$socket"
+}
+
+audit_all_responses_presets() {
+  echo "[headless] shipped + custom presets through the Responses API"
+  install_fixture_custom_preset
+  "$NODE_BIN" -e '
+  const fs = require("node:fs")
+  const path = process.argv[1]
+  const gateway = process.argv[2]
+  const source = fs.readFileSync(path, "utf8")
+  const current = "agent-default-model:\n  provider: fake\n  model: fake-model\n"
+  const provider = [
+    "    fake-responses:",
+    "      displayName: Fake Responses Gateway",
+    "      apiKeyEnv: FAKE_KEY",
+    "      api: openai-responses",
+    `      baseURL: ${gateway}/responses-api`,
+    "      models:",
+    "        - id: fake-responses-model",
+    "",
+  ].join("\n")
+  const replacement = provider + "agent-default-model:\n  provider: fake-responses\n  model: fake-responses-model\n"
+  if (!source.includes(current)) throw new Error("fake default model block was not found")
+  fs.writeFileSync(path, source.replace(current, replacement))
+  ' "$SCRATCH/settings.yaml" "$GATEWAY" || fail "could not switch the isolated profile to the Responses API provider"
+  for preset in minimal standard code cordis fixture-custom; do
+    audit_responses_preset "$preset"
+  done
+  cat "$PRESET_ROSTER_LOG"
+  "$NODE_BIN" -e '
+  const fs = require("node:fs")
+  const path = process.argv[1]
+  const source = fs.readFileSync(path, "utf8")
+  const current = /    fake-responses:\n(?:      .*\n|        .*\n)+agent-default-model:\n  provider: fake-responses\n  model: fake-responses-model\n/
+  const replacement = "agent-default-model:\n  provider: fake\n  model: fake-model\n"
+  if (!current.test(source)) throw new Error("fake Responses provider block was not found")
+  fs.writeFileSync(path, source.replace(current, replacement))
+  ' "$SCRATCH/settings.yaml" || fail "could not restore the isolated completion provider"
+}
 
 echo "[headless] durable resume through a fresh leader"
 env PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-headless-resume" \
@@ -199,6 +484,7 @@ env PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-headless-resume" \
   if (resumed.text !== "E2E_STREAM_OK" || resumed.sessionId !== first.sessionId) process.exit(1)
 ' "$HEADLESS_OUT" "$HEADLESS_RESUME_OUT" \
   || fail "headless resume did not reuse the durable dsh session"
+wait_leader_exit "$HEADLESS_RESUME_SOCKET"
 
 echo "[headless] durable fork through a fresh leader"
 FORK_ID="$("$NODE_BIN" -e 'console.log(require("node:crypto").randomUUID())')"
@@ -215,6 +501,7 @@ env PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-headless-fork" \
   if (forked.text !== "E2E_STREAM_OK" || forked.sessionId !== process.argv[2]) process.exit(1)
 ' "$HEADLESS_FORK_OUT" "$FORK_ID" \
   || fail "headless fork did not create the requested durable child"
+wait_leader_exit "$HEADLESS_FORK_SOCKET"
 
 echo "[headless] unsupported CLI metadata fails closed"
 completion_count_before_reject="$(grep -c 'POST /v1/chat/completions' "$MOCK_LOG" 2>/dev/null || true)"
@@ -232,6 +519,9 @@ grep -q 'refusing to run with silently weakened CLI settings' \
 completion_count_after_reject="$(grep -c 'POST /v1/chat/completions' "$MOCK_LOG" 2>/dev/null || true)"
 [[ "$completion_count_after_reject" -eq "$completion_count_before_reject" ]] \
   || fail "rejected headless CLI metadata still reached the mock model"
+wait_leader_exit "$HEADLESS_REJECT_SOCKET"
+
+audit_all_responses_presets
 
 capture() {
   tmux -L "$SESSION" -f /dev/null capture-pane -p -S - -t "$SESSION:0.0" >"$FRAME" 2>/dev/null
@@ -249,6 +539,20 @@ wait_frame() {
     sleep 0.2
   done
   fail "$label: never saw '$pattern'"
+}
+
+wait_frame_absent() {
+  label="$1"
+  pattern="$2"
+  tries="${3:-100}"
+  for _ in $(seq 1 "$tries"); do
+    capture || true
+    ! grep -Eq "$pattern" "$FRAME" 2>/dev/null && return 0
+    tmux -L "$SESSION" -f /dev/null has-session -t "$SESSION" 2>/dev/null \
+      || fail "$label: TUI exited while '$pattern' was still visible"
+    sleep 0.2
+  done
+  fail "$label: '$pattern' never disappeared"
 }
 
 send_line() {
@@ -290,8 +594,14 @@ boot "$SOCKET"
 echo "[tui] preset picker"
 send_line "/preset"
 wait_frame "preset picker" 'Presets'
+grep -q 'Fixture custom preset' "$FRAME" || fail "custom preset was missing from the picker"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Home Enter
 wait_frame "preset selection" 'preset: standard'
+capture
+if grep -q 'Presets' "$FRAME"; then
+  tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Escape
+fi
+wait_frame_absent "preset picker close" 'Presets'
 
 echo "[tui] provider and model selection"
 clear_prompt
@@ -330,8 +640,11 @@ grep -q 'POST /v1/chat/completions' "$MOCK_LOG" \
 
 echo "[tui] durable resume through a fresh leader"
 stop_client
+wait_leader_exit "$SOCKET"
 boot "$RESUME_SOCKET" --resume
 wait_frame "resume" 'E2E_STREAM_OK|reply with the test marker' 300
+stop_client
+wait_leader_exit "$RESUME_SOCKET"
 
 echo "PASS real TUI + dsh + bridge E2E run $RUN_ID"
 echo "  artifacts: $OUT (*-$RUN_ID.*)"

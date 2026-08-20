@@ -6,7 +6,19 @@
 - id: system-prompt
   config:
     persona: >-
-      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
+      You are a coding agent. Your working directory is {{cwd}}.
+
+# dscode is provider-neutral. A fresh profile starts with no provider or
+# model; users add any route they want through /provider. Keep the default
+# selection service mounted so later model/effort choices persist, but make
+# its deployment fallback empty. The native DeepSeek route remains available
+# as an add-provider preset rather than being silently preinstalled.
+- id: agent-default-model
+  config:
+    provider: ''
+    model: ''
+- id: llm-deepseek
+  disabled: true
 
 # Long-lived server: no module-reload HMR.
 - id: hmr
@@ -68,6 +80,12 @@
 # app can resolve its own config directory; the writable user root is the
 # roster's own default.
 - insert:
+    # The shipped `code` preset selects Code Mode and therefore needs the same
+    # host-plane TypeScript runtime used by dsh's headless and web profiles.
+    - id: code-runtime
+      name: '@deepseek-ai/dsh-code-runtime-worker-thread'
+
+- insert:
     - id: agent-presets
       name: '@deepseek-ai/dsh-agent-presets'
       config:
@@ -76,10 +94,6 @@
 - insert:
     - id: cordis-host-runner
       name: '@deepseek-ai/dsh-cordis-host-runner'
-
-- insert:
-    - id: schedule
-      name: '@deepseek-ai/dsh-schedule'
 
 - insert:
     - id: grok-leader

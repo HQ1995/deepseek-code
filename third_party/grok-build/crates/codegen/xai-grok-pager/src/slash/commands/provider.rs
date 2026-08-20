@@ -131,8 +131,8 @@ impl SlashCommand for ProviderCommand {
         let Some(provider) = resolve_provider(ctx.models, query) else {
             return CommandResult::Error(format!("Unknown provider: {query}"));
         };
-        // The provider's first catalog model is its default (the bridge lists
-        // providers before flattening, so catalog order is provider order).
+        // Preserve the same raw model id when the target provider offers it;
+        // otherwise use that provider's first catalog model.
         let Some(model_id) = default_model_for(ctx.models, provider) else {
             // The remedy (log in, add a key, …) is the agent's knowledge, not
             // the TUI's: relay the bridge-supplied note when there is one.
@@ -225,22 +225,42 @@ fn resolve_provider<'a>(models: &'a ModelState, query: &str) -> Option<&'a str> 
         })
 }
 
-/// The provider's default model: its first entry in the flattened catalog
-/// (provider-major order from the bridge's refreshCatalog).
+/// Raw model id behind a bridge wire id. Duplicate ids are qualified as
+/// `provider:model`; the first owner keeps the bare id.
+fn raw_model_id<'a>(models: &'a ModelState, id: &'a agent_client_protocol::ModelId) -> &'a str {
+    let wire = id.0.as_ref();
+    let provider = models.provider_for(id);
+    wire.strip_prefix(provider)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .unwrap_or(wire)
+}
+
+fn belongs_to_provider(
+    models: &ModelState,
+    id: &agent_client_protocol::ModelId,
+    provider: &str,
+) -> bool {
+    models.provider_for(id) == provider
+}
+
+/// Prefer the current raw model on the target provider; fall back to the
+/// provider's first entry in bridge catalog order.
 fn default_model_for(
     models: &ModelState,
     provider: &str,
 ) -> Option<agent_client_protocol::ModelId> {
+    if let Some(current) = models.current.as_ref() {
+        let current_raw = raw_model_id(models, current);
+        if let Some((id, _)) = models.available.iter().find(|(id, _)| {
+            belongs_to_provider(models, id, provider) && raw_model_id(models, id) == current_raw
+        }) {
+            return Some(id.clone());
+        }
+    }
     models
         .available
         .iter()
-        .find(|(_, info)| {
-            info.meta
-                .as_ref()
-                .and_then(|m| m.get("provider"))
-                .and_then(|v| v.as_str())
-                == Some(provider)
-        })
+        .find(|(id, _)| belongs_to_provider(models, id, provider))
         .map(|(id, _)| id.clone())
 }
 
@@ -405,6 +425,20 @@ mod tests {
                 assert_eq!(id.0.as_ref(), "pi-code");
             }
             other => panic!("expected SetDefaultModel(pi-code), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn switching_provider_preserves_the_same_raw_model_when_available() {
+        let mut state = sample();
+        let (shared, info) = model("pi:deepseek-chat", "DeepSeek Chat", "pi");
+        state.available.insert(shared, info);
+        let mut ctx = exec_ctx(&state);
+        match ProviderCommand.run(&mut ctx, "pi") {
+            CommandResult::Action(Action::SetDefaultModel(id)) => {
+                assert_eq!(id.0.as_ref(), "pi:deepseek-chat");
+            }
+            other => panic!("expected the matching Pi model, got {other:?}"),
         }
     }
 

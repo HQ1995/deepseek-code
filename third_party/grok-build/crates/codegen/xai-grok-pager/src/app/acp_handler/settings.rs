@@ -12,6 +12,7 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
         );
 
         app.models.update_catalog(new_models.available.clone());
+        app.models.providers = new_models.providers.clone();
         let stale = app
             .models
             .current
@@ -35,6 +36,7 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
                 .session
                 .models
                 .update_catalog(new_models.available.clone());
+            agent.session.models.providers = new_models.providers.clone();
         }
         true
     } else {

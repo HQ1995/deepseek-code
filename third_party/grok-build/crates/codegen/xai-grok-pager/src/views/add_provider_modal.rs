@@ -37,6 +37,7 @@ pub const APIS: [&str; 3] = [
 pub struct ProviderPreset {
     pub label: &'static str,
     pub id: &'static str,
+    pub display_name: &'static str,
     pub api_key_env: &'static str,
     pub api: &'static str,
     pub base_url: &'static str,
@@ -45,39 +46,44 @@ pub struct ProviderPreset {
 /// Preset order is the dropdown order; PRESETS.len() indexes Custom.
 pub const PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
-        label: "DeepSeek official",
-        id: "deepseek-official",
+        label: "DeepSeek",
+        id: "deepseek",
+        display_name: "DeepSeek",
         api_key_env: "DEEPSEEK_API_KEY",
-        api: "openai-responses",
+        api: "",
         base_url: "",
     },
     ProviderPreset {
-        label: "OpenCodex gateway",
-        id: "opencode-go",
+        label: "OpenCodex",
+        id: "ocx",
+        display_name: "OpenCodex",
         api_key_env: "OCX_API_KEY",
         api: "openai-responses",
         base_url: "http://127.0.0.1:10100/v1",
     },
     ProviderPreset {
-        label: "OpenAI-compatible",
-        id: "",
+        label: "OpenAI",
+        id: "openai",
+        display_name: "OpenAI",
         api_key_env: "OPENAI_API_KEY",
-        api: "openai-completions",
-        base_url: "https://api.openai.com/v1",
+        api: "",
+        base_url: "",
     },
     ProviderPreset {
-        label: "Anthropic-compatible",
-        id: "",
+        label: "Anthropic",
+        id: "anthropic",
+        display_name: "Anthropic",
         api_key_env: "ANTHROPIC_API_KEY",
-        api: "anthropic-messages",
-        base_url: "https://api.anthropic.com/v1",
+        api: "",
+        base_url: "",
     },
     ProviderPreset {
         label: "OpenRouter",
-        id: "",
+        id: "openrouter",
+        display_name: "OpenRouter",
         api_key_env: "OPENROUTER_API_KEY",
-        api: "openai-completions",
-        base_url: "https://openrouter.ai/api/v1",
+        api: "",
+        base_url: "",
     },
 ];
 
@@ -173,7 +179,7 @@ impl AddProviderModalState {
     pub fn new() -> Self {
         let mut state = Self {
             window: ModalWindowState::new(),
-            preset: 0,
+            preset: PRESETS.len(),
             field: Field::Preset,
             id: LineEditor::default(),
             display_name: LineEditor::default(),
@@ -185,7 +191,7 @@ impl AddProviderModalState {
             submitting: false,
             error: None,
         };
-        state.apply_preset(0);
+        state.apply_preset(PRESETS.len());
         state
     }
 
@@ -196,19 +202,19 @@ impl AddProviderModalState {
     /// Fill the form from a preset row (Custom clears it).
     pub fn apply_preset(&mut self, preset: usize) {
         self.preset = preset;
-        let (id, api_key_env, api, base_url) = match PRESETS.get(preset) {
-            Some(p) => (p.id, p.api_key_env, p.api, p.base_url),
-            None => ("", "", APIS[0], ""),
+        let (id, display_name, api_key_env, api, base_url) = match PRESETS.get(preset) {
+            Some(p) => (p.id, p.display_name, p.api_key_env, p.api, p.base_url),
+            None => ("", "", "", "", ""),
         };
         Self::set_editor(&mut self.id, id);
-        Self::set_editor(&mut self.display_name, "");
+        Self::set_editor(&mut self.display_name, display_name);
         Self::set_editor(&mut self.api_key_env, api_key_env);
         Self::set_editor(&mut self.base_url, base_url);
         Self::set_editor(&mut self.api_key, "");
         self.api_idx = APIS
             .iter()
             .position(|candidate| *candidate == api)
-            .unwrap_or(0);
+            .unwrap_or(APIS.len());
         self.error = None;
     }
 
@@ -361,17 +367,12 @@ pub fn handle_add_provider_key(
             AddProviderOutcome::Changed
         }
         KeyCode::Left if state.field == Field::Preset => {
-            let next = state.preset.saturating_sub(1);
-            if next != state.preset {
-                state.apply_preset(next);
-            }
+            let count = PRESETS.len() + 1;
+            state.apply_preset((state.preset + count - 1) % count);
             AddProviderOutcome::Changed
         }
         KeyCode::Right if state.field == Field::Preset => {
-            let next = (state.preset + 1).min(PRESETS.len());
-            if next != state.preset {
-                state.apply_preset(next);
-            }
+            state.apply_preset((state.preset + 1) % (PRESETS.len() + 1));
             AddProviderOutcome::Changed
         }
         // Enter on the preset row advances into the form instead of
@@ -649,19 +650,28 @@ mod tests {
     #[test]
     fn presets_prefill_and_custom_clears() {
         let mut state = AddProviderModalState::new();
-        assert_eq!(state.form().id, "deepseek-official");
-        assert_eq!(state.form().api, "openai-responses");
-        assert_eq!(state.form().api_key_env, "DEEPSEEK_API_KEY");
-
-        state.apply_preset(PRESETS.len());
         assert_eq!(state.form().id, "");
-        assert_eq!(state.form().api_key_env, "");
-        assert_eq!(state.form().api, "openai-completions");
+        assert_eq!(state.form().display_name, "");
+        assert_eq!(state.form().api, "");
+
+        state.apply_preset(0);
+        assert_eq!(state.form().id, "deepseek");
+        assert_eq!(state.form().display_name, "DeepSeek");
+        assert_eq!(state.form().api_key_env, "DEEPSEEK_API_KEY");
+        assert_eq!(state.form().api, "");
+
+        state.apply_preset(1);
+        assert_eq!(state.form().id, "ocx");
+        assert_eq!(state.form().display_name, "OpenCodex");
+        assert_eq!(state.form().api_key_env, "OCX_API_KEY");
+        assert_eq!(state.form().api, "openai-responses");
+        assert_eq!(state.form().base_url, "http://127.0.0.1:10100/v1");
     }
 
     #[test]
     fn tab_cycles_fields_and_left_right_cycles_protocol() {
         let mut state = AddProviderModalState::new();
+        state.apply_preset(1);
         // Add mode opens on the preset chooser row; Down (or Tab) moves rows.
         assert_eq!(state.field, Field::Preset);
         assert!(matches!(
@@ -675,7 +685,7 @@ mod tests {
             handle_add_provider_key(&mut state, &key(KeyCode::Tab));
         }
         assert_eq!(state.field, Field::Api);
-        // The DeepSeek official preset pre-fills openai-responses (index 1).
+        // The OpenCodex preset pre-fills openai-responses (index 1).
         assert_eq!(state.form().api, "openai-responses");
         handle_add_provider_key(&mut state, &key(KeyCode::Right));
         assert_eq!(state.form().api, "anthropic-messages");

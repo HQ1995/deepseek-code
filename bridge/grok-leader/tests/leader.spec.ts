@@ -493,6 +493,51 @@ describe('grok leader over a unix socket', () => {
     })
   })
 
+  it('supports a provider-neutral fresh profile with an empty model catalog', async () => {
+    const emptyLlm = {
+      listProviders: () => [],
+      listModels: async () => [],
+    }
+    const { registry, client: c } = await start({ llm: emptyLlm })
+    register(c)
+    await c.next()
+    const initialized = await c.request(0, 'initialize', { protocolVersion: 1, clientCapabilities: {} })
+    expect(initialized.error).toBeUndefined()
+    expect((initialized.result as { _meta: { modelState: unknown } })._meta.modelState).toEqual({
+      currentModelId: '',
+      availableModels: [],
+      _meta: { currentProviderId: '', providers: [] },
+    })
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    expect(created.error).toBeUndefined()
+    expect(registry.created).toHaveLength(1)
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const prompt = await c.request(2, 'session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text: 'hello' }],
+    })
+    expect(prompt.error).toEqual({
+      code: -32602,
+      message: 'no model selected; use /provider to add or choose a provider first',
+    })
+  })
+
+  it('rejects an explicit provider/model pair owned by different routes', async () => {
+    const { registry, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { provider: 'pi', model: 'deepseek-chat' },
+    })
+    expect(created.error).toEqual({
+      code: -32602,
+      message: 'requested provider/model is not in the catalog: pi/deepseek-chat',
+    })
+    expect(registry.created).toHaveLength(0)
+  })
+
   it('runs the session flow: new, prompt, cancel, models, list, load, close', async () => {
     const { registry, persistence, client: c } = await start()
     register(c)
@@ -1042,6 +1087,68 @@ describe('grok leader over a unix socket', () => {
     expect(loaded.result).toEqual({})
   })
 
+  it('drops a stale saved effort when exact model metadata exposes no reasoning', async () => {
+    const exactLlm = {
+      listProviders: () => [{ id: 'ocx', name: 'OpenCodex' }],
+      listModels: async () => [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }],
+      resolveModelInfo: async () => ({
+        provider: 'ocx',
+        id: 'deepseek-v4-flash',
+        name: 'DeepSeek V4 Flash',
+      }),
+    }
+    mockDefaultModel.current = {
+      provider: 'ocx',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'max',
+    }
+    const { persistence, client: c } = await start({ llm: exactLlm })
+    register(c)
+    await c.next()
+    const initialized = await c.request(0, 'initialize', { protocolVersion: 1, clientCapabilities: {} })
+    const modelState = (initialized.result as {
+      _meta: { modelState: { availableModels: Array<{ modelId: string; _meta?: Record<string, unknown> }> } }
+    })._meta.modelState
+    const advertised = modelState.availableModels.find(model => model.modelId === 'deepseek-v4-flash')
+    expect(advertised?._meta).toEqual({ provider: 'ocx', supportsReasoningEffort: false })
+
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    mockDefaultModel.saved.length = 0
+    const invalid = await c.request(2, 'session/set_model', {
+      sessionId,
+      modelId: 'deepseek-v4-flash',
+      _meta: { reasoningEffort: 'max' },
+    })
+    expect(invalid.error).toEqual({
+      code: -32602,
+      message: 'reasoningEffort "max" is not supported by model deepseek-v4-flash',
+    })
+    const switched = await c.request(3, 'session/set_model', { sessionId, modelId: 'deepseek-v4-flash' })
+    expect(switched.error).toBeUndefined()
+    expect(mockDefaultModel.saved).toEqual([{ provider: 'ocx', model: 'deepseek-v4-flash' }])
+
+    persistence.events.push({
+      type: 'model/selected',
+      seq: 0,
+      time: 0,
+      data: { provider: 'ocx', model: 'deepseek-v4-flash', reasoningEffort: 'max' },
+    } as SessionEvent)
+    const loaded = await c.request(4, 'session/load', {
+      sessionId: 'persisted-session',
+      cwd: '/tmp/proj',
+      mcpServers: [],
+    })
+    expect(loaded.error).toBeUndefined()
+    mockDefaultModel.saved.length = 0
+    const resumedSwitch = await c.request(5, 'session/set_model', {
+      sessionId: 'persisted-session',
+      modelId: 'deepseek-v4-flash',
+    })
+    expect(resumedSwitch.error).toBeUndefined()
+    expect(mockDefaultModel.saved).toEqual([{ provider: 'ocx', model: 'deepseek-v4-flash' }])
+  })
+
   it('reports the saved reasoning effort on the current model in models/list', async () => {
     const { client: c } = await start()
     register(c)
@@ -1054,6 +1161,12 @@ describe('grok leader over a unix socket', () => {
     const switched = await c.request(2, 'session/set_model', { sessionId, modelId: 'deepseek-chat', _meta: { reasoningEffort: 'max' } })
     expect(switched.error).toBeUndefined()
     expect(mockDefaultModel.saved).toEqual([{ provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'max' }])
+    const agent = harness?.registry.byId.get(sessionId) as unknown as { session: { events: Array<{ type: string; data: unknown }> } }
+    expect(agent.session.events.at(-1)).toMatchObject({
+      type: 'dscode/model-selected',
+      data: { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'max' },
+    })
+    expect(mockSessionsStore.flushed.at(-1)).toBe(agent.session)
     const models = await c.request(3, 'x.ai/models/list', {})
     const listed = (models.result as { availableModels: Array<{ modelId: string; _meta?: { reasoningEffort?: string } }> }).availableModels
     expect(listed.find(m => m.modelId === 'deepseek-chat')?._meta?.reasoningEffort).toBe('max')
@@ -1092,6 +1205,41 @@ describe('grok leader over a unix socket', () => {
     const models = await c.request(5, 'x.ai/models/list', {})
     const listed = (models.result as { availableModels: Array<{ modelId: string; _meta?: { reasoningEffort?: string } }> }).availableModels
     expect(listed.find(m => m.modelId === 'deepseek-reasoner')?._meta?.reasoningEffort).toBe('max')
+  })
+
+  it('keeps effort memory isolated between sessions using the same model', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const first = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const second = await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const firstId = (first.result as { sessionId: string }).sessionId
+    const secondId = (second.result as { sessionId: string }).sessionId
+
+    expect((await c.request(3, 'session/set_model', {
+      sessionId: firstId,
+      modelId: 'deepseek-reasoner',
+      _meta: { reasoningEffort: 'high' },
+    })).error).toBeUndefined()
+    expect((await c.request(4, 'session/set_model', {
+      sessionId: secondId,
+      modelId: 'deepseek-reasoner',
+      _meta: { reasoningEffort: 'low' },
+    })).error).toBeUndefined()
+    expect((await c.request(5, 'session/set_model', {
+      sessionId: firstId,
+      modelId: 'pi-code',
+    })).error).toBeUndefined()
+    expect((await c.request(6, 'session/set_model', {
+      sessionId: firstId,
+      modelId: 'deepseek-reasoner',
+    })).error).toBeUndefined()
+
+    expect(mockDefaultModel.saved.at(-1)).toEqual({
+      provider: 'deepseek',
+      model: 'deepseek-reasoner',
+      reasoningEffort: 'high',
+    })
   })
 
   it('session/set_model rejects a modelId outside the catalog without persisting', async () => {
@@ -1554,9 +1702,30 @@ describe('grok leader over a unix socket', () => {
     expect(presets?.mounted).toEqual(['minimal'])
   })
 
-  it('does not advertise subagents for the minimal preset', async () => {
+  it('does not advertise subagents when the selected preset exposes no delegation tool', async () => {
     const { client: c } = await start({
       presets: true,
+      subagents: { list: () => ['spawn'] },
+    })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { agentProfile: 'standard' },
+    })
+    expect(created.error).toBeUndefined()
+    await waitFor(() => c.all.some(message => {
+      const update = (message.params as { update?: { sessionUpdate?: string; meta?: { capabilities?: string[] } } } | undefined)?.update
+      return update?.sessionUpdate === 'available_commands_update'
+        && update.meta?.capabilities?.includes('subagents') === false
+    }))
+  })
+
+  it('advertises plugin-added delegation from the actual tool surface, independent of preset id', async () => {
+    const { client: c } = await start({
+      presets: true,
+      tools: { schemas: () => [{ name: 'subagent' }] },
       subagents: { list: () => ['spawn'] },
     })
     register(c)
@@ -1570,7 +1739,7 @@ describe('grok leader over a unix socket', () => {
     await waitFor(() => c.all.some(message => {
       const update = (message.params as { update?: { sessionUpdate?: string; meta?: { capabilities?: string[] } } } | undefined)?.update
       return update?.sessionUpdate === 'available_commands_update'
-        && update.meta?.capabilities?.includes('subagents') === false
+        && update.meta?.capabilities?.includes('subagents') === true
     }))
   })
 
@@ -1664,6 +1833,7 @@ describe('grok leader over a unix socket', () => {
           { name: 'mcp__github__issues' },
           { name: 'mcp__filesystem__read' },
           { name: 'bash' },
+          { name: 'subagent' },
         ],
       },
       skills: {
@@ -2952,6 +3122,59 @@ describe('x.ai/providers/add', () => {
     }])
   })
 
+  it('treats empty optional preset fields as unset', async () => {
+    const settings = makeSettings()
+    const { client } = await startWithSettings(settings)
+    const res = await client.request(1, 'x.ai/providers/add', {
+      id: 'openai',
+      displayName: 'OpenAI',
+      apiKeyEnv: 'OPENAI_API_KEY',
+      api: '',
+      baseURL: '',
+      apiKey: '',
+    })
+    expect(res.error).toBeUndefined()
+    expect(settings.calls[0].ops).toEqual([{
+      op: 'set',
+      path: ['providers', 'openai'],
+      value: {
+        displayName: 'OpenAI',
+        apiKeyEnv: 'OPENAI_API_KEY',
+      },
+    }])
+  })
+
+  it('broadcasts the refreshed model catalog after adding a provider', async () => {
+    mockDefaultModel.current = undefined
+    const settings = makeSettings()
+    const { client } = await startWithSettings(settings)
+    await client.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const res = await client.request(2, 'x.ai/providers/add', {
+      id: 'acme-gateway',
+      displayName: 'Acme Gateway',
+      apiKeyEnv: 'ACME_KEY',
+      api: 'openai-completions',
+      baseURL: 'https://acme.test/v1',
+    })
+    expect(res.error).toBeUndefined()
+    await waitFor(() => client.all.some(message => message.method === 'x.ai/models/update'))
+    const update = client.all.find(message => message.method === 'x.ai/models/update')
+    expect(update?.params).toMatchObject({
+      currentModelId: 'deepseek-chat',
+      availableModels: [
+        { modelId: 'deepseek-chat', _meta: { provider: 'deepseek' } },
+        { modelId: 'acme-gateway-model', _meta: { provider: 'acme-gateway' } },
+      ],
+      _meta: {
+        currentProviderId: 'deepseek',
+        providers: [
+          { id: 'deepseek' },
+          { id: 'acme-gateway', name: 'Acme Gateway' },
+        ],
+      },
+    })
+  })
+
   it('stores a pasted apiKey in the credentials service under a derived ref', async () => {
     const stored: Array<{ ref: string; value: string }> = []
     const credentials = { set: async (ref: string, value: string) => { stored.push({ ref, value }) } }
@@ -3054,18 +3277,175 @@ describe('x.ai/providers/add', () => {
 
     const models = await client.request(1, 'x.ai/models/list', {})
     const listed = (models.result as { availableModels: Array<{ modelId: string; name: string; _meta: { provider: string } }> }).availableModels
-    expect(listed.find(m => m.modelId === 'deepseek-v4-flash')).toMatchObject({
+    expect(listed.find(m => m.modelId === 'opencode-go/deepseek-v4-flash')).toMatchObject({
+      modelId: 'opencode-go/deepseek-v4-flash',
+      _meta: { provider: 'ocx' },
+    })
+    await waitFor(() => (settings.providers['ocx'] as { models?: Array<{ id?: string }> }).models?.[0]?.id === 'deepseek-v4-flash')
+    const refreshed = await client.request(2, 'x.ai/models/list', {})
+    const refreshedList = (refreshed.result as { availableModels: Array<{ modelId: string; name: string; _meta: { provider: string } }> }).availableModels
+    expect(refreshedList.find(m => m.modelId === 'deepseek-v4-flash')).toMatchObject({
       modelId: 'deepseek-v4-flash',
       name: 'DeepSeek V4 Flash',
       _meta: { provider: 'ocx' },
     })
-    expect(listed.find(m => m.modelId === 'opencode-go/deepseek-v4-flash')).toBeUndefined()
+    expect(refreshedList.find(m => m.modelId === 'opencode-go/deepseek-v4-flash')).toBeUndefined()
     expect(settings.providers['ocx']).toMatchObject({
       models: [
         { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
         { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', input: ['text', 'image'] },
       ],
     })
+  })
+
+  it('adopts endpoint reasoning capabilities so an explicit max effort is valid', async () => {
+    const settings = makeSettings(true)
+    settings.providers['ocx'] = {
+      displayName: 'OpenCodex',
+      apiKeyEnv: 'OCX_API_KEY',
+      api: 'openai-responses',
+      baseURL: 'http://127.0.0.1:10100/v1',
+      models: [{ id: 'deepseek-v4-flash' }],
+    }
+    const llm = {
+      listProviders: () => [{ id: 'ocx', name: 'OpenCodex' }],
+      listModels: async () => [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }],
+      discoverModels: async () => [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }],
+      resolveModelInfo: async () => {
+        const profile = settings.providers['ocx'] as { models: Array<{ id: string; reasoningEfforts?: false | Record<string, string | null> }> }
+        const reasoningEfforts = profile.models[0]?.reasoningEfforts
+        return {
+          provider: 'ocx',
+          id: 'deepseek-v4-flash',
+          name: 'DeepSeek V4 Flash',
+          ...(reasoningEfforts === undefined || reasoningEfforts === false
+            ? {}
+            : {
+                reasoning: {
+                  efforts: Object.keys(reasoningEfforts).map(id => ({ id, name: id })),
+                },
+              }),
+        }
+      },
+    }
+    const fetchModels = vi.fn(async () => new Response(JSON.stringify({
+      object: 'list',
+      data: [{
+        id: 'deepseek-v4-flash',
+        supports_reasoning_effort: true,
+        reasoning_efforts: [
+          { value: 'high', label: 'High Effort' },
+          { value: 'max', label: 'Max Effort', default: true },
+          { value: 'ultra', label: 'Unsupported by pi-ai rc.8' },
+        ],
+      }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchModels)
+    mockDefaultModel.current = {
+      provider: 'ocx',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'max',
+    }
+    try {
+      const credentials = {
+        resolve: async () => ({ value: 'stored-secret' }),
+        set: async () => {},
+      }
+      const made = await makeHarness({ llm, settings: settings as unknown as Context['settings'], credentials })
+      harness = made
+      client = await makeClient(made.socketPath)
+      register(client)
+      await client.next()
+
+      const created = await client.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      const sessionId = (created.result as { sessionId: string }).sessionId
+      await client.request(2, 'x.ai/models/list', {})
+      await waitFor(() => {
+        const profile = settings.providers['ocx'] as { models?: Array<{ reasoningEfforts?: unknown }> }
+        return profile.models?.[0]?.reasoningEfforts !== undefined
+      })
+      expect((settings.providers['ocx'] as { models: unknown[] }).models).toEqual([{
+        id: 'deepseek-v4-flash',
+        name: 'DeepSeek V4 Flash',
+        reasoningEfforts: { high: 'high', max: 'max' },
+      }])
+      expect(fetchModels).toHaveBeenCalledWith(
+        'http://127.0.0.1:10100/v1/models',
+        expect.objectContaining({
+          headers: expect.objectContaining({ authorization: 'Bearer stored-secret' }),
+        }),
+      )
+
+      const refreshed = await client.request(3, 'x.ai/models/list', {})
+      const model = (refreshed.result as {
+        availableModels: Array<{ modelId: string; _meta?: Record<string, unknown> }>
+      }).availableModels[0]
+      expect(model).toMatchObject({
+        modelId: 'deepseek-v4-flash',
+        _meta: {
+          supportsReasoningEffort: true,
+          reasoningEfforts: ['high', 'max'],
+          reasoningEffort: 'max',
+        },
+      })
+      const waterfall = made.pluginCtx.waterfall as unknown as (name: string, ...args: unknown[]) => Promise<unknown>
+      await waterfall('system-prompt/assemble', {}, {}, async () => ({ variables: {} }))
+      const routed = await waterfall('agent/request', {
+        agent: made.registry.byId.get(sessionId),
+        turn: 0,
+        step: 0,
+        signal: new AbortController().signal,
+      }, async () => ({ provider: 'fallback', model: 'fallback', reasoningEffort: 'low' }))
+      expect(routed).toEqual({ provider: 'ocx', model: 'deepseek-v4-flash', reasoningEffort: 'max' })
+      const selected = await client.request(4, 'session/set_model', {
+        sessionId,
+        modelId: 'deepseek-v4-flash',
+        _meta: { reasoningEffort: 'max' },
+      })
+      expect(selected.error).toBeUndefined()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('does not block initialize on dynamic model discovery', async () => {
+    const settings = makeSettings(true)
+    settings.providers['ocx'] = {
+      displayName: 'OpenCodex',
+      api: 'openai-responses',
+      baseURL: 'http://127.0.0.1:10100/v1',
+      models: [{ id: 'persisted-model' }],
+    }
+    let markStarted!: () => void
+    const started = new Promise<void>(resolve => { markStarted = resolve })
+    let releaseDiscovery!: (models: Array<{ id: string; name?: string }>) => void
+    const discovery = new Promise<Array<{ id: string; name?: string }>>(resolve => { releaseDiscovery = resolve })
+    const llm = {
+      listProviders: () => [{ id: 'ocx', name: 'OpenCodex' }],
+      listModels: async () => [{ id: 'persisted-model', name: 'Persisted Model' }],
+      discoverModels: async () => {
+        markStarted()
+        return await discovery
+      },
+    }
+    const made = await makeHarness({ llm, settings: settings as unknown as Context['settings'] })
+    harness = made
+    client = await makeClient(made.socketPath)
+    register(client)
+    await client.next()
+
+    const initializing = client.request(1, 'initialize', { protocolVersion: 1, clientCapabilities: {} })
+    await started
+    const completedWithoutDiscovery = await Promise.race([
+      initializing.then(() => true),
+      new Promise<boolean>(resolve => { setTimeout(() => { resolve(false) }, 250) }),
+    ])
+    releaseDiscovery([{ id: 'fresh-model', name: 'Fresh Model' }])
+    expect(completedWithoutDiscovery).toBe(true)
+    const initialized = await initializing
+    expect((initialized.result as { _meta: { modelState: { availableModels: Array<{ modelId: string }> } } })
+      ._meta.modelState.availableModels).toMatchObject([{ modelId: 'persisted-model' }])
+    await waitFor(() => (settings.providers['ocx'] as { models?: Array<{ id?: string }> }).models?.[0]?.id === 'fresh-model')
   })
 
   it('fills a custom route with gateway-discovered models after the seam refuses', async () => {
@@ -3299,7 +3679,7 @@ describe('x.ai/providers/update', () => {
       providerId: 'acme-gateway',
       displayName: '',
       apiKeyEnv: 'ACME_KEY',
-      api: 'openai-responses',
+      api: '',
       baseURL: 'https://new.test/v1',
     })
     expect(res.error).toBeUndefined()
@@ -3310,13 +3690,12 @@ describe('x.ai/providers/update', () => {
       path: ['providers', 'acme-gateway'],
       value: {
         apiKeyEnv: 'ACME_KEY',
-        api: 'openai-responses',
         baseURL: 'https://new.test/v1',
         models: [{ id: 'gw-model' }],
       },
     }])
     expect(res.result).toMatchObject({
-      providers: [{ id: 'deepseek' }, { id: 'acme-gateway', api: 'openai-responses', baseURL: 'https://new.test/v1' }],
+      providers: [{ id: 'deepseek' }, { id: 'acme-gateway', baseURL: 'https://new.test/v1' }],
     })
   })
 
@@ -3547,6 +3926,13 @@ describe('sessionEventToUpdates tool-result diff fallback', () => {
 
 describe('analyzeBundlePatch (static pre-install patch analysis)', () => {
   const analyze = GrokLeader.analyzeBundlePatch
+
+  it('keeps model-facing add-ons out of the preset-owned tool catalogs', () => {
+    const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+    const analysis = analyze(patch)
+    expect(analysis.insertedRows).toEqual(['code-runtime', 'agent-presets', 'cordis-host-runner', 'grok-leader'])
+    expect(patch).not.toContain('@deepseek-ai/dsh-schedule')
+  })
 
   it('classifies inserts, overrides, disables, and flags the security spine', () => {
     const patch = [

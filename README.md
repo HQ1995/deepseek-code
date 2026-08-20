@@ -10,8 +10,8 @@ Rust TUI, an isolated `dsh` profile, and the bridge between them.
 ## Prerequisites
 
 - macOS Apple Silicon or Linux x86-64
-- Node.js `^22.19.0` or `>=24.0.0`
-- npm and GitHub network access for the first install
+- Node.js `>=22.19.0` and npm (the floor comes from pinned `dsh`)
+- GitHub network access for the first install
 - `~/.local/bin` on `PATH` after installation
 
 You do not need to install `dsh` globally. The launcher reuses an exactly
@@ -26,6 +26,11 @@ npx @hqzhao95/dscode
 The first run creates `~/.dsh/profiles/dscode`, installs the bridge and tested
 runtime, downloads the matching TUI binary with checksum verification, and
 links `~/.local/bin/dscode`. It does not change the global npm prefix.
+It never installs or switches Node for you.
+The dsh runtime install and compressed TUI download run in parallel.
+
+A fresh profile has no provider or API key. Open `/provider --add` and choose
+a template or Custom; dscode does not restrict which provider you use.
 
 ## Use
 
@@ -43,13 +48,17 @@ Headless output formats are `plain`, `json`, `streaming-json`, and
 
 Useful in-app commands:
 
-- `/model` — choose model and reasoning effort
-- `/provider` and `/provider --add` — select or add a provider
-- `/preset` or `Ctrl+Y` — choose `standard`, `code`, `minimal`, or `cordis`
+- `/model` — choose model and reasoning effort; choices persist
+- `/provider` and `/provider --add` — select or add any provider
+- `/preset` or `Ctrl+Y` — choose any discovered preset; four ship by default
 - `/dsh plugins` — inspect profile plugins
 - `Ctrl+S` — open durable session resume
 
 Run `dscode --help` for the complete CLI.
+
+When switching providers, dscode keeps the current model if the target
+provider exposes the same model id; otherwise it selects that provider's first
+model. Reasoning effort is remembered separately for each provider/model pair.
 
 ## Update
 

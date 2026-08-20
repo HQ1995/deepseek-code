@@ -44,12 +44,15 @@ branding (our identity). Keep this list current on every sync.
   crates/codegen/xai-grok-pager/src/app/app_view.rs (2 sites), matching the
   bridge's default preset (minimal). Coupled change: if the bridge default
   ever changes, update these labels too.
-- Persona/preset selection is fed by the bridge's bundle/status personas;
-  no TUI-side persona list of its own.
+- Persona/preset selection is fed by the bridge's dynamic bundle/status roster;
+  selection uses the returned preset id while display uses its name. There is
+  no TUI-side allowlist, so user-installed dsh presets appear without a Rust
+  change. The four shipped presets are only the E2E baseline.
 - /provider command (crates/codegen/xai-grok-pager/src/slash/commands/provider.rs):
   lists providers from the bridge's initialize _meta.modelState.providers and
-  switches the session to the picked provider's first catalog model by reusing
-  the existing SetDefaultModel pipeline. The "current provider" is derived
+  switches through the existing SetDefaultModel pipeline. It keeps the same
+  raw model id when the target provider offers it, otherwise falling back to
+  that provider's first catalog model. The "current provider" is derived
   from the current model's provider meta (the bridge's currentProviderId is
   only a fallback). /model's dropdown is scoped to the current provider when
   empty (falling back to the full catalog if that provider has no models), and
@@ -85,9 +88,10 @@ branding (our identity). Keep this list current on every sync.
   accepts as /provider --add, which opens a new add-provider modal
   (crates/codegen/xai-grok-pager/src/views/add_provider_modal.rs, wired through
   ActiveModal::AddProvider, Action::OpenAddProvider/AddProvider and
-  Effect::AddProvider). The modal offers the dsh provider presets (DeepSeek
-  official, OpenCodex gateway, OpenAI/Anthropic-compatible, OpenRouter) plus a
-  Custom empty form over id/displayName/apiKeyEnv/api/baseURL/apiKey. A
+  Effect::AddProvider). A fresh profile is provider-neutral and the modal opens
+  on Custom; DeepSeek, OpenCodex (`ocx`), OpenAI, Anthropic, and OpenRouter are
+  optional templates, not preinstalled routes. The form covers
+  id/displayName/apiKeyEnv/api/baseURL/apiKey. A
   pasted apiKey renders masked and is stored by the bridge in the dsh
   credentials service ($DSH_HOME/.credentials.yaml via
   dsh-credentials-local) under the apiKeyEnv reference (derived
@@ -95,8 +99,9 @@ branding (our identity). Keep this list current on every sync.
   fallback, so exported env vars keep working. Submit sends
   x.ai/providers/add to the bridge,
   which writes the provider into the dsh settings document through the official
-  settings seam (ctx.settings.mutate on the llm-pi-ai namespace); the response
-  refreshes modelState.providers so /provider updates without a reload.
+  settings seam (ctx.settings.mutate on the llm-pi-ai namespace); the bridge
+  broadcasts the refreshed provider roster and model catalog so /provider and
+  /model update without a reload.
   ponytail: no models field in v1 - custom routes get their models from
   bridge-side gateway discovery, catalog routes keep serving the installed
   catalog. Protocol ids are the official seam's: openai-completions /
@@ -144,12 +149,19 @@ branding (our identity). Keep this list current on every sync.
   x.ai/btw runs a one-shot subagent so it does not pollute the main
   session context, and AvailableCommandsUpdate.meta.capabilities drives
   runtime capability-aware slash visibility (subagents/skills/plan/todo/
-  schedule/goal). session/new and session/load accept
+  schedule/goal). Capabilities come from the selected agent's actual tool
+  schemas and scoped services, not from hardcoded preset ids. session/new and session/load accept
   _meta.provider/_meta.model/_meta.reasoningEffort and the permission modes
   the bridge can enforce exactly. Unsupported sandbox, prompt/rule/tool,
   auto/acceptEdits/dontAsk, and no-subagents metadata are rejected fail-closed
-  instead of silently weakening CLI flags. dsh-schedule is mounted in the
-  leader profile, and TUI /loop no longer requires grok's scheduler_create.
+  instead of silently weakening CLI flags. The leader profile does not mount
+  dsh-schedule globally: doing so injects its three tools into every root agent
+  and breaks the shipped minimal preset's exact two-tool contract. TUI /loop
+  therefore stays hidden unless scheduling is supplied by a preset-scoped
+  composition.
+- The host profile mounts `dsh-code-runtime-worker-thread`; without it dsh's
+  shipped `code` preset silently exposes the native standard roster instead of
+  its intended single `run_code` tool.
 - dscode CLI surfaces hidden because they have no dsh counterpart or are not
   worth exposing yet: login, logout, plugin, memory, setup, trace, worktree,
   dashboard, --worktree, --worktree-ref, --restore-code, --oauth. They remain
@@ -299,6 +311,12 @@ standard ACP `available_commands_update`, and the stock pager merges
 agent-advertised commands into the slash registry (builtin names win,
 BLOCKED_ACP_NAMES skipped). New dsh plugins get top-level slash commands
 with zero pager changes.
+
+This generic path covers dsh presets, tools, commands, providers, models, and
+settings. Browser-only plugin slots, custom panels, and private extension RPCs
+still require an explicit TUI/bridge adapter; they are not inferred. The same
+applies to plugin-owned durable session event types while pinned dsh rc.8 has
+no public downstream registration seam for that vocabulary.
 
 ### xAI login/logout CLI subcommands are severed
 
