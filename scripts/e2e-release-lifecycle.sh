@@ -108,8 +108,8 @@ if env DSCODE_SOCKET="$ONBOARDING_SOCKET" DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 \
   >"$RUN_ROOT/onboarding.out" 2>"$RUN_ROOT/onboarding.err"; then
   fail "fresh profile unexpectedly completed a turn without a provider"
 fi
-cat "$RUN_ROOT/onboarding.out" "$RUN_ROOT/onboarding.err" \
-  | grep -Eiq 'no model selected|use /provider|provider.*model' \
+grep -Eiq 'no model selected|use /provider|provider.*model' \
+  "$RUN_ROOT/onboarding.out" "$RUN_ROOT/onboarding.err" \
   || fail "fresh profile did not explain how to select a provider"
 wait_leader_exit "$ONBOARDING_SOCKET"
 
