@@ -465,8 +465,8 @@ pub struct RemoteSettings {
     /// turns instead of background subagents.
     #[serde(default)]
     pub scheduler_background_loops: Option<bool>,
-    /// Release channel: `"stable"` or `"alpha"`.
-    /// Fallback when no local `[cli] channel` or `--alpha`/`--stable` flag is set.
+    /// Release channel: `"stable"` or internal `"alpha"` (user-facing beta).
+    /// Fallback when no local `[cli] channel` or `--beta`/`--stable` flag is set.
     #[serde(default)]
     pub release_channel: Option<String>,
     /// When `Some(true)`, enable LOC attribution tracking for this session.

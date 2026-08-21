@@ -2172,7 +2172,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 json,
                 force_reinstall,
                 version,
-                alpha,
+                beta,
                 stable,
                 enterprise,
                 trigger,
@@ -2180,7 +2180,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             } => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                let channel_switch = get_channel_switch(alpha, stable, enterprise);
+                let channel_switch = get_channel_switch(beta, stable, enterprise);
                 let trigger = resolve_update_trigger(trigger.as_deref(), auto);
                 return run_update_command(
                     check,
@@ -2393,6 +2393,7 @@ async fn finish_update_on_exit(
 fn build_update_config() -> UpdateConfig {
     let environment = xai_grok_shell::env::GrokBuildEnvironment::from_flags(false, false);
     let mut config = UpdateConfig::from_environment(&environment);
+    config.channel = default_update_channel(xai_grok_version::VERSION).to_string();
     cryptify::flow_stmt!({
         {
             config.deployment_key =
@@ -2408,6 +2409,22 @@ fn build_update_config() -> UpdateConfig {
         config.channel = ch;
     }
     config
+}
+
+fn default_update_channel(version: &str) -> &'static str {
+    if version.ends_with("-dev") {
+        return "stable";
+    }
+    if semver::Version::parse(version).is_ok_and(|version| {
+        matches!(
+            version.pre.as_str().split('.').next(),
+            Some("alpha" | "beta")
+        )
+    }) {
+        "alpha"
+    } else {
+        "stable"
+    }
 }
 /// Central gate for auto-update checks; add new suppression rules here,
 /// not at call sites.
@@ -2450,8 +2467,8 @@ fn is_managed_install(exe: Option<std::path::PathBuf>, grok_home: &std::path::Pa
 }
 /// Map the mutually-exclusive channel flags to a channel name. clap enforces
 /// that at most one is set, so the order is irrelevant.
-fn get_channel_switch(alpha: bool, stable: bool, enterprise: bool) -> Option<&'static str> {
-    if alpha {
+fn get_channel_switch(beta: bool, stable: bool, enterprise: bool) -> Option<&'static str> {
+    if beta {
         Some("alpha")
     } else if stable {
         Some("stable")
@@ -2461,7 +2478,7 @@ fn get_channel_switch(alpha: bool, stable: bool, enterprise: bool) -> Option<&'s
         None
     }
 }
-/// Handle `grok-pager update [--check] [--json] [--force-reinstall] [--version X] [--alpha|--stable|--enterprise]`.
+/// Handle `dscode update [--check] [--json] [--force-reinstall] [--version X] [--beta|--stable|--enterprise]`.
 /// --trigger is the one representation; --auto is the compat alias from
 /// older parents. Unknown values fall back to user_command (a human is the
 /// only caller that can produce them).
@@ -2495,7 +2512,7 @@ async fn run_update_command(
         if version.is_some() {
             anyhow::bail!("--version cannot be used with --check");
         }
-        auto_update::apply_channel_switch(channel_switch, &mut update_config).await;
+        auto_update::apply_channel_switch(channel_switch, &mut update_config).await?;
         let status = auto_update::check_update_status(&update_config).await;
         auto_update::print_update_status(&status, json)?;
         return Ok(());
@@ -2685,7 +2702,7 @@ mod tests {
     #[test]
     fn version_output_writer_preserves_channel_aware_contract() {
         for (label, expected_suffix) in [
-            (" [alpha]", " [alpha]\n"),
+            (" [beta]", " [beta]\n"),
             (" [stable]", " [stable]\n"),
             ("", ")\n"),
         ] {
@@ -2696,6 +2713,15 @@ mod tests {
             assert!(output.contains(env!("VERSION_WITH_COMMIT")));
             assert!(output.ends_with(expected_suffix), "{output:?}");
         }
+    }
+    #[test]
+    fn beta_releases_default_to_beta_updates_but_dev_builds_do_not() {
+        assert_eq!(default_update_channel("0.0.11-beta.1"), "alpha");
+        assert_eq!(default_update_channel("0.0.11-alpha.1"), "alpha");
+        assert_eq!(default_update_channel("0.0.11"), "stable");
+        assert_eq!(default_update_channel("0.0.11-dev"), "stable");
+        assert_eq!(default_update_channel("0.0.11-beta.1-dev"), "stable");
+        assert_eq!(default_update_channel("not-semver"), "stable");
     }
     #[test]
     fn version_flags_and_doctor_are_distinct_early_intents() {

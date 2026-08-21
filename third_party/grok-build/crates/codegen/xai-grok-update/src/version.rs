@@ -79,10 +79,14 @@ pub struct UpdateConfig {
     pub deployment_key: Option<String>,
     /// Optional extra auth material forwarded with requests when present.
     pub alpha_test_key: Option<String>,
-    /// Release channel: "stable" or "alpha". Loaded from config.
+    /// Release channel: "stable" or internal "alpha" (user-facing beta).
     pub channel: String,
     /// Custom npm registry URL. When set, passed as `--registry=` to npm CLI.
     pub npm_registry: Option<String>,
+}
+
+pub(crate) fn public_channel(channel: &str) -> &str {
+    if channel == "alpha" { "beta" } else { channel }
 }
 
 impl UpdateConfig {
@@ -577,7 +581,7 @@ pub async fn write_version_cache(version: &str, stable_version: Option<&str>) {
 /// - `"gh-release"` — uses `gh release list` against GitHub Releases.
 pub async fn get_latest_version(installer: &str, config: &UpdateConfig) -> Result<String> {
     let version = fetch_latest_version(installer, config).await?;
-    let stable_ptr = try_fetch_stable_pointer().await;
+    let stable_ptr = stable_pointer_for(installer, &config.channel, &version).await;
     write_version_cache(&version, stable_ptr.as_deref()).await;
     Ok(version)
 }
@@ -657,19 +661,31 @@ pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -
     Some(ver_str)
 }
 
-/// Fetch the stable channel pointer for caching alongside the version.
+/// Resolve the stable release for caching alongside a selected version.
 ///
-/// Tries each base URL in [`CLI_BASE_URLS`] and returns the first success.
-/// Best-effort: returns `None` on any failure (the caller will simply omit
-/// the stable pointer from the cache, and `channel_label()` will return `""`
-/// until the next successful fetch).
+/// Stable selections reuse the already-resolved version. dscode beta compares
+/// against the latest stable deepseek-code GitHub release; upstream installers
+/// retain their GCS stable-pointer behavior.
 ///
-/// The entire operation is capped at 500 ms. The stable pointer is only used
-/// to derive the `[alpha]`/`[stable]` channel label — it is never required
-/// for correctness. On slow or unreachable networks the timeout fires and we
-/// return `None`; the label will populate on the next successful TTL check
-/// (~30 min). This keeps startup and post-install paths fast.
-pub(crate) async fn try_fetch_stable_pointer() -> Option<String> {
+/// Best-effort: failures omit the label cache without blocking updates.
+pub(crate) async fn stable_pointer_for(
+    installer: &str,
+    channel: &str,
+    resolved_version: &str,
+) -> Option<String> {
+    if channel.is_empty() || channel == "stable" {
+        return Some(resolved_version.to_string());
+    }
+    if installer == "dscode" {
+        return tokio::time::timeout(
+            Duration::from_secs(3),
+            fetch_dscode_release_version("stable"),
+        )
+        .await
+        .ok()?
+        .ok();
+    }
+
     tokio::time::timeout(Duration::from_millis(500), async {
         for base in cli_base_urls() {
             if let Ok(v) = fetch_gcs_channel_pointer("stable", &base).await {
@@ -682,11 +698,11 @@ pub(crate) async fn try_fetch_stable_pointer() -> Option<String> {
     .unwrap_or(None)
 }
 
-/// Read the cached stable version from `~/.grok/dscode-version.json` (sync, for display).
+/// Read the cached stable version from the dscode product home's
+/// `dscode-version.json` (sync, for display).
 ///
-/// dscode keeps its own cache file: the official grok binary shares
-/// `~/.grok` and writes ITS release line into `version.json`, which would
-/// poison the dscode channel label and update prompts.
+/// The distinct filename keeps dscode's release line separate from the
+/// upstream `version.json` contract.
 ///
 /// Returns `None` if the file doesn't exist, can't be parsed, or has no
 /// `stable_version` field (e.g. written by an older binary).
@@ -713,7 +729,7 @@ fn derive_channel<'a>(current: &str, stable: &str) -> Option<&'a str> {
 
 /// Machine-readable channel name derived from the cached stable pointer.
 ///
-/// Returns `Some("alpha")` when the current version is ahead of the cached
+/// Returns `Some("beta")` when the current version is ahead of the cached
 /// stable pointer, `Some("stable")` when at or behind, or `None` when no
 /// cached pointer is available (first launch, old cache format, parse error).
 ///
@@ -728,14 +744,14 @@ pub fn channel_name() -> Option<&'static str> {
             return None;
         }
         let stable = cached_stable_version()?;
-        derive_channel(xai_grok_version::VERSION, &stable)
+        derive_channel(xai_grok_version::VERSION, &stable).map(public_channel)
     })
 }
 
 /// Channel label derived from the cached stable pointer.
 ///
-/// Compares the compiled-in `VERSION` against the stable pointer stored in
-/// `~/.grok/dscode-version.json` (written by the auto-updater):
+/// Compares the compiled-in `VERSION` against the stable pointer stored in the
+/// dscode product home's `dscode-version.json` (written by the auto-updater):
 /// - `" [beta]"` when the current version is ahead of stable,
 /// - `" [stable]"` when at or behind stable,
 /// - `""` when no cached pointer is available (first launch, old cache format).
@@ -874,6 +890,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_public_channel_names() {
+        assert_eq!(public_channel("alpha"), "beta");
+        assert_eq!(public_channel("stable"), "stable");
+        assert_eq!(public_channel("enterprise"), "enterprise");
+    }
+
     // ──────────────────────────────────────────────────────────────────────
     // semver_max — invariant matrix
     // ──────────────────────────────────────────────────────────────────────
@@ -989,5 +1012,13 @@ mod tests {
         use xai_grok_shell::env::GrokBuildEnvironment;
         let cfg = UpdateConfig::from_environment(&GrokBuildEnvironment::Production);
         assert_eq!(cfg.channel, "stable");
+    }
+
+    #[tokio::test]
+    async fn test_stable_pointer_reuses_resolved_version() {
+        assert_eq!(
+            stable_pointer_for("dscode", "stable", "0.0.10").await,
+            Some("0.0.10".to_string())
+        );
     }
 }

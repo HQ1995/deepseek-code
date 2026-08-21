@@ -1,11 +1,12 @@
 use semver::Version;
 use toml::Value as TomlValue;
 
-/// Machine-readable channel name derived from the GCS stable pointer cache.
+/// Machine-readable channel name derived from the cached stable release.
 ///
-/// Reads `stable_version` from `~/.grok/version.json` (written by the
-/// auto-updater) and compares the compiled-in version against it:
-/// - `Some("alpha")` when the current version is ahead of stable,
+/// Reads `stable_version` from the dscode product home's
+/// `dscode-version.json` (written by the auto-updater) and compares the
+/// compiled-in version against it:
+/// - `Some("beta")` when the current version is ahead of stable,
 /// - `Some("stable")` when at or behind stable,
 /// - `None` when no cached pointer is available (first launch, old cache).
 ///
@@ -15,18 +16,21 @@ pub(crate) fn channel_name_from_cache() -> Option<&'static str> {
     use std::sync::OnceLock;
     static NAME: OnceLock<Option<&'static str>> = OnceLock::new();
     *NAME.get_or_init(|| {
-        let version_path = crate::util::grok_home::grok_home().join("version.json");
+        if xai_grok_version::VERSION.contains("-dev") {
+            return None;
+        }
+        let version_path = crate::util::grok_home::grok_home().join("dscode-version.json");
         let content = std::fs::read_to_string(&version_path).ok()?;
         let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
         let stable = parsed.get("stable_version")?.as_str()?;
-        let current = semver::Version::parse(xai_grok_version::VERSION).ok()?;
-        let stable_v = semver::Version::parse(stable).ok()?;
-        if current > stable_v {
-            Some("alpha")
-        } else {
-            Some("stable")
-        }
+        channel_name_for_versions(xai_grok_version::VERSION, stable)
     })
+}
+
+fn channel_name_for_versions(current: &str, stable: &str) -> Option<&'static str> {
+    let current = semver::Version::parse(current).ok()?;
+    let stable = semver::Version::parse(stable).ok()?;
+    Some(if current > stable { "beta" } else { "stable" })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -295,6 +299,19 @@ impl VersionPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_channel_name_uses_beta() {
+        assert_eq!(
+            channel_name_for_versions("0.0.11-beta.1", "0.0.10"),
+            Some("beta")
+        );
+        assert_eq!(
+            channel_name_for_versions("0.0.10", "0.0.10"),
+            Some("stable")
+        );
+        assert_eq!(channel_name_for_versions("bad", "0.0.10"), None);
+    }
 
     fn no_env(_: &str) -> Option<String> {
         None

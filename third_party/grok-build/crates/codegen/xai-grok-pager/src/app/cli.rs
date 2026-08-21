@@ -62,7 +62,7 @@ pub enum Command {
     #[command(hide = true)]
     Setup {
         /// Print the fetched configuration as JSON instead of installing it;
-        /// writes nothing to ~/.grok.
+        /// writes nothing to the dscode profile.
         #[arg(long)]
         json: bool,
     },
@@ -86,7 +86,6 @@ Examples:
   dscode wrap docker exec -it my-container bash
   dscode wrap kubectl exec -it my-pod -- bash
 
-See ~/.grok/README.md for more information.
 ")]
     Wrap(WrapArgs),
     /// Export a session transcript as Markdown
@@ -109,13 +108,13 @@ See ~/.grok/README.md for more information.
         #[arg(long)]
         version: Option<String>,
         /// Switch to the beta release channel (faster updates, may have bugs).
-        #[arg(long, alias = "beta", conflicts_with_all = ["stable", "enterprise"])]
-        alpha: bool,
-        /// Switch to the stable release channel (default, weekly releases).
-        #[arg(long, conflicts_with_all = ["alpha", "enterprise"])]
+        #[arg(long, alias = "alpha", conflicts_with_all = ["stable", "enterprise"])]
+        beta: bool,
+        /// Switch to the stable release channel.
+        #[arg(long, conflicts_with_all = ["beta", "enterprise"])]
         stable: bool,
         /// Switch to the enterprise release channel.
-        #[arg(long, conflicts_with_all = ["alpha", "stable"], hide = true)]
+        #[arg(long, conflicts_with_all = ["beta", "stable"], hide = true)]
         enterprise: bool,
         /// Internal: what spawned this `grok update` (`user_command`,
         /// `auto_background`, `leader_converge`). Hidden.
@@ -142,7 +141,7 @@ See ~/.grok/README.md for more information.
     /// Manage git worktrees
     #[command(hide = true)]
     Worktree(crate::worktree_cmd::WorktreeArgs),
-    /// Show what the dscode home (~/.grok) uses on disk
+    /// Show what the dscode profile uses on disk
     #[command(name = "du", visible_alias = "disk-usage")]
     DiskUsage(crate::disk_usage_cmd::DiskUsageArgs),
     /// Expose this workspace to the Computer Hub (via the leader).
@@ -443,7 +442,7 @@ pub struct PagerArgs {
     /// Working directory.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
-    /// Use a custom leader socket path instead of the default `~/.grok/leader.sock`.
+    /// Use a custom leader socket path.
     #[arg(
         long = "leader-socket",
         value_name = "PATH",
@@ -777,7 +776,7 @@ pub struct PagerArgs {
     /// into the terminal's native scrollback (use the terminal's own scroll /
     /// selection); a small pinned region holds the prompt + running turn.
     /// Session-scoped only — does not write config. To default plain `dscode` to
-    /// minimal, set `[ui] screen_mode = "minimal"` in ~/.grok/config.toml.
+    /// minimal, set `[ui] screen_mode = "minimal"` in the dscode profile config.
     #[arg(long = "minimal")]
     pub minimal: bool,
     /// Open in the standard fullscreen TUI for this session, overriding a
@@ -1080,6 +1079,45 @@ impl PagerArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn update_beta_is_canonical_and_alpha_remains_compatible() {
+        for flag in ["--beta", "--alpha"] {
+            let args = PagerArgs::try_parse_from(["dscode", "update", flag])
+                .unwrap_or_else(|error| panic!("{flag} must parse: {error}"));
+            assert!(matches!(
+                args.command,
+                Some(Command::Update {
+                    beta: true,
+                    stable: false,
+                    enterprise: false,
+                    ..
+                })
+            ));
+        }
+
+        let mut command = PagerArgs::command();
+        let update = command
+            .find_subcommand_mut("update")
+            .expect("update subcommand");
+        let help = update.render_long_help().to_string();
+        assert!(help.contains("--beta"));
+        assert!(!help.contains("--alpha"));
+    }
+
+    #[test]
+    fn public_help_does_not_point_at_the_upstream_home() {
+        let mut command = PagerArgs::command();
+        let help = command.render_long_help().to_string();
+        assert!(!help.contains("~/.grok"));
+
+        let wrap = command
+            .find_subcommand_mut("wrap")
+            .expect("wrap subcommand");
+        assert!(!wrap.render_long_help().to_string().contains("~/.grok"));
+    }
+
     #[test]
     fn version_flags_parse_as_early_intent_without_exiting() {
         for flag in ["--version", "-v", "-V"] {

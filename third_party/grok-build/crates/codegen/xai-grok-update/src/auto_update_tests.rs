@@ -1239,7 +1239,7 @@ fn test_update_status_with_error_field_serialized() {
 }
 
 #[test]
-fn test_update_status_alpha_channel_serialized() {
+fn test_update_status_beta_channel_serialized() {
     let s = UpdateStatus {
         current_version: "0.1.150-alpha.1".to_string(),
         latest_version: Some("0.1.150-alpha.2".to_string()),
@@ -1250,7 +1250,7 @@ fn test_update_status_alpha_channel_serialized() {
         error: None,
     };
     let v = serde_json::to_value(&s).unwrap();
-    assert_eq!(v["channel"], "alpha");
+    assert_eq!(v["channel"], "beta");
     assert_eq!(v["currentVersion"], "0.1.150-alpha.1");
     assert_eq!(v["latestVersion"], "0.1.150-alpha.2");
 }
@@ -2565,10 +2565,17 @@ fn dev_builds_are_developer_managed() {
     // paths gate on this so a background download never clobbers it with a
     // release (the install destination is the repo build output).
     assert!(is_dev_build("0.0.5-dev"));
+    assert!(is_dev_build("0.0.11-beta.1-dev"));
     assert!(!is_dev_build("0.0.5"));
-    assert!(!is_dev_build("0.0.6-beta.1"), "prereleases from the beta channel still update");
+    assert!(
+        !is_dev_build("0.0.6-beta.1"),
+        "prereleases from the beta channel still update"
+    );
     assert!(!is_dev_build("not-a-version"));
     // Sanity: without the gate, needs_update would treat a dev build as
     // behind the same-numbered stable release — the exact clobber this guards.
-    assert_eq!(needs_update("0.0.5-dev", "0.0.5", "stable", false), Some(true));
+    assert_eq!(
+        needs_update("0.0.5-dev", "0.0.5", "stable", false),
+        Some(true)
+    );
 }

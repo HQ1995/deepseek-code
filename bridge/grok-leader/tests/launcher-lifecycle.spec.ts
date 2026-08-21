@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import { nodeVersionSupported } from '../bin/dscode.mjs'
+import { nodeVersionSupported, packageUpdateRef } from '../bin/dscode.mjs'
 
 const launcher = fileURLToPath(new URL('../bin/dscode.mjs', import.meta.url))
 const packageVersion = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
@@ -19,6 +19,11 @@ afterEach(() => {
 })
 
 describe('launcher lifecycle', () => {
+  it('uses beta as the public channel name and keeps alpha compatible', () => {
+    expect(packageUpdateRef(['--beta'])).toBe('beta')
+    expect(packageUpdateRef(['--alpha'])).toBe('beta')
+  })
+
   it.skipIf(productNode === undefined)('bootstraps an isolated profile, runtime, launcher, and cached TUI', () => {
     const home = mkdtempSync(join(tmpdir(), 'dscode-first-run-'))
     homes.push(home)
@@ -145,7 +150,7 @@ chmod +x "$prefix/node_modules/@hqzhao95/dscode/bin/dscode.mjs"
 `)
     chmodSync(fakeNpm, 0o755)
 
-    const result = spawnSync(productNode!, [launcher, '--debug', 'update', '--alpha'], {
+    const result = spawnSync(productNode!, [launcher, '--debug', 'update', '--beta'], {
       encoding: 'utf8',
       env: {
         ...process.env,
@@ -157,7 +162,7 @@ chmod +x "$prefix/node_modules/@hqzhao95/dscode/bin/dscode.mjs"
 
     expect(result.status, result.stderr).toBe(0)
     expect(JSON.parse(readFileSync(join(plugin, 'package.json'), 'utf8')).version).toBe(updatedPackageVersion)
-    expect(readFileSync(reexecLog, 'utf8')).toBe('RECONCILED=1\nARGS=<--debug><update><--alpha>\n')
+    expect(readFileSync(reexecLog, 'utf8')).toBe('RECONCILED=1\nARGS=<--debug><update><--beta>\n')
   })
 
   it('reconciles a stale profile package to the launcher version', () => {

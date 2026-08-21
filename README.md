@@ -64,13 +64,14 @@ model. Reasoning effort is remembered separately for each provider/model pair.
 
 ```sh
 dscode update --check              # check only
-dscode update                      # stable channel
-dscode update --alpha              # beta channel
+dscode update                      # remembered/current channel
+dscode update --stable             # stable channel
+dscode update --beta               # beta channel
 dscode update --version <version>  # exact version
 ```
 
 Update keeps the npm bridge, tested dsh runtime, and TUI binary on the same
-release channel.
+release channel. Explicit `--stable` and `--beta` selections are remembered.
 
 ## Uninstall
 

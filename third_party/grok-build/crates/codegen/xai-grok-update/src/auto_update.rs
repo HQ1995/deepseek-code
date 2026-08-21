@@ -12,7 +12,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::version::{
     UpdateConfig, fetch_latest_version, get_installed_grok_version, get_latest_version,
-    is_version_cache_fresh, try_fetch_stable_pointer, write_version_cache,
+    is_version_cache_fresh, public_channel, stable_pointer_for, write_version_cache,
 };
 use xai_grok_shell::util::config;
 use xai_grok_shell::util::grok_home::{grok_application, grok_home};
@@ -185,9 +185,17 @@ pub struct UpdateStatus {
     pub latest_version: Option<String>,
     pub update_available: bool,
     pub installer: Option<String>,
+    #[serde(serialize_with = "serialize_public_channel")]
     pub channel: String,
     pub auto_update: Option<bool>,
     pub error: Option<String>,
+}
+
+fn serialize_public_channel<S>(channel: &String, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(public_channel(channel))
 }
 
 /// Format and print an [`UpdateStatus`] to stdout.
@@ -201,13 +209,14 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
     if let Some(error) = status.error.as_deref() {
         println!(
             "Deepseek Code - v{} [{}]",
-            status.current_version, status.channel
+            status.current_version,
+            public_channel(&status.channel)
         );
         println!("Update check failed: {error}");
         return Ok(());
     }
 
-    let channel_label = format!(" [{}]", status.channel);
+    let channel_label = format!(" [{}]", public_channel(&status.channel));
 
     if status.update_available {
         if let Some(latest_version) = status.latest_version.as_deref() {
@@ -272,7 +281,7 @@ pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
                         error = Some(if parse_ok {
                             format!(
                                 "Unsupported release channel '{channel}' (current={current_version}, latest={target}). \
-                                     Supported channels: stable, alpha, enterprise."
+                                     Supported channels: stable, beta, enterprise."
                             )
                         } else {
                             format!(
@@ -562,7 +571,7 @@ pub async fn get_installer() -> Option<&'static str> {
 /// Explicit `dscode update` stays available as the escape hatch back to a
 /// managed release.
 fn is_dev_build(version: &str) -> bool {
-    semver::Version::parse(version).is_ok_and(|v| v.pre.as_str() == "dev")
+    version.ends_with("-dev") && semver::Version::parse(version).is_ok()
 }
 
 fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: bool) -> Option<bool> {
@@ -689,7 +698,8 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
     )
     .unwrap_or(false)
     {
-        let stable_ptr = try_fetch_stable_pointer().await;
+        let stable_ptr =
+            stable_pointer_for(installer, &update_config.channel, &target_version).await;
         write_version_cache(&target_version, stable_ptr.as_deref()).await;
         return BackgroundUpdateCheck::none();
     }
@@ -809,12 +819,12 @@ pub async fn run_update_if_available(
     )
     .unwrap_or(false)
     {
-        let stable_ptr = try_fetch_stable_pointer().await;
+        let stable_ptr = stable_pointer_for(inst, &update_config.channel, &latest_version).await;
         write_version_cache(&latest_version, stable_ptr.as_deref()).await;
         return Ok(false);
     }
 
-    let channel_label = format!(" [{}]", update_config.channel);
+    let channel_label = format!(" [{}]", public_channel(&update_config.channel));
     if auto_update {
         eprintln!(
             "A new version of Deepseek Code is available: {} -> {}{}",
@@ -2761,17 +2771,23 @@ fn install_npm(target: Option<&str>, channel: &str, npm_registry: Option<&str>) 
     Ok(())
 }
 
-pub async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &mut UpdateConfig) {
-    if let Some(ch) = channel_switch
-        && update_config.channel != ch
-    {
-        let _ = config::update_config(|st| {
+pub async fn apply_channel_switch(
+    channel_switch: Option<&str>,
+    update_config: &mut UpdateConfig,
+) -> Result<()> {
+    if let Some(ch) = channel_switch {
+        let changed = update_config.channel != ch;
+        config::update_config(|st| {
             st.cli.channel = Some(ch.to_string());
         })
-        .await;
+        .await
+        .context("Failed to remember the release channel")?;
         update_config.channel = ch.to_string();
-        eprintln!("Switched to {} channel.", ch);
+        if changed {
+            eprintln!("Switched to {} channel.", public_channel(ch));
+        }
     }
+    Ok(())
 }
 
 /// Run the `grok update` command. Returns `Ok(Some(version))` when the target
@@ -2789,7 +2805,7 @@ pub async fn run_update(
     update_config: &mut UpdateConfig,
     trigger: CliUpdateTrigger,
 ) -> Result<Option<String>> {
-    apply_channel_switch(channel_switch, update_config).await;
+    apply_channel_switch(channel_switch, update_config).await?;
     let installer = match get_installer().await {
         Some(i) => i,
         None => {
@@ -2848,7 +2864,7 @@ pub async fn run_update(
     let (latest_version, install_target) = match plan {
         UpdatePlan::Skip { latest } => {
             // Cache so an explicit `grok update` doesn't re-prompt every run.
-            let stable_ptr = try_fetch_stable_pointer().await;
+            let stable_ptr = stable_pointer_for(installer, &update_config.channel, &latest).await;
             write_version_cache(&latest, stable_ptr.as_deref()).await;
             eprintln!(
                 "The latest release ({latest}) is not an allowed update; \
@@ -2890,14 +2906,16 @@ pub async fn run_update(
         ) {
             Some(true) => {}
             Some(false) => {
-                // Explicit channel switch (--stable / --alpha) with a
+                // Explicit channel switch (--stable / --beta) with a
                 // different target version: install even though the current
                 // version is "newer" by semver. This handles switching from
                 // alpha 0.2.X back to stable 0.1.220 where 0.2.X > 0.1.220.
                 if channel_switch.is_some() && effective_current != install_target {
                     // Fall through to install
                 } else {
-                    let stable_ptr = try_fetch_stable_pointer().await;
+                    let stable_ptr =
+                        stable_pointer_for(installer, &update_config.channel, &install_target)
+                            .await;
                     write_version_cache(&install_target, stable_ptr.as_deref()).await;
                     eprintln!("Already up to date ({}).", effective_current);
                     // Retry if a prior sync failed.
@@ -2916,8 +2934,8 @@ pub async fn run_update(
                 if parse_ok {
                     anyhow::bail!(
                         "Unsupported release channel '{}' (current={}, target={}). \
-                         Supported channels: stable, alpha, enterprise. \
-                         Use --stable or --alpha to override, or set [cli] channel in config.toml.",
+                         Supported channels: stable, beta, enterprise. \
+                         Use --stable or --beta to override.",
                         update_config.channel,
                         effective_current,
                         install_target
@@ -2957,7 +2975,7 @@ pub async fn run_update(
     // Fetch the stable pointer now so the new binary has it immediately
     // for channel_label() display, rather than waiting for the next
     // TTL-gated update check (~30 min).
-    let stable_ptr = try_fetch_stable_pointer().await;
+    let stable_ptr = stable_pointer_for(installer, &update_config.channel, target_version).await;
     write_version_cache(target_version, stable_ptr.as_deref()).await;
     refresh_deployment_config().await;
     eprintln!("  ✓ dscode v{} installed successfully!", target_version);
