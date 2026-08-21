@@ -53,6 +53,7 @@ private runtime under the dscode profile. It never upgrades a global install.
 scripts/check.sh
 scripts/e2e-product.sh
 scripts/e2e-product.sh --full --provider-ui
+scripts/e2e-release-lifecycle.sh
 ```
 
 CI runs script, bridge, and Rust checks on Ubuntu and macOS. Tagged releases
