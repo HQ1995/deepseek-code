@@ -98,7 +98,7 @@ Client disconnect and Cordis disposal share the per-client teardown: owned agent
 
 ## Running
 
-The dscode binary bootstraps the leader directly: it resolves dsh (DSH_BIN env, dsh on PATH, then npx --yes @deepseek-ai/dsh), spawns dsh --profile dscode bound to the socket, removes any stale socket file first, waits for the socket, and attaches through the normal --leader path (third_party/grok-build/crates/codegen/xai-grok-pager/src/dsh_leader.rs). The same composition underneath is the agent loop, LLM adapters, session persistence, and this plugin in the dscode profile.
+The dscode binary bootstraps the leader directly: it resolves the tested dsh from the launcher's `DSH_BIN` or an existing `dsh` on `PATH`, spawns `dsh --profile dscode` bound to the socket, removes any stale socket file first, waits for the socket, and attaches through the normal `--leader` path (`third_party/grok-build/crates/codegen/xai-grok-pager/src/dsh_leader.rs`). It never starts an npm install after entering the alternate screen. The same composition underneath is the agent loop, LLM adapters, session persistence, and this plugin in the dscode profile.
 
 After changing this package, run `scripts/update-bridge.sh` (repo root): building alone does not replace the copy already installed in the profile. The script packs the local bridge, installs it without changing the profile's registry or `file:` dependency, and verifies the bridge, launcher, and composition files. A leader that is already running keeps its loaded code either way; it exits with its last client, and the next dscode spawn picks up the refreshed profile.
 

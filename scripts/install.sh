@@ -48,22 +48,23 @@ if [[ -z "$DSH_VERSION" ]]; then
   exit 1
 fi
 
-# Source installs never mutate the user's global npm prefix. Use an existing
-# tested dsh or the exact npx pin for the one-time profile operation.
-if command -v dsh >/dev/null 2>&1; then
-  installed_dsh_version="$(dsh --version 2>/dev/null | head -1 || true)"
-  if [[ "$installed_dsh_version" == "$DSH_VERSION" ]]; then
-    DSH_RUN=(dsh)
-  else
-    DSH_RUN=(npx --yes "@deepseek-ai/dsh@$DSH_VERSION")
-  fi
-else
-  DSH_RUN=(npx --yes "@deepseek-ai/dsh@$DSH_VERSION")
-fi
-
 # The dsh profile used by the TUI leader.
 PROFILE_NAME="dscode"
 PROFILE_DIR="$HOME/.dsh/profiles/$PROFILE_NAME"
+
+# Source installs never mutate the user's global npm prefix. Provision the
+# exact tested dsh under the product profile before the TUI starts; npx is not
+# safe here because a PATH shim named dsh can shadow the requested package.
+RUNTIME_DIR="$PROFILE_DIR/runtime"
+DSH_BIN="$RUNTIME_DIR/bin/dsh"
+installed_dsh_version="$("$DSH_BIN" --version 2>/dev/null | head -1 || true)"
+if [[ "$installed_dsh_version" != "$DSH_VERSION" ]]; then
+  echo "  installing the tested dsh runtime..."
+  rm -rf "$RUNTIME_DIR"
+  npm install --global --prefix "$RUNTIME_DIR" \
+    "@deepseek-ai/dsh@$DSH_VERSION" --omit=dev --no-audit --no-fund
+fi
+DSH_RUN=("$DSH_BIN")
 
 # Build the bridge against its pinned npm peers, then install it as a plugin
 # into the dscode profile. The official CLI initializes the profile
@@ -199,10 +200,9 @@ else
   ( cd "$ROOT/third_party/grok-build" && cargo build --release -p xai-grok-pager-bin )
 fi
 
-# Launchers. dscode links DIRECTLY to the prebuilt TUI binary - it bootstraps
-# the dsh leader itself (no shell wrapper). dsh is linked only when no working
-# dsh is reachable on PATH (the official CLI usually owns that name); a foreign
-# regular file is left alone.
+# Launchers. dscode links directly to the prebuilt TUI binary. If no compatible
+# dsh already owns the public command, expose the profile-owned tested runtime;
+# never install the old npx shim, which can recursively resolve itself.
 mkdir -p "$HOME/.local/bin"
 dscode_link="$HOME/.local/bin/dscode"
 if [[ -e "$dscode_link" && ! -L "$dscode_link" ]]; then
@@ -219,13 +219,13 @@ else
   ln -sf "$ROOT/third_party/grok-build/target/release/dscode" "$dscode_link"
   echo "  linked dscode"
 fi
-if dsh --version >/dev/null 2>&1; then
-  echo "  dsh already reachable on PATH; leaving it in place"
+if [[ "$(dsh --version 2>/dev/null | head -1 || true)" == "$DSH_VERSION" ]]; then
+  echo "  compatible dsh already reachable on PATH; leaving it in place"
 elif [[ -e "$HOME/.local/bin/dsh" && ! -L "$HOME/.local/bin/dsh" ]]; then
   echo "  warning: $HOME/.local/bin/dsh exists and is not a symlink; leaving it alone" >&2
 else
-  ln -sf "$ROOT/bin/dsh" "$HOME/.local/bin/dsh"
-  echo "  linked dsh"
+  ln -sf "$DSH_BIN" "$HOME/.local/bin/dsh"
+  echo "  linked tested dsh runtime"
 fi
 
 echo

@@ -1379,6 +1379,45 @@ fn cursor_style_policy(cursor_blink: Option<bool>) -> CursorStylePolicy {
         Some(false) => CursorStylePolicy::ForceSteady,
     }
 }
+/// Convert terminal capability evidence into the existing skip-reason
+/// contract. Unknown or timed-out probes stay conservative.
+fn resolve_kitty_skip_reason(
+    support: crate::terminal::KittyKeyboardSupport,
+    probed: Option<bool>,
+) -> Option<&'static str> {
+    match support {
+        crate::terminal::KittyKeyboardSupport::Supported => None,
+        crate::terminal::KittyKeyboardSupport::Unsupported(reason) => Some(reason),
+        crate::terminal::KittyKeyboardSupport::Probe => match probed {
+            Some(true) => None,
+            Some(false) => Some("unsupported"),
+            None => Some("probe_unavailable"),
+        },
+    }
+}
+
+fn init_inline_terminal(
+    backend: CrosstermBackend<crate::render::draw::TermWriter>,
+    viewport_rows: u16,
+    cursor_position: Option<ratatui::layout::Position>,
+) -> io::Result<PagerTerminal> {
+    let options = ratatui::TerminalOptions {
+        viewport: ratatui::Viewport::Inline(viewport_rows),
+    };
+    #[cfg(unix)]
+    {
+        xai_ratatui_inline::Terminal::with_options_and_cursor_position(
+            backend,
+            options,
+            cursor_position.unwrap_or(ratatui::layout::Position::ORIGIN),
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cursor_position;
+        xai_ratatui_inline::Terminal::with_options(backend, options)
+    }
+}
 /// Outcome of [`init_terminal`]: the live terminal, the effective screen mode,
 /// and any startup type-ahead captured after raw mode was enabled.
 pub(crate) struct TerminalInit {
@@ -1474,12 +1513,42 @@ fn init_terminal(
         startup_typeahead.extend(event_loop::capture_startup_typeahead(drain_timeout));
         crate::theme::apply_cursor_color();
         let ctx = crate::terminal::terminal_context();
-        let skip_reason: Option<&str> =
-            ctx.kitty_skip_reason()
-                .or_else(|| match terminal::supports_keyboard_enhancement() {
-                    Ok(true) => None,
-                    _ => Some("unsupported"),
-                });
+        let kitty_support = ctx.kitty_keyboard_support();
+        let probe_request = crate::terminal::startup_probe::StartupProbeRequest {
+            cursor_position: !mode.is_fullscreen(),
+            keyboard_enhancement: matches!(
+                kitty_support,
+                crate::terminal::KittyKeyboardSupport::Probe
+            ),
+        };
+        let probe_started = std::time::Instant::now();
+        let startup_probe = match crate::terminal::startup_probe::startup(
+            probe_request,
+            crate::terminal::startup_probe::DEFAULT_TIMEOUT,
+        ) {
+            Ok(probe) => probe,
+            Err(error) => {
+                tracing::warn!(%error, "bounded terminal startup probe failed");
+                crate::terminal::startup_probe::StartupProbe::default()
+            }
+        };
+        tracing::info!(
+            elapsed_ms = probe_started.elapsed().as_millis() as u64,
+            cursor_position = startup_probe.cursor_position.is_some(),
+            keyboard_enhancement = ?startup_probe.keyboard_enhancement,
+            "bounded terminal startup probe finished"
+        );
+        let startup_cursor = startup_probe
+            .cursor_position
+            .map(|position| ratatui::layout::Position::new(position.x, position.y));
+        let skip_reason =
+            resolve_kitty_skip_reason(kitty_support, startup_probe.keyboard_enhancement);
+        // The bounded raw-fd probe replays interleaved keys/paste through
+        // crossterm. Capture those events under the same startup safety policy
+        // as input typed before the query.
+        startup_typeahead.extend(event_loop::capture_startup_typeahead(
+            std::time::Duration::ZERO,
+        ));
         crate::terminal::da2::probe_at_startup();
         let flags = crate::terminal::negotiated_kitty_flags(
             skip_reason,
@@ -1525,12 +1594,7 @@ fn init_terminal(
                 crate::render::draw::TermWriter::new(frame_tx.clone(), writer_sync.clone())
                     .map_err(io::Error::other)?,
             );
-            if let Ok(term) = xai_ratatui_inline::Terminal::with_options(
-                probe_backend,
-                ratatui::TerminalOptions {
-                    viewport: ratatui::Viewport::Inline(viewport_rows),
-                },
-            ) {
+            if let Ok(term) = init_inline_terminal(probe_backend, viewport_rows, startup_cursor) {
                 return Ok((
                     term,
                     if want_minimal {
@@ -1552,12 +1616,7 @@ fn init_terminal(
                     crate::render::draw::TermWriter::new(frame_tx.clone(), writer_sync.clone())
                         .map_err(io::Error::other)?,
                 );
-                if let Ok(term) = xai_ratatui_inline::Terminal::with_options(
-                    retry_backend,
-                    ratatui::TerminalOptions {
-                        viewport: ratatui::Viewport::Inline(rows),
-                    },
-                ) {
+                if let Ok(term) = init_inline_terminal(retry_backend, rows, startup_cursor) {
                     return Ok((term, ScreenMode::Inline));
                 }
             } else {
@@ -1788,6 +1847,25 @@ mod tests {
         assert_eq!(
             cursor_style_policy(Some(false)),
             CursorStylePolicy::ForceSteady
+        );
+    }
+    #[test]
+    fn kitty_support_decision_degrades_conservatively() {
+        use crate::terminal::KittyKeyboardSupport::{Probe, Supported, Unsupported};
+
+        assert_eq!(resolve_kitty_skip_reason(Supported, Some(false)), None);
+        assert_eq!(
+            resolve_kitty_skip_reason(Unsupported("vte"), Some(true)),
+            Some("vte")
+        );
+        assert_eq!(resolve_kitty_skip_reason(Probe, Some(true)), None);
+        assert_eq!(
+            resolve_kitty_skip_reason(Probe, Some(false)),
+            Some("unsupported")
+        );
+        assert_eq!(
+            resolve_kitty_skip_reason(Probe, None),
+            Some("probe_unavailable")
         );
     }
     fn empty_config() -> toml::Value {

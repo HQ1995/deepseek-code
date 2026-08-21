@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# Fallback dsh launcher for dscode. Real installs normally have dsh on PATH or
-# set DSH_BIN; this is only linked when no dsh is reachable. It uses the exact
-# npm version this dscode release was tested against.
-exec npx --yes @deepseek-ai/dsh@0.1.0-rc.8 "$@"
+# Legacy source-install shim. The managed launcher provisions this exact
+# profile-owned runtime before starting the TUI; never delegate back through
+# npx, which can resolve this shim again and recurse indefinitely.
+set -euo pipefail
+
+runtime="${DSH_HOME:-$HOME/.dsh}/profiles/dscode/runtime/bin/dsh"
+if [[ ! -x "$runtime" ]]; then
+  echo "dsh: dscode runtime is missing; repair it with: npx @hqzhao95/dscode@beta" >&2
+  exit 1
+fi
+exec "$runtime" "$@"

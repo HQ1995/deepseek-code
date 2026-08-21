@@ -138,7 +138,7 @@ core-foundation = "0.10"
 crc32fast = "1.4"
 criterion = "0.6"
 crossbeam = "0.8"
-crossterm = "0.28"
+crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "45fecb9508105988f42fe6ff0441783ed3717f92" }
 cryptify = "3.2"
 ctor = "0.4"
 dashmap = "6"

@@ -2300,10 +2300,27 @@ checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
 dependencies = [
  "bitflags 2.13.0",
  "crossterm_winapi",
- "futures-core",
  "mio",
  "parking_lot",
  "rustix 0.38.44",
+ "signal-hook 0.3.18",
+ "signal-hook-mio",
+ "winapi",
+]
+
+[[package]]
+name = "crossterm"
+version = "0.29.0"
+source = "git+https://github.com/openai-oss-forks/crossterm?rev=45fecb9508105988f42fe6ff0441783ed3717f92#45fecb9508105988f42fe6ff0441783ed3717f92"
+dependencies = [
+ "bitflags 2.13.0",
+ "crossterm_winapi",
+ "derive_more 2.1.1",
+ "document-features",
+ "futures-core",
+ "mio",
+ "parking_lot",
+ "rustix 1.1.4",
  "signal-hook 0.3.18",
  "signal-hook-mio",
  "winapi",
@@ -8436,7 +8453,7 @@ dependencies = [
  "bitflags 2.13.0",
  "cassowary",
  "compact_str 0.8.1",
- "crossterm",
+ "crossterm 0.28.1",
  "indoc",
  "instability",
  "itertools 0.13.0",
@@ -13594,7 +13611,7 @@ dependencies = [
  "anstyle-lossy",
  "anstyle-syntect",
  "criterion",
- "crossterm",
+ "crossterm 0.29.0",
  "html-escape",
  "linkify",
  "pretty_assertions",
@@ -13732,7 +13749,7 @@ dependencies = [
  "clap_complete",
  "core-foundation",
  "criterion",
- "crossterm",
+ "crossterm 0.29.0",
  "derive_more 2.1.1",
  "dirs 5.0.1",
  "dunce",
@@ -13863,7 +13880,7 @@ name = "xai-grok-pager-minimal"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "crossterm",
+ "crossterm 0.29.0",
  "ratatui",
  "similar",
  "tracing",
@@ -13909,7 +13926,7 @@ dependencies = [
  "anstyle",
  "anyhow",
  "base64",
- "crossterm",
+ "crossterm 0.29.0",
  "dark-light",
  "dirs 5.0.1",
  "documented",
@@ -14791,7 +14808,7 @@ dependencies = [
  "anyhow",
  "colored_json",
  "criterion",
- "crossterm",
+ "crossterm 0.29.0",
  "lipsum",
  "ratatui",
  "serde_json",
@@ -14805,7 +14822,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "chrono",
- "crossterm",
+ "crossterm 0.29.0",
  "fuzzy-matcher",
  "ignore",
  "itertools 0.14.0",

@@ -1754,7 +1754,86 @@ fn herdr_over_ssh_pane_does_not_skip_kitty_keyboard() {
     assert_eq!(ctx.env_brand, TerminalName::Unknown);
     assert_eq!(ctx.multiplexer, MultiplexerKind::Herdr);
     assert_eq!(ctx.kitty_skip_reason(), None);
+    assert_eq!(
+        ctx.kitty_keyboard_support(),
+        KittyKeyboardSupport::Supported
+    );
     assert!(!ctx.shift_enter_unavailable());
+}
+
+#[test]
+fn kitty_capability_matrix_covers_common_terminals_and_multiplexers() {
+    for brand in [
+        TerminalName::Kitty,
+        TerminalName::Ghostty,
+        TerminalName::WezTerm,
+    ] {
+        let ctx = TerminalContext {
+            brand,
+            env_brand: brand,
+            ..Default::default()
+        };
+        assert_eq!(
+            ctx.kitty_keyboard_support(),
+            KittyKeyboardSupport::Probe,
+            "{brand:?} should use the bounded live probe"
+        );
+    }
+
+    for (brand, reason) in [
+        (TerminalName::AppleTerminal, "apple_terminal"),
+        (TerminalName::VsCode, "vscode"),
+        (TerminalName::Vte, "vte"),
+        (TerminalName::WindowsTerminal, "windows_terminal"),
+        (TerminalName::JetBrains, "jetbrains"),
+    ] {
+        let ctx = TerminalContext {
+            brand,
+            env_brand: brand,
+            ..Default::default()
+        };
+        assert_eq!(
+            ctx.kitty_keyboard_support(),
+            KittyKeyboardSupport::Unsupported(reason)
+        );
+    }
+
+    let modern_tmux = TerminalContext {
+        multiplexer: MultiplexerKind::Tmux,
+        tmux_version: Some("tmux 3.4".to_owned()),
+        ..Default::default()
+    };
+    assert_eq!(
+        modern_tmux.kitty_keyboard_support(),
+        KittyKeyboardSupport::Probe
+    );
+
+    let old_tmux = TerminalContext {
+        multiplexer: MultiplexerKind::Tmux,
+        tmux_version: Some("tmux 3.2".to_owned()),
+        ..Default::default()
+    };
+    assert_eq!(
+        old_tmux.kitty_keyboard_support(),
+        KittyKeyboardSupport::Unsupported("tmux_old")
+    );
+
+    let zellij = TerminalContext {
+        multiplexer: MultiplexerKind::Zellij,
+        ..Default::default()
+    };
+    assert_eq!(zellij.kitty_keyboard_support(), KittyKeyboardSupport::Probe);
+
+    let herdr_with_vte_host = TerminalContext {
+        brand: TerminalName::Vte,
+        multiplexer: MultiplexerKind::Herdr,
+        ..Default::default()
+    };
+    assert_eq!(
+        herdr_with_vte_host.kitty_keyboard_support(),
+        KittyKeyboardSupport::Unsupported("vte"),
+        "known host incompatibility must beat multiplexer support"
+    );
 }
 
 #[test]

@@ -111,6 +111,7 @@ mod links {
         /// Total lines passed to `append_lines` (used by the
         /// `set_viewport_height` grow-path test).
         appended_lines: u16,
+        cursor_queries: usize,
     }
 
     impl Write for RecordingBackend {
@@ -140,6 +141,7 @@ mod links {
             Ok(())
         }
         fn get_cursor_position(&mut self) -> io::Result<Position> {
+            self.cursor_queries += 1;
             Ok(Position::ORIGIN)
         }
         fn set_cursor_position<P: Into<Position>>(&mut self, _position: P) -> io::Result<()> {
@@ -226,6 +228,19 @@ mod links {
         assert!(!out.contains("\x1b]8;"), "unexpected OSC8: {out:?}");
     }
 
+    #[test]
+    fn supplied_startup_cursor_skips_backend_query() {
+        let terminal = Terminal::with_options_and_cursor_position(
+            RecordingBackend::default(),
+            TerminalOptions {
+                viewport: Viewport::Inline(3),
+            },
+            Position::new(4, 7),
+        )
+        .unwrap();
+
+        assert_eq!(terminal.backend().cursor_queries, 0);
+    }
     #[test]
     fn grow_viewport_scrolls_committed_lines_into_history() {
         // A small inline viewport near the bottom of the screen, grown to full

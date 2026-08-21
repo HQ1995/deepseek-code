@@ -61,10 +61,15 @@ fi
 export PATH="$SCRATCH/e2e-bin:$PATH"
 if [[ -n "${DSCODE_E2E_DSH_BIN:-}" ]]; then
   DSH_BIN="$DSCODE_E2E_DSH_BIN"
-elif command -v dsh >/dev/null 2>&1; then
+elif command -v dsh >/dev/null 2>&1 \
+  && [[ "$(dsh --version 2>/dev/null | head -1 || true)" == "0.1.0-rc.8" ]]; then
   DSH_BIN="$(command -v dsh)"
 else
-  DSH_BIN="$ROOT/bin/dsh"
+  DSH_PREFIX="$SCRATCH/dsh-cli"
+  npm install --prefix "$DSH_PREFIX" --ignore-scripts --no-audit --no-fund \
+    @deepseek-ai/dsh@0.1.0-rc.8 >"$OUT/dsh-install-$RUN_ID.log" 2>&1 \
+    || fail "could not install the pinned dsh CLI"
+  DSH_BIN="$DSH_PREFIX/node_modules/.bin/dsh"
 fi
 cat >"$SCRATCH/settings.yaml" <<EOF
 llm-pi-ai:

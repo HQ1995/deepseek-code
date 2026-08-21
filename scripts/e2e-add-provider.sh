@@ -38,10 +38,24 @@ grep -q 'mock ready' "$OUT/mock-$RUN_ID.log" || fail "mock gateway did not start
 # 2. Isolated DSH_HOME seeded with the real settings, bridge installed.
 mkdir -p "$SCRATCH"
 cp "$HOME/.dsh/settings.yaml" "$SCRATCH/settings.yaml"
-DSH_HOME="$SCRATCH" "$ROOT/bin/dsh" plugin --profile dscode add "file:$ROOT/bridge/grok-leader" >"$OUT/plugin-$RUN_ID.log" 2>&1   || fail "dsh plugin add failed"
+if [[ -n "${DSCODE_E2E_DSH_BIN:-}" ]]; then
+  DSH_BIN="$DSCODE_E2E_DSH_BIN"
+elif command -v dsh >/dev/null 2>&1 \
+  && [[ "$(dsh --version 2>/dev/null | head -1 || true)" == "0.1.0-rc.8" ]]; then
+  DSH_BIN="$(command -v dsh)"
+else
+  DSH_PREFIX="$SCRATCH/dsh-cli"
+  npm install --prefix "$DSH_PREFIX" --ignore-scripts --no-audit --no-fund \
+    @deepseek-ai/dsh@0.1.0-rc.8 >"$OUT/dsh-install-$RUN_ID.log" 2>&1 \
+    || fail "could not install the pinned dsh CLI"
+  DSH_BIN="$DSH_PREFIX/node_modules/.bin/dsh"
+fi
+DSH_HOME="$SCRATCH" "$DSH_BIN" plugin --profile dscode add "file:$ROOT/bridge/grok-leader" >"$OUT/plugin-$RUN_ID.log" 2>&1 \
+  || fail "dsh plugin add failed"
 
 export TERM=xterm-256color
 export DSH_HOME="$SCRATCH"
+export DSH_BIN
 export DSCODE_SOCKET="$SOCK"
 export DSH_TELEMETRY_DISABLED=1
 export FAKE_KEY=e2e-fake-key

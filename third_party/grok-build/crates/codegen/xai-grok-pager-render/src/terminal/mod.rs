@@ -16,6 +16,7 @@ pub mod keyboard;
 pub mod kitty_keyboard;
 pub mod overlay;
 pub(crate) mod probe;
+pub mod startup_probe;
 pub mod term_version;
 pub mod tmux;
 pub mod tmux_probe;
@@ -213,6 +214,15 @@ impl MultiplexerKind {
     }
 }
 
+/// Whether Kitty keyboard support is known from terminal metadata or still
+/// requires a live query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KittyKeyboardSupport {
+    Supported,
+    Unsupported(&'static str),
+    Probe,
+}
+
 /// The Byobu backend, when Byobu markers are present.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, strum::Display)]
 pub enum ByobuBackend {
@@ -396,6 +406,18 @@ impl TerminalContext {
             return Some("unknown_no_multiplexer");
         }
         None
+    }
+
+    /// Resolve Kitty keyboard support from the centralized terminal capability
+    /// matrix. Known support and known incompatibility never need a live query.
+    pub fn kitty_keyboard_support(&self) -> KittyKeyboardSupport {
+        if let Some(reason) = self.kitty_skip_reason() {
+            KittyKeyboardSupport::Unsupported(reason)
+        } else if self.multiplexer == MultiplexerKind::Herdr {
+            KittyKeyboardSupport::Supported
+        } else {
+            KittyKeyboardSupport::Probe
+        }
     }
 
     /// Returns the reason inline images / terminal graphics protocols are

@@ -3,11 +3,11 @@
 //! scripts/dscode.sh glue - the TUI binary itself resolves dsh, waits for its
 //! socket, and hands off to the normal --leader startup path.
 //!
-//! Resolution order (mirrors the old shell):
-//!   DSH_BIN env -> "dsh" on PATH -> npx on demand.
-//! The spawned leader logs to /tmp/dscode.log (DSCODE_LOG
-//! overrides); on this host it is wrapped in numactl node-1 pinning when
-//! numactl is on PATH (conditional, host policy).
+//! Resolution order: DSH_BIN env, then "dsh" on PATH. Release installs always
+//! provide DSH_BIN from the managed launcher; the PATH fallback is for
+//! developer setups with an already-installed compatible CLI. Starting dsh
+//! through npx here is unsafe: the TUI has already entered its alternate
+//! screen, and a PATH shim named dsh can recursively invoke itself.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -49,12 +49,8 @@ fn uid() -> u32 {
     0
 }
 
-/// The exact dsh npm version this release is tested against.
-pub const DSH_NPM_SPEC: &str = "@deepseek-ai/dsh@0.1.0-rc.8";
-
-/// Resolve the dsh argv prefix: DSH_BIN env, "dsh" on PATH, then
-/// ["npx", "--yes", DSH_NPM_SPEC]. The env override is authoritative
-/// (taken verbatim); spawn failures point at the leader log.
+/// Resolve the dsh command: DSH_BIN env, then "dsh" on PATH. The env override
+/// is authoritative (taken verbatim); spawn failures point at the leader log.
 pub fn resolve_dsh_command() -> Result<Vec<OsString>, ConnectionError> {
     if let Some(bin) = std::env::var_os(DSH_BIN_ENV).filter(|v| !v.is_empty()) {
         return Ok(vec![bin]);
@@ -62,11 +58,8 @@ pub fn resolve_dsh_command() -> Result<Vec<OsString>, ConnectionError> {
     if let Some(dsh) = find_in_path("dsh") {
         return Ok(vec![dsh.into_os_string()]);
     }
-    if find_in_path("npx").is_some() {
-        return Ok(vec!["npx".into(), "--yes".into(), DSH_NPM_SPEC.into()]);
-    }
     Err(ConnectionError::SpawnFailed(
-        "no dsh CLI found: set DSH_BIN, put dsh on PATH, or install npm/npx".into(),
+        "no dsh CLI found; run dscode through its managed launcher or set DSH_BIN".into(),
     ))
 }
 
@@ -95,16 +88,7 @@ pub fn spawn_dsh_leader(sock_path: &Path) -> Result<u32, ConnectionError> {
                 log_path.display()
             ))
         })?;
-    let mut cmd = match find_in_path("numactl") {
-        // Host policy (see /home/hanqing/.herdr AGENTS note): keep non-SORT
-        // work on NUMA node 1; conditional so other machines drop it cleanly.
-        Some(numactl) => {
-            let mut c = Command::new(numactl);
-            c.arg("--cpunodebind=1").arg("--membind=1").arg(&argv[0]);
-            c
-        }
-        None => Command::new(&argv[0]),
-    };
+    let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..])
         .arg("--profile")
         .arg("dscode")
@@ -193,6 +177,25 @@ mod tests {
             vec![fake.into_os_string()],
             "PATH dsh wins when no env override is set"
         );
+    }
+
+    #[serial_test::serial(dsh_leader_env)]
+    #[test]
+    fn resolve_does_not_start_dsh_through_npx() {
+        let dir = std::env::temp_dir().join(format!("dsh-npx-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let npx = dir.join("npx");
+        std::fs::write(&npx, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _path = crate::test_util::EnvVarGuard::set("PATH", dir.to_str().unwrap());
+        let _env = crate::test_util::EnvVarGuard::set(DSH_BIN_ENV, "");
+
+        let error = resolve_dsh_command().unwrap_err();
+        assert!(
+            error.to_string().contains("managed launcher"),
+            "missing dsh must fail before the TUI delegates to npx"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Spawn smoke test: a fake DSH_BIN child starts, its stderr lands in the

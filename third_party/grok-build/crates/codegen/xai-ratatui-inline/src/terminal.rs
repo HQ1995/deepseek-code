@@ -273,7 +273,25 @@ where
     /// let terminal = Terminal::with_options(backend, TerminalOptions { viewport })?;
     /// # std::io::Result::Ok(())
     /// ```
-    pub fn with_options(mut backend: B, options: TerminalOptions) -> io::Result<Self> {
+    pub fn with_options(backend: B, options: TerminalOptions) -> io::Result<Self> {
+        Self::with_options_inner(backend, options, None)
+    }
+
+    /// Creates a terminal without querying a cursor position already obtained
+    /// by the caller's bounded startup probe.
+    pub fn with_options_and_cursor_position(
+        backend: B,
+        options: TerminalOptions,
+        cursor_position: Position,
+    ) -> io::Result<Self> {
+        Self::with_options_inner(backend, options, Some(cursor_position))
+    }
+
+    fn with_options_inner(
+        mut backend: B,
+        options: TerminalOptions,
+        cursor_position: Option<Position>,
+    ) -> io::Result<Self> {
         let area = match options.viewport {
             Viewport::Fullscreen | Viewport::Inline(_) => {
                 Rect::from((Position::ORIGIN, backend.size()?))
@@ -283,7 +301,7 @@ where
         let (viewport_area, cursor_pos) = match options.viewport {
             Viewport::Fullscreen => (area, Position::ORIGIN),
             Viewport::Inline(height) => {
-                compute_inline_size(&mut backend, height, area.as_size(), 0)?
+                compute_inline_size(&mut backend, height, area.as_size(), 0, cursor_position)?
             }
             Viewport::Fixed(area) => (area, area.as_position()),
         };
@@ -483,6 +501,7 @@ where
                     height,
                     area.as_size(),
                     offset_in_previous_viewport,
+                    None,
                 )?
                 .0
             }
@@ -1311,8 +1330,12 @@ fn compute_inline_size<B: Backend>(
     height: u16,
     size: Size,
     offset_in_previous_viewport: u16,
+    cursor_position: Option<Position>,
 ) -> io::Result<(Rect, Position)> {
-    let pos = backend.get_cursor_position()?;
+    let pos = match cursor_position {
+        Some(position) => position,
+        None => backend.get_cursor_position()?,
+    };
     let mut row = pos.y;
 
     let max_height = size.height.min(height);
