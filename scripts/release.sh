@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Cut a deepseek-code release from the repo VERSION file (the single version
-# source): build the TUI with the exact tag version compiled in, checksum it,
-# tag, and publish to GitHub Releases.
+# source): verify the host TUI, tag, create the GitHub release, and publish npm.
 #
 # Channels are encoded in the version itself:
 #   0.0.5         -> stable release (marked latest; /releases/latest serves it)
@@ -15,11 +14,11 @@
 #   - scripts/install.sh / npx launcher (dscode-linux-x86_64 + dscode-macos-aarch64)
 #   - dscode update (xai-grok-update install_dscode_release)
 #
-# This script can run on Linux or macOS. It attaches the *native* TUI
-# binary when cargo is available, creates the GitHub release, and waits for
-# CI (.github/workflows/release.yml) to upload the other platform before
-# publishing npm. Do not hardcode one OS as the asset name: a Darwin binary
-# shipped as dscode-linux-x86_64 would break Linux installs.
+# This script can run on Linux or macOS. It builds the native TUI as a local
+# preflight, creates the draft release with metadata assets, and waits for CI
+# (.github/workflows/release.yml) to upload both platform binaries before
+# publishing npm. CI is the sole platform-asset uploader so users never see
+# mixed files while duplicate uploads are being clobbered.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -66,7 +65,6 @@ fi
 echo "releasing deepseek-code $TAG"
 DIST="$ROOT/dist"
 mkdir -p "$DIST"
-HOST_FILES=()
 
 if [[ -n "$HOST_ASSET" ]] && command -v cargo >/dev/null 2>&1; then
   echo "  building native TUI ($HOST_ASSET) with GROK_VERSION=$VERSION..."
@@ -83,7 +81,6 @@ if [[ -n "$HOST_ASSET" ]] && command -v cargo >/dev/null 2>&1; then
   gzip -9 -c "$DIST/$HOST_ASSET" > "$DIST/$HOST_ASSET.gz"
   echo "  $(cat "$DIST/$HOST_ASSET.sha256")"
   echo "  compressed: $(du -h "$DIST/$HOST_ASSET.gz" | awk '{print $1}')"
-  HOST_FILES=("$DIST/$HOST_ASSET" "$DIST/$HOST_ASSET.sha256" "$DIST/$HOST_ASSET.gz")
 elif [[ -n "$HOST_ASSET" ]]; then
   echo "  no cargo on PATH; CI will publish $HOST_ASSET"
 else
@@ -134,11 +131,9 @@ fi
 
 git -C "$ROOT" tag -a "$TAG" -m "deepseek-code $TAG"
 git -C "$ROOT" push origin "$TAG"
-# Bash 3.2 (macOS /bin/bash) treats "${empty[@]}" as unbound under set -u.
+# CI is the sole owner of platform assets. Concurrent host + CI uploads replace
+# the raw, checksum, and gzip files separately and can expose a mixed asset set.
 gh_files=("$LICENSES" "$DIST/dscode-plugin.tgz")
-if [[ ${#HOST_FILES[@]} -gt 0 ]]; then
-  gh_files=("${HOST_FILES[@]}" "${gh_files[@]}")
-fi
 release_args=(
   --repo "$RELEASE_REPO"
   --title "deepseek-code $TAG"

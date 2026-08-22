@@ -1,7 +1,6 @@
-# Native TUI binaries for every supported OS. scripts/release.sh (Linux or
-# macOS) creates the GitHub release (plugin tarball + licenses, plus the
-# host binary when cargo is available); pushing the tag triggers this
-# workflow, which builds and uploads the remaining platforms.
+# Native TUI binaries for every supported OS. scripts/release.sh creates the
+# draft GitHub release with plugin and license assets; this workflow is the
+# sole uploader for platform binaries and checksums, avoiding clobber races.
 # workflow_dispatch backfills an existing release (e.g. tag: v0.0.10).
 # Asset names follow xai-grok-update detect_platform: dscode-{os}-{arch}.
 name: release

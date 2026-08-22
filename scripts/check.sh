@@ -48,13 +48,4 @@ uid="$(dscode_file_uid "$tmp")"
 rm -f "$tmp" "$tmp.sha256"
 echo "  sha256/uid helpers ok"
 
-# Bash 3.2 (macOS /bin/bash) + set -u: never expand an empty array with [@].
-HOST_FILES=()
-gh_files=(licenses plugin.tgz)
-if [[ ${#HOST_FILES[@]} -gt 0 ]]; then
-  gh_files=("${HOST_FILES[@]}" "${gh_files[@]}")
-fi
-[[ ${#gh_files[@]} -eq 2 ]] || fail "empty HOST_FILES concat broke on this bash"
-echo "  bash array concat ok"
-
 echo "PASS scripts/check.sh"
