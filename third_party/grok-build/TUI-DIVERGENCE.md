@@ -85,35 +85,41 @@ branding (our identity). Keep this list current on every sync.
   without cancelling it, matching the composer's Alt+Enter steer. Local rows
   dispatch `Action::Interject`; server rows use the bridge's new `x.ai/queue/steer`.
 - Add-provider flow: the /provider dropdown's final row "+ Add provider…"
-  accepts as /provider --add, which opens a new add-provider modal
+  accepts as /provider --add, which opens a two-step add-provider modal
   (crates/codegen/xai-grok-pager/src/views/add_provider_modal.rs, wired through
   ActiveModal::AddProvider, Action::OpenAddProvider/AddProvider and
-  Effect::AddProvider). A fresh profile is provider-neutral and the modal opens
-  on Custom; DeepSeek, OpenCodex (`ocx`), OpenAI, Anthropic, and OpenRouter are
-  optional templates, not preinstalled routes. The form covers
-  id/displayName/apiKeyEnv/api/baseURL/apiKey. A
-  pasted apiKey renders masked and is stored by the bridge in the dsh
-  credentials service ($DSH_HOME/.credentials.yaml via
-  dsh-credentials-local) under the apiKeyEnv reference (derived
-  <ID>_API_KEY when blank) — llm-pi-ai resolves credentials-first with env
-  fallback, so exported env vars keep working. Submit sends
-  x.ai/providers/add to the bridge,
-  which writes the provider into the dsh settings document through the official
-  settings seam (ctx.settings.mutate on the llm-pi-ai namespace); the bridge
-  broadcasts the refreshed provider roster and model catalog so /provider and
-  /model update without a reload.
+  Effect::AddProvider). Step one is a bounded vertical template picker:
+  DeepSeek, OpenCodex (`ocx`), OpenAI, Anthropic, OpenRouter, and Custom;
+  templates whose route id already exists are omitted. It shows each catalog
+  endpoint as a display-only default, so leaving baseURL empty keeps following
+  catalog updates instead of persisting today's URL. Step two is a focused
+  seven-field window (current field plus bounded neighbors) over
+  id/displayName/api/baseURL/credentialSource/apiKeyEnv/apiKey.
+  credentialSource explicitly selects Saved key or Environment. A pasted
+  apiKey renders masked and is stored by the bridge in the dsh credentials
+  service ($DSH_HOME/.credentials.yaml via dsh-credentials-local) under the
+  apiKeyEnv reference (derived <ID>_API_KEY when blank). The inherited launch
+  environment has highest precedence, then the managed credential file, then
+  project/user .env layers; the form shows the non-secret configured/source/
+  writable status returned by credentials.describe. Submit sends
+  x.ai/providers/add to the bridge, which writes the provider into the dsh
+  settings document through the official settings seam (ctx.settings.mutate
+  on the llm-pi-ai namespace); the bridge broadcasts the refreshed provider
+  roster and model catalog so /provider and /model update without a reload.
   ponytail: no models field in v1 - custom routes get their models from
   bridge-side gateway discovery, catalog routes keep serving the installed
   catalog. Protocol ids are the official seam's: openai-completions /
   openai-responses / anthropic-messages.
-- Provider edit/delete: in the /provider dropdown, Ctrl+E opens the same
-  modal prefilled from the provider's settings profile (id locked, empty
-  fields mean unset) and submits x.ai/providers/update; Ctrl+D arms a
-  y/n delete confirm that submits x.ai/providers/remove. Both bridge methods
-  reuse the official settings seam (ctx.settings.mutate on llm-pi-ai), never
-  write settings.yaml directly, and return the refreshed roster. Deleting the
-  provider that owns the current model is blocked (switch provider first),
-  both in the dropdown footer and by the bridge.
+- Provider edit/delete: in the /provider dropdown, Ctrl+E opens the same field
+  window prefilled from the provider's settings and credential status (id
+  locked, empty fields mean unset) and submits x.ai/providers/update; changing
+  a credential ref cleans its old unshared file-backed key. Ctrl+D arms a y/n
+  delete confirm that submits x.ai/providers/remove; successful removal also
+  clears an unshared file-backed credential. Shared refs and read-only launch
+  environment credentials are retained. Both bridge methods reuse the official
+  settings seam, never write settings.yaml directly, and return the refreshed
+  roster. Deleting the provider that owns the current model is blocked (switch
+  provider first), both in the dropdown footer and by the bridge.
 - /usage shows real per-session stats instead of grok.com billing. It opens the
   existing usage modal on the "Context usage" tab (session/info context
   breakdown: used/total/pct, turns, tool calls, messages, compactions) and

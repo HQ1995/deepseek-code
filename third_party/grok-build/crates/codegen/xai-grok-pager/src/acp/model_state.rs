@@ -64,6 +64,14 @@ pub struct ModelState {
     context_window_override: Option<u64>,
 }
 
+/// Non-secret credential status supplied by the dsh credential service.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProviderCredentialInfo {
+    pub configured: bool,
+    pub source: Option<String>,
+    pub writable: bool,
+}
+
 /// One provider row from _meta.modelState.providers.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProviderInfo {
@@ -75,10 +83,49 @@ pub struct ProviderInfo {
     pub api_key_env: Option<String>,
     pub api: Option<String>,
     pub base_url: Option<String>,
+    pub credential: Option<ProviderCredentialInfo>,
     /// Free-text status supplied by the agent (e.g. why a provider has no
     /// models and what unlocks it). Display-only: the TUI renders it verbatim
     /// and attaches no semantics, so plugins can shape it without TUI changes.
     pub note: Option<String>,
+}
+
+impl ProviderInfo {
+    pub(crate) fn from_json(row: &serde_json::Value) -> Option<Self> {
+        let credential = row.get("credential").and_then(|value| {
+            Some(ProviderCredentialInfo {
+                configured: value.get("configured")?.as_bool()?,
+                source: value
+                    .get("source")
+                    .and_then(|source| source.as_str())
+                    .map(str::to_string),
+                writable: value.get("writable")?.as_bool()?,
+            })
+        });
+        Some(Self {
+            id: row.get("id")?.as_str()?.to_string(),
+            name: row.get("name").and_then(|v| v.as_str()).map(str::to_string),
+            display_name: row
+                .get("displayName")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            api_key_env: row
+                .get("apiKeyEnv")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            api: row.get("api").and_then(|v| v.as_str()).map(str::to_string),
+            base_url: row
+                .get("baseURL")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            credential,
+            note: row
+                .get("note")
+                .and_then(|v| v.as_str())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        })
+    }
 }
 
 impl ModelState {
@@ -372,45 +419,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                         .as_ref()
                         .and_then(|m| m.get("providers"))
                         .and_then(|v| v.as_array())
-                        .map(|rows| {
-                            rows.iter()
-                                .filter_map(|row| {
-                                    let id = row.get("id")?.as_str()?.to_string();
-                                    let name = row
-                                        .get("name")
-                                        .and_then(|v| v.as_str())
-                                        .map(str::to_string);
-                                    let display_name = row
-                                        .get("displayName")
-                                        .and_then(|v| v.as_str())
-                                        .map(str::to_string);
-                                    let api_key_env = row
-                                        .get("apiKeyEnv")
-                                        .and_then(|v| v.as_str())
-                                        .map(str::to_string);
-                                    let api =
-                                        row.get("api").and_then(|v| v.as_str()).map(str::to_string);
-                                    let base_url = row
-                                        .get("baseURL")
-                                        .and_then(|v| v.as_str())
-                                        .map(str::to_string);
-                                    let note = row
-                                        .get("note")
-                                        .and_then(|v| v.as_str())
-                                        .filter(|s| !s.is_empty())
-                                        .map(str::to_string);
-                                    Some(ProviderInfo {
-                                        id,
-                                        name,
-                                        display_name,
-                                        api_key_env,
-                                        api,
-                                        base_url,
-                                        note,
-                                    })
-                                })
-                                .collect()
-                        })
+                        .map(|rows| rows.iter().filter_map(ProviderInfo::from_json).collect())
                         .unwrap_or_default(),
                     current_provider: state
                         .meta
@@ -474,6 +483,29 @@ mod tests {
         assert!(state.is_empty());
         assert!(state.current_model_name().is_none());
         assert!(state.next_model().is_none());
+    }
+
+    #[test]
+    fn provider_json_keeps_non_secret_credential_status() {
+        let provider = ProviderInfo::from_json(&serde_json::json!({
+            "id": "openai",
+            "apiKeyEnv": "OPENAI_API_KEY",
+            "credential": {
+                "configured": true,
+                "source": "env",
+                "writable": false
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            provider.credential,
+            Some(ProviderCredentialInfo {
+                configured: true,
+                source: Some("env".to_string()),
+                writable: false,
+            })
+        );
     }
 
     fn state_with_meta(meta: Option<serde_json::Value>) -> ModelState {

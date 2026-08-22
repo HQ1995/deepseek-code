@@ -123,6 +123,17 @@ fn open_provider_modal(app: &mut AppView, prefill: Option<&ProviderInfo>) -> Vec
             }
         }
     };
+    let existing_provider_ids: Vec<String> = app
+        .models
+        .providers
+        .iter()
+        .chain(
+            app.agents
+                .values()
+                .flat_map(|agent| agent.session.models.providers.iter()),
+        )
+        .map(|provider| provider.id.clone())
+        .collect();
     let Some(agent) = app.agents.get_mut(&id) else {
         return effects;
     };
@@ -136,8 +147,9 @@ fn open_provider_modal(app: &mut AppView, prefill: Option<&ProviderInfo>) -> Vec
             profile.api_key_env.as_deref().unwrap_or(""),
             profile.api.as_deref(),
             profile.base_url.as_deref().unwrap_or(""),
+            profile.credential.clone(),
         ),
-        None => AddProviderModalState::new(),
+        None => AddProviderModalState::new_for_existing(&existing_provider_ids),
     };
     agent.active_modal = Some(ActiveModal::AddProvider {
         state: Box::new(state),

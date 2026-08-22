@@ -375,7 +375,7 @@ interface ModelCatalog {
    * the raw user-section profile fields the edit form prefills. `note` is a
    * display-only status the TUI relays verbatim (e.g. empty subscription
    * provider → its /dsh login pointer). */
-  providers: Array<{ id: string; name?: string; displayName?: string; apiKeyEnv?: string; api?: string; baseURL?: string; note?: string }>
+  providers: Array<{ id: string; name?: string; displayName?: string; apiKeyEnv?: string; api?: string; baseURL?: string; credential?: CredentialInfo; note?: string }>
   /** Provider that owns currentModelId ('' when no current model). */
   currentProviderId: string
   availableModels: Array<{ modelId: string; name: string; description?: string; _meta?: { provider: string; supportsReasoningEffort?: boolean; reasoningEfforts?: string[]; reasoningEffort?: string } }>
@@ -520,11 +520,20 @@ interface LlmLike {
   ): Promise<Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>>
 }
 
+/** Non-secret credential facts safe to expose to configuration UIs. */
+interface CredentialInfo {
+  configured: boolean
+  source?: string
+  writable: boolean
+}
+
 /** Structural credential seam; references are resolved only for already
  * persisted endpoints, never for a brand-new caller-supplied URL. */
 interface CredentialsLike {
-  resolve?(ref: string): Promise<{ value: string } | undefined>
+  resolve?(ref: string): Promise<{ value: string; source?: string } | undefined>
+  describe?(ref: string): Promise<CredentialInfo>
   set(ref: string, value: string): Promise<void>
+  unset?(ref: string): Promise<void>
 }
 
 /** Structural write path of the official settings seam (ctx.settings.mutate). */
@@ -981,6 +990,18 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return typeof value === 'string' && value.length > 0 ? value : undefined
   }
 
+  /** Describe one credential reference without exposing its value. */
+  const describeCredential = async (ref: string | undefined): Promise<CredentialInfo | undefined> => {
+    if (ref === undefined) return undefined
+    const credentials = ctx.get('credentials') as CredentialsLike | undefined
+    try {
+      return await credentials?.describe?.(ref)
+    } catch (error) {
+      logger.warn('grok-leader: could not describe credential reference ' + ref + ': ' + (error instanceof Error ? error.message : String(error)))
+      return undefined
+    }
+  }
+
   // The one-time COMPAT SHIM (/dsh login + /dsh code for the pre-registry
   // subscriptions plugin) is RETIRED: @hqzhao95/dsh-subscriptions-commands
   // registers /login, /logout, /code, /subscriptions-status through the dsh
@@ -1016,8 +1037,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return { provider: provider.id, models }
       }))
     const modelCount = new Map(rows.map(row => [row.provider, row.models.length]))
-    const providers = llmService === undefined ? [] : llmService.listProviders().map(p => {
+    const providers = llmService === undefined ? [] : await Promise.all(llmService.listProviders().map(async p => {
       const profile = providerUserProfile(userSection, p.id)
+      const apiKeyEnv = typeof profile.apiKeyEnv === 'string' ? profile.apiKeyEnv : undefined
+      const credential = await describeCredential(apiKeyEnv)
       // Display-only status for an empty provider; generic on purpose (the
       // TUI relays notes verbatim, and the bridge carries no plugin-specific
       // knowledge of WHICH login or key a given provider wants).
@@ -1027,12 +1050,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         id: p.id,
         ...p.name === undefined ? {} : { name: p.name },
         ...typeof profile.displayName === 'string' ? { displayName: profile.displayName } : {},
-        ...typeof profile.apiKeyEnv === 'string' ? { apiKeyEnv: profile.apiKeyEnv } : {},
+        ...apiKeyEnv === undefined ? {} : { apiKeyEnv },
         ...typeof profile.api === 'string' ? { api: profile.api } : {},
         ...typeof profile.baseURL === 'string' ? { baseURL: profile.baseURL } : {},
+        ...credential === undefined ? {} : { credential },
         ...note === undefined ? {} : { note },
       }
-    })
+    }))
     const providerByModel = new Map<string, string>()
     const providerModelToWireId = new Map<string, string>()
     const rawModelOwners = new Map<string, string>()
@@ -3148,19 +3172,28 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
     // Paste-a-key path: a literal apiKey lands in the credentials service
     // ($DSH_HOME/.credentials.yaml via dsh-credentials-local), NEVER in the
-    // settings document. The route still references it by name (apiKeyEnv,
-    // derived from the id when the form left it blank) — the same reference
-    // llm-pi-ai resolves credentials-first with env fallback, so an
-    // exported env var keeps working exactly as before.
+    // settings document. The route references it by name (apiKeyEnv, derived
+    // from the id when blank). The credentials service preserves its own
+    // documented precedence: inherited launch env first, managed file next,
+    // then project/user .env layers.
     const pastedKey = p.apiKey
+    if (p.credentialSource === 'environment'
+      && typeof pastedKey === 'string'
+      && pastedKey.length > 0) {
+      throw invalidParams('apiKey must be empty when credentialSource is environment')
+    }
     if (typeof pastedKey === 'string' && pastedKey.length > 0) {
-      const credentials = ctx.get('credentials') as { set(ref: string, value: string): Promise<void> } | undefined
+      const credentials = ctx.get('credentials') as CredentialsLike | undefined
       if (credentials === undefined) throw internalError('cannot store the API key: no credentials service is configured')
       const ref = nonEmpty(p.apiKeyEnv) ? p.apiKeyEnv as string : id.toUpperCase().replace(/[^A-Z0-9]+/g, '_') + '_API_KEY'
       await credentials.set(ref, pastedKey)
       p.apiKeyEnv = ref
     }
     await mutateProviderRoute(providerService, id, editableProfile(p), p, 'add')
+    if (p.credentialSource === 'environment') {
+      const ref = nonEmpty(p.apiKeyEnv) ? p.apiKeyEnv : undefined
+      await cleanupUnsharedCredential(providerService, ref, id)
+    }
     const current = await refreshCatalog()
     scheduleDynamicCatalogRefresh()
     broadcastModelsUpdate()
@@ -3174,6 +3207,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (value !== undefined && value !== null && typeof value !== 'string') {
         throw invalidParams(field + ' must be a string')
       }
+    }
+    const credentialSource = p.credentialSource
+    if (credentialSource !== undefined
+      && credentialSource !== 'saved'
+      && credentialSource !== 'environment') {
+      throw invalidParams('credentialSource must be saved or environment')
     }
     const api = p.api
     if (api !== undefined && api !== null && (typeof api !== 'string'
@@ -3216,6 +3255,34 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       else delete next[field] // an explicit empty field unsets
     }
     return next
+  }
+
+  /** Remove an unshared file-backed credential after its provider route has
+   * already changed. Cleanup is best-effort: a route mutation must never look
+   * failed because a read-only environment layer shadows the stored ref. */
+  const cleanupUnsharedCredential = async (
+    providerService: SettingsLike,
+    ref: string | undefined,
+    excludedProviderId: string,
+  ): Promise<void> => {
+    if (ref === undefined) return
+    const providers = providerUserSection(providerService)?.providers
+    if (providers !== null && typeof providers === 'object') {
+      const shared = Object.entries(providers as Record<string, unknown>).some(([id, profile]) =>
+        id !== excludedProviderId
+        && profile !== null
+        && typeof profile === 'object'
+        && (profile as Record<string, unknown>).apiKeyEnv === ref)
+      if (shared) return
+    }
+    const credentials = ctx.get('credentials') as CredentialsLike | undefined
+    if (credentials?.describe === undefined || credentials.unset === undefined) return
+    try {
+      const info = await credentials.describe(ref)
+      if (info.source === 'file' && info.writable) await credentials.unset(ref)
+    } catch (error) {
+      logger.warn('grok-leader: could not clean unused credential reference ' + ref + ': ' + (error instanceof Error ? error.message : String(error)))
+    }
   }
 
   /**
@@ -3269,18 +3336,31 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (!providerExists(providerService, providerId)) {
       throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + providerId + '" does not exist')
     }
+    const currentProfile = providerUserProfile(providerUserSection(providerService), providerId)
+    const previousCredentialRef = nonEmpty(currentProfile.apiKeyEnv) ? currentProfile.apiKeyEnv : undefined
     // Same paste-a-key path as add: key → credentials store, name → route.
     const pastedKey = p.apiKey
+    if (p.credentialSource === 'environment'
+      && typeof pastedKey === 'string'
+      && pastedKey.length > 0) {
+      throw invalidParams('apiKey must be empty when credentialSource is environment')
+    }
     if (typeof pastedKey === 'string' && pastedKey.length > 0) {
-      const credentials = ctx.get('credentials') as { set(ref: string, value: string): Promise<void> } | undefined
+      const credentials = ctx.get('credentials') as CredentialsLike | undefined
       if (credentials === undefined) throw internalError('cannot store the API key: no credentials service is configured')
       const ref = nonEmpty(p.apiKeyEnv) ? p.apiKeyEnv as string : providerId.toUpperCase().replace(/[^A-Z0-9]+/g, '_') + '_API_KEY'
       await credentials.set(ref, pastedKey)
       p.apiKeyEnv = ref
     }
-    const currentProfile = providerUserProfile(providerUserSection(providerService), providerId)
     const next = mergeEditable(currentProfile, p)
+    const nextCredentialRef = nonEmpty(next.apiKeyEnv) ? next.apiKeyEnv : undefined
     await mutateProviderRoute(providerService, providerId, next, p, 'update')
+    if (previousCredentialRef !== nextCredentialRef) {
+      await cleanupUnsharedCredential(providerService, previousCredentialRef, providerId)
+    }
+    if (p.credentialSource === 'environment') {
+      await cleanupUnsharedCredential(providerService, nextCredentialRef, providerId)
+    }
     discoveredModels.delete(providerId)
     discoveredRoutes.delete(providerId)
     const current = await refreshCatalog()
@@ -3306,6 +3386,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (!providerExists(providerService, id)) {
       throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" does not exist')
     }
+    const profile = providerUserProfile(providerUserSection(providerService), id)
+    const credentialRef = nonEmpty(profile.apiKeyEnv) ? profile.apiKeyEnv : undefined
     const current = await refreshCatalog()
     const liveUse = [...sessions.values()].find(record => record.selection.current?.provider === id)
     if (current.currentProviderId === id || liveUse !== undefined) {
@@ -3319,6 +3401,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     } catch (error: unknown) {
       throw internalError('failed to remove provider "' + id + '": ' + (error instanceof Error ? error.message : String(error)))
     }
+    await cleanupUnsharedCredential(providerService, credentialRef, id)
     discoveredModels.delete(id)
     discoveredRoutes.delete(id)
     const refreshed = await refreshCatalog()

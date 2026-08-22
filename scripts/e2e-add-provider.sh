@@ -88,13 +88,14 @@ for _ in $(seq 1 60); do
 done
 grep -q 'Add provider' "$OUT/frame-$RUN_ID-modal.txt" || fail "add-provider modal did not open"
 
-# Custom is the neutral default; Down moves from preset to id.
-tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Down
+# Pick Custom, enter the form, then configure an env-backed OpenAI-compatible route.
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" End Enter
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "fake-gw"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "Fake GW"
-tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "FAKE_KEY"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab Right
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "$GW_URL"
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab Right
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "FAKE_KEY"
 snap filled
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Enter
 for _ in $(seq 1 60); do
@@ -115,6 +116,7 @@ sleep 2
 snap provider-list
 grep -q 'Fake GW' "$OUT/frame-$RUN_ID-provider-list.txt" || fail "/provider does not list Fake GW"
 tmux -L "$SESSION" -f /dev/null kill-server 2>/dev/null || true
+sleep 1
 
 # 6. Subsequent boot with the same scratch home still works.
 export DSCODE_SOCKET="$SOCK2"

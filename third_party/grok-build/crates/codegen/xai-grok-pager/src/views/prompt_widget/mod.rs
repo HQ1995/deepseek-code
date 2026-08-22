@@ -1260,7 +1260,10 @@ impl PromptWidget {
                     armed.name
                 )
             } else {
-                format!("delete {}? y confirm · n cancel", armed.name)
+                format!(
+                    "delete {} + unused saved key? y confirm · n cancel",
+                    armed.name
+                )
             });
         }
         Some("↑/↓ navigate · enter switch · ^E edit · ^D delete · esc cancel".to_string())

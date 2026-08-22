@@ -3739,6 +3739,106 @@ describe('x.ai/providers/update', () => {
     expect(res.error).toMatchObject({ code: -32602 })
     expect(settings.calls).toHaveLength(0)
   })
+
+  it('returns non-secret credential status for the edit form', async () => {
+    const settings = makeManageSettings()
+    settings.providers['acme-gateway'] = { apiKeyEnv: 'ACME_KEY' }
+    const credentials = {
+      describe: async (ref: string) => ({
+        configured: ref === 'ACME_KEY',
+        source: ref === 'ACME_KEY' ? 'env' : undefined,
+        writable: ref !== 'ACME_KEY',
+      }),
+      set: async () => {},
+      unset: async () => {},
+    }
+    const { client } = await startManageHarness(settings, undefined, credentials)
+    const listed = await client.request(1, 'x.ai/models/list', {})
+    expect(listed.result).toMatchObject({
+      _meta: {
+        providers: [{
+          id: 'deepseek',
+        }, {
+          id: 'acme-gateway',
+          credential: { configured: true, source: 'env', writable: false },
+        }],
+      },
+    })
+  })
+
+  it('cleans an unshared saved key after changing its reference', async () => {
+    const settings = makeManageSettings()
+    settings.providers['acme-gateway'] = { apiKeyEnv: 'OLD_ACME_KEY' }
+    const unset = vi.fn(async () => {})
+    const credentials = {
+      describe: async () => ({ configured: true, source: 'file', writable: true }),
+      set: async () => {},
+      unset,
+    }
+    const { client } = await startManageHarness(settings, undefined, credentials)
+    const res = await client.request(1, 'x.ai/providers/update', {
+      providerId: 'acme-gateway',
+      apiKeyEnv: 'NEW_ACME_KEY',
+    })
+    expect(res.error).toBeUndefined()
+    expect(unset).toHaveBeenCalledWith('OLD_ACME_KEY')
+  })
+
+  it('keeps a saved key still referenced by another provider', async () => {
+    const settings = makeManageSettings()
+    settings.providers['acme-gateway'] = { apiKeyEnv: 'SHARED_KEY' }
+    settings.providers['acme-copy'] = { apiKeyEnv: 'SHARED_KEY' }
+    const unset = vi.fn(async () => {})
+    const credentials = {
+      describe: async () => ({ configured: true, source: 'file', writable: true }),
+      set: async () => {},
+      unset,
+    }
+    const { client } = await startManageHarness(settings, undefined, credentials)
+    const res = await client.request(1, 'x.ai/providers/update', {
+      providerId: 'acme-gateway',
+      apiKeyEnv: 'NEW_KEY',
+    })
+    expect(res.error).toBeUndefined()
+    expect(unset).not.toHaveBeenCalled()
+  })
+
+  it('replaces a saved key without putting it in provider settings', async () => {
+    const settings = makeManageSettings()
+    settings.providers['acme-gateway'] = { apiKeyEnv: 'ACME_KEY' }
+    const set = vi.fn(async () => {})
+    const credentials = { set }
+    const { client } = await startManageHarness(settings, undefined, credentials)
+    const res = await client.request(1, 'x.ai/providers/update', {
+      providerId: 'acme-gateway',
+      apiKeyEnv: 'ACME_KEY',
+      credentialSource: 'saved',
+      apiKey: 'replacement-secret',
+    })
+    expect(res.error).toBeUndefined()
+    expect(set).toHaveBeenCalledWith('ACME_KEY', 'replacement-secret')
+    expect(settings.providers['acme-gateway']).toEqual({ apiKeyEnv: 'ACME_KEY' })
+  })
+
+  it('environment mode removes an unshadowed saved key on the same ref', async () => {
+    const settings = makeManageSettings()
+    settings.providers['acme-gateway'] = { apiKeyEnv: 'ACME_KEY' }
+    const unset = vi.fn(async () => {})
+    const credentials = {
+      describe: async () => ({ configured: true, source: 'file', writable: true }),
+      set: async () => {},
+      unset,
+    }
+    const { client } = await startManageHarness(settings, undefined, credentials)
+    const res = await client.request(1, 'x.ai/providers/update', {
+      providerId: 'acme-gateway',
+      apiKeyEnv: 'ACME_KEY',
+      credentialSource: 'environment',
+      apiKey: '',
+    })
+    expect(res.error).toBeUndefined()
+    expect(unset).toHaveBeenCalledWith('ACME_KEY')
+  })
 })
 
 describe('x.ai/providers/remove', () => {
@@ -3784,6 +3884,24 @@ describe('x.ai/providers/remove', () => {
     const res = await client.request(1, 'x.ai/providers/remove', { id: 'nope' })
     expect(res.error).toMatchObject({ code: -32602, message: 'provider "nope" does not exist' })
     expect(settings.calls).toHaveLength(0)
+  })
+
+  it('removes an unshared file-backed credential with its provider route', async () => {
+    const settings = makeManageSettings()
+    settings.providers['acme-gateway'] = {
+      displayName: 'Acme',
+      apiKeyEnv: 'ACME_KEY',
+    }
+    const unset = vi.fn(async () => {})
+    const credentials = {
+      describe: async () => ({ configured: true, source: 'file', writable: true }),
+      set: async () => {},
+      unset,
+    }
+    const { client } = await startManageHarness(settings, 'deepseek-chat', credentials)
+    const res = await client.request(1, 'x.ai/providers/remove', { id: 'acme-gateway' })
+    expect(res.error).toBeUndefined()
+    expect(unset).toHaveBeenCalledWith('ACME_KEY')
   })
 })
 

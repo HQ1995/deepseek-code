@@ -668,7 +668,7 @@ impl AgentView {
             pending_hint: if provider_pending {
                 Some(crate::views::shortcuts_bar::PendingHint {
                     shortcut: crate::key!('y'),
-                    label: "delete highlighted provider (y confirms, n keeps)",
+                    label: "delete provider + unused saved key (y/n)",
                 })
             } else {
                 None

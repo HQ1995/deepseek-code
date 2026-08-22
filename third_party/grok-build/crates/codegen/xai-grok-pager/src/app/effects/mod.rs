@@ -46,40 +46,7 @@ fn parse_provider_roster(
 ) -> Option<Vec<crate::acp::model_state::ProviderInfo>> {
     parsed.get("providers")?.as_array().map(|rows| {
         rows.iter()
-            .filter_map(|row| {
-                let id = row.get("id")?.as_str()?.to_string();
-                let name = row
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let display_name = row
-                    .get("displayName")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let api_key_env = row
-                    .get("apiKeyEnv")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let api = row.get("api").and_then(|v| v.as_str()).map(str::to_string);
-                let base_url = row
-                    .get("baseURL")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let note = row
-                    .get("note")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string);
-                Some(crate::acp::model_state::ProviderInfo {
-                    id,
-                    name,
-                    display_name,
-                    api_key_env,
-                    api,
-                    base_url,
-                    note,
-                })
-            })
+            .filter_map(crate::acp::model_state::ProviderInfo::from_json)
             .collect()
     })
 }
@@ -3565,6 +3532,7 @@ pub(crate) fn execute(
                         "apiKeyEnv": form.api_key_env,
                         "api": form.api,
                         "baseURL": form.base_url,
+                        "credentialSource": form.credential_source.wire(),
                         "apiKey": form.api_key,
                     }),
                     None => serde_json::json!({
@@ -3573,6 +3541,7 @@ pub(crate) fn execute(
                         "apiKeyEnv": form.api_key_env,
                         "api": form.api,
                         "baseURL": form.base_url,
+                        "credentialSource": form.credential_source.wire(),
                         "apiKey": form.api_key,
                     }),
                 };

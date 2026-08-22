@@ -142,15 +142,17 @@ wait_default_selection() {
   fail "default selection did not become $provider/$model"
 }
 
-# 3. First boot: Custom is the neutral default; add fake-gw.
+# 3. Pick Custom, then add an env-backed fake-gw route.
 boot_and_wait boot1 "$SOCK"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "/provider add" Enter
 wait_frame modal "Add provider"
-tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Down "fake-gw"
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" End Enter
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "fake-gw"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "Fake GW"
-tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "FAKE_KEY"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab Right
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "$GW_URL"
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab Right
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "FAKE_KEY"
 snap filled
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Enter
 wait_frame after-add "Provider added"
@@ -194,6 +196,7 @@ sleep 2
 snap post-edit-list
 grep -q 'Fake GW Renamed' "$OUT/frame-$RUN_ID-post-edit-list.txt" || fail "/provider does not show the renamed provider"
 tmux -L "$SESSION" -f /dev/null kill-server 2>/dev/null || true
+sleep 1
 
 # 6. Second boot: the edited settings persist, then delete and the blocked check.
 export DSCODE_SOCKET="$SOCK2"
@@ -208,7 +211,7 @@ clear_prompt
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "/provider fake"
 sleep 2
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" C-d
-wait_frame delete-arm "y confirm"
+wait_frame delete-arm "unused saved key"
 grep -q 'Fake GW Renamed' "$OUT/frame-$RUN_ID-delete-arm.txt" || fail "delete confirm does not name the provider"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "y"
 wait_frame after-delete "Provider removed"
