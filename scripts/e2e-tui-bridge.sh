@@ -31,8 +31,10 @@ HEADLESS_REJECT_OUT="$OUT/headless-reject-$RUN_ID.json"
 HEADLESS_REJECT_ERR="$OUT/headless-reject-$RUN_ID.log"
 MOCK_PID=""
 ACTIVE_SOCKET="$SOCKET"
+BOOT_CWD="$ROOT"
 
 WORKTREE_PATH=""
+WORKTREE_SESSION_ID=""
 WORKTREE_LABEL="e2e-$RUN_ID"
 
 fail() {
@@ -574,7 +576,7 @@ boot() {
   socket="$1"
   shift
   ACTIVE_SOCKET="$socket"
-  cmd="cd '$ROOT' && exec env PATH='$PATH' DSH_HOME='$SCRATCH' DSC_HOME='$SCRATCH/dsc-tui' DSCODE_SOCKET='$socket' DSCODE_LOG='$LEADER_LOG' DSH_BIN='$DSH_BIN' FAKE_KEY='e2e-key' DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 TERM=xterm-256color '$TUI_BIN'"
+  cmd="cd '$BOOT_CWD' && exec env PATH='$PATH' DSH_HOME='$SCRATCH' DSC_HOME='$SCRATCH/dsc-tui' DSCODE_SOCKET='$socket' DSCODE_LOG='$LEADER_LOG' DSH_BIN='$DSH_BIN' FAKE_KEY='e2e-key' DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 TERM=xterm-256color '$TUI_BIN'"
   for argument in "$@"; do cmd="$cmd '$argument'"; done
   tmux -L "$SESSION" -f /dev/null new-session -d -s "$SESSION" -x 180 -y 48 "$cmd"
   for _ in $(seq 1 120); do
@@ -654,11 +656,25 @@ send_line "reply with the test marker"
 wait_frame "streamed prompt" 'E2E_STREAM_OK' 300
 grep -q 'POST /v1/chat/completions' "$MOCK_LOG" \
   || fail "the mock gateway never received a completion request"
+for _ in $(seq 1 100); do
+  worktree_session_roots=("$SCRATCH/sessions"/*"$WORKTREE_LABEL"*)
+  if [[ -d "${worktree_session_roots[0]}" ]]; then
+    worktree_session_dirs=("${worktree_session_roots[0]}"/*)
+    if [[ -d "${worktree_session_dirs[0]}" ]]; then
+      WORKTREE_SESSION_ID="${worktree_session_dirs[0]##*/}"
+      break
+    fi
+  fi
+  sleep 0.1
+done
+[[ "$WORKTREE_SESSION_ID" =~ ^[0-9a-f-]+$ ]] \
+  || fail "worktree session was not persisted"
 
 echo "[tui] durable resume through a fresh leader"
 stop_client
 wait_leader_exit "$SOCKET"
-boot "$RESUME_SOCKET" --resume
+BOOT_CWD="$WORKTREE_PATH"
+boot "$RESUME_SOCKET" --resume "$WORKTREE_SESSION_ID"
 wait_frame "resume" 'E2E_STREAM_OK|reply with the test marker' 300
 stop_client
 wait_leader_exit "$RESUME_SOCKET"
