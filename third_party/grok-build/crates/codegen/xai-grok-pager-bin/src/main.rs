@@ -1842,6 +1842,13 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     }
     true
 }
+fn unsupported_dscode_cli(args: &PagerArgs) -> Option<&'static str> {
+    args.restore_code.then_some(
+        "--restore-code is not supported by dscode because dsh does not persist repository \
+         snapshots; use --worktree to copy the current checkout state",
+    )
+}
+
 fn main() {
     // dscode isolation: TUI state must never land in ~/.grok.
     // Public knob: DSCODE_HOME. dsh-native: DSH_PROFILE_DIR. 0.0.10 alias: DSC_HOME.
@@ -1884,6 +1891,10 @@ fn main() {
     let args = PagerArgs::parse_cli();
     if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
         return;
+    }
+    if let Some(error) = unsupported_dscode_cli(&args) {
+        eprintln!("Error: {error}");
+        std::process::exit(2);
     }
     xai_grok_pager_minimal::install();
     #[cfg(all(feature = "jemalloc", unix))]
@@ -2127,9 +2138,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             Command::Worktree(worktree_args) => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                let agent_config = xai_grok_shell::config::load_agent_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                return xai_grok_pager::worktree_cmd::run(worktree_args, &agent_config).await;
+                return xai_grok_pager::worktree_cmd::run(worktree_args).await;
             }
             Command::DiskUsage(disk_usage_args) => {
                 init_tracing_simple("cli");
@@ -2740,6 +2749,20 @@ mod tests {
             subcommand.command,
             Some(Command::Version { json: false })
         ));
+    }
+    #[test]
+    fn restore_code_is_rejected_but_worktree_is_supported() {
+        let restore = PagerArgs::try_parse_from([
+            "dscode",
+            "--resume",
+            "11111111-1111-4111-8111-111111111111",
+            "--restore-code",
+        ])
+        .unwrap();
+        assert!(unsupported_dscode_cli(&restore).is_some());
+
+        let worktree = PagerArgs::try_parse_from(["dscode", "--worktree=feature"]).unwrap();
+        assert!(unsupported_dscode_cli(&worktree).is_none());
     }
     #[cfg(all(feature = "jemalloc", unix))]
     struct TempHeapDump(std::path::PathBuf);

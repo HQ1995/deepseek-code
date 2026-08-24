@@ -4,12 +4,8 @@ use std::io::Write;
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
-use tokio_util::sync::CancellationToken;
 use xai_fast_worktree::WorktreeRecord;
-
-use agent_client_protocol as acp;
-use xai_acp_lib::acp_send;
-use xai_grok_shell::agent::config::Config as AgentConfig;
+use xai_grok_workspace::worktree as local;
 
 /// Read the agent's own report types rather than copies, so a field added
 /// there cannot go missing here.
@@ -78,110 +74,74 @@ enum WorktreeDbCommand {
     Path,
 }
 
-pub async fn run(args: WorktreeArgs, agent_config: &AgentConfig) -> Result<()> {
-    let cancel = CancellationToken::new();
+pub async fn run(args: WorktreeArgs) -> Result<()> {
     xai_grok_telemetry::startup::mark_utility_process();
-    let spawned = crate::acp::spawn::spawn_grok_shell(agent_config.clone(), &cancel, None).await?;
-    // Cancel + join on every return path, including the `?` below.
-    let _agent_guard =
-        crate::acp::spawn::AgentShutdownGuard::new(cancel.clone(), Some(spawned.thread_handle));
-
-    let _init: acp::InitializeResponse = acp_send(
-        acp::InitializeRequest::new(acp::ProtocolVersion::V1)
-            .client_capabilities(
-                acp::ClientCapabilities::new()
-                    .fs(acp::FileSystemCapabilities::new())
-                    .terminal(false),
-            )
-            .meta(
-                serde_json::json!({
-                    "clientType": crate::client_identity::HEADLESS_CLIENT_TYPE,
-                    "clientVersion": crate::client_identity::PAGER_CLIENT_VERSION
-                })
-                .as_object()
-                .cloned(),
-            ),
-        &spawned.channel.tx,
-    )
-    .await?;
-
-    dispatch(args.command, &spawned.channel.tx).await
+    dispatch(args.command).await
 }
 
-async fn dispatch(command: WorktreeCommand, tx: &xai_acp_lib::AcpAgentTx) -> Result<()> {
+async fn run_blocking<T, F>(label: &'static str, operation: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| anyhow::anyhow!("{label} task failed: {error}"))?
+}
+
+async fn dispatch(command: WorktreeCommand) -> Result<()> {
     match command {
         WorktreeCommand::List {
             repo,
             r#type,
             json,
             all,
-        } => cmd_list(tx, repo, r#type, json, all).await,
-        WorktreeCommand::Show { id_or_path } => cmd_show(tx, &id_or_path).await,
+        } => cmd_list(repo, r#type, json, all).await,
+        WorktreeCommand::Show { id_or_path } => cmd_show(id_or_path).await,
         WorktreeCommand::Rm {
             ids,
             force,
             dry_run,
-        } => cmd_rm(tx, ids, force, dry_run).await,
+        } => cmd_rm(ids, force, dry_run).await,
         WorktreeCommand::Gc {
             dry_run,
             max_age,
             force,
-        } => cmd_gc(tx, dry_run, max_age, force).await,
-        WorktreeCommand::Db { command } => cmd_db(tx, command).await,
+        } => cmd_gc(dry_run, max_age, force).await,
+        WorktreeCommand::Db { command } => cmd_db(command).await,
     }
 }
 
-fn ext_request<T: serde::Serialize>(
-    method: &str,
-    params: &T,
-) -> Result<acp::ExtRequest, serde_json::Error> {
-    let params = serde_json::value::to_raw_value(params)?;
-    Ok(acp::ExtRequest::new(method, params.into()))
-}
-
-/// ACP extension responses are wrapped in `{ "result": T, "error": ... }`.
-#[derive(serde::Deserialize)]
-struct ExtEnvelope<T> {
-    result: Option<T>,
-    error: Option<serde_json::Value>,
-}
-
-async fn ext_call<T: serde::de::DeserializeOwned>(
-    tx: &xai_acp_lib::AcpAgentTx,
-    method: &str,
-    params: &impl serde::Serialize,
-) -> Result<T> {
-    let req =
-        ext_request(method, params).map_err(|e| anyhow::anyhow!("failed to build request: {e}"))?;
-    let resp = acp_send(req, tx)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let envelope: ExtEnvelope<T> = serde_json::from_str(resp.0.get())
-        .map_err(|e| anyhow::anyhow!("response parse error: {e}"))?;
-    if let Some(err) = envelope.error {
-        bail!("ACP error: {err}");
-    }
-    envelope
-        .result
-        .ok_or_else(|| anyhow::anyhow!("ACP response missing result field"))
+fn parse_duration(value: &str) -> Result<i64> {
+    let value = value.trim();
+    let (number, multiplier) = if let Some(number) = value.strip_suffix('d') {
+        (number, 86_400)
+    } else if let Some(number) = value.strip_suffix('h') {
+        (number, 3_600)
+    } else if let Some(number) = value.strip_suffix('m') {
+        (number, 60)
+    } else if let Some(number) = value.strip_suffix('s') {
+        (number, 1)
+    } else {
+        bail!("invalid duration: {value} (expected e.g. 7d, 24h, 30m, 60s)");
+    };
+    number
+        .parse::<i64>()
+        .ok()
+        .filter(|number| *number >= 0)
+        .and_then(|number| number.checked_mul(multiplier))
+        .ok_or_else(|| anyhow::anyhow!("invalid number in duration: {value}"))
 }
 
 async fn cmd_list(
-    tx: &xai_acp_lib::AcpAgentTx,
     repo: Option<String>,
     types: Vec<String>,
     json: bool,
     all: bool,
 ) -> Result<()> {
-    let records: Vec<WorktreeRecord> = ext_call(
-        tx,
-        "x.ai/git/worktree/list",
-        &serde_json::json!({
-            "repo": repo,
-            "type": types,
-            "includeAll": all,
-        }),
-    )
+    let records = run_blocking("worktree list", move || {
+        local::list_worktrees(repo.as_deref(), &types, all)
+    })
     .await?;
 
     let mut out = std::io::stdout().lock();
@@ -193,79 +153,62 @@ async fn cmd_list(
     Ok(crate::util::ignore_broken_pipe(written)?)
 }
 
-async fn cmd_show(tx: &xai_acp_lib::AcpAgentTx, id_or_path: &str) -> Result<()> {
-    let rec: Option<WorktreeRecord> = ext_call(
-        tx,
-        "x.ai/git/worktree/show",
-        &serde_json::json!({ "idOrPath": id_or_path }),
-    )
-    .await?;
+async fn cmd_show(id_or_path: String) -> Result<()> {
+    let query = id_or_path.clone();
+    let record = run_blocking("worktree show", move || local::show_worktree(&query)).await?;
 
-    match rec {
-        Some(r) => {
-            let written = display::print_show(&r, &mut std::io::stdout().lock());
+    match record {
+        Some(record) => {
+            let written = display::print_show(&record, &mut std::io::stdout().lock());
             Ok(crate::util::ignore_broken_pipe(written)?)
         }
         None => bail!("worktree not found: {id_or_path}"),
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RemoveResponse {
-    removed: bool,
-    #[serde(default)]
-    resolved_path: Option<String>,
-}
 
-async fn cmd_rm(
-    tx: &xai_acp_lib::AcpAgentTx,
-    ids: Vec<String>,
-    force: bool,
-    dry_run: bool,
-) -> Result<()> {
-    for id_or_path in &ids {
-        let resp: Result<RemoveResponse> = ext_call(
-            tx,
-            "x.ai/git/worktree/remove",
-            &serde_json::json!({
-                "idOrPath": id_or_path,
-                "force": force,
-                "dryRun": dry_run,
-            }),
+async fn cmd_rm(ids: Vec<String>, force: bool, dry_run: bool) -> Result<()> {
+    let copy_context = local::BackgroundCopyContext::default();
+    let mut failures = 0usize;
+    for id_or_path in ids {
+        let response = local::remove_worktree(
+            &local::RemoveWorktreeRequest {
+                worktree_path: None,
+                id_or_path: Some(id_or_path.clone()),
+                force,
+                dry_run,
+            },
+            &copy_context,
         )
         .await;
 
-        match resp {
-            Ok(r) => {
-                let path = r.resolved_path.as_deref().unwrap_or(id_or_path);
+        match response {
+            Ok(response) => {
+                let path = response.resolved_path.as_deref().unwrap_or(&id_or_path);
                 if dry_run {
                     println!("  would remove: {path}");
-                } else if r.removed {
+                } else if response.removed {
                     println!("  removed: {path}");
                 }
             }
-            Err(e) => eprintln!("  error removing {id_or_path}: {e}"),
+            Err(error) => {
+                failures += 1;
+                eprintln!("  error removing {id_or_path}: {error}");
+            }
         }
     }
-    Ok(())
+    if failures == 0 {
+        Ok(())
+    } else {
+        bail!("{failures} worktree removal(s) failed")
+    }
 }
 
-async fn cmd_gc(
-    tx: &xai_acp_lib::AcpAgentTx,
-    dry_run: bool,
-    max_age: Option<String>,
-    force: bool,
-) -> Result<()> {
-    let report: GcReport = ext_call(
-        tx,
-        "x.ai/git/worktree/gc",
-        &serde_json::json!({
-            "dryRun": dry_run,
-            "maxAge": max_age,
-            "force": force,
-        }),
-    )
+async fn cmd_gc(dry_run: bool, max_age: Option<String>, force: bool) -> Result<()> {
+    let max_age_secs = max_age.as_deref().map(parse_duration).transpose()?;
+    let report = run_blocking("worktree gc", move || {
+        local::gc_worktrees_mgmt(dry_run, max_age_secs, force)
+    })
     .await?;
 
     let mut out = std::io::stdout().lock();
@@ -278,24 +221,20 @@ async fn cmd_gc(
     Ok(crate::util::ignore_broken_pipe(written)?)
 }
 
-async fn cmd_db(tx: &xai_acp_lib::AcpAgentTx, command: WorktreeDbCommand) -> Result<()> {
+async fn cmd_db(command: WorktreeDbCommand) -> Result<()> {
     match command {
         WorktreeDbCommand::Stats => {
-            let stats: DbStats = ext_call(tx, "x.ai/git/worktree/db/stats", &()).await?;
+            let stats = run_blocking("worktree db stats", local::worktree_db_stats).await?;
             let written = display::print_stats(&stats, &mut std::io::stdout().lock());
             Ok(crate::util::ignore_broken_pipe(written)?)
         }
         WorktreeDbCommand::Path => {
-            #[derive(serde::Deserialize)]
-            struct PathResp {
-                path: String,
-            }
-            let resp: PathResp = ext_call(tx, "x.ai/git/worktree/db/path", &()).await?;
-            println!("{}", resp.path);
+            println!("{}", local::worktree_db_path()?.display());
             Ok(())
         }
         WorktreeDbCommand::Rebuild => {
-            let report: RebuildReport = ext_call(tx, "x.ai/git/worktree/db/rebuild", &()).await?;
+            let report =
+                run_blocking("worktree db rebuild", local::worktree_db_rebuild).await?;
             let written = display::print_rebuild(&report, &mut std::io::stdout().lock());
             Ok(crate::util::ignore_broken_pipe(written)?)
         }
@@ -307,135 +246,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ext_request_builds_list_with_filters() {
-        let req = ext_request(
-            "x.ai/git/worktree/list",
-            &serde_json::json!({
-                "repo": "xai",
-                "type": ["session"],
-                "includeAll": true,
-            }),
-        )
-        .unwrap();
-        assert_eq!(req.method.as_ref(), "x.ai/git/worktree/list");
-        let params: serde_json::Value = serde_json::from_str(req.params.get()).unwrap();
-        assert_eq!(params["repo"], "xai");
-        assert_eq!(params["includeAll"], true);
+    fn duration_parser_accepts_supported_units() {
+        assert_eq!(parse_duration("7d").unwrap(), 7 * 86_400);
+        assert_eq!(parse_duration("24h").unwrap(), 24 * 3_600);
+        assert_eq!(parse_duration("30m").unwrap(), 30 * 60);
+        assert_eq!(parse_duration("60s").unwrap(), 60);
     }
 
     #[test]
-    fn ext_request_builds_gc_with_max_age_string() {
-        let req = ext_request(
-            "x.ai/git/worktree/gc",
-            &serde_json::json!({
-                "dryRun": true,
-                "maxAge": "7d",
-                "force": false,
-            }),
-        )
-        .unwrap();
-        let params: serde_json::Value = serde_json::from_str(req.params.get()).unwrap();
-        assert_eq!(params["maxAge"], "7d");
-        assert_eq!(params["dryRun"], true);
-    }
-
-    #[test]
-    fn ext_request_builds_remove_with_id_or_path() {
-        let req = ext_request(
-            "x.ai/git/worktree/remove",
-            &serde_json::json!({
-                "idOrPath": "wt-abc123",
-                "force": true,
-                "dryRun": false,
-            }),
-        )
-        .unwrap();
-        let params: serde_json::Value = serde_json::from_str(req.params.get()).unwrap();
-        assert_eq!(params["idOrPath"], "wt-abc123");
-    }
-
-    #[test]
-    fn ext_request_builds_show() {
-        let req = ext_request(
-            "x.ai/git/worktree/show",
-            &serde_json::json!({ "idOrPath": "/some/path" }),
-        )
-        .unwrap();
-        let params: serde_json::Value = serde_json::from_str(req.params.get()).unwrap();
-        assert_eq!(params["idOrPath"], "/some/path");
-    }
-
-    #[test]
-    fn ext_request_builds_db_stats_empty_params() {
-        let req = ext_request("x.ai/git/worktree/db/stats", &()).unwrap();
-        assert_eq!(req.method.as_ref(), "x.ai/git/worktree/db/stats");
-    }
-
-    #[test]
-    fn remove_response_deserializes_with_resolved_path() {
-        let json = r#"{"removed": true, "resolvedPath": "/resolved"}"#;
-        let resp: RemoveResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.removed);
-        assert_eq!(resp.resolved_path.as_deref(), Some("/resolved"));
-    }
-
-    #[test]
-    fn remove_response_deserializes_without_resolved_path() {
-        let json = r#"{"removed": true}"#;
-        let resp: RemoveResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.removed);
-        assert!(resp.resolved_path.is_none());
-    }
-
-    #[test]
-    fn ext_envelope_unwraps_success_result() {
-        let json = r#"{"result": {"path": "/home/user/.grok/worktrees.db"}, "error": null}"#;
-        #[derive(serde::Deserialize)]
-        struct PathResp {
-            path: String,
+    fn duration_parser_rejects_invalid_or_negative_values() {
+        for value in ["", "7", "7x", "-1d", "overflow999999999999999999999d"] {
+            assert!(parse_duration(value).is_err(), "{value:?} must fail");
         }
-        let envelope: ExtEnvelope<PathResp> = serde_json::from_str(json).unwrap();
-        assert!(envelope.error.is_none());
-        let inner = envelope.result.unwrap();
-        assert_eq!(inner.path, "/home/user/.grok/worktrees.db");
     }
-
-    #[test]
-    fn ext_envelope_unwraps_error_result() {
-        let json = r#"{"result": null, "error": "something went wrong"}"#;
-        let envelope: ExtEnvelope<serde_json::Value> = serde_json::from_str(json).unwrap();
-        assert!(envelope.result.is_none());
-        assert!(envelope.error.is_some());
-    }
-
-    #[test]
-    fn ext_envelope_unwraps_list_of_records() {
-        let json = r#"{"result": [], "error": null}"#;
-        let envelope: ExtEnvelope<Vec<WorktreeRecord>> = serde_json::from_str(json).unwrap();
-        assert!(envelope.error.is_none());
-        assert!(envelope.result.unwrap().is_empty());
-    }
-
-    #[test]
-    fn ext_envelope_unwraps_db_stats() {
-        let json = r#"{"result": {"total_records": 5, "alive_count": 3, "dead_count": 2, "db_file_bytes": 1024}}"#;
-        let envelope: ExtEnvelope<DbStats> = serde_json::from_str(json).unwrap();
-        let stats = envelope.result.unwrap();
-        assert_eq!(stats.total_records, 5);
-        assert_eq!(stats.alive_count, 3);
-    }
-
-    #[test]
-    fn ext_envelope_unwraps_gc_report() {
-        let json = r#"{"result": {"dead_removed": 2, "expired_removed": 1, "skipped_alive": 0}}"#;
-        let envelope: ExtEnvelope<GcReport> = serde_json::from_str(json).unwrap();
-        let report = envelope.result.unwrap();
-        assert_eq!(report.dead_removed, 2);
-        assert_eq!(report.expired_removed, 1);
-        // Older agents omit remove_failed; it must default to zero.
-        assert_eq!(report.remove_failed, 0);
-    }
-
     /// A worktree the gate kept is not one in use, and a path that was never a
     /// repository is not a worktree that was removed.
     #[test]
@@ -443,9 +266,10 @@ mod tests {
         let json = r#"{"result": {"dead_removed": 0, "expired_removed": 3, "skipped_alive": 0,
             "kept_unsafe": 2, "no_repo_paths": 1, "kept_reasons": {"dirty": 2},
             "kept": [{"path": "/wt", "reason": "dirty"}], "not_judged": 4, "unnamed": 5}}"#;
-        let envelope: ExtEnvelope<GcReport> = serde_json::from_str(json).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(json).unwrap();
+        let report: GcReport = serde_json::from_value(envelope["result"].clone()).unwrap();
         let mut out = Vec::new();
-        display::print_gc(&envelope.result.unwrap(), &mut out).unwrap();
+        display::print_gc(&report, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
 
         assert_eq!(

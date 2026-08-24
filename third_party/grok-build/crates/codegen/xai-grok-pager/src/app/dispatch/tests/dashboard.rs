@@ -591,7 +591,19 @@ async fn dashboard_change_location_to_non_git_clears_worktree_toggle() {
         lp.worktree_mode = true;
         d.location_picker = Some(lp);
     }
-    let tmp = tempfile::tempdir().unwrap();
+    let mut roots = vec![std::env::temp_dir()];
+    #[cfg(unix)]
+    roots.extend([std::path::PathBuf::from("/tmp"), std::path::PathBuf::from("/var/tmp")]);
+    let Some(root) = roots
+        .into_iter()
+        .find(|root| root.is_dir() && !root.ancestors().any(|p| p.join(".git").exists()))
+    else {
+        return;
+    };
+    let tmp = tempfile::Builder::new()
+        .prefix("non-git-dashboard-")
+        .tempdir_in(root)
+        .unwrap();
     let target = dunce::canonicalize(tmp.path()).unwrap_or_else(|_| tmp.path().to_path_buf());
     dispatch(
         Action::DashboardChangeLocation {

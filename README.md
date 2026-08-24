@@ -41,7 +41,15 @@ dscode -p "explain src/index.ts"     # headless single turn
 dscode -c                           # continue the latest session for this cwd
 dscode --resume <id-or-title>       # resume a session
 dscode sessions list                # list durable sessions
+dscode -w                           # new session in an auto-named worktree
+dscode --worktree=feat "fix it"     # named worktree with an initial prompt
+dscode --resume <id> --worktree=try # fork a conversation into a worktree
+dscode worktree list                # inspect managed worktrees
 ```
+
+`--worktree-ref <branch|tag|commit>` selects the clean base. Management stays
+local: `dscode worktree list|show|rm|gc|db`; `rm` uses the upstream
+no-data-loss gate unless `--force` is explicit.
 
 Headless output formats are `plain`, `json`, `streaming-json`, and
 `streaming-messages-json`.

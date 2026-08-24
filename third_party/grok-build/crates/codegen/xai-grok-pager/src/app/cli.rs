@@ -139,7 +139,6 @@ Examples:
         shell: Shell,
     },
     /// Manage git worktrees
-    #[command(hide = true)]
     Worktree(crate::worktree_cmd::WorktreeArgs),
     /// Show what the dscode profile uses on disk
     #[command(name = "du", visible_alias = "disk-usage")]
@@ -611,19 +610,22 @@ pub struct PagerArgs {
     /// instead of reusing the original (optionally set via `--session-id`).
     #[arg(long = "fork-session")]
     pub fork_session: bool,
-    /// Start the session in a new git worktree, optionally named.
-    /// With `--resume` of a remote session, pass `--restore-code` to apply
-    /// the snapshot codebase (conversation is restored either way).
-    /// Headless (`-p`) does not create a worktree from this flag.
-    #[arg(short = 'w', long = "worktree", num_args = 0..= 1, default_missing_value = "", hide = true)]
+    /// Start a new or resumed session in a managed isolated git worktree,
+    /// optionally named. A resumed conversation is forked into the new cwd.
+    #[arg(
+        short = 'w',
+        long = "worktree",
+        num_args = 0..=1,
+        default_missing_value = "",
+        conflicts_with_all = ["single", "prompt_file", "prompt_json"]
+    )]
     pub worktree: Option<String>,
     /// Branch, tag, or commit to base the worktree on (with `--worktree`).
     /// Defaults to the current HEAD of the source checkout when omitted.
     #[arg(
         long = "worktree-ref",
         visible_alias = "ref",
-        requires = "worktree",
-        hide = true
+        requires = "worktree"
     )]
     pub worktree_ref: Option<String>,
     /// Restore the original session's repository snapshot when resuming.
@@ -1119,6 +1121,16 @@ mod tests {
     }
 
     #[test]
+    fn public_help_exposes_supported_worktree_surface_only() {
+        let mut command = PagerArgs::command();
+        let help = command.render_long_help().to_string();
+        assert!(help.contains("--worktree"));
+        assert!(help.contains("--worktree-ref"));
+        assert!(!help.contains("--restore-code"));
+        assert!(command.find_subcommand_mut("worktree").is_some());
+    }
+
+    #[test]
     fn version_flags_parse_as_early_intent_without_exiting() {
         for flag in ["--version", "-v", "-V"] {
             let args = PagerArgs::try_parse_from(["grok", flag]).expect("version flag parses");
@@ -1497,6 +1509,17 @@ mod tests {
         let c = PagerArgs::try_parse_from(["grok", "-w", "x"]).expect("-w x parses");
         assert_eq!(c.worktree.as_deref(), Some("x"));
         assert_eq!(c.initial_prompt(), None);
+    }
+    #[test]
+    fn worktree_rejects_headless_modes() {
+        for args in [
+            vec!["grok", "-w", "-p", "prompt"],
+            vec!["grok", "-w", "--prompt-file", "prompt.txt"],
+            vec!["grok", "-w", "--prompt-json", "[]"],
+        ] {
+            let error = PagerArgs::try_parse_from(args).expect_err("worktree must stay interactive");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
     }
     #[test]
     fn trust_flag_parses_on_pager_and_alias() {

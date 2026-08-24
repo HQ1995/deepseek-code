@@ -144,8 +144,10 @@ branding (our identity). Keep this list current on every sync.
   session at that cwd; conversation forks use the bridge's
   x.ai/session/fork with newCwd. If dsh session creation/forking fails, dscode
   rolls back only the worktree created by that request through the upstream
-  no-data-loss remover and reports any path it must retain. The hidden
-  worktree management CLI and x.ai restore-code semantics remain unsupported.
+  no-data-loss remover and reports any path it must retain. The public
+  `dscode worktree` list/show/rm/gc/db commands use the same local registry
+  without spawning xai-grok-shell. x.ai restore-code semantics remain hidden
+  and fail closed because dsh does not persist repository snapshots.
 
 ## Feature
 
@@ -186,9 +188,9 @@ branding (our identity). Keep this list current on every sync.
   shipped `code` preset silently exposes the native standard roster instead of
   its intended single `run_code` tool.
 - dscode CLI surfaces hidden because they have no dsh counterpart or are not
-  worth exposing yet: login, logout, plugin, memory, setup, trace, worktree,
-  dashboard, --worktree, --worktree-ref, --restore-code, --oauth. They remain
-  parseable for compatibility/guidance but are omitted from --help.
+  worth exposing yet: login, logout, plugin, memory, setup, trace, dashboard,
+  --restore-code, --oauth. They remain parseable for compatibility/guidance
+  but are omitted from --help.
 ## Patch
 
 - crates/codegen/xai-grok-shell/src/session/acp_session_tests/tool_layer_images_bridge_tests.rs:
@@ -200,6 +202,10 @@ branding (our identity). Keep this list current on every sync.
   `docs/internal` files it `include_str!`s, so the published test target cannot
   compile. Re-enable only when those operator documents become public or the
   upstream test is made self-contained.
+- The dashboard non-git location test chooses a temporary root with no `.git`
+  ancestor. CI/dev `TMPDIR` may itself live inside another checkout, where the
+  original fixture was correctly detected as Git-backed and asserted the
+  opposite. Product behavior is unchanged; this is test isolation.
 Slash commands removed: login, logout, share, feedback, imagine,
 imagine_video, import_claude, gboom, voice, release_notes, announcements,
 recap, timeline.

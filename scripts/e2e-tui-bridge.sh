@@ -29,6 +29,11 @@ HEADLESS_FORK_OUT="$OUT/headless-fork-$RUN_ID.json"
 HEADLESS_FORK_ERR="$OUT/headless-fork-$RUN_ID.log"
 HEADLESS_REJECT_OUT="$OUT/headless-reject-$RUN_ID.json"
 HEADLESS_REJECT_ERR="$OUT/headless-reject-$RUN_ID.log"
+WORKTREE_LIST_OUT="$OUT/worktree-list-$RUN_ID.json"
+WORKTREE_SHOW_OUT="$OUT/worktree-show-$RUN_ID.txt"
+WORKTREE_GC_OUT="$OUT/worktree-gc-$RUN_ID.txt"
+WORKTREE_RM_OUT="$OUT/worktree-rm-$RUN_ID.txt"
+RESTORE_CODE_ERR="$OUT/restore-code-$RUN_ID.log"
 MOCK_PID=""
 ACTIVE_SOCKET="$SOCKET"
 BOOT_CWD="$ROOT"
@@ -572,6 +577,12 @@ clear_prompt() {
   sleep 0.3
 }
 
+worktree_cli() {
+  env PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-tui" \
+    DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 TERM=xterm-256color \
+    "$TUI_BIN" worktree "$@"
+}
+
 boot() {
   socket="$1"
   shift
@@ -596,19 +607,36 @@ stop_client() {
   sleep 3
 }
 
-echo "[tui] booting isolated dsh profile"
-boot "$SOCKET"
+echo "[tui] unsupported restore-code fails closed"
+if env PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-tui" \
+  DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 TERM=xterm-256color \
+  "$TUI_BIN" --resume 11111111-1111-4111-8111-111111111111 --restore-code \
+  >/dev/null 2>"$RESTORE_CODE_ERR"; then
+  fail "unsupported --restore-code was accepted"
+fi
+grep -q -- '--restore-code is not supported by dscode' "$RESTORE_CODE_ERR" \
+  || fail "unsupported --restore-code did not explain the dsh limitation"
 
-echo "[tui] managed worktree creation"
-tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" C-w
-wait_frame "worktree dialog" 'Name \(optional\):'
-tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "$WORKTREE_LABEL" Enter
+echo "[tui] booting CLI-managed worktree"
+boot "$SOCKET" "--worktree=$WORKTREE_LABEL" --worktree-ref HEAD
 wait_frame "worktree creation" 'Worktree ready:' 300
 worktree_matches=("$SCRATCH/dsc-tui/worktrees"/*/"$WORKTREE_LABEL")
 WORKTREE_PATH="${worktree_matches[0]}"
 [[ -d "$WORKTREE_PATH" ]] || fail "managed worktree path was not created"
 git -C "$WORKTREE_PATH" rev-parse --is-inside-work-tree >/dev/null \
   || fail "managed worktree is not a usable git checkout"
+worktree_cli list --json >"$WORKTREE_LIST_OUT"
+grep -q "\"label\": \"$WORKTREE_LABEL\"" "$WORKTREE_LIST_OUT" \
+  || fail "worktree list did not include the CLI-created worktree"
+worktree_cli show "$WORKTREE_PATH" >"$WORKTREE_SHOW_OUT"
+grep -q "$WORKTREE_LABEL" "$WORKTREE_SHOW_OUT" \
+  || fail "worktree show did not resolve the managed path"
+worktree_cli db path >/dev/null
+worktree_cli db stats >/dev/null
+worktree_cli gc --dry-run --max-age 0s >"$WORKTREE_GC_OUT"
+grep -q 'Dry run' "$WORKTREE_GC_OUT" \
+  || fail "worktree gc dry-run did not report its mode"
+
 
 echo "[tui] preset picker"
 send_line "/preset"
@@ -678,6 +706,11 @@ boot "$RESUME_SOCKET" --resume "$WORKTREE_SESSION_ID"
 wait_frame "resume" 'E2E_STREAM_OK|reply with the test marker' 300
 stop_client
 wait_leader_exit "$RESUME_SOCKET"
+worktree_cli rm "$WORKTREE_PATH" >"$WORKTREE_RM_OUT"
+grep -q 'removed:' "$WORKTREE_RM_OUT" \
+  || fail "worktree rm did not report the removed path"
+[[ ! -e "$WORKTREE_PATH" ]] || fail "worktree rm left the checkout on disk"
+WORKTREE_PATH=""
 
 echo "PASS real TUI + dsh + bridge E2E run $RUN_ID"
 echo "  artifacts: $OUT (*-$RUN_ID.*)"
