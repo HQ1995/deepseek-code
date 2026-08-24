@@ -417,7 +417,7 @@ pub struct LeaderArgs {
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "dscode",
-    version = env!("VERSION_WITH_COMMIT"),
+    version = xai_grok_version::full_version(),
     about = "Deepseek Code TUI",
     disable_version_flag = true,
     next_display_order = None,

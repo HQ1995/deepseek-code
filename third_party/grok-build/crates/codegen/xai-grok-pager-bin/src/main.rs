@@ -1276,6 +1276,7 @@ async fn run_agent_command(
             terminal: false,
             fs_read: false,
             fs_write: false,
+            status_line: false,
         };
         let conn = connect_or_spawn(&client_type, mode, &env_urls, capabilities.clone()).await?;
         let (tx, rx) = conn.into_channels();
@@ -1872,6 +1873,7 @@ fn main() {
         // SAFETY: startup is single-threaded here.
         unsafe { std::env::set_var("GROK_HOME", tui_home) };
     }
+    xai_grok_version::set_full_version(env!("VERSION_WITH_COMMIT"));
     xai_grok_telemetry::startup::mark_process_start();
     if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {
         std::process::exit(code);
@@ -2701,6 +2703,7 @@ mod tests {
     }
     #[test]
     fn version_output_writer_preserves_channel_aware_contract() {
+        xai_grok_version::set_full_version(env!("VERSION_WITH_COMMIT"));
         for (label, expected_suffix) in [
             (" [beta]", " [beta]\n"),
             (" [stable]", " [stable]\n"),

@@ -10,6 +10,15 @@ Every intentional difference between this tree and upstream grok-build.
 Class: patch (generic fix, should be offered upstream) / feature (product) /
 branding (our identity). Keep this list current on every sync.
 
+## Upstream baseline
+
+- Source baseline: xai-org/grok-build
+  `19d42e35c07a9c9244f03f6df0c4c353f970d4f9` (`xai-grok-shell` 1.0.6),
+  three-way merged from the prior `d6a22a1` baseline. Product-specific dsh,
+  provider, branding, startup, and protocol changes below remain layered on
+  top; upstream source synchronization does not enable unsupported x.ai
+  surfaces.
+
 ## Branding
 
 - Product name and visible strings changed grok -> dscode / "Deepseek Code"

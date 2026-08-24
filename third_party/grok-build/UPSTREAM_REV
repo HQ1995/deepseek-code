@@ -1,11 +1,10 @@
 # grok-build upstream sync baseline
 
-Last synced from: d6a22a1aed70b58d30a0f82a1a2a76ce1301631e
-(the tree was vendored flat without .git history; vendor date 2026-08-15,
-TUI app version 1.0.4)
+Last synced from: 19d42e35c07a9c9244f03f6df0c4c353f970d4f9
+(three-way synced from the previous d6a22a1 baseline on 2026-08-22;
+TUI app version 1.0.6)
 
-Upstream HEAD observed at record time (2026-08-16):
-https://github.com/xai-org/grok-build.git @ 5163763e703c319e4554c2f455535c5adb6e51e8
-
-Next sync: clone upstream, diff against this tree, port selected changes by
-hand, then update this file with the commit you synced from.
+Upstream HEAD observed during this sync:
+https://github.com/xai-org/grok-build.git @ 07b2f7144fd5c5c9d3dd1966937a87852d2dbdb8
+That 1.0.8 snapshot was not adopted because its xai-fast-worktree test target
+did not compile; advance only to a tested upstream commit.
