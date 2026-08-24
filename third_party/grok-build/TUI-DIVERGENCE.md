@@ -195,6 +195,11 @@ branding (our identity). Keep this list current on every sync.
   added the missing 'use base64::Engine as _;' (base64 0.22 trait import) so the
   shell test binary compiles. Generic bug fixes found here must go upstream as
   PRs and be removed from this list when accepted.
+- `xai-grok-pager/tests/registered_features_are_documented.rs` is omitted:
+  the public grok-build sync includes that test but excludes both
+  `docs/internal` files it `include_str!`s, so the published test target cannot
+  compile. Re-enable only when those operator documents become public or the
+  upstream test is made self-contained.
 Slash commands removed: login, logout, share, feedback, imagine,
 imagine_video, import_claude, gboom, voice, release_notes, announcements,
 recap, timeline.
