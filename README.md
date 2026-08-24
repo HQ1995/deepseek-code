@@ -52,6 +52,7 @@ Useful in-app commands:
 - `/provider` and `/provider --add` — select or add any provider
 - `/preset` or `Ctrl+Y` — choose any discovered preset; four ship by default
 - `/dsh plugins` — inspect profile plugins
+- `Ctrl+W` on the welcome screen — create a managed isolated Git worktree
 - `Ctrl+S` — open durable session resume
 
 Run `dscode --help` for the complete CLI.

@@ -32,6 +32,9 @@ HEADLESS_REJECT_ERR="$OUT/headless-reject-$RUN_ID.log"
 MOCK_PID=""
 ACTIVE_SOCKET="$SOCKET"
 
+WORKTREE_PATH=""
+WORKTREE_LABEL="e2e-$RUN_ID"
+
 fail() {
   echo "FAIL: $1" >&2
   capture >/dev/null 2>&1 || true
@@ -83,6 +86,9 @@ cleanup() {
     [[ -n "$pid" ]] && kill "$pid" >/dev/null 2>&1 || true
   done
   [[ -n "$MOCK_PID" ]] && kill "$MOCK_PID" >/dev/null 2>&1 || true
+  if [[ -n "$WORKTREE_PATH" ]]; then
+    git -C "$ROOT" worktree remove --force "$WORKTREE_PATH" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
@@ -590,6 +596,17 @@ stop_client() {
 
 echo "[tui] booting isolated dsh profile"
 boot "$SOCKET"
+
+echo "[tui] managed worktree creation"
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" C-w
+wait_frame "worktree dialog" 'Name \(optional\):'
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "$WORKTREE_LABEL" Enter
+wait_frame "worktree creation" 'Worktree ready:' 300
+worktree_matches=("$SCRATCH/dsc-tui/worktrees"/*/"$WORKTREE_LABEL")
+WORKTREE_PATH="${worktree_matches[0]}"
+[[ -d "$WORKTREE_PATH" ]] || fail "managed worktree path was not created"
+git -C "$WORKTREE_PATH" rev-parse --is-inside-work-tree >/dev/null \
+  || fail "managed worktree is not a usable git checkout"
 
 echo "[tui] preset picker"
 send_line "/preset"

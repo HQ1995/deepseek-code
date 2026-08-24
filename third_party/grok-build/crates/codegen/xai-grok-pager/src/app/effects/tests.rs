@@ -685,6 +685,53 @@ fn credit_balance_effective_blends_budget_for_legacy_shape_under_100() {
     assert_eq!(bal.usage_pct, 50.0);
     assert_eq!(bal.effective_usage_pct, 25.0);
 }
+#[serial_test::serial(GROK_HOME)]
+#[tokio::test]
+async fn dscode_worktree_adapter_copies_dirty_state_and_rolls_back() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::test_util::EnvVarGuard::set("GROK_HOME", home.path());
+    let repo = crate::test_util::TempGitRepo::init("main");
+    std::fs::write(repo.path.join("README"), "dirty tracked\n").unwrap();
+    std::fs::write(repo.path.join("untracked.txt"), "dirty untracked\n").unwrap();
+
+    let worktree = create_dscode_worktree(
+        &repo.path,
+        format!("dscode-wt-{}", uuid::Uuid::new_v4()),
+        Some(format!("adapter-{}", uuid::Uuid::new_v4().simple())),
+        None,
+    )
+    .await
+    .unwrap();
+    let worktree_path = PathBuf::from(&worktree.worktree_path);
+
+    assert_eq!(worktree.status, "created");
+    assert_eq!(
+        std::fs::read_to_string(worktree_path.join("README")).unwrap(),
+        "dirty tracked\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree_path.join("untracked.txt")).unwrap(),
+        "dirty untracked\n"
+    );
+    assert_eq!(
+        dscode_worktree_session_cwd(&repo.path, &worktree),
+        worktree_path
+    );
+
+    assert!(rollback_dscode_worktree(&worktree).await.is_none());
+    assert!(!worktree_path.exists());
+    let registrations = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(&repo.path)
+        .output()
+        .unwrap();
+    assert!(registrations.status.success());
+    assert!(
+        !String::from_utf8_lossy(&registrations.stdout)
+            .contains(&worktree_path.to_string_lossy().to_string())
+    );
+}
+
 #[test]
 fn parse_worktree_restore_payload_full() {
     use xai_grok_workspace::session::git::RestoreDegree;

@@ -138,6 +138,14 @@ branding (our identity). Keep this list current on every sync.
   session/info model:null. The x.ai/session/usage RPC is skipped (bridge has
   no such method); /usage is session-scoped and "manage" stays gated by
   billing_surface_visible (never true in dscode).
+- Managed worktrees are local to the dscode Rust client because dsh exposes a
+  session cwd but no x.ai worktree RPC. Welcome/Ctrl+W and worktree-backed
+  forks materialize through xai-fast-worktree, then create a normal dsh
+  session at that cwd; conversation forks use the bridge's
+  x.ai/session/fork with newCwd. If dsh session creation/forking fails, dscode
+  rolls back only the worktree created by that request through the upstream
+  no-data-loss remover and reports any path it must retain. The hidden
+  worktree management CLI and x.ai restore-code semantics remain unsupported.
 
 ## Feature
 
