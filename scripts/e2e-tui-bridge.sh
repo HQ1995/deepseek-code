@@ -34,6 +34,8 @@ WORKTREE_SHOW_OUT="$OUT/worktree-show-$RUN_ID.txt"
 WORKTREE_GC_OUT="$OUT/worktree-gc-$RUN_ID.txt"
 WORKTREE_RM_OUT="$OUT/worktree-rm-$RUN_ID.txt"
 RESTORE_CODE_ERR="$OUT/restore-code-$RUN_ID.log"
+ENV_AMBIENT_OUT="$OUT/env-ambient-$RUN_ID.json"
+ENV_DSCODE_OUT="$OUT/env-dscode-$RUN_ID.json"
 MOCK_PID=""
 ACTIVE_SOCKET="$SOCKET"
 BOOT_CWD="$ROOT"
@@ -606,6 +608,22 @@ stop_client() {
   tmux -L "$SESSION" -f /dev/null kill-server >/dev/null 2>&1 || true
   sleep 3
 }
+
+echo "[tui] dscode environment namespace isolation"
+env PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-tui" \
+  GROK_CONFIG='{"models":{"default_reasoning_effort":"low"}}' \
+  DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 TERM=xterm-256color \
+  "$TUI_BIN" inspect --json >"$ENV_AMBIENT_OUT"
+if grep -q '"role": "env_overlay"' "$ENV_AMBIENT_OUT"; then
+  fail "ambient GROK_CONFIG leaked into dscode"
+fi
+env PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-tui" \
+  GROK_CONFIG='{"models":{"default_reasoning_effort":"low"}}' \
+  DSCODE_CONFIG='{"models":{"default_reasoning_effort":"high"}}' \
+  DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 TERM=xterm-256color \
+  "$TUI_BIN" inspect --json >"$ENV_DSCODE_OUT"
+grep -Fq '"path": "$DSCODE_CONFIG (inline)"' "$ENV_DSCODE_OUT" \
+  || fail "DSCODE_CONFIG was not mapped into the internal overlay"
 
 echo "[tui] unsupported restore-code fails closed"
 if env PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-tui" \

@@ -46,6 +46,13 @@ branding (our identity). Keep this list current on every sync.
   sessions spawned by the old shell leader on the same socket
   are still adopted. scripts/dscode.sh + bin/dscode are gone; install.sh links
   ~/.local/bin/dscode directly to the prebuilt binary.
+- Environment namespace isolation: pager-bin maps DSCODE_CONFIG,
+  DSCODE_CONFIG_PATH, and DSCODE_CONNECT_UI_TIMEOUT_SECS onto the upstream
+  GROK_* implementation names before configuration loads. When a DSCODE alias
+  is absent, the corresponding inherited GROK_* value is removed inside the
+  dscode process, so a co-installed grok-build cannot leak its shell-wide
+  configuration into dscode. The mapping never mutates the parent shell;
+  startup recovery copy advertises the DSCODE timeout name.
 - Leader mode: --leader/--leader-socket flags connect the TUI to our bridge
   over the grok leader unix-socket protocol instead of x.ai; local xai auth
   is bypassed in leader mode.

@@ -1117,8 +1117,8 @@ fn list_config_sources(cwd: &Path) -> ConfigSources {
         }
     }
 
-    let inline_env = crate::config::GROK_CONFIG_ENV;
-    let path_env = crate::config::GROK_CONFIG_PATH_ENV;
+    let inline_env = "DSCODE_CONFIG";
+    let path_env = "DSCODE_CONFIG_PATH";
     if let Some(overlay) = crate::config::resolved_env_overlay() {
         if !overlay.sections.is_empty() {
             let path = match overlay.source {

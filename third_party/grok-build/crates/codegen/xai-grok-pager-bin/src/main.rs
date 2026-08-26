@@ -1848,8 +1848,35 @@ fn unsupported_dscode_cli(args: &PagerArgs) -> Option<&'static str> {
          snapshots; use --worktree to copy the current checkout state",
     )
 }
+const DSCODE_ENV_ALIASES: [(&str, &str); 3] = [
+    ("DSCODE_CONFIG", "GROK_CONFIG"),
+    ("DSCODE_CONFIG_PATH", "GROK_CONFIG_PATH"),
+    (
+        "DSCODE_CONNECT_UI_TIMEOUT_SECS",
+        "GROK_CONNECT_UI_TIMEOUT_SECS",
+    ),
+];
+
+/// Keep dscode and a co-installed grok-build process in separate environment
+/// namespaces. The upstream names remain an implementation detail inside this
+/// process; inherited GROK_* values are ignored unless their DSCODE_* alias is
+/// explicitly present.
+fn isolate_dscode_environment() {
+    for (public, internal) in DSCODE_ENV_ALIASES {
+        // SAFETY: main calls this before worker threads, config loading, or
+        // leader spawning. Tests serialize every mutation of these names.
+        unsafe {
+            match std::env::var_os(public) {
+                Some(value) => std::env::set_var(internal, value),
+                None => std::env::remove_var(internal),
+            }
+        }
+    }
+}
+
 
 fn main() {
+    isolate_dscode_environment();
     // dscode isolation: TUI state must never land in ~/.grok.
     // Public knob: DSCODE_HOME. dsh-native: DSH_PROFILE_DIR. 0.0.10 alias: DSC_HOME.
     // Default: ~/.dsh/profiles/dscode. GROK_HOME is internal and always overwritten.
@@ -2630,6 +2657,76 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvRestore {
+        fn capture(names: &[&'static str]) -> Self {
+            Self(
+                names
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            // SAFETY: alias tests hold one serial_test lock for every captured
+            // variable and restore them before another test can observe them.
+            unsafe {
+                for (name, value) in self.0.drain(..) {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(dscode_env_aliases)]
+    fn dscode_aliases_override_and_scrub_ambient_grok_values() {
+        let names = [
+            "DSCODE_CONFIG",
+            "DSCODE_CONFIG_PATH",
+            "DSCODE_CONNECT_UI_TIMEOUT_SECS",
+            "GROK_CONFIG",
+            "GROK_CONFIG_PATH",
+            "GROK_CONNECT_UI_TIMEOUT_SECS",
+        ];
+        let _restore = EnvRestore::capture(&names);
+        // SAFETY: this test holds the shared alias lock and restores all names.
+        unsafe {
+            std::env::set_var("DSCODE_CONFIG", r#"{"models":{}}"#);
+            std::env::remove_var("DSCODE_CONFIG_PATH");
+            std::env::set_var("DSCODE_CONNECT_UI_TIMEOUT_SECS", "60");
+            std::env::set_var("GROK_CONFIG", "ambient-grok-config");
+            std::env::set_var("GROK_CONFIG_PATH", "/tmp/ambient-grok.toml");
+            std::env::set_var("GROK_CONNECT_UI_TIMEOUT_SECS", "5");
+        }
+
+        isolate_dscode_environment();
+        assert_eq!(
+            std::env::var("GROK_CONFIG").unwrap(),
+            r#"{"models":{}}"#
+        );
+        assert!(std::env::var_os("GROK_CONFIG_PATH").is_none());
+        assert_eq!(
+            std::env::var("GROK_CONNECT_UI_TIMEOUT_SECS").unwrap(),
+            "60"
+        );
+
+        // No public alias means an ambient Grok setting is ignored, not reused.
+        unsafe {
+            std::env::remove_var("DSCODE_CONFIG");
+            std::env::set_var("GROK_CONFIG", "ambient-again");
+        }
+        isolate_dscode_environment();
+        assert!(std::env::var_os("GROK_CONFIG").is_none());
+    }
+
     #[test]
     fn default_caps_the_core_count() {
         let nz = |n| NonZeroUsize::new(n).unwrap();

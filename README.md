@@ -69,6 +69,22 @@ When switching providers, dscode keeps the current model if the target
 provider exposes the same model id; otherwise it selects that provider's first
 model. Reasoning effort is remembered separately for each provider/model pair.
 
+## Per-run configuration
+
+Use the dscode namespace for process-local overrides:
+
+```sh
+DSCODE_CONFIG='{"models":{"default_reasoning_effort":"high"}}' dscode
+DSCODE_CONFIG_PATH=./dscode-overlay.toml dscode
+DSCODE_CONNECT_UI_TIMEOUT_SECS=60 dscode
+```
+
+The first value is inline JSON; the path accepts JSON or TOML. These soft
+overrides do not persist and cannot set credentials, providers, plugins, MCP
+servers, or command hooks. Ambient `GROK_CONFIG`, `GROK_CONFIG_PATH`, and
+`GROK_CONNECT_UI_TIMEOUT_SECS` are ignored so a co-installed grok-build keeps
+an independent configuration namespace.
+
 ## Update
 
 ```sh

@@ -14,7 +14,7 @@ pub(super) const CONNECT_UI_TIMEOUT_ENV: &str = connect_ui_timeout_env!();
 /// Runnable form for the startup-failure `Try` row, which keeps commands out
 /// of wrappable prose.
 pub(super) const CONNECT_UI_TIMEOUT_TRY_COMMAND: &str =
-    concat!(connect_ui_timeout_env!(), "=60 grok");
+    "DSCODE_CONNECT_UI_TIMEOUT_SECS=60 dscode";
 pub(super) const DEFAULT_CONNECT_UI_TIMEOUT: Duration = Duration::from_secs(30);
 // Floor: the bounded no-mint startup auth alone can take ~5s.
 const MIN_CONNECT_UI_TIMEOUT_SECS: u64 = 5;
@@ -45,5 +45,13 @@ mod tests {
         assert_eq!(resolve(Some("1e3")), DEFAULT_CONNECT_UI_TIMEOUT);
         assert_eq!(resolve(Some("1")), Duration::from_secs(5));
         assert_eq!(resolve(Some("9999")), Duration::from_secs(9999));
+    }
+
+    #[test]
+    fn recovery_command_uses_the_public_dscode_namespace() {
+        assert_eq!(
+            CONNECT_UI_TIMEOUT_TRY_COMMAND,
+            "DSCODE_CONNECT_UI_TIMEOUT_SECS=60 dscode"
+        );
     }
 }
