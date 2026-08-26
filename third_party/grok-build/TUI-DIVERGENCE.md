@@ -356,8 +356,8 @@ with zero pager changes.
 This generic path covers dsh presets, tools, commands, providers, models, and
 settings. Browser-only plugin slots, custom panels, and private extension RPCs
 still require an explicit TUI/bridge adapter; they are not inferred. The same
-applies to plugin-owned durable session event types while pinned dsh rc.8 has
-no public downstream registration seam for that vocabulary.
+applies to plugin-owned durable session event types while pinned dsh
+0.1.1-rc.2 has no public downstream registration seam for that vocabulary.
 
 ### xAI login/logout CLI subcommands are severed
 

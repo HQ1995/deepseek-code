@@ -87,8 +87,8 @@ describe('installation lifecycle', () => {
   })
 
   it('parses the official dsh version output', () => {
-    expect(parseCliVersion('0.1.0-rc.8')).toBe('0.1.0-rc.8')
-    expect(parseCliVersion('dsh 0.1.0-rc.8\n')).toBe('0.1.0-rc.8')
+    expect(parseCliVersion('0.1.1-rc.2')).toBe('0.1.1-rc.2')
+    expect(parseCliVersion('dsh 0.1.1-rc.2\n')).toBe('0.1.1-rc.2')
     expect(parseCliVersion('unknown')).toBeUndefined()
   })
 

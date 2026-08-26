@@ -30,6 +30,7 @@ trap cleanup EXIT
 [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || fail "Node is unavailable"
 "$NODE_BIN" -e 'const a=process.versions.node.split(".").map(Number), b=[22,19,0]; process.exit(a[0]>b[0] || (a[0]===b[0] && (a[1]>b[1] || (a[1]===b[1] && a[2]>=b[2]))) ? 0 : 1)' \
   || fail "pinned dsh requires Node >=22.19.0 (got $($NODE_BIN --version))"
+DSH_VERSION="$("$NODE_BIN" -p "require('$ROOT/bridge/grok-leader/package.json').dsh.testedVersion")"
 export PATH="$(dirname "$NODE_BIN"):$PATH"
 
 # 1. Mock gateway (node stdlib): GET .../models answers one fake model.
@@ -62,12 +63,12 @@ export PATH="$SCRATCH/e2e-bin:$PATH"
 if [[ -n "${DSCODE_E2E_DSH_BIN:-}" ]]; then
   DSH_BIN="$DSCODE_E2E_DSH_BIN"
 elif command -v dsh >/dev/null 2>&1 \
-  && [[ "$(dsh --version 2>/dev/null | head -1 || true)" == "0.1.0-rc.8" ]]; then
+  && [[ "$(dsh --version 2>/dev/null | head -1 || true)" == "$DSH_VERSION" ]]; then
   DSH_BIN="$(command -v dsh)"
 else
   DSH_PREFIX="$SCRATCH/dsh-cli"
   npm install --prefix "$DSH_PREFIX" --ignore-scripts --no-audit --no-fund \
-    @deepseek-ai/dsh@0.1.0-rc.8 >"$OUT/dsh-install-$RUN_ID.log" 2>&1 \
+    "@deepseek-ai/dsh@$DSH_VERSION" >"$OUT/dsh-install-$RUN_ID.log" 2>&1 \
     || fail "could not install the pinned dsh CLI"
   DSH_BIN="$DSH_PREFIX/node_modules/.bin/dsh"
 fi

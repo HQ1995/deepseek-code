@@ -7,7 +7,12 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { nodeVersionSupported, packageUpdateRef } from '../bin/dscode.mjs'
 
 const launcher = fileURLToPath(new URL('../bin/dscode.mjs', import.meta.url))
-const packageVersion = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
+const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+  version: string
+  dsh: { testedVersion: string }
+}
+const packageVersion = packageJson.version
+const dshVersion = packageJson.dsh.testedVersion
 const [packageMajor, packageMinor, packagePatch] = packageVersion.split(/[.-]/).slice(0, 3).map(Number)
 const updatedPackageVersion = `${packageMajor}.${packageMinor}.${packagePatch + 1}-beta.1`
 const homes: string[] = []
@@ -62,7 +67,7 @@ case "$prefix" in
     mkdir -p "$prefix/bin"
     cat > "$prefix/bin/dsh" <<'EOF'
 #!/bin/sh
-echo '0.1.0-rc.8'
+echo '${dshVersion}'
 EOF
     chmod +x "$prefix/bin/dsh"
     ;;
@@ -105,7 +110,7 @@ esac
     expect(launched).toContain(`DSH_PROFILE_DIR=${profile}`)
     expect(launched).toContain('ARGS=<inspect><--json>')
     expect(readFileSync(npmLog, 'utf8')).toContain(`@hqzhao95/dscode@${packageVersion}`)
-    expect(readFileSync(npmLog, 'utf8')).toContain('@deepseek-ai/dsh@0.1.0-rc.8')
+    expect(readFileSync(npmLog, 'utf8')).toContain(`@deepseek-ai/dsh@${dshVersion}`)
   })
 
   it.skipIf(productNode === undefined)('reconciles the requested update channel and re-execs the installed launcher', () => {

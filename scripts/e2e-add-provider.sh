@@ -8,6 +8,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/third_party/grok-build/target/release/dscode"
+DSH_VERSION="$(node -p "require('$ROOT/bridge/grok-leader/package.json').dsh.testedVersion")"
 OUT=/tmp/addprov-e2e
 mkdir -p "$OUT"
 RUN_ID="$$"
@@ -41,12 +42,12 @@ cp "$HOME/.dsh/settings.yaml" "$SCRATCH/settings.yaml"
 if [[ -n "${DSCODE_E2E_DSH_BIN:-}" ]]; then
   DSH_BIN="$DSCODE_E2E_DSH_BIN"
 elif command -v dsh >/dev/null 2>&1 \
-  && [[ "$(dsh --version 2>/dev/null | head -1 || true)" == "0.1.0-rc.8" ]]; then
+  && [[ "$(dsh --version 2>/dev/null | head -1 || true)" == "$DSH_VERSION" ]]; then
   DSH_BIN="$(command -v dsh)"
 else
   DSH_PREFIX="$SCRATCH/dsh-cli"
   npm install --prefix "$DSH_PREFIX" --ignore-scripts --no-audit --no-fund \
-    @deepseek-ai/dsh@0.1.0-rc.8 >"$OUT/dsh-install-$RUN_ID.log" 2>&1 \
+    "@deepseek-ai/dsh@$DSH_VERSION" >"$OUT/dsh-install-$RUN_ID.log" 2>&1 \
     || fail "could not install the pinned dsh CLI"
   DSH_BIN="$DSH_PREFIX/node_modules/.bin/dsh"
 fi

@@ -106,6 +106,7 @@ trap cleanup EXIT
 command -v tmux >/dev/null 2>&1 || fail "tmux is required"
 "$NODE_BIN" -e 'const a=process.versions.node.split(".").map(Number), b=[22,19,0]; process.exit(a[0]>b[0] || (a[0]===b[0] && (a[1]>b[1] || (a[1]===b[1] && a[2]>=b[2]))) ? 0 : 1)' \
   || fail "pinned dsh requires Node >=22.19.0 (got $($NODE_BIN --version))"
+DSH_VERSION="$("$NODE_BIN" -p "require('$ROOT/bridge/grok-leader/package.json').dsh.testedVersion")"
 
 mkdir -p "$OUT" "$SCRATCH" "$SCRATCH/e2e-bin" "$SCRATCH/fixture-plugin"
 export PATH="$(dirname "$NODE_BIN"):$SCRATCH/e2e-bin:$PATH"
@@ -125,12 +126,13 @@ fi
 
 if [[ -n "${DSCODE_E2E_DSH_BIN:-}" ]]; then
   DSH_BIN="$DSCODE_E2E_DSH_BIN"
-elif command -v dsh >/dev/null 2>&1; then
+elif command -v dsh >/dev/null 2>&1 \
+  && [[ "$(dsh --version 2>/dev/null | head -1 || true)" == "$DSH_VERSION" ]]; then
   DSH_BIN="$(command -v dsh)"
 else
   DSH_PREFIX="$SCRATCH/dsh-cli"
   npm install --prefix "$DSH_PREFIX" --ignore-scripts --no-audit --no-fund \
-    @deepseek-ai/dsh@0.1.0-rc.8 >"$OUT/dsh-install-$RUN_ID.log" 2>&1 \
+    "@deepseek-ai/dsh@$DSH_VERSION" >"$OUT/dsh-install-$RUN_ID.log" 2>&1 \
     || fail "could not install the pinned dsh CLI"
   DSH_BIN="$DSH_PREFIX/node_modules/.bin/dsh"
 fi
@@ -215,6 +217,12 @@ agent-default-model:
   provider: fake
   model: fake-model
 EOF
+cat >"$SCRATCH/.credentials.yaml" <<'EOF'
+# legacy flat document retained through the 0.1.1 migration
+LEGACY_FILE_KEY: legacy-secret
+EOF
+chmod 600 "$SCRATCH/.credentials.yaml"
+
 
 cat >"$SCRATCH/fixture-plugin/package.json" <<'EOF'
 {
@@ -388,6 +396,16 @@ if grep -Eqi 'grok-4|api\.x\.ai|xai\.com' "$HEADLESS_OUT" "$HEADLESS_ERR"; then
   fail "headless dscode leaked to the embedded xAI path"
 fi
 wait_leader_exit "$HEADLESS_SOCKET"
+"$NODE_BIN" -e '
+  const fs = require("node:fs")
+  const value = fs.readFileSync(process.argv[1], "utf8")
+  if (!/^version: 1$/m.test(value)) throw new Error("missing version 1 marker")
+  if (!/^refs:$/m.test(value)) throw new Error("missing refs mapping")
+  if (!/^  LEGACY_FILE_KEY: legacy-secret$/m.test(value)) {
+    throw new Error("legacy credential reference was not retained")
+  }
+' "$SCRATCH/.credentials.yaml" || fail "dsh did not migrate the legacy credential document"
+
 
 audit_responses_preset() {
   preset="$1"
@@ -637,6 +655,14 @@ grep -q -- '--restore-code is not supported by dscode' "$RESTORE_CODE_ERR" \
 
 echo "[tui] booting CLI-managed worktree"
 boot "$SOCKET" "--worktree=$WORKTREE_LABEL" --worktree-ref HEAD
+grep -q '^version: 1' "$SCRATCH/.credentials.yaml" \
+  || fail "new dsh did not migrate the legacy credentials document"
+grep -q '^refs:' "$SCRATCH/.credentials.yaml" \
+  || fail "migrated credentials document has no refs section"
+grep -q '  LEGACY_FILE_KEY: legacy-secret' "$SCRATCH/.credentials.yaml" \
+  || fail "credential migration lost the legacy reference"
+grep -q '# legacy flat document retained' "$SCRATCH/.credentials.yaml" \
+  || fail "credential migration did not preserve comments"
 wait_frame "worktree creation" 'Worktree ready:' 300
 worktree_matches=("$SCRATCH/dsc-tui/worktrees"/*/"$WORKTREE_LABEL")
 WORKTREE_PATH="${worktree_matches[0]}"

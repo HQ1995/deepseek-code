@@ -51,8 +51,8 @@ declare module '@deepseek-ai/dsh-session/types' {
 
 const MODEL_SELECTION_EVENT = 'dscode/model-selected' as const
 const LEGACY_MODEL_SELECTION_EVENT = 'model/selected' as const
-// dsh rc.8 exports its persistence vocabulary as a mutable Set but has no
-// downstream registration method yet. Register before any session restore.
+// dsh exports its persistence vocabulary as a mutable Set but has no downstream
+// registration method. Register before any session restore.
 const knownSessionEventTypes = KNOWN_SESSION_EVENT_TYPES as Set<string>
 knownSessionEventTypes.add(MODEL_SELECTION_EVENT)
 knownSessionEventTypes.add(LEGACY_MODEL_SELECTION_EVENT)
@@ -272,7 +272,7 @@ async function readBoundedModelListing(response: Response): Promise<unknown> {
   return JSON.parse(new TextDecoder().decode(body)) as unknown
 }
 
-/** Best-effort second read for endpoint capability extensions that dsh rc.8's
+/** Best-effort second read for endpoint capability extensions that dsh's
  * official discovery intentionally drops from LlmDiscoveredModel. */
 async function discoverEndpointModelCapabilities(
   baseURL: string,

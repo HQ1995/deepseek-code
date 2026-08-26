@@ -3336,7 +3336,7 @@ describe('x.ai/providers/add', () => {
         reasoning_efforts: [
           { value: 'high', label: 'High Effort' },
           { value: 'max', label: 'Max Effort', default: true },
-          { value: 'ultra', label: 'Unsupported by pi-ai rc.8' },
+          { value: 'ultra', label: 'Unsupported by pi-ai' },
         ],
       }],
     }), { status: 200, headers: { 'content-type': 'application/json' } }))

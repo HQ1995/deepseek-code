@@ -1,6 +1,6 @@
 {
   // Out-of-tree build against the published npm dsh packages: the bridge's
-  // peers (@deepseek-ai/dsh-* on the ^0.1.0-rc.8 line) install as
+  // peers (@deepseek-ai/dsh-* on the ^0.1.1-rc.2 line) install as
   // devDependencies for this tsc build and resolve at runtime from this
   // tree — no harness checkout required.
   "compilerOptions": {
