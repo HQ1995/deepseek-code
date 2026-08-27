@@ -207,11 +207,9 @@ impl ModelState {
     /// `meta` (the ACP extension point — same source as `totalContextTokens`).
     ///
     /// Honors an explicit `acceptsImages` bool, else an `inputModalities` array
-    /// containing `"image"`. DEFAULTS TO `true` when neither key is present:
-    /// correct today (all current Grok models accept images, so nothing is
-    /// suppressed) and forward-compatible (suppresses non-vision models once the
-    /// ACP server populates the key). Populating that key server-side is a
-    /// separate change.
+    /// containing `"image"`. Missing metadata fails closed: dscode supports
+    /// arbitrary provider catalogs, so absence cannot be treated as proof that
+    /// a model accepts binary input.
     pub fn current_model_accepts_images(&self) -> bool {
         let Some(meta) = self
             .current
@@ -219,7 +217,7 @@ impl ModelState {
             .and_then(|id| self.available.get(id))
             .and_then(|info| info.meta.as_ref())
         else {
-            return true;
+            return false;
         };
         if let Some(accepts) = meta.get("acceptsImages").and_then(|v| v.as_bool()) {
             return accepts;
@@ -229,7 +227,7 @@ impl ModelState {
                 .iter()
                 .any(|m| m.as_str().is_some_and(|s| s.eq_ignore_ascii_case("image")));
         }
-        true
+        false
     }
 
     /// Get the effective context window size (tokens).
@@ -521,13 +519,13 @@ mod tests {
     }
 
     #[test]
-    fn accepts_images_defaults_true_when_meta_absent() {
-        // No current model, empty meta, and a meta without the key all default
-        // permissive — correct today and a no-op until the server populates it.
-        assert!(ModelState::default().current_model_accepts_images());
-        assert!(state_with_meta(None).current_model_accepts_images());
+    fn accepts_images_defaults_false_when_meta_absent() {
+        // No selected model or no affirmative capability metadata is not proof
+        // of image support.
+        assert!(!ModelState::default().current_model_accepts_images());
+        assert!(!state_with_meta(None).current_model_accepts_images());
         assert!(
-            state_with_meta(Some(serde_json::json!({ "totalContextTokens": 256000 })))
+            !state_with_meta(Some(serde_json::json!({ "totalContextTokens": 256000 })))
                 .current_model_accepts_images()
         );
     }

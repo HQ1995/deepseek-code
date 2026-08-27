@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-attachment'
 import { SessionId, type SessionEvent, type UserMessage } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
@@ -50,12 +51,17 @@ function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry {
   const created: Array<{ sessionId: string; cwd?: string }> = []
   const resumed: Array<{ sessionId: string }> = []
   const byId = new Map<string, MockAgent>()
-  const makeAgent = (sessionId: SessionId, cwd: string | undefined, agentPreset?: string): MockAgent => {
+  const makeAgent = (
+    sessionId: SessionId,
+    cwd: string | undefined,
+    agentPreset?: string,
+    options: AgentOptions = {},
+  ): MockAgent => {
     const internals: MockAgentInternals = { cancelCalls: 0, followups: [], steered: [], messages: [], disposed: false, idleWaiters: [], status: 'idle' }
     const events: Array<{ type: string; data: unknown; seq: number; time: number }> = []
     const agent = {
       id: sessionId,
-      options: {} as AgentOptions,
+      options,
       session: {
         id: sessionId,
         header: { id: sessionId, version: 0, createdAt: 0, ...cwd === undefined ? {} : { cwd }, ...agentPreset === undefined ? {} : { agentPreset } },
@@ -105,21 +111,21 @@ function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry {
     resumed,
     byId,
     async create(options) {
-      const o = options as { sessionId: SessionId; meta?: { cwd?: string; agentPreset?: string }; setup?: (agentCtx: Context) => unknown }
+      const o = options as { sessionId: SessionId; meta?: { cwd?: string; agentPreset?: string }; agentOptions?: AgentOptions; setup?: (agentCtx: Context) => unknown }
       created.push({
         sessionId: o.sessionId,
         ...o.meta?.cwd === undefined ? {} : { cwd: o.meta.cwd },
         ...o.meta?.agentPreset === undefined ? {} : { agentPreset: o.meta.agentPreset },
       })
       if (o.setup !== undefined) await o.setup(ctx)
-      const agent = makeAgent(o.sessionId, o.meta?.cwd, o.meta?.agentPreset)
+      const agent = makeAgent(o.sessionId, o.meta?.cwd, o.meta?.agentPreset, o.agentOptions)
       return { agent, dispose: async () => { agent.internals.disposed = true; byId.delete(o.sessionId) } }
     },
     async resume(options) {
-      const o = options as { resumeSessionId: SessionId; setup?: (agentCtx: Context) => unknown }
+      const o = options as { resumeSessionId: SessionId; agentOptions?: AgentOptions; setup?: (agentCtx: Context) => unknown }
       resumed.push({ sessionId: o.resumeSessionId })
       if (o.setup !== undefined) await o.setup(ctx)
-      const agent = makeAgent(o.resumeSessionId, undefined)
+      const agent = makeAgent(o.resumeSessionId, undefined, undefined, o.agentOptions)
       return { agent, dispose: async () => { agent.internals.disposed = true; byId.delete(o.resumeSessionId) } }
     },
     get(id) { return byId.get(id) },
@@ -136,6 +142,22 @@ const mockLlm = {
     : provider === 'pi'
       ? [{ provider: 'pi', id: 'pi-code', name: 'Pi Code' }]
       : [],
+}
+
+const mockVisionLlm = {
+  listProviders: () => [{ id: 'vision', name: 'Vision Provider' }],
+  listModels: async () => [{
+    provider: 'vision',
+    id: 'vision-model',
+    name: 'Vision Model',
+    inputModalities: ['text', 'image'],
+  }],
+  resolveModelInfo: async () => ({
+    provider: 'vision',
+    id: 'vision-model',
+    name: 'Vision Model',
+    inputModalities: ['text', 'image'],
+  }),
 }
 
 /** Two providers that both list the id "shared": exercises the catalog dedup. */
@@ -175,13 +197,13 @@ function makeMockPresets() {
     ],
     resolve: async (id?: string) => {
       resolved.push(id)
-      const chosen = id ?? 'minimal'
+      const chosen = id ?? 'standard'
       if (chosen === 'standard' || chosen === 'code' || chosen === 'minimal' || chosen === 'cordis') return { id: chosen }
       throw new Error('agent-presets: preset "' + chosen + '" not found (available: standard, cordis, minimal, code)')
     },
     mount: async (_agentCtx: unknown, id?: string) => {
-      mounted.push(id ?? 'minimal')
-      return { id: id ?? 'minimal' }
+      mounted.push(id ?? 'standard')
+      return { id: id ?? 'standard' }
     },
     recompose: async (_agentCtx: unknown, id: string) => {
       recomposed.push(id)
@@ -210,6 +232,17 @@ const mockSessionsStore = {
   flush: async (session: object) => { mockSessionsStore.flushed.push(session); return true },
 }
 
+const mockAttachments = {
+  saveImages: async (inputs: ReadonlyArray<{ data: Uint8Array; mediaType: string }>) =>
+    inputs.map((input, index) => ({
+      attachmentId: 'test-image-' + String(index),
+      mediaType: input.mediaType,
+      bytes: input.data.byteLength,
+      width: 1,
+      height: 1,
+    })),
+}
+
 interface LeaderHarness {
   ctx: Context
   pluginCtx: Context
@@ -225,6 +258,7 @@ interface HarnessOptions {
   llm?: unknown
   model?: string
   settings?: unknown
+  attachments?: unknown
   commands?: unknown
   userQuestions?: unknown
   credentials?: unknown
@@ -373,6 +407,7 @@ async function makeHarness(
   const presets = options.presets === true ? makeMockPresets() : undefined
   ctx.provide('agents', registry as unknown as Context['agents'])
   ctx.provide('llm', options.llm ?? mockLlm as unknown as Context['llm'])
+  ctx.provide('attachments', (options.attachments ?? mockAttachments) as unknown as Context['attachments'])
   // Stub settings service: initialize awaits the real one for a bounded time,
   // which tests must not spend when the harness composes no settings provider.
   ctx.provide('settings', (options.settings ?? { mutate: async () => {} }) as unknown as Context['settings'])
@@ -464,9 +499,9 @@ describe('grok leader over a unix socket', () => {
         modelState: {
           currentModelId: 'deepseek-chat',
           availableModels: [
-            { modelId: 'deepseek-chat', name: 'DeepSeek Chat', _meta: { provider: 'deepseek', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoningEffort: 'high' } },
-            { modelId: 'deepseek-reasoner', name: 'DeepSeek Reasoner', _meta: { provider: 'deepseek', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
-            { modelId: 'pi-code', name: 'Pi Code', _meta: { provider: 'pi', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+            { modelId: 'deepseek-chat', name: 'DeepSeek Chat', _meta: { provider: 'deepseek', supportsReasoningEffort: true, acceptsImages: false, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoningEffort: 'high' } },
+            { modelId: 'deepseek-reasoner', name: 'DeepSeek Reasoner', _meta: { provider: 'deepseek', supportsReasoningEffort: true, acceptsImages: false, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+            { modelId: 'pi-code', name: 'Pi Code', _meta: { provider: 'pi', supportsReasoningEffort: true, acceptsImages: false, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
           ],
           _meta: {
             currentProviderId: 'deepseek',
@@ -522,6 +557,47 @@ describe('grok leader over a unix socket', () => {
     })
   })
 
+  it('advertises exact model image capabilities to the TUI composer', async () => {
+    const llm = {
+      listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' }],
+      listModels: async () => [
+        { id: 'vision', name: 'Vision', inputModalities: ['text', 'image'] },
+        { id: 'text-only', name: 'Text only', inputModalities: ['text'] },
+        { id: 'unknown', name: 'Unknown' },
+      ],
+      resolveModelInfo: async (_provider: string, model: string) => ({
+        provider: 'deepseek',
+        id: model,
+        name: model,
+        ...(model === 'unknown'
+          ? {}
+          : { inputModalities: model === 'vision' ? ['text', 'image'] : ['text'] }),
+      }),
+    }
+    const { client: c } = await start({ llm })
+    register(c)
+    await c.next()
+
+    const models = await c.request(1, 'x.ai/models/list', {})
+
+    expect(models.result).toMatchObject({
+      availableModels: [
+        {
+          modelId: 'vision',
+          _meta: { inputModalities: ['text', 'image'], acceptsImages: true },
+        },
+        {
+          modelId: 'text-only',
+          _meta: { inputModalities: ['text'], acceptsImages: false },
+        },
+        {
+          modelId: 'unknown',
+          _meta: { acceptsImages: false },
+        },
+      ],
+    })
+  })
+
   it('rejects an explicit provider/model pair owned by different routes', async () => {
     const { registry, client: c } = await start()
     register(c)
@@ -536,6 +612,42 @@ describe('grok leader over a unix socket', () => {
       message: 'requested provider/model is not in the catalog: pi/deepseek-chat',
     })
     expect(registry.created).toHaveLength(0)
+  })
+
+  it('lets an explicit wire model override a stale saved provider', async () => {
+    mockDefaultModel.current = { provider: 'removed-provider', model: 'deepseek-chat' }
+    const { registry, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { model: 'pi-code' },
+    })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+
+    expect(created.error).toBeUndefined()
+    expect(registry.byId.get(sessionId)?.options).toMatchObject({
+      provider: 'pi',
+      model: 'pi-code',
+    })
+  })
+
+  it('materializes the selected route into parent options for subagent inheritance', async () => {
+    const { registry, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { provider: 'pi', model: 'pi-code' },
+    })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+
+    expect(registry.byId.get(sessionId)?.options).toMatchObject({
+      provider: 'pi',
+      model: 'pi-code',
+    })
   })
 
   it('runs the session flow: new, prompt, cancel, models, list, load, close', async () => {
@@ -571,9 +683,9 @@ describe('grok leader over a unix socket', () => {
     expect(models.result).toEqual({
       currentModelId: 'deepseek-chat',
       availableModels: [
-        { modelId: 'deepseek-chat', name: 'DeepSeek Chat', _meta: { provider: 'deepseek', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoningEffort: 'high' } },
-        { modelId: 'deepseek-reasoner', name: 'DeepSeek Reasoner', _meta: { provider: 'deepseek', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
-        { modelId: 'pi-code', name: 'Pi Code', _meta: { provider: 'pi', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+        { modelId: 'deepseek-chat', name: 'DeepSeek Chat', _meta: { provider: 'deepseek', supportsReasoningEffort: true, acceptsImages: false, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoningEffort: 'high' } },
+        { modelId: 'deepseek-reasoner', name: 'DeepSeek Reasoner', _meta: { provider: 'deepseek', supportsReasoningEffort: true, acceptsImages: false, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+        { modelId: 'pi-code', name: 'Pi Code', _meta: { provider: 'pi', supportsReasoningEffort: true, acceptsImages: false, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
       ],
       _meta: {
         currentProviderId: 'deepseek',
@@ -1041,8 +1153,49 @@ describe('grok leader over a unix socket', () => {
     expect((promo!.params as { runningCombinedTexts?: string[] }).runningCombinedTexts).toEqual(['second', 'third'])
   })
 
+  it('keeps image-bearing queued prompts separate from combined text turns', async () => {
+    const { registry, client: c } = await start({
+      manualIdle: true,
+      combineQueuedPrompts: true,
+      followUpBehavior: 'queue',
+      llm: mockVisionLlm,
+    })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    sendRequest(c, 3, 'session/prompt', {
+      sessionId,
+      prompt: [
+        { type: 'text', text: 'second [Image #1]' },
+        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      ],
+    })
+    sendRequest(c, 4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'third' }] })
+    await waitFor(() => c.broadcasts.some(b => ((b.params as { entries?: unknown[] }).entries?.length ?? 0) === 2))
+
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.followups.includes('second [Image #1]'))
+    expect(agent.internals.messages[1]).toMatchObject({
+      content: [
+        { type: 'text', text: 'second [Image #1]' },
+        { type: 'image', attachment: { attachmentId: 'test-image-0' } },
+      ],
+    })
+    agent.internals.idleWaiters.shift()!()
+    await waitFor(() => agent.internals.followups.includes('third'))
+    expect(agent.internals.followups).toEqual(['first', 'second [Image #1]', 'third'])
+    agent.internals.idleWaiters.shift()!()
+  })
+
   it('rejects invalid session requests with JSON-RPC errors', async () => {
-    const { client: c } = await start()
+    const { client: c } = await start({ llm: mockVisionLlm })
     register(c)
     await c.next()
 
@@ -1059,7 +1212,129 @@ describe('grok leader over a unix socket', () => {
     expect(unknownSession.error).toEqual({ code: -32602, message: 'unknown session: missing' })
 
     const imagePrompt = await c.request(5, 'session/prompt', { sessionId, prompt: [{ type: 'image', data: '', mimeType: 'image/png' }] })
-    expect(imagePrompt.error).toEqual({ code: -32602, message: 'only text and resource_link prompt content is supported' })
+    expect(imagePrompt.error).toEqual({ code: -32602, message: 'Image upload is not canonical base64.' })
+  })
+
+  it('admits ACP image blocks into durable dsh user-message content', async () => {
+    const saved: Array<{ data: number[]; mediaType: string }> = []
+    const attachments = {
+      saveImages: async (inputs: ReadonlyArray<{ data: Uint8Array; mediaType: string }>) => {
+        saved.push(...inputs.map(input => ({ data: [...input.data], mediaType: input.mediaType })))
+        return inputs.map((input, index) => ({
+          attachmentId: 'durable-' + String(index),
+          mediaType: input.mediaType,
+          bytes: input.data.byteLength,
+          width: 1,
+          height: 1,
+        }))
+      },
+    }
+    const { registry, client: c } = await start({ attachments, llm: mockVisionLlm })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+
+    const result = await c.request(2, 'session/prompt', {
+      sessionId,
+      prompt: [
+        { type: 'text', text: 'inspect [Image #1]' },
+        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      ],
+    })
+
+    expect(result.error).toBeUndefined()
+    expect(saved).toEqual([{ data: [1, 2, 3], mediaType: 'image/png' }])
+    expect(registry.byId.get(sessionId)!.internals.messages[0]).toMatchObject({
+      content: [
+        { type: 'text', text: 'inspect [Image #1]' },
+        {
+          type: 'image',
+          attachment: {
+            attachmentId: 'durable-0',
+            mediaType: 'image/png',
+            bytes: 3,
+            width: 1,
+            height: 1,
+          },
+        },
+      ],
+    })
+  })
+
+  it('rejects images for a model with no affirmative multimodal metadata', async () => {
+    const saveImages = vi.fn(async () => [])
+    const { client: c } = await start({ attachments: { saveImages } })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+
+    const result = await c.request(2, 'session/prompt', {
+      sessionId,
+      prompt: [
+        { type: 'text', text: 'inspect [Image #1]' },
+        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      ],
+    })
+
+    expect(result.error).toEqual({
+      code: -32602,
+      message: 'selected model does not support image input: deepseek/deepseek-chat',
+    })
+    expect(saveImages).not.toHaveBeenCalled()
+  })
+
+  it('forwards exact cumulative cache usage even after streamed text suppressed the assembled message', async () => {
+    const { registry, pluginCtx, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const usageEvent = {
+      type: 'assistant/message',
+      seq: 0,
+      time: Date.now(),
+      data: {
+        turn: 0,
+        step: 0,
+        message: { role: 'assistant', content: [], source: { kind: 'model', provider: 'deepseek', model: 'vision' } },
+        usage: { inputTokens: 1, outputTokens: 5, cacheReadTokens: 999, cacheWriteTokens: 0 },
+      },
+    } as unknown as SessionEvent
+
+    pluginCtx.emit('session/event', agent.session, usageEvent)
+    expect(await c.next()).toMatchObject({
+      method: 'session/update',
+      params: {
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '' } },
+        _meta: { totalTokens: 1005, cacheHitPercent: '99.9' },
+      },
+    })
+    expect((await c.request(2, 'x.ai/session/info', { sessionId })).result).toMatchObject({
+      result: { context: { used: 1005, messageTokens: 1005 } },
+    })
+  })
+
+  it('reports completed compactions in session info', async () => {
+    const { registry, pluginCtx, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    pluginCtx.emit('session/event', agent.session, {
+      type: 'compaction/end',
+      seq: 0,
+      time: Date.now(),
+      data: { compactionId: 'compaction-test', turn: null },
+    } as unknown as SessionEvent)
+
+    expect((await c.request(2, 'x.ai/session/info', { sessionId })).result).toMatchObject({
+      result: { context: { compactionCount: 1 } },
+    })
   })
 
   it('session/new rejects any non-empty or non-array mcpServers value', async () => {
@@ -1110,7 +1385,7 @@ describe('grok leader over a unix socket', () => {
       _meta: { modelState: { availableModels: Array<{ modelId: string; _meta?: Record<string, unknown> }> } }
     })._meta.modelState
     const advertised = modelState.availableModels.find(model => model.modelId === 'deepseek-v4-flash')
-    expect(advertised?._meta).toEqual({ provider: 'ocx', supportsReasoningEffort: false })
+    expect(advertised?._meta).toEqual({ provider: 'ocx', supportsReasoningEffort: false, acceptsImages: false })
 
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
@@ -1564,6 +1839,57 @@ describe('grok leader over a unix socket', () => {
     expect(presets?.mounted).toEqual(['code'])
   })
 
+  it('remembers every successfully applied manual preset for future sessions', async () => {
+    const mutations: Array<{ ns: string; ops: unknown }> = []
+    const settings = {
+      describe: () => [{ ns: 'agent-presets', user: {} }],
+      mutate: async (ns: string, ops: unknown) => { mutations.push({ ns, ops }) },
+    }
+    const { client: c } = await start({ presets: true, settings })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { agentProfile: 'code', rememberAgentPreset: true },
+    })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    await c.request(2, 'session/load', {
+      sessionId,
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { agentProfile: 'minimal', rememberAgentPreset: true },
+    })
+    await c.request(3, 'session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text: '/preset cordis' }],
+    })
+
+    expect(mutations).toEqual([
+      { ns: 'agent-presets', ops: [{ op: 'set', path: ['default'], value: 'code' }] },
+      { ns: 'agent-presets', ops: [{ op: 'set', path: ['default'], value: 'minimal' }] },
+      { ns: 'agent-presets', ops: [{ op: 'set', path: ['default'], value: 'cordis' }] },
+    ])
+  })
+
+  it('keeps an unmarked preset override session-local', async () => {
+    const mutations: unknown[] = []
+    const settings = {
+      mutate: async (_ns: string, ops: unknown) => { mutations.push(ops) },
+    }
+    const { client: c } = await start({ presets: true, settings })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+      _meta: { agentProfile: 'minimal' },
+    })
+
+    expect(created.error).toBeUndefined()
+    expect(mutations).toEqual([])
+  })
+
   it('lists the dsh preset roster as bundle/status personas', async () => {
     const { client: c } = await start({ presets: true })
     register(c)
@@ -1572,6 +1898,7 @@ describe('grok leader over a unix socket', () => {
     expect(status.error).toBeUndefined()
     expect(status.result).toEqual({
       hasCache: true,
+      defaultPersona: 'standard',
       personas: ['standard', 'code', 'minimal', 'cordis'],
       roles: [],
       agents: [],
@@ -1698,8 +2025,8 @@ describe('grok leader over a unix socket', () => {
     await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
-    expect(registry.created).toEqual([{ sessionId, cwd: process.cwd(), agentPreset: 'minimal' }])
-    expect(presets?.mounted).toEqual(['minimal'])
+    expect(registry.created).toEqual([{ sessionId, cwd: process.cwd(), agentPreset: 'standard' }])
+    expect(presets?.mounted).toEqual(['standard'])
   })
 
   it('does not advertise subagents when the selected preset exposes no delegation tool', async () => {
@@ -2258,10 +2585,17 @@ describe('grok leader over a unix socket', () => {
         if (!/^\/confirm(\s|$)/.test(line)) return undefined
         const answer = await questionService.provider!.ask({
           agent,
-          questions: [{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }, { label: 'No' }] }],
-        }) as { answers: Array<{ id: string; selected: string[] }> }
+          questions: [{
+            id: 'q1',
+            header: 'Deployment decision',
+            question: 'Proceed?',
+            detail: 'Review both lines.\nKeep the rollback ready.',
+            options: [{ label: 'Yes' }, { label: 'No' }],
+          }],
+        }) as { answers: Array<{ id: string; selected: string[]; custom?: string }> }
         const picked = answer.answers[0]?.selected[0] ?? 'nothing'
-        return { commandId: 'c1', result: { kind: 'success', text: 'confirmed: ' + picked } }
+        const custom = answer.answers[0]?.custom
+        return { commandId: 'c1', result: { kind: 'success', text: 'confirmed: ' + picked + (custom === undefined ? '' : '\n' + custom) } }
       },
     }
     const { client: c } = await start({ commands: commandsService, userQuestions: questionService })
@@ -2280,26 +2614,39 @@ describe('grok leader over a unix socket', () => {
     const reverse = c.all.find(m => m.method === 'x.ai/ask_user_question')!
     const inner = reverse.params as { method: string; params: { sessionId: string; questions: Array<{ question: string; options: Array<{ label: string }> }> } }
     expect(inner.params.sessionId).toBe(sessionId)
-    expect(inner.params.questions[0].question).toBe('Proceed?')
+    const displayQuestion = 'Deployment decision\nProceed?\nReview both lines.\nKeep the rollback ready.'
+    expect(inner.params.questions[0].question).toBe(displayQuestion)
     expect(inner.params.questions[0].options.map(o => o.label)).toEqual(['Yes', 'No'])
 
     // Answer as the grok TUI would: accepted, keyed by question text.
-    c.send({ type: 'acp', payload: JSON.stringify({ jsonrpc: '2.0', id: reverse.id, result: { outcome: 'accepted', answers: { 'Proceed?': ['Yes'] } } }) })
+    c.send({ type: 'acp', payload: JSON.stringify({
+      jsonrpc: '2.0',
+      id: reverse.id,
+      result: {
+        outcome: 'accepted',
+        answers: { [displayQuestion]: ['Yes', 'Other'] },
+        annotations: { [displayQuestion]: { notes: 'first line\nsecond line' } },
+      },
+    }) })
 
     const settled = await waitForId(c, 2)
     expect(settled.result).toMatchObject({ stopReason: 'end_turn', _meta: { promptId: 'ask-1' } })
     await waitFor(() => c.all.some(m => m.method === 'session/update'
-      && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '') === 'confirmed: Yes'))
+      && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '') === 'confirmed: Yes\nfirst line\nsecond line'))
   })
 
   it('surfaces dsh-registry commands as slash commands and routes them to execute()', async () => {
     const executed: string[] = []
+    const commandImages: unknown[][] = []
+    const commandSignals: boolean[] = []
     const commandsService = {
-      list: () => [{ name: 'greet', description: 'Say hello', input: { hint: '<name>' } }],
-      execute: async (_agent: unknown, line: string) => {
+      list: () => [{ name: 'greet', description: 'Say hello', input: { hint: '<name>', images: true } }],
+      execute: async (_agent: unknown, line: string, images: unknown[], signal: AbortSignal) => {
         const parsed = /^\/greet(\s+(.*))?$/.exec(line)
         if (parsed === null) return undefined
         executed.push(line)
+        commandImages.push(images)
+        commandSignals.push(signal instanceof AbortSignal)
         return { commandId: 'c1', result: { kind: 'success', text: 'hello ' + (parsed[2] ?? 'world') } }
       },
     }
@@ -2323,15 +2670,84 @@ describe('grok leader over a unix socket', () => {
     const settled = await waitForId(c, 2)
     expect(settled.result).toMatchObject({ stopReason: 'end_turn', _meta: { promptId: 'greet-1' } })
     expect(executed).toEqual(['/greet dscode'])
+    expect(commandImages).toEqual([[]])
+    expect(commandSignals).toEqual([true])
     await waitFor(() => c.all.some(m => m.method === 'session/update'
       && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '') === 'hello dscode'))
     expect(agent.internals.followups).toEqual([])
 
+    // rc.2 commands receive raw composer images before their registry performs
+    // command-specific durable admission.
+    sendRequest(c, 3, 'session/prompt', {
+      sessionId,
+      prompt: [
+        { type: 'text', text: '/greet picture' },
+        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      ],
+    })
+    expect((await waitForId(c, 3)).result).toMatchObject({ stopReason: 'end_turn' })
+    expect(executed).toEqual(['/greet dscode', '/greet picture'])
+    expect(commandImages[1]).toEqual([{ data: 'AQID', mediaType: 'image/png' }])
+    expect(commandSignals).toEqual([true, true])
+
     // Unknown slash text falls through to the model unchanged.
-    sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/nope do it' }] })
+    sendRequest(c, 4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/nope do it' }] })
     await waitFor(() => agent.internals.followups.includes('/nope do it'))
     agent.internals.idleWaiters.shift()?.()
-    await waitForId(c, 3)
+    await waitForId(c, 4)
+  })
+
+  it('discovers and executes the preset-scoped dsh compact command', async () => {
+    const executions: Array<{ line: string; images: unknown[]; signal: boolean }> = []
+    const commandsService = {
+      list: () => [{ name: 'compact', description: 'Compact older conversation history' }],
+      execute: async (_agent: unknown, line: string, images: unknown[], signal: AbortSignal) => {
+        if (line !== '/compact') return undefined
+        executions.push({ line, images, signal: signal instanceof AbortSignal })
+        return { commandId: 'compact-1', result: { kind: 'success', text: 'No compactable history yet.' } }
+      },
+    }
+    const { registry, client: c } = await start({ commands: commandsService })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    await waitFor(() => c.all.some(message => JSON.stringify(message).includes('"name":"compact"')))
+    sendRequest(c, 2, 'session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text: '/compact' }],
+      _meta: { promptId: 'compact-prompt' },
+    })
+
+    expect((await waitForId(c, 2)).result).toMatchObject({
+      stopReason: 'end_turn',
+      _meta: { promptId: 'compact-prompt' },
+    })
+    expect(executions).toEqual([{ line: '/compact', images: [], signal: true }])
+    await waitFor(() => c.all.some(message => JSON.stringify(message).includes('No compactable history yet.')))
+    expect(agent.internals.followups).toEqual([])
+  })
+
+  it('fails a raw compact request closed when the preset has no compact command', async () => {
+    const { registry, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text: '/compact' }],
+    })
+
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'end_turn' })
+    await waitFor(() => c.all.some(message => JSON.stringify(message).includes(
+      'Manual compaction is unavailable in the selected preset.',
+    )))
+    expect(agent.internals.followups).toEqual([])
   })
 
   it('reports the services and effects a loaded plugin brought, generically', async () => {
@@ -2672,10 +3088,10 @@ describe('grok leader over a unix socket', () => {
       _meta: { modelState: { currentModelId: string; availableModels: Array<{ modelId: string; name: string }> } }
     })._meta.modelState
     expect(modelState.availableModels).toEqual([
-      { modelId: 'shared', name: 'Shared A', _meta: { provider: 'a', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoningEffort: 'high' } },
-      { modelId: 'only-a', name: 'Only A', _meta: { provider: 'a', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
-      { modelId: 'b:shared', name: 'Shared B', _meta: { provider: 'b', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
-      { modelId: 'only-b', name: 'Only B', _meta: { provider: 'b', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+      { modelId: 'shared', name: 'Shared A', _meta: { provider: 'a', supportsReasoningEffort: true, acceptsImages: false, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoningEffort: 'high' } },
+      { modelId: 'only-a', name: 'Only A', _meta: { provider: 'a', supportsReasoningEffort: true, acceptsImages: false, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+      { modelId: 'b:shared', name: 'Shared B', _meta: { provider: 'b', supportsReasoningEffort: true, acceptsImages: false, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+      { modelId: 'only-b', name: 'Only B', _meta: { provider: 'b', supportsReasoningEffort: true, acceptsImages: false, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
     ])
     expect(modelState.currentModelId).toEqual('shared')
 
@@ -2683,10 +3099,10 @@ describe('grok leader over a unix socket', () => {
     expect(models.result).toEqual({
       currentModelId: 'shared',
       availableModels: [
-        { modelId: 'shared', name: 'Shared A', _meta: { provider: 'a', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoningEffort: 'high' } },
-        { modelId: 'only-a', name: 'Only A', _meta: { provider: 'a', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
-        { modelId: 'b:shared', name: 'Shared B', _meta: { provider: 'b', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
-        { modelId: 'only-b', name: 'Only B', _meta: { provider: 'b', supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+        { modelId: 'shared', name: 'Shared A', _meta: { provider: 'a', supportsReasoningEffort: true, acceptsImages: false, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoningEffort: 'high' } },
+        { modelId: 'only-a', name: 'Only A', _meta: { provider: 'a', supportsReasoningEffort: true, acceptsImages: false, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+        { modelId: 'b:shared', name: 'Shared B', _meta: { provider: 'b', supportsReasoningEffort: true, acceptsImages: false, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
+        { modelId: 'only-b', name: 'Only B', _meta: { provider: 'b', supportsReasoningEffort: true, acceptsImages: false, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] } },
       ],
       _meta: {
         currentProviderId: 'a',
@@ -3902,6 +4318,17 @@ describe('x.ai/providers/remove', () => {
     const res = await client.request(1, 'x.ai/providers/remove', { id: 'acme-gateway' })
     expect(res.error).toBeUndefined()
     expect(unset).toHaveBeenCalledWith('ACME_KEY')
+  })
+})
+
+describe('cacheHitPercent', () => {
+  it('shows only a true full hit as 100 and preserves near-full precision', () => {
+    expect(GrokLeader.cacheHitPercent(0, 0, 0)).toBeUndefined()
+    expect(GrokLeader.cacheHitPercent(0, 1000, 0)).toBe('100')
+    expect(GrokLeader.cacheHitPercent(1, 1, 0)).toBe('50')
+    expect(GrokLeader.cacheHitPercent(5, 995, 0)).toBe('99.5')
+    expect(GrokLeader.cacheHitPercent(1, 999, 0)).toBe('99.9')
+    expect(GrokLeader.cacheHitPercent(1, 9999, 0)).toBe('99.99')
   })
 })
 

@@ -1565,6 +1565,7 @@ fn bundle_status_ready_populates_state() {
         Action::TaskComplete(TaskResult::BundleStatusReady {
             has_cache: true,
             version: Some("v2".into()),
+            default_persona: Some("researcher".into()),
             personas: vec!["researcher".into(), "auditor".into()],
             roles: vec!["reviewer".into()],
             agents: vec!["default".into()],
@@ -1587,6 +1588,7 @@ fn bundle_status_ready_populates_state() {
 
     assert!(app.bundle_state.has_cache);
     assert_eq!(app.bundle_state.version, "v2");
+    assert_eq!(app.preset_default, "researcher");
     assert_eq!(app.bundle_state.personas, vec!["researcher", "auditor"]);
     assert_eq!(app.bundle_state.roles, vec!["reviewer"]);
     assert_eq!(app.bundle_state.agents, vec!["default"]);

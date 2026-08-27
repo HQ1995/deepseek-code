@@ -568,10 +568,12 @@ pub(crate) fn default_palette_entries(
     entries.retain(|entry| {
         if let PaletteCommand::SlashCommand(text) = &entry.command
             && let Some(invocation) = crate::slash::parse_invocation(text.trim())
-            && !slash
-                .registry()
-                .mode_support(invocation.token)
-                .supports(screen_mode)
+            && ((invocation.token == "compact"
+                && slash.registry().get(invocation.token).is_none())
+                || !slash
+                    .registry()
+                    .mode_support(invocation.token)
+                    .supports(screen_mode))
         {
             return false;
         }
@@ -1334,14 +1336,17 @@ mod palette_tests {
             "palette entry must use the 'Agent Dashboard' label"
         );
     }
-    fn slash_rows(mode: crate::app::ScreenMode) -> Vec<String> {
-        default_palette_entries(true, &slash(mode))
+    fn slash_rows_with(slash: &crate::slash::SlashController) -> Vec<String> {
+        default_palette_entries(true, slash)
             .into_iter()
             .filter_map(|entry| match entry.command {
                 PaletteCommand::SlashCommand(text) => Some(text.trim().to_string()),
                 _ => None,
             })
             .collect()
+    }
+    fn slash_rows(mode: crate::app::ScreenMode) -> Vec<String> {
+        slash_rows_with(&slash(mode))
     }
     #[test]
     fn palette_drops_slash_rows_the_mode_cannot_run() {
@@ -1350,8 +1355,8 @@ mod palette_tests {
             assert!(!minimal.contains(&gated.to_string()), "{gated} in minimal");
         }
         assert!(
-            minimal.contains(&"/compact".to_string()),
-            "mode-agnostic rows stay: {minimal:?}"
+            !minimal.contains(&"/compact".to_string()),
+            "undiscovered ACP commands stay hidden: {minimal:?}"
         );
         let fullscreen = slash_rows(crate::app::ScreenMode::Fullscreen);
         for offered in ["/theme", "/dashboard", "/tutorial"] {
@@ -1360,6 +1365,17 @@ mod palette_tests {
                 "{offered} missing in fullscreen"
             );
         }
+    }
+    #[test]
+    fn palette_includes_discovered_acp_command() {
+        let mut controller = slash(crate::app::ScreenMode::Fullscreen);
+        controller.registry_mut().set_acp_commands(&[
+            agent_client_protocol::AvailableCommand::new(
+                "compact".to_string(),
+                "Compact conversation history".to_string(),
+            ),
+        ]);
+        assert!(slash_rows_with(&controller).contains(&"/compact".to_string()));
     }
     #[test]
     fn every_palette_slash_row_resolves_to_a_registered_command() {

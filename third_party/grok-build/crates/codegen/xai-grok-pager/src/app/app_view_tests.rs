@@ -167,6 +167,7 @@ pub(crate) fn test_app() -> AppView {
         resume_local_miss: None,
         agent_override: None,
         persona_override: None,
+        preset_default: "standard".to_string(),
         bootstrap_acp_commands: Vec::new(),
         auth_methods: Vec::new(),
         auth_state: AuthState::Done,

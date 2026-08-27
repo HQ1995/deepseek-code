@@ -29,6 +29,8 @@ pub struct BundleStatusResult {
     pub has_cache: bool,
     /// `None` when `has_cache` is false (shell omits the field).
     pub version: Option<String>,
+    #[serde(default)]
+    pub default_persona: Option<String>,
     pub personas: Vec<String>,
     pub roles: Vec<String>,
     pub agents: Vec<String>,
@@ -100,6 +102,7 @@ mod tests {
         let json = r#"{
             "hasCache": true,
             "version": "v2",
+            "defaultPersona": "researcher",
             "personas": ["researcher"],
             "roles": ["reviewer"],
             "agents": [],
@@ -116,6 +119,7 @@ mod tests {
             }]
         }"#;
         let r: BundleStatusResult = serde_json::from_str(json).expect("parse");
+        assert_eq!(r.default_persona.as_deref(), Some("researcher"));
         assert_eq!(r.persona_details.len(), 1);
         assert_eq!(r.persona_details[0].name, "researcher");
         assert_eq!(

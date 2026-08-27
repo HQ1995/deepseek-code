@@ -31,6 +31,10 @@ The dsh runtime install and compressed TUI download run in parallel.
 
 A fresh profile has no provider or API key. Open `/provider --add` and choose
 a template or Custom; dscode does not restrict which provider you use.
+Fresh profiles start new sessions with dsh's `standard` preset: native coding
+tools, automatic compaction, planning, skills, goals, subagents, and workflows.
+Choose `code`, `minimal`, `cordis`, or an installed preset with `/preset`; a
+successful manual choice becomes the default for later new sessions.
 
 ## Use
 
@@ -54,11 +58,19 @@ no-data-loss gate unless `--force` is explicit.
 Headless output formats are `plain`, `json`, `streaming-json`, and
 `streaming-messages-json`.
 
+Interactive prompts accept pasted or dragged PNG, JPEG, WebP, and GIF images
+when the selected model advertises image input. dscode stores them through
+dsh's durable attachment service; the provider adapter handles request resizing
+and encoding. The status row shows the cumulative prompt-cache hit percentage.
+Question cards preserve multiline detail and accept Shift+Enter in free-form
+answers.
+
 Useful in-app commands:
 
 - `/model` — choose model and reasoning effort; choices persist
 - `/provider` and `/provider --add` — select or add any provider
 - `/preset` or `Ctrl+Y` — choose any discovered preset; four ship by default
+- `/compact` — manually compact older history when the active preset provides dsh compaction
 - `/dsh plugins` — inspect profile plugins
 - `Ctrl+W` on the welcome screen — create a managed isolated Git worktree
 - `Ctrl+S` — open durable session resume

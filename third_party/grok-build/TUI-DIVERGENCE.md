@@ -56,14 +56,17 @@ branding (our identity). Keep this list current on every sync.
 - Leader mode: --leader/--leader-socket flags connect the TUI to our bridge
   over the grok leader unix-socket protocol instead of x.ai; local xai auth
   is bypassed in leader mode.
-- Default preset label: hardcoded fallback "standard" -> "minimal" in
-  crates/codegen/xai-grok-pager/src/app/app_view.rs (2 sites), matching the
-  bridge's default preset (minimal). Coupled change: if the bridge default
-  ever changes, update these labels too.
+- Default preset label: `app/app_view.rs` starts at `"standard"` until the
+  bridge's `x.ai/bundle/status.defaultPersona` arrives, then renders the dsh
+  roster's remembered `agent-presets.default`. A live manual selection still
+  wins through `persona_override`.
 - Persona/preset selection is fed by the bridge's dynamic bundle/status roster;
-  selection uses the returned preset id while display uses its name. There is
-  no TUI-side allowlist, so user-installed dsh presets appear without a Rust
-  change. The four shipped presets are only the E2E baseline.
+  selection uses the returned preset id while display uses its name. TUI manual
+  selections stamp `rememberAgentPreset` and become the default for later new
+  sessions; unmarked headless/session overrides stay local, while resume and
+  fork retain their durable session preset. There is no TUI-side allowlist, so
+  user-installed dsh presets appear without a Rust change. The four shipped
+  presets are only the E2E baseline.
 - /provider command (crates/codegen/xai-grok-pager/src/slash/commands/provider.rs):
   lists providers from the bridge's initialize _meta.modelState.providers and
   switches through the existing SetDefaultModel pipeline. It keeps the same
@@ -165,10 +168,10 @@ branding (our identity). Keep this list current on every sync.
   remains the only preset picker; /usage is adapted to session stats (above).
 - Slash commands hard-hidden because dsh has no matching surface: /cd (no
   Agent Dashboard), /auto (no dsh auto permission-mode classifier),
-  /workflows (dsh workflow has no list/run-history API yet), /compact,
-  /delete, /remember, /mcps, /skills, plus the already-hidden /hooks,
-  /plugins, /marketplace, /dashboard, /rewind. The bridge explicitly refuses
-  the five typed dsh-extension commands so none can fall through to the model.
+  /workflows (dsh workflow has no list/run-history API yet), /delete, /remember,
+  /mcps, /skills, plus the already-hidden /hooks, /plugins, /marketplace,
+  /dashboard, /rewind. The bridge explicitly refuses the four typed
+  dsh-extension commands so none can fall through to the model.
 - Bridge now maps dsh capabilities onto grok RPCs: x.ai/session/rename →
   dsh session-title, session/set_mode → dsh plan-mode, x.ai/session/fork →
   dsh sessions.fork + agents.create(seed), x.ai/mcp/list → dsh MCP tool
@@ -400,17 +403,26 @@ registration error. The focused client test pins the fail-fast behavior.
 ### Unsupported extension surfaces are hard-hidden
 
 `slash/registry.rs CommandRegistry::new` adds `/hooks`, `/plugins`,
-`/marketplace`, `/skills`, `/compact`, `/delete`, `/remember`, and `/mcps`
-to the fail-closed `hidden` set. The pager-plugin group opens grok-build's
-OWN plugin system — a second plugin world dscode does not use, whose names
-collide head-on with the real one (dsh plugins, managed by /dsh). Note dsh itself DOES have skills
-(the `skills` registry, packages/skill) and hooks (hooks-claude-code);
-those live harness-side and are unreachable from these TUI management
-surfaces. The remaining commands require extension RPCs or session mutation
-semantics the bridge cannot complete. Typed commands reach the bridge's
-precise refusal; they never become model prompts. The future path for
-exposing harness-side features is bridge-advertised ACP commands, not
-un-hiding grok's local UIs.
+`/marketplace`, `/skills`, `/delete`, `/remember`, and `/mcps` to the
+fail-closed `hidden` set. The pager-plugin group opens grok-build's OWN plugin
+system — a second plugin world dscode does not use, whose names collide
+head-on with the real one (dsh plugins, managed by /dsh). Note dsh itself DOES
+have skills (the `skills` registry, packages/skill) and hooks
+(hooks-claude-code); those live harness-side and are unreachable from these TUI
+management surfaces. The remaining commands require extension RPCs or session
+mutation semantics the bridge cannot complete. Typed commands reach the
+bridge's precise refusal; they never become model prompts. The future path for
+exposing harness-side features is bridge-advertised ACP commands, not un-hiding
+grok's local UIs.
+
+### Manual compaction uses the dsh command registry
+
+The grok `/compact` builtin is omitted from `slash/commands/mod.rs`, and
+`compact` is no longer globally hidden. Presets that mount
+`@deepseek-ai/dsh-command-compact` advertise its ACP command; the existing
+generic command adapter executes `compactNow()` without a model turn. Presets
+without that command show no completion row, while a raw `/compact` receives
+the bridge's explicit unavailable result instead of becoming model text.
 
 ### Bare /provider opens a list picker
 
@@ -435,3 +447,24 @@ into the form instead of submitting a barely-seen prefill. Additionally
 Action::SetDefaultModel's idempotent branch now toasts ("Already on X")
 so picking the current provider/model in any picker gives feedback
 instead of silence.
+
+### dsh cache hit percentage is shown in the status row
+
+`acp/meta.rs` parses the bridge-owned `cacheHitPercent` notification metadata;
+`app/acp_handler/mod.rs` stores its newest cumulative value on `AgentView`, and
+`app/agent_view/render.rs` renders `cache N%` beside the context meter. The
+bridge computes the value from dsh's disjoint uncached/read/write input buckets
+and sends a non-rendering empty update when terminal usage follows streamed
+text, so the status cannot stay one turn behind.
+`views/agent_status.rs` accepts borrowed dynamic lines so the percentage is
+rendered without formatting or allocating a new status string every frame.
+
+### Image input capability fails closed
+
+`acp/model_state.rs` now defaults `current_model_accepts_images()` to false
+when the selected model has no affirmative `acceptsImages` or
+`inputModalities` metadata. Upstream's permissive default assumes the fixed
+Grok catalog; dscode admits arbitrary provider models, where missing metadata
+cannot prove multimodal support. `app/agent_view/paste.rs` refuses image chips
+for those models and cleans temporary paste files. The bridge independently
+rejects direct/headless image prompts before writing an attachment.

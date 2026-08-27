@@ -1090,6 +1090,8 @@ pub struct AppView {
     /// Stamped into session/new and session/load meta as agentProfile so the
     /// harness leader resolves it to a dsh agent preset.
     pub persona_override: Option<String>,
+    /// Roster default reported by the leader; fresh profiles start at Standard.
+    pub preset_default: String,
     /// ACP-advertised commands seeded into every new `AgentSession` so
     /// autocomplete has shell builtins and skills before any runtime
     /// `AvailableCommandsUpdate` arrives.
@@ -1600,6 +1602,7 @@ impl AppView {
             resume_local_miss: None,
             agent_override: None,
             persona_override: None,
+            preset_default: "standard".to_string(),
             bootstrap_acp_commands,
             auth_methods: Vec::new(),
             auth_state: AuthState::Done,
@@ -4958,7 +4961,7 @@ impl AppView {
                                     preset_label: self
                                         .persona_override
                                         .as_deref()
-                                        .unwrap_or("minimal"),
+                                        .unwrap_or(self.preset_default.as_str()),
                                     status_line: status_line_frame.clone(),
                                 },
                             );
@@ -5081,7 +5084,7 @@ impl AppView {
                                                         preset_label: self
                                                             .persona_override
                                                             .as_deref()
-                                                            .unwrap_or("minimal"),
+                                                            .unwrap_or(self.preset_default.as_str()),
                                                         ..Default::default()
                                                     },
                                                 )

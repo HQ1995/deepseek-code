@@ -399,6 +399,7 @@ impl SessionFlags {
             }
         } else if let Some(ref persona) = self.persona_override {
             meta.insert("agentProfile".into(), serde_json::json!(persona));
+            meta.insert("rememberAgentPreset".into(), serde_json::json!(true));
         } else if let Some(ref profile) = self.agent_override {
             meta.insert("agentProfile".into(), profile.clone());
         } else if std::env::var("GROK_AGENT").ok().is_some_and(|s| !s.trim().is_empty())

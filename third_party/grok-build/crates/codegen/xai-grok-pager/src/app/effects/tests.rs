@@ -1950,6 +1950,7 @@ fn persona_override_stamps_agent_profile_name() {
     };
     let meta = flags.to_meta().unwrap();
     assert_eq!(meta["agentProfile"], "minimal");
+    assert_eq!(meta["rememberAgentPreset"], true);
 }
 /// --plan alone produces meta with `agentProfile` only and a
 /// `askUserQuestion: false` since `ask_user` is off here.

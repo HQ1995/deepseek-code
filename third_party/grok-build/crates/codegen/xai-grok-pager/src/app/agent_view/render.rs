@@ -1562,6 +1562,18 @@ impl AgentView {
             .as_ref()
             .and_then(|c| (c.total > 0).then_some(c.total))
             .or(model_window);
+        if let Some(percent) = self.cache_hit_percent.as_deref() {
+            let label = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+            let value = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+            status.push(
+                "cache",
+                Line::from(vec![
+                    Span::styled("cache ", label),
+                    Span::styled(percent, value),
+                    Span::styled("%", label),
+                ]),
+            );
+        }
         if let Some(ctx_line) = context_bar::context_bar_line_for_session(
             ctx_used,
             ctx_total,

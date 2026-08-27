@@ -25,6 +25,14 @@ import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import { installModelSelection, type Agent, type AgentOptions, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets'
+import {
+  admitEncodedImages,
+  isImageAdmissionError,
+  type AttachmentStore,
+  type EncodedImageAttachment,
+  type ImageAttachmentRef,
+  type ImageMediaType,
+} from '@deepseek-ai/dsh-attachment'
 import { CallId, ReasoningEffortId, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import { KNOWN_SESSION_EVENT_TYPES, SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -59,7 +67,7 @@ knownSessionEventTypes.add(LEGACY_MODEL_SELECTION_EVENT)
 
 export const name = 'grok-leader'
 /** The bridge cannot accept clients until agents and durable session discovery are ready. */
-export const inject = ['agents', 'sessionPersistence']
+export const inject = ['agents', 'sessionPersistence', 'attachments']
 
 /** Plugin config: socket path and the provider/model selection used for created agents. */
 export interface GrokLeaderConfig {
@@ -149,6 +157,8 @@ const WIRE = {
 
 /** The dsh settings namespace the llm-pi-ai plugin owns (packages/llm/llm-pi-ai). */
 const PROVIDER_SETTINGS_NS = 'llm-pi-ai'
+/** The dsh preset roster's user-default namespace. */
+const PRESET_SETTINGS_NS = 'agent-presets'
 /** Provider route ids are lowercase kebab-case, like settings namespace ids. */
 const PROVIDER_ID_PATTERN = /^[a-z][a-z0-9-]*$/
 /** Wire protocols a declared provider route may name (llm-pi-ai supportedProtocols). */
@@ -340,6 +350,21 @@ const SHIPPED_PRESET_DISPLAY: Readonly<Record<string, { name: string; descriptio
 
 /** The grok StopReason vocabulary (agent.rs StopReason). */
 type StopReasonWire = 'end_turn' | 'max_tokens' | 'cancelled'
+/** Durable model-facing prompt blocks accepted from the ACP composer. */
+type DurablePromptBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; attachment: ImageAttachmentRef }
+
+/** Validated ACP prompt before image bytes are committed to durable storage. */
+interface ParsedPrompt {
+  blocks: Array<
+    | { type: 'text'; text: string }
+    | { type: 'resource_link'; name: unknown; uri: unknown }
+    | { type: 'image'; image: EncodedImageAttachment }
+  >
+  text: string
+  images: EncodedImageAttachment[]
+}
 
 /** One streaming delta this bridge emits as a session/update notification. */
 export type GrokSessionUpdate =
@@ -349,6 +374,12 @@ export type GrokSessionUpdate =
   | { sessionUpdate: 'tool_call'; toolCallId: string; title: string; kind: ToolKindWire; status: 'in_progress'; rawInput?: unknown }
   | { sessionUpdate: 'tool_call_update'; toolCallId: string; status: 'completed' | 'error'; content?: Array<ToolResultContentBlock>; rawOutput?: unknown; error?: { name: string; code: string } }
   | { sessionUpdate: 'plan'; entries: Array<{ content: string; priority: string; status: string }> }
+/** Non-rendering usage facts carried beside one session update. */
+type ProjectedUpdate = GrokSessionUpdate & {
+  totalTokens?: number
+  cacheHitPercent?: string
+}
+
 
 /** grok ACP ToolKind vocabulary the TUI renders for a tool call. */
 export type ToolKindWire = 'execute' | 'read' | 'edit' | 'search' | 'fetch' | 'other'
@@ -378,7 +409,7 @@ interface ModelCatalog {
   providers: Array<{ id: string; name?: string; displayName?: string; apiKeyEnv?: string; api?: string; baseURL?: string; credential?: CredentialInfo; note?: string }>
   /** Provider that owns currentModelId ('' when no current model). */
   currentProviderId: string
-  availableModels: Array<{ modelId: string; name: string; description?: string; _meta?: { provider: string; supportsReasoningEffort?: boolean; reasoningEfforts?: string[]; reasoningEffort?: string } }>
+  availableModels: Array<{ modelId: string; name: string; description?: string; _meta?: { provider: string; supportsReasoningEffort?: boolean; reasoningEfforts?: string[]; reasoningEffort?: string; inputModalities?: string[]; acceptsImages?: boolean } }>
   providerByModel: Map<string, string>
   providerModelToWireId: Map<string, string>
 }
@@ -418,16 +449,22 @@ interface SessionRecord {
   /** Cumulative session token accounting summed from assistant/message usage. */
   inputTokens: number
   outputTokens: number
+  /** Disjoint prompt-side cache token buckets from dsh TokenUsage. */
+  cacheReadTokens: number
+  cacheWriteTokens: number
   /** Counters the grok x.ai/session/info context reads. */
   turnCount: number
   toolCallCount: number
   messageCount: number
+  compactionCount: number
   /** Pending tool-call facts keyed by callId, used to attach rawInput/rawOutput. */
   pendingToolCalls: Map<string, { name: string; arguments: unknown }>
   /** True once the current step streamed a text-delta; suppresses the assembled-message re-emit. */
   textStreamed: boolean
   /** Accepted user prompts, oldest first; served by x.ai/prompt_history. */
   prompts: string[]
+  /** Serializes pre-enqueue image admission so later text prompts cannot overtake it. */
+  promptAdmissionTail: Promise<void>
   /** FIFO of validated prompts waiting for the in-flight one to settle. */
   promptQueue: Array<{
     resolve: (value: PromptSettleResult) => void
@@ -435,6 +472,8 @@ interface SessionRecord {
     /** Stable queue-row id: the request _meta.promptId or a minted uuid. */
     id: string
     text: string
+    /** Durable model content; text is kept separately for queue/history display. */
+    content: DurablePromptBlock[]
     /** Edit counter: fresh rows start at 0 (grok QueueEntryMeta), edits bump by one. */
     version: number
     /** Per-prompt display texts when combine folded followers into this row (len >= 2). */
@@ -490,14 +529,14 @@ interface UserQuestionsLike {
  *  plugin-registered human commands surfaced as pager slash commands. */
 interface CommandsLike {
   list(agent: Agent): ReadonlyArray<{ name: string; description: string; input?: { hint: string } }>
-  execute(agent: Agent, line: string, signal: AbortSignal): Promise<{ result: { kind: string; text?: string } } | undefined>
+  execute(agent: Agent, line: string, images: readonly EncodedImageAttachment[], signal: AbortSignal): Promise<{ result: { kind: string; text?: string } } | undefined>
 }
 
 /** Structural read of the llm service: provider and model catalogs only. */
 interface LlmLike {
   listProviders(): Array<{ id: string; name?: string }>
-  listModels(provider: string): Promise<Array<{ id: string; name: string; description?: string }>>
-  /** Exact-route model metadata (used for adapter-configured effort defaults). */
+  listModels(provider: string): Promise<Array<{ id: string; name: string; description?: string; inputModalities?: readonly string[] }>>
+  /** Exact-route model metadata (used for adapter-configured effort and modality metadata). */
   resolveModelInfo?(
     provider: string,
     model: string,
@@ -507,6 +546,7 @@ interface LlmLike {
     id: string
     name?: string
     reasoning?: { defaultEffort?: string; efforts?: Array<{ id: string; name?: string }> }
+    inputModalities?: readonly string[]
   }>
   /** Interrogate a draft provider for its model catalog (llm-pi-ai discovery). */
   discoverModels?(
@@ -848,6 +888,21 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const agentDefaultModel = (): AgentDefaultModelLike | undefined => ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
   /** Read the preset roster on demand: it mounts asynchronously after apply. */
   const agentPresets = (): AgentPresetsLike | undefined => ctx.get('agentPresets') as AgentPresetsLike | undefined
+  /** Persist a real, explicitly selected preset as the default for future sessions. */
+  const persistPresetDefault = async (preset: string): Promise<void> => {
+    const service = settings()
+    if (service === undefined) throw internalError('the settings service is not configured')
+    const descriptor = service.describe?.().find(entry => entry.ns === PRESET_SETTINGS_NS)
+    const user = descriptor?.user
+    if (user !== null && typeof user === 'object'
+      && (user as Record<string, unknown>).default === preset) return
+    try {
+      await service.mutate(PRESET_SETTINGS_NS, [{ op: 'set', path: ['default'], value: preset }])
+    } catch (error) {
+      throw internalError('failed to remember preset "' + preset + '": '
+        + (error instanceof Error ? error.message : String(error)))
+    }
+  }
   const sessions = new Map<SessionId, SessionRecord>()
   const connections = new Map<number, ClientConnection>()
   const persistedSessionIdInUse = async (sessionId: SessionId): Promise<boolean> => {
@@ -1028,7 +1083,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       : await Promise.all(llmService.listProviders().map(async provider => {
         const staticModels = await llmService.listModels(provider.id)
         const discovered = discoveredModels.get(provider.id)
-        const models: Array<{ id: string; name: string; description?: string }> = discovered === undefined
+        const models: Array<{ id: string; name: string; description?: string; inputModalities?: readonly string[] }> = discovered === undefined
           ? staticModels
           : discovered.map(model => ({
             id: model.id,
@@ -1082,10 +1137,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const resolveModelInfo = llmService?.resolveModelInfo
         const hasMetadataResolver = resolveModelInfo !== undefined
         let reasoning: { defaultEffort?: string; efforts?: Array<{ id: string; name?: string }> } | undefined
+        let inputModalities = model.inputModalities
+          ?.filter((modality): modality is string => typeof modality === 'string' && modality.length > 0)
         if (resolveModelInfo !== undefined) {
           try {
             const info = await resolveModelInfo.call(llmService, row.provider, model.id)
             reasoning = info.reasoning
+            if (info.inputModalities !== undefined) {
+              inputModalities = info.inputModalities
+                .filter((modality): modality is string => typeof modality === 'string' && modality.length > 0)
+            }
           } catch (error) {
             logger.warn('grok-leader: could not resolve model metadata for ' + row.provider + '/' + model.id + ': ' + (error instanceof Error ? error.message : String(error)))
           }
@@ -1108,6 +1169,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
             supportsReasoningEffort: hasMetadataResolver
               ? (efforts?.length ?? 0) > 0
               : true,
+            acceptsImages: inputModalities?.includes('image') === true,
+            ...(inputModalities === undefined
+              ? {}
+              : { inputModalities: [...inputModalities] }),
             ...(efforts !== undefined && efforts.length > 0
               ? { reasoningEfforts: efforts }
               : !hasMetadataResolver
@@ -1222,11 +1287,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const explicitModel = nonEmptyString(meta?.model) ? meta.model : undefined
     const explicitProvider = nonEmptyString(meta?.provider) ? meta.provider : undefined
     let wireId: string | undefined
-    if (candidate !== undefined) {
+    if (explicitProvider === undefined
+      && explicitModel !== undefined
+      && current.providerByModel.has(explicitModel)) {
+      wireId = explicitModel
+    } else if (candidate !== undefined) {
       wireId = current.providerModelToWireId.get(modelEffortKey(candidate.provider, candidate.model))
         ?? (current.providerByModel.get(candidate.model) === candidate.provider ? candidate.model : undefined)
-    } else if (explicitModel !== undefined && current.providerByModel.has(explicitModel)) {
-      wireId = explicitModel
     }
     if (wireId === undefined && (explicitModel !== undefined || explicitProvider !== undefined)) {
       throw invalidParams('requested provider/model is not in the catalog: '
@@ -1358,7 +1425,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     conn: ClientConnection,
     record: SessionRecord,
     sourceSeq: number | undefined,
-    item: GrokSessionUpdate & { totalTokens?: number },
+    item: ProjectedUpdate,
     isReplay: boolean,
     agentTimestampMs?: number,
   ): void => {
@@ -1369,7 +1436,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const eventSeq = record.eventSeq
     record.eventSeq = eventSeq + 1
     const inflight = record.inflight
-    const { totalTokens, ...update } = item
+    const { totalTokens, cacheHitPercent, ...update } = item
     sendNotification(conn, WIRE.sessionUpdate, {
       sessionId: record.agent.session.id,
       update,
@@ -1378,6 +1445,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         ...inflight === undefined ? {} : { promptId: inflight.promptId },
         ...isReplay ? { isReplay: true } : {},
         ...totalTokens === undefined ? {} : { totalTokens },
+        ...cacheHitPercent === undefined ? {} : { cacheHitPercent },
         ...agentTimestampMs === undefined ? {} : { agentTimestampMs },
         ...record.turnStartMs === undefined ? {} : { streamStartMs: record.turnStartMs, turnStartMs: record.turnStartMs },
       },
@@ -1391,6 +1459,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (usage !== undefined) {
         record.inputTokens += usage.inputTokens
         record.outputTokens += usage.outputTokens
+        record.cacheReadTokens += usage.cacheReadTokens ?? 0
+        record.cacheWriteTokens += usage.cacheWriteTokens ?? 0
       }
       record.messageCount += 1
     } else if (event.type === 'tool/call') {
@@ -1401,6 +1471,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       })
     } else if (event.type === 'user/message' && (event.data.source as { kind?: unknown }).kind === 'user') {
       record.messageCount += 1
+    } else if (String(event.type) === 'compaction/end') {
+      record.compactionCount += 1
     } else if (event.type === 'turn/end') {
       record.turnCount += 1
     }
@@ -1411,22 +1483,35 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     record: SessionRecord,
     event: SessionEvent,
     replay: boolean,
-  ): Array<GrokSessionUpdate & { totalTokens?: number }> => {
+  ): Array<ProjectedUpdate> => {
     if (event.type === 'step/start') record.textStreamed = false
     noteEvent(record, event)
-    const totalTokens = record.inputTokens + record.outputTokens
-    const updates: Array<GrokSessionUpdate & { totalTokens?: number }> = []
+    const totalTokens = record.inputTokens + record.cacheReadTokens + record.cacheWriteTokens + record.outputTokens
+    const hitPercent = cacheHitPercent(record.inputTokens, record.cacheReadTokens, record.cacheWriteTokens)
+    const updates: Array<ProjectedUpdate> = []
     for (const item of sessionEventToUpdates(event, {
       replay,
       textStreamed: record.textStreamed,
       toolCall: (callId) => record.pendingToolCalls.get(callId),
     })) {
       if (item.sessionUpdate === 'agent_message_chunk') {
-        record.textStreamed = true
-        updates.push({ ...item, totalTokens })
+        if (item.content.text.length > 0) record.textStreamed = true
+        updates.push({ ...item, totalTokens, ...hitPercent === undefined ? {} : { cacheHitPercent: hitPercent } })
       } else {
         updates.push(item)
       }
+    }
+    // Streamed responses suppress their assembled assistant message. Emit one
+    // empty content chunk so the terminal usage still reaches the TUI without
+    // creating another scrollback block.
+    if (event.type === 'assistant/message' && event.data.usage !== undefined
+      && !updates.some(item => item.sessionUpdate === 'agent_message_chunk')) {
+      updates.push({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        totalTokens,
+        ...hitPercent === undefined ? {} : { cacheHitPercent: hitPercent },
+      })
     }
     if (event.type === 'tool/result') {
       const block = event.data.message.content[0] as { toolCallId?: unknown } | undefined
@@ -1551,9 +1636,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         // grok keys accepted answers by question text, so remember each text's dsh id.
         const textToId = new Map<string, string>()
         const grokQuestions = request.questions.map((question) => {
-          textToId.set(question.question, question.id)
+          // The pager's question card has one multiline heading slot. Preserve
+          // dsh's separate short header and supporting detail instead of
+          // dropping them at the adapter boundary.
+          const displayQuestion = [question.header, question.question, question.detail]
+            .filter(nonEmptyString)
+            .join('\n')
+          textToId.set(displayQuestion, question.id)
           return {
-            question: question.question,
+            question: displayQuestion,
             options: (question.options ?? []).map(option => ({
               label: option.label,
               description: option.description ?? '',
@@ -1825,6 +1916,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (meta.noReplay !== undefined && typeof meta.noReplay !== 'boolean') {
       throw invalidParams('_meta.noReplay must be a boolean')
     }
+    if (meta.rememberAgentPreset !== undefined && typeof meta.rememberAgentPreset !== 'boolean') {
+      throw invalidParams('_meta.rememberAgentPreset must be a boolean')
+    }
     if (meta.subagents === false) {
       throw invalidParams('--no-subagents is not supported by this dscode bridge; choose a preset without subagents instead')
     }
@@ -1881,7 +1975,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // clientIdentifier, codeNavEnabled, and client terminal/fs routing from the
     // registration capabilities (server.rs:671-770). Only yoloMode and
     // agentProfile/agentPreset are wired.
-    const preset = await composePreset(presetRequestFromMeta(meta))
+    const presetRequest = presetRequestFromMeta(meta)
+    const preset = await composePreset(presetRequest)
+    const explicitPreset = presetRequest !== undefined && preset.agentPreset === presetRequest
+      ? preset.agentPreset
+      : undefined
     // Seed from the saved global default when one exists. A provider-neutral
     // fresh profile deliberately leaves selection.current undefined until the
     // user adds a provider and picks a model.
@@ -1898,7 +1996,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         cwd,
         ...preset.agentPreset === undefined ? {} : { agentPreset: preset.agentPreset },
       },
-      agentOptions: agentOptions(config),
+      agentOptions: agentOptions(config, selection.current),
       setup: (agentCtx) => {
         installModelSelection(agentCtx, selection)
         return preset.mount === undefined ? undefined : preset.mount(agentCtx)
@@ -1921,12 +2019,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       eventSeq: 1,
       inputTokens: 0,
       outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
       turnCount: 0,
       toolCallCount: 0,
       messageCount: 0,
+      compactionCount: 0,
       pendingToolCalls: new Map(),
       textStreamed: false,
       prompts: [],
+      promptAdmissionTail: Promise.resolve(),
       promptQueue: [],
       runningPromptId: undefined,
       runningText: undefined,
@@ -1947,6 +2049,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     } catch (error) {
       await handle.dispose()
       throw error
+    }
+    if (explicitPreset !== undefined && meta?.rememberAgentPreset === true) {
+      try {
+        await persistPresetDefault(explicitPreset)
+      } catch (error) {
+        await handle.dispose()
+        throw error
+      }
     }
     sessions.set(sessionId, record)
     void broadcastAvailableCommands(record)
@@ -2026,11 +2136,17 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
    * Run one validated prompt: admit it, stream the echo, and settle at turn
    * end (or idle for a turnless slot).
    */
-  const runPrompt = async (record: SessionRecord, id: string, text: string, combinedTexts?: string[]): Promise<PromptSettleResult> => {
+  const runPrompt = async (
+    record: SessionRecord,
+    id: string,
+    text: string,
+    content: DurablePromptBlock[],
+    combinedTexts?: string[],
+  ): Promise<PromptSettleResult> => {
     if (agents.get(record.agent.id) !== record.agent) {
       throw internalError('prompt was not queued: the agent was disposed outside the bridge')
     }
-    const message = createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
+    const message = createUserMessage({ content, source: { kind: 'user' } })
     record.runningPromptId = id
     record.runningText = combinedTexts === undefined || combinedTexts[0] === undefined ? text : combinedTexts[0]
     record.runningCombinedTexts = combinedTexts
@@ -2113,15 +2229,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // A held front parks the whole queue (grok maybe_start_running_task):
     // nothing promotes until queue/release_edit clears the hold.
     if (record.editHolds.has(front.id)) return
-    // grok combine: with 2+ queued prompts, fold the followers into the front
-    // (text joined with blank lines; followers resolve as removed). Every bridge
-    // entry is a validated text prompt, so the grok gates (images/bash/skills)
-    // are satisfied trivially. ponytail: config-gated, default off.
-    if (combineQueued && record.promptQueue.length >= 2) {
+    // grok combine: fold only adjacent text-only rows. Images are durable
+    // message content and must retain their own per-message admission boundary.
+    if (combineQueued && record.promptQueue.length >= 2
+      && !front.content.some(block => block.type === 'image')) {
       const segments = [front.text]
-      // Held followers never fold into the front; the run stops at the first
-      // held row (xai_prompt_queue::can_merge_follower).
-      while (record.promptQueue.length >= 2 && !record.editHolds.has(record.promptQueue[1]!.id)) {
+      // Held or image-bearing followers stop the merge at that row.
+      while (record.promptQueue.length >= 2
+        && !record.editHolds.has(record.promptQueue[1]!.id)
+        && !record.promptQueue[1]!.content.some(block => block.type === 'image')) {
         const follower = record.promptQueue.splice(1, 1)[0]!
         segments.push(follower.text)
         follower.resolve(promptSettled(record, follower.id, 'cancelled'))
@@ -2130,7 +2246,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
     const entry = record.promptQueue.shift()!
     const runText = entry.combinedTexts === undefined ? entry.text : entry.combinedTexts.join('\n\n')
-    void runPrompt(record, entry.id, runText, entry.combinedTexts).then(entry.resolve, entry.reject)
+    const runContent = entry.combinedTexts === undefined
+      ? entry.content
+      : [{ type: 'text' as const, text: runText }]
+    void runPrompt(record, entry.id, runText, runContent, entry.combinedTexts).then(entry.resolve, entry.reject)
   }
 
   /** Promote the next queued prompt without racing the harness turn lifecycle.
@@ -2175,7 +2294,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   /** Enqueue a validated prompt and run it as soon as the session is idle. */
-  const enqueuePrompt = (record: SessionRecord, p: Record<string, unknown>, text: string): Promise<PromptSettleResult> =>
+  const enqueuePrompt = (record: SessionRecord, p: Record<string, unknown>, text: string, content: DurablePromptBlock[]): Promise<PromptSettleResult> =>
     new Promise((resolve, reject) => {
       const meta = p._meta as Record<string, unknown> | null | undefined
       const id = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
@@ -2184,7 +2303,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         // running turn and run this prompt next, ahead of the queue —
         // mirroring x.ai/queue/interject's front-jump for queued rows. The
         // send_now trigger suppresses the pager's "Turn cancelled" marker.
-        record.promptQueue.unshift({ resolve, reject, id, text, version: 0 })
+        record.promptQueue.unshift({ resolve, reject, id, text, content, version: 0 })
         record.cancelTrigger = 'send_now'
         record.agent.cancel({ kind: 'user' })
         settlePrompt(record, 'cancelled')
@@ -2202,11 +2321,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         // confirmed to the pager once — so its optimistic echo retires by id —
         // and then leaves the queue as it joins the live turn; its RPC settles
         // with the host turn (see the steered drain in runPrompt).
-        record.promptQueue.push({ resolve, reject, id, text, version: 0 })
+        record.promptQueue.push({ resolve, reject, id, text, content, version: 0 })
         broadcastQueueChanged(record)
         record.promptQueue.pop()
         try {
-          record.agent.steer(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
+          record.agent.steer(createUserMessage({ content, source: { kind: 'user' } }))
         } catch (error: unknown) {
           broadcastQueueChanged(record)
           reject(internalError('prompt was not steered: ' + (error instanceof Error ? error.message : String(error))))
@@ -2226,7 +2345,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return
       }
       // Fresh rows start at version 0 (grok QueueEntryMeta); edits bump by one.
-      record.promptQueue.push({ resolve, reject, id, text, version: 0 })
+      record.promptQueue.push({ resolve, reject, id, text, content, version: 0 })
       const runningBefore = record.runningPromptId
       promoteWhenIdle(record)
       // The idle fast path already broadcast the promoted state from inside
@@ -2653,7 +2772,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (resolved === undefined) return settleBridgeCommand(record, p, 'Unknown preset "' + requested + '".')
     const current = roster.composedPreset?.(record.agent.ctx)
       ?? sessionPresetFromLog(record.agent.session.header, record.agent.session.events)
-    if (current === resolved) return settleBridgeCommand(record, p, 'Preset "' + resolved + '" is already active.')
+    if (current === resolved) {
+      await persistPresetDefault(resolved)
+      return settleBridgeCommand(record, p, 'Preset "' + resolved + '" is active and is now the default for new sessions.')
+    }
     if (record.runningPromptId !== undefined || presetSwitchLocked(record.agent.session.events)) {
       return settleBridgeCommand(record, p, 'agent-preset-locked: a preset can only be changed before the session has produced history')
     }
@@ -2666,17 +2788,79 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
     const store = ctx.get('sessions') as SessionsLike | undefined
     if (store !== undefined) await store.flush(record.agent.session)
+    await persistPresetDefault(resolved)
     void broadcastAvailableCommands(record)
-    return settleBridgeCommand(record, p, 'Switched to preset "' + resolved + '".')
+    return settleBridgeCommand(record, p, 'Switched to preset "' + resolved + '" and made it the default for new sessions.')
   }
 
-  const unsupportedSlashCommands = new Map([
-    ['compact', '/compact is not supported by the dsh session runtime yet.'],
-    ['delete', '/delete is not supported yet; use /exit to close without deleting durable history.'],
-    ['remember', '/remember is not supported by the dsh memory runtime yet.'],
-    ['mcps', '/mcps management is not supported by this bridge yet.'],
-    ['skills', '/skills management is not supported by this bridge yet.'],
-  ])
+  const unsupportedSlashCommands: Record<string, string> = {
+    delete: '/delete is not supported yet; use /exit to close without deleting durable history.',
+    remember: '/remember is not supported by the dsh memory runtime yet.',
+    mcps: '/mcps management is not supported by this bridge yet.',
+    skills: '/skills management is not supported by this bridge yet.',
+  }
+  const imageMediaTypes: Record<ImageMediaType, true> = {
+    'image/png': true,
+    'image/jpeg': true,
+    'image/webp': true,
+    'image/gif': true,
+  }
+
+  /** Validate ACP prompt blocks without committing image bytes. */
+  const parsePrompt = (value: unknown): ParsedPrompt => {
+    if (!Array.isArray(value)) throw invalidParams('session/prompt prompt must be an array')
+    if (promptHasUnsupportedContent(value)) {
+      throw invalidParams('only text, resource_link, and image prompt content is supported')
+    }
+    const blocks: ParsedPrompt['blocks'] = []
+    const images: EncodedImageAttachment[] = []
+    for (const raw of value) {
+      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+        throw invalidParams('prompt content blocks must be objects')
+      }
+      const block = raw as Record<string, unknown>
+      if (block.type === 'text') {
+        if (typeof block.text !== 'string') throw invalidParams('text prompt content requires text')
+        blocks.push({ type: 'text', text: block.text })
+      } else if (block.type === 'resource_link') {
+        blocks.push({ type: 'resource_link', name: block.name, uri: block.uri })
+      } else {
+        if (typeof block.data !== 'string' || typeof block.mimeType !== 'string'
+          || !Object.hasOwn(imageMediaTypes, block.mimeType)) {
+          throw invalidParams('image prompt content requires canonical base64 data and a supported mimeType')
+        }
+        const image: EncodedImageAttachment = {
+          data: block.data,
+          mediaType: block.mimeType as ImageMediaType,
+        }
+        blocks.push({ type: 'image', image })
+        images.push(image)
+      }
+    }
+    return { blocks, images, text: acpPromptToText(value) }
+  }
+
+  /** Commit one validated prompt's images, preserving ACP block order. */
+  const durablePromptContent = async (parsed: ParsedPrompt): Promise<DurablePromptBlock[]> => {
+    const attachments = ctx.get('attachments') as AttachmentStore | undefined
+    if (attachments === undefined) throw internalError('image attachment storage is not configured')
+    let refs: readonly ImageAttachmentRef[]
+    try {
+      refs = await admitEncodedImages(attachments, parsed.images)
+    } catch (error) {
+      if (isImageAdmissionError(error)) throw invalidParams(error.message)
+      throw internalError('image attachment storage failed: ' + errorChain(error))
+    }
+    let imageIndex = 0
+    return parsed.blocks.map((block): DurablePromptBlock => {
+      if (block.type === 'text') return block
+      if (block.type === 'resource_link') {
+        return { type: 'text', text: acpPromptToText([block]) }
+      }
+      return { type: 'image', attachment: refs[imageIndex++]! }
+    })
+  }
+
 
   const prompt = async (clientId: number, params: unknown): Promise<unknown> => {
     assertOpen()
@@ -2684,35 +2868,39 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
     const record = ownedRecord(clientId, sessionId)
     if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
-    const blocks = p.prompt
-    if (promptHasUnsupportedContent(blocks)) {
-      throw invalidParams('only text and resource_link prompt content is supported')
-    }
-    const text = acpPromptToText(blocks)
-    if (text.trim().length === 0) throw invalidParams('empty prompt')
+    const parsed = parsePrompt(p.prompt)
+    const text = parsed.text.trim().length > 0 ? parsed.text : parsed.images.length > 0 ? '[Image]' : ''
+    if (text.length === 0) throw invalidParams('empty prompt')
     // A prompt joins the session history at acceptance, mirroring the grok
     // shell's queue-time history append.
     record.prompts.push(text)
     // /dsh is a bridge command (advertised via availableCommands, delivered
     // as an ACP pass-through prompt): interpret it here, never in the model.
     if (/^\/dsh(\s|$)/.test(text.trim())) {
+      if (parsed.images.length > 0) throw invalidParams('/dsh does not accept image attachments')
       return runDshCommand(record, p, text.trim())
     }
     if (/^\/preset(\s|$)/.test(text.trim())) {
+      if (parsed.images.length > 0) throw invalidParams('/preset does not accept image attachments')
       return await runPresetCommand(record, p, text.trim())
     }
     const slashName = /^\/([^\s]+)/.exec(text.trim())?.[1]?.toLowerCase()
-    const unsupported = slashName === undefined ? undefined : unsupportedSlashCommands.get(slashName)
+    const unsupported = slashName === undefined ? undefined : unsupportedSlashCommands[slashName]
     if (unsupported !== undefined) {
+      if (parsed.images.length > 0) throw invalidParams('/' + slashName + ' does not accept image attachments')
       return settleBridgeCommand(record, p, unsupported)
     }
-    // Plugin-registered slash commands (dsh command registry): execute() runs
-    // only known names and returns undefined otherwise, so unknown slash text
+    // Plugin-registered slash commands own image admission. Unknown slash text
     // still reaches the model unchanged (grok pass-through semantics).
     if (text.trim().startsWith('/')) {
       const registry = dshCommands()
       if (registry !== undefined) {
-        const execution = await registry.execute(record.agent, text.trim(), new AbortController().signal)
+        const execution = await registry.execute(
+          record.agent,
+          text.trim(),
+          parsed.images,
+          new AbortController().signal,
+        )
         if (execution !== undefined) {
           const meta = p._meta as Record<string, unknown> | null | undefined
           const id = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
@@ -2722,10 +2910,48 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         }
       }
     }
+    if (slashName === 'compact') {
+      if (parsed.images.length > 0) throw invalidParams('/compact does not accept image attachments')
+      return settleBridgeCommand(record, p, 'Manual compaction is unavailable in the selected preset.')
+    }
     if (record.selection.current === undefined) {
       throw invalidParams('no model selected; use /provider to add or choose a provider first')
     }
-    return await enqueuePrompt(record, p, text)
+    const previousAdmission = record.promptAdmissionTail
+    let releaseAdmission = (): void => {}
+    record.promptAdmissionTail = new Promise<void>((resolveAdmission) => {
+      releaseAdmission = resolveAdmission
+    })
+    await previousAdmission
+    let settlement: Promise<PromptSettleResult>
+    try {
+      if (closed || sessions.get(record.agent.session.id) !== record) {
+        throw invalidParams('unknown session: ' + String(record.agent.session.id))
+      }
+      if (parsed.images.length > 0) {
+        const selected = record.selection.current
+        const current = await currentCatalog()
+        const wireId = current.providerModelToWireId.get(modelEffortKey(selected.provider, selected.model))
+        const advertised = current.availableModels.find(model => model.modelId === wireId)
+        if (advertised?._meta?.acceptsImages !== true) {
+          throw invalidParams('selected model does not support image input: '
+            + selected.provider + '/' + selected.model)
+        }
+      }
+      const content = parsed.images.length === 0
+        ? parsed.blocks.map((block): DurablePromptBlock => {
+            if (block.type === 'text') return block
+            if (block.type === 'resource_link') {
+              return { type: 'text', text: acpPromptToText([block]) }
+            }
+            throw internalError('image prompt admission state drifted')
+          })
+        : await durablePromptContent(parsed)
+      settlement = enqueuePrompt(record, p, text, content)
+    } finally {
+      releaseAdmission()
+    }
+    return await settlement
   }
 
   const cancel = (clientId: number, params: unknown): void => {
@@ -2791,6 +3017,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         }
       }
     }
+    if (explicitPreset !== undefined && meta?.rememberAgentPreset === true) {
+      await persistPresetDefault(explicitPreset)
+    }
     const presetRequest = explicitPreset ?? currentPreset
     const preset = await composePreset(presetRequest)
 
@@ -2822,7 +3051,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
     const handle = await agents.resume({
       resumeSessionId: sessionId,
-      agentOptions: agentOptions(config),
+      agentOptions: agentOptions(config, selection.current),
       setup: (agentCtx) => {
         installModelSelection(agentCtx, selection)
         return preset.mount === undefined ? undefined : preset.mount(agentCtx)
@@ -2841,12 +3070,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       eventSeq: 1,
       inputTokens: 0,
       outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
       turnCount: 0,
       toolCallCount: 0,
       messageCount: 0,
+      compactionCount: 0,
       pendingToolCalls: new Map(),
       textStreamed: false,
       prompts: [],
+      promptAdmissionTail: Promise.resolve(),
       promptQueue: [],
       runningPromptId: undefined,
       runningText: undefined,
@@ -3443,9 +3676,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const bundleStatus = async (): Promise<unknown> => {
     const roster = agentPresets()
     const presets = roster === undefined ? [] : await roster.list()
+    const defaultPersona = roster === undefined ? undefined : (await roster.resolve(undefined)).id
     return {
       hasCache: presets.length > 0,
       personas: presets.map(preset => preset.id),
+      ...defaultPersona === undefined ? {} : { defaultPersona },
       roles: [],
       agents: [],
       skills: [],
@@ -3519,7 +3754,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         seedLength: seed.length,
         ...preset.agentPreset === undefined ? {} : { agentPreset: preset.agentPreset },
       },
-      agentOptions: agentOptions(config),
+      agentOptions: agentOptions(config, selection.current),
       setup: (agentCtx) => {
         installModelSelection(agentCtx, selection)
         return preset.mount === undefined ? undefined : preset.mount(agentCtx)
@@ -3541,12 +3776,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       eventSeq: 1,
       inputTokens: 0,
       outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
       turnCount: 0,
       toolCallCount: 0,
       messageCount: 0,
+      compactionCount: 0,
       pendingToolCalls: new Map(),
       textStreamed: false,
       prompts: [],
+      promptAdmissionTail: Promise.resolve(),
       promptQueue: [],
       runningPromptId: undefined,
       runningText: undefined,
@@ -3855,7 +4094,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const record = ownedRecord(clientId, sessionId)
         if (sessionId !== undefined && record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
         const total = 100000
-        const used = record === undefined ? 0 : record.inputTokens + record.outputTokens
+        const used = record === undefined
+          ? 0
+          : record.inputTokens + record.cacheReadTokens + record.cacheWriteTokens + record.outputTokens
         return {
           result: {
             sessionId: record?.agent.session.id ?? '',
@@ -3865,7 +4106,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
             model: null,
             context: {
               used, total, systemPromptTokens: 0, toolDefinitionsCount: 0,
-              toolDefinitionsTokens: 0, compactionCount: 0, turnCount: record?.turnCount ?? 0,
+              toolDefinitionsTokens: 0, compactionCount: record?.compactionCount ?? 0, turnCount: record?.turnCount ?? 0,
               toolCallCount: record?.toolCallCount ?? 0, messageCount: record?.messageCount ?? 0,
               messageTokens: used, freeTokens: total - used, usagePct: Math.min(100, Math.round((used / total) * 100)),
             },
@@ -4041,6 +4282,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const [entry] = record.promptQueue.splice(located.index, 1)
         if (typeof p.newText === 'string' && p.newText.trim().length > 0) {
           entry.text = p.newText
+          entry.content = [
+            { type: 'text', text: p.newText },
+            ...entry.content.filter((block): block is Extract<DurablePromptBlock, { type: 'image' }> => block.type === 'image'),
+          ]
           entry.combinedTexts = undefined
           entry.version = entry.version + 1
         }
@@ -4081,8 +4326,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const [entry] = record.promptQueue.splice(located.index, 1)
         record.editHolds.delete(entry.id)
         const text = entry.combinedTexts === undefined ? entry.text : entry.combinedTexts.join('\n\n')
+        const content = entry.combinedTexts === undefined
+          ? entry.content
+          : [{ type: 'text' as const, text }]
         try {
-          record.agent.steer(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
+          record.agent.steer(createUserMessage({ content, source: { kind: 'user' } }))
         } catch (error) {
           // Put the row back so a failed steer never loses the queued message.
           record.promptQueue.splice(located.index, 0, entry)
@@ -4152,6 +4400,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         }
         if (typeof p.newText === 'string' && p.newText.trim().length > 0) {
           located.entry.text = p.newText
+          located.entry.content = [
+            { type: 'text', text: p.newText },
+            ...located.entry.content.filter((block): block is Extract<DurablePromptBlock, { type: 'image' }> => block.type === 'image'),
+          ]
           located.entry.combinedTexts = undefined
           located.entry.version = located.entry.version + 1
         }
@@ -4751,16 +5003,71 @@ export function acpPromptToText(prompt: unknown): string {
 }
 
 /**
- * Whether a prompt carries content beyond text and resource_link blocks.
+ * Whether a prompt carries content beyond text, resource_link, and image
+ * blocks. Shape validation and image admission happen at the RPC boundary.
  * @param prompt - prompt content blocks to inspect.
- * @returns true when any block is neither text nor resource_link.
+ * @returns true when any block has an unsupported content type.
  */
 export function promptHasUnsupportedContent(prompt: unknown): boolean {
   if (!Array.isArray(prompt)) return true
   return prompt.some((block) => {
     const t = (block as Record<string, unknown>).type
-    return t !== 'text' && t !== 'resource_link'
+    return t !== 'text' && t !== 'resource_link' && t !== 'image'
   })
+}
+
+/** Integer cache percentage with positive midpoint ties rounded up. */
+function roundedIntegerPercent(cacheReadTokens: number, denominator: number): number {
+  const denominatorQuotient = Math.floor(denominator / 200)
+  const denominatorRemainder = denominator % 200
+  let lower = 0
+  let upper = 100
+  while (lower < upper) {
+    const candidate = Math.floor((lower + upper + 1) / 2)
+    const factor = candidate * 2 - 1
+    if (cacheReadTokens >= factor * denominatorQuotient + Math.ceil(factor * denominatorRemainder / 200)) {
+      lower = candidate
+    } else {
+      upper = candidate - 1
+    }
+  }
+  return lower
+}
+
+/**
+ * Display-ready cache-hit share of the three disjoint dsh input buckets.
+ * A non-full ratio that rounds to 100 gains only enough decimals to remain
+ * below 100; a true full hit is the sole `100` result.
+ */
+export function cacheHitPercent(
+  uncachedInputTokens: number,
+  cacheReadTokens: number,
+  cacheWriteTokens: number,
+): string | undefined {
+  const denominator = uncachedInputTokens + cacheReadTokens + cacheWriteTokens
+  if (denominator === 0) return undefined
+  const missedInputTokens = uncachedInputTokens + cacheWriteTokens
+  if (missedInputTokens === 0) return '100'
+  const integerPercent = roundedIntegerPercent(cacheReadTokens, denominator)
+  if (integerPercent < 100) return String(integerPercent)
+  let decimalPlaces = 1
+  let scaledDoubleGap = missedInputTokens * 200
+  const denominatorTens = Math.floor(denominator / 10)
+  while (scaledDoubleGap <= denominatorTens) {
+    scaledDoubleGap *= 10
+    decimalPlaces += 1
+  }
+  const denominatorOnes = denominator % 10
+  let roundedLoss = 5
+  for (let loss = 1; loss < 5; loss += 1) {
+    const factor = loss * 2 + 1
+    const threshold = factor * denominatorTens + Math.floor(factor * denominatorOnes / 10)
+    if (scaledDoubleGap <= threshold) {
+      roundedLoss = loss
+      break
+    }
+  }
+  return `99.${'9'.repeat(decimalPlaces - 1)}${10 - roundedLoss}`
 }
 
 /**
@@ -5191,10 +5498,15 @@ export function turnEndToStopReason(reason: TurnEndReason): StopReasonWire {
   }
 }
 
-/** Build per-agent options from plugin config without assigning absent optional fields. */
-function agentOptions(config: GrokLeaderConfig): Pick<AgentOptions, 'provider' | 'model'> {
+/** Materialize the resolved route into AgentOptions so dsh subagents inherit it. */
+function agentOptions(
+  config: GrokLeaderConfig,
+  selection?: { provider: string; model: string },
+): Pick<AgentOptions, 'provider' | 'model'> {
+  const provider = selection?.provider ?? config.provider
+  const model = selection?.model ?? config.model
   return {
-    ...config.provider !== undefined ? { provider: config.provider } : {},
-    ...config.model !== undefined ? { model: config.model } : {},
+    ...provider === undefined ? {} : { provider },
+    ...model === undefined ? {} : { model },
   }
 }

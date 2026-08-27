@@ -4018,6 +4018,7 @@ pub(crate) fn execute(
                                     TaskResult::BundleStatusReady {
                                         has_cache: r.has_cache,
                                         version: r.version,
+                                        default_persona: r.default_persona,
                                         personas: r.personas,
                                         roles: r.roles,
                                         agents: r.agents,

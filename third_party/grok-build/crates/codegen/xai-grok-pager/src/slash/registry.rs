@@ -190,10 +190,12 @@ impl CommandRegistry {
         hidden.insert("marketplace".to_string());
         // DIVERGENCE(deepseek): these builtins enter grok extension flows the
         // dsh bridge cannot complete yet. Keep them out of completion instead
-        // of advertising actions that end in method-not-found. If typed
-        // explicitly they pass through, where the bridge returns a precise
-        // unsupported message rather than sending them to the model.
-        hidden.insert("compact".to_string());
+        // of advertising actions that end in method-not-found. `/compact` is
+        // deliberately not hidden: its grok builtin is omitted and the
+        // preset-scoped dsh command is discovered over ACP when available.
+        // If the others are typed explicitly they pass through, where the
+        // bridge returns a precise unsupported message rather than sending
+        // them to the model.
         hidden.insert("delete".to_string());
         hidden.insert("remember".to_string());
         hidden.insert("mcps".to_string());
@@ -968,7 +970,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_dsh_extension_commands_are_hard_hidden() {
+    fn unsupported_dsh_extension_commands_are_hard_hidden_except_compact() {
         let builtins: Vec<Arc<dyn SlashCommand>> =
             ["compact", "delete", "remember", "mcps", "skills", "exit"]
                 .into_iter()
@@ -976,7 +978,10 @@ mod tests {
                 .collect();
         let registry = CommandRegistry::new(builtins);
 
-        for name in ["compact", "delete", "remember", "mcps", "skills"] {
+        // `/compact` is no longer globally suppressed; the real built-in roster
+        // omits it so only a preset-advertised ACP command appears.
+        assert!(registry.get("compact").is_some());
+        for name in ["delete", "remember", "mcps", "skills"] {
             assert!(registry.get(name).is_none(), "{name} must not be offered");
             assert!(
                 registry.get_for_dispatch(name).is_none(),

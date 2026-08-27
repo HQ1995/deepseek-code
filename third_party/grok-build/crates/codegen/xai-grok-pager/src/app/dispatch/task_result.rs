@@ -1233,6 +1233,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::BundleStatusReady {
             has_cache,
             version,
+            default_persona,
             personas,
             roles,
             agents,
@@ -1242,6 +1243,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         } => {
             app.bundle_state.has_cache = has_cache;
             app.bundle_state.version = version.unwrap_or_default();
+            app.preset_default = default_persona.unwrap_or_else(|| "standard".to_string());
             app.bundle_state.personas = personas;
             app.bundle_state.roles = roles;
             app.bundle_state.agents = agents;

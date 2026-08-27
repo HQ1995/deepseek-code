@@ -16,7 +16,7 @@ impl SlashCommand for PresetCommand {
     }
 
     fn description(&self) -> &str {
-        "Pick the agent preset for this session"
+        "Pick and remember the agent preset"
     }
 
     fn usage(&self) -> &str {

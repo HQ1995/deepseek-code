@@ -71,7 +71,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(delete::DeleteCommand),
         Arc::new(new::NewCommand),
         Arc::new(fork::ForkCommand),
-        Arc::new(compact::CompactCommand),
         Arc::new(copy::CopyCommand),
         Arc::new(find::FindCommand),
         Arc::new(history::HistoryCommand),

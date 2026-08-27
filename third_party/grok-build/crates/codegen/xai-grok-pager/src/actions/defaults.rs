@@ -590,7 +590,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Shows or hides the bundled preset/role/agent catalog. Select a preset and press Enter to use it as the next session's agent profile.",
+                "Shows or hides the bundled preset/role/agent catalog. Select a preset and press Enter to use it now and remember it for later new sessions.",
             ),
         },
         ActionDef {

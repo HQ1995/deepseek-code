@@ -1,8 +1,8 @@
 //! Agent status bar — composable right-aligned status items with separators.
 //!
-//! Provides [`AgentStatusBar`] which collects items as `Line<'static>` spans,
-//! lays them out right-aligned with dim `│` separators, and renders into a
-//! buffer row.  Returns hit-test areas keyed by item ID.
+//! Provides [`AgentStatusBar`] which collects styled lines, including borrowed
+//! dynamic labels, lays them out right-aligned with dim `│` separators, and
+//! renders into a buffer row. Returns hit-test areas keyed by item ID.
 //!
 //! # Example
 //!
@@ -29,11 +29,11 @@ use crate::theme::Theme;
 use crate::views::tasks_pane::TaskStatusCounts;
 
 /// A named status bar item.
-struct StatusEntry {
+struct StatusEntry<'a> {
     /// Identifier for hit-test lookup (e.g., "context", "queue").
     id: &'static str,
     /// Pre-built styled content.
-    line: Line<'static>,
+    line: Line<'a>,
     /// Display width in columns.
     width: u16,
 }
@@ -43,7 +43,7 @@ struct StatusEntry {
 /// Collect items with [`push`], then call [`render`] to lay them out
 /// right-aligned with separators and get back hit-test areas.
 pub struct AgentStatusBar<'a> {
-    items: Vec<StatusEntry>,
+    items: Vec<StatusEntry<'a>>,
     theme: &'a Theme,
     /// Padding from the right edge of the status bar area.
     right_pad: u16,
@@ -63,7 +63,7 @@ impl<'a> AgentStatusBar<'a> {
     ///
     /// Items are rendered left-to-right in push order, but the entire
     /// group is right-aligned within the status bar area.
-    pub fn push(&mut self, id: &'static str, line: Line<'static>) {
+    pub fn push(&mut self, id: &'static str, line: Line<'a>) {
         let width = line.width() as u16;
         self.items.push(StatusEntry { id, line, width });
     }

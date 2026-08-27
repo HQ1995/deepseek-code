@@ -2889,6 +2889,7 @@ pub enum TaskResult {
     BundleStatusReady {
         has_cache: bool,
         version: Option<String>,
+        default_persona: Option<String>,
         personas: Vec<String>,
         roles: Vec<String>,
         agents: Vec<String>,

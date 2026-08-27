@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 pub struct NotificationMeta {
     /// Accumulated token count across the session (`totalTokens`).
     pub total_tokens: Option<u64>,
+    /// Display-ready cumulative prompt cache hit percentage (`cacheHitPercent`).
+    pub cache_hit_percent: Option<String>,
     /// UTC ms when this notification was sent (`agentTimestampMs`).
     pub agent_timestamp_ms: Option<i64>,
     /// UTC ms when the current LLM streaming response started (`streamStartMs`).
@@ -118,6 +120,10 @@ impl NotificationMeta {
         let event_seq = event_id.as_deref().and_then(event_id_counter);
         Self {
             total_tokens: m.get("totalTokens").and_then(|v| v.as_u64()),
+            cache_hit_percent: m
+                .get("cacheHitPercent")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
             agent_timestamp_ms: m.get("agentTimestampMs").and_then(|v| v.as_i64()),
             stream_start_ms: m.get("streamStartMs").and_then(|v| v.as_i64()),
             turn_start_ms: m.get("turnStartMs").and_then(|v| v.as_i64()),
@@ -141,6 +147,7 @@ mod tests {
     fn parse_full_meta() {
         let meta_json = json!({
             "totalTokens": 5000u64,
+            "cacheHitPercent": "99.9",
             "agentTimestampMs": 1700000000000i64,
             "streamStartMs": 1700000000000i64 - 3200,
             "turnStartMs": 1700000000000i64 - 5000,
@@ -150,6 +157,7 @@ mod tests {
         let meta = NotificationMeta::from_json(Some(map));
 
         assert_eq!(meta.total_tokens, Some(5000));
+        assert_eq!(meta.cache_hit_percent.as_deref(), Some("99.9"));
         assert_eq!(meta.agent_timestamp_ms, Some(1700000000000));
         assert_eq!(meta.stream_start_ms, Some(1700000000000 - 3200));
         assert_eq!(meta.turn_start_ms, Some(1700000000000 - 5000));

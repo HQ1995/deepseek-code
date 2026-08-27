@@ -68,22 +68,24 @@ impl AgentView {
             PromptEvent::Ignored => (InputOutcome::Changed, ClipboardTextInsertion::Failed),
         }
     }
-    fn reject_shared_queue_image_edit(
-        &mut self,
-        pasted: &crate::prompt_images::PastedImage,
-    ) -> bool {
-        if !matches!(
+    fn reject_image_paste(&mut self, pasted: &crate::prompt_images::PastedImage) -> bool {
+        if matches!(
             self.prompt_mode,
             crate::app::queue_edit::PromptMode::EditingQueued {
                 server_id: Some(_),
                 ..
             }
         ) {
-            return false;
+            crate::prompt_images::cleanup_temp_file(pasted);
+            self.show_toast("Images can't be attached when editing a shared queued prompt");
+            return true;
         }
-        crate::prompt_images::cleanup_temp_file(pasted);
-        self.show_toast("Images can't be attached when editing a shared queued prompt");
-        true
+        if !self.session.models.current_model_accepts_images() {
+            crate::prompt_images::cleanup_temp_file(pasted);
+            self.show_toast("Selected model does not support image input");
+            return true;
+        }
+        false
     }
     /// Enqueue attachment probing off-thread so paste-then-send remains ordered.
     pub(super) fn enqueue_clipboard_attachment_probe(
@@ -160,7 +162,7 @@ impl AgentView {
         );
         let attachment = match image {
             ProbedAttachment::Image(pasted) => {
-                if self.reject_shared_queue_image_edit(&pasted) {
+                if self.reject_image_paste(&pasted) {
                     return ClipboardPasteCompletion::Failed(
                         ClipboardPasteFailure::AlreadyReported,
                     );
@@ -411,7 +413,7 @@ impl AgentView {
         &mut self,
         mut pasted: crate::prompt_images::PastedImage,
     ) -> bool {
-        if self.reject_shared_queue_image_edit(&pasted) {
+        if self.reject_image_paste(&pasted) {
             return false;
         }
         let preparation = pasted.preview_preparation();
@@ -447,6 +449,24 @@ pub(super) mod paste_key_tests {
     use crate::clipboard::ImageData;
     use crate::scrollback::state::ScrollbackState;
     use crate::views::prompt_widget::KIND_PASTE;
+    use agent_client_protocol as acp;
+    use std::sync::Arc;
+    fn image_capable_models() -> ModelState {
+        let id = acp::ModelId::new(Arc::from("image-model"));
+        let mut models = ModelState::default();
+        models.available.insert(
+            id.clone(),
+            acp::ModelInfo::new(id.clone(), "Image model".to_string()).meta(Some(
+                serde_json::json!({ "acceptsImages": true })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )),
+        );
+        models.current = Some(id);
+        models
+    }
+
     fn make_agent() -> AgentView {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         AgentView::new(
@@ -454,7 +474,7 @@ pub(super) mod paste_key_tests {
                 id: AgentId(0),
                 acp_tx: tx,
                 session_id: None,
-                models: ModelState::default(),
+                models: image_capable_models(),
                 state: AgentState::Idle,
                 tracker: crate::acp::tracker::AcpUpdateTracker::new(),
                 cwd: std::path::PathBuf::from("/tmp"),
@@ -1203,6 +1223,21 @@ pub(super) mod paste_key_tests {
             .unwrap();
         buf
     }
+    #[test]
+    fn image_paste_rejects_model_without_affirmative_capability() {
+        let mut agent = make_agent();
+        agent.session.models = ModelState::default();
+
+        assert!(!agent.handle_image_paste_from_data(test_image_paste()));
+        assert!(agent.prompt.images.is_empty());
+        let toast = agent
+            .toast
+            .as_ref()
+            .map(|(message, _)| message.as_str())
+            .unwrap_or_default();
+        assert_eq!(toast, "Selected model does not support image input");
+    }
+
     #[test]
     fn regression_question_modal_fullscreen_overcommit() {
         use crate::views::agent::AgentViewLayoutParams;

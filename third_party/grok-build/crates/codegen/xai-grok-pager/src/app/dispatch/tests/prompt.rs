@@ -2,6 +2,22 @@
 
 use super::*;
 
+fn enable_image_input(app: &mut AppView, id: AgentId) {
+    use std::sync::Arc;
+    let model_id = acp::ModelId::new(Arc::from("image-model"));
+    let models = &mut app.agents.get_mut(&id).unwrap().session.models;
+    models.available.insert(
+        model_id.clone(),
+        acp::ModelInfo::new(model_id.clone(), "Image model".to_string()).meta(Some(
+            serde_json::json!({ "acceptsImages": true })
+                .as_object()
+                .unwrap()
+                .clone(),
+        )),
+    );
+    models.current = Some(model_id);
+}
+
 /// Sending a prompt is a submit: it retires the active ephemeral tip.
 #[test]
 fn send_prompt_clears_active_ephemeral_tip() {
@@ -3178,6 +3194,7 @@ fn agent_send_before_paste_probe_keeps_image() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app_with_agent();
     let id = AgentId(0);
+    enable_image_input(&mut app, id);
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.set_active_pane(ActivePane::Prompt, true);
@@ -3256,6 +3273,7 @@ fn interject_before_paste_probe_keeps_image() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app_with_agent();
     let id = AgentId(0);
+    enable_image_input(&mut app, id);
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning; // interject needs a live turn
@@ -3345,6 +3363,7 @@ fn agent_paste_completion_after_switch_does_not_send_to_other_agent() {
     let mut app = test_app_with_agent(); // agent A = AgentId(0), active view
     let a = AgentId(0);
     let b = AgentId(1);
+    enable_image_input(&mut app, a);
     // A second agent B for the user to switch to mid-probe.
     let session_b = make_test_agent_session(&app, b, "session-b");
     app.agents

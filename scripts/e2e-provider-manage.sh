@@ -148,6 +148,7 @@ boot_and_wait boot1 "$SOCK"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "/provider add" Enter
 wait_frame modal "Add provider"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" End Enter
+wait_frame custom "Template Custom"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "fake-gw"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "Fake GW"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab Right

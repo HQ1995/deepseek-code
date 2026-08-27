@@ -12,6 +12,8 @@ SESSION="dscode-tui-$RUN_ID"
 SOCKET="$OUT/leader-$RUN_ID.sock"
 RESUME_SOCKET="$OUT/leader-$RUN_ID-resume.sock"
 HEADLESS_SOCKET="$OUT/leader-$RUN_ID-headless.sock"
+HEADLESS_IMAGE_SOCKET="$OUT/leader-$RUN_ID-headless-image.sock"
+HEADLESS_TEXT_IMAGE_SOCKET="$OUT/leader-$RUN_ID-headless-text-image.sock"
 HEADLESS_RESUME_SOCKET="$OUT/leader-$RUN_ID-headless-resume.sock"
 HEADLESS_FORK_SOCKET="$OUT/leader-$RUN_ID-headless-fork.sock"
 HEADLESS_REJECT_SOCKET="$OUT/leader-$RUN_ID-headless-reject.sock"
@@ -23,6 +25,10 @@ MOCK_LOG="$OUT/mock-$RUN_ID.log"
 PLUGIN_LOG="$OUT/plugin-$RUN_ID.log"
 HEADLESS_OUT="$OUT/headless-$RUN_ID.json"
 HEADLESS_ERR="$OUT/headless-$RUN_ID.log"
+HEADLESS_IMAGE_OUT="$OUT/headless-image-$RUN_ID.json"
+HEADLESS_IMAGE_ERR="$OUT/headless-image-$RUN_ID.log"
+HEADLESS_TEXT_IMAGE_OUT="$OUT/headless-text-image-$RUN_ID.json"
+HEADLESS_TEXT_IMAGE_ERR="$OUT/headless-text-image-$RUN_ID.log"
 HEADLESS_RESUME_OUT="$OUT/headless-resume-$RUN_ID.json"
 HEADLESS_RESUME_ERR="$OUT/headless-resume-$RUN_ID.log"
 HEADLESS_FORK_OUT="$OUT/headless-fork-$RUN_ID.json"
@@ -84,8 +90,9 @@ wait_leader_exit() {
 cleanup() {
   tmux -L "$SESSION" -f /dev/null kill-server >/dev/null 2>&1 || true
   for socket in \
-    "$SOCKET" "$RESUME_SOCKET" "$HEADLESS_SOCKET" \
-    "$HEADLESS_RESUME_SOCKET" "$HEADLESS_FORK_SOCKET" "$HEADLESS_REJECT_SOCKET"; do
+    "$SOCKET" "$RESUME_SOCKET" "$HEADLESS_SOCKET" "$HEADLESS_IMAGE_SOCKET" \
+    "$HEADLESS_TEXT_IMAGE_SOCKET" "$HEADLESS_RESUME_SOCKET" \
+    "$HEADLESS_FORK_SOCKET" "$HEADLESS_REJECT_SOCKET"; do
     pid="$(leader_pid "$socket")"
     [[ -n "$pid" ]] && kill "$pid" >/dev/null 2>&1 || true
   done
@@ -213,6 +220,9 @@ llm-pi-ai:
       baseURL: $GATEWAY
       models:
         - id: fake-model
+          input: [text, image]
+        - id: fake-text-model
+          input: [text]
 agent-default-model:
   provider: fake
   model: fake-model
@@ -241,12 +251,13 @@ import http from 'node:http'
 
 const [portText, logPath] = process.argv.slice(2)
 const port = Number(portText)
-const chunk = (text, finishReason = null) => JSON.stringify({
+const chunk = (text, finishReason = null, usage = undefined) => JSON.stringify({
   id: 'dscode-e2e',
   object: 'chat.completion.chunk',
   created: 1,
   model: 'fake-model',
   choices: [{ index: 0, delta: text === '' ? {} : { role: 'assistant', content: text }, finish_reason: finishReason }],
+  ...(usage === undefined ? {} : { usage }),
 })
 const responsesEvent = (type, sequenceNumber, response) => JSON.stringify({
   type,
@@ -262,17 +273,24 @@ http.createServer((request, response) => {
     const path = request.url?.split('?')[0] ?? ''
     if (request.method === 'GET' && path.endsWith('/models')) {
       response.writeHead(200, { 'content-type': 'application/json' })
-      const model = path.includes('/responses-api/')
-        ? { id: 'fake-responses-model', name: 'Fake Responses Model' }
-        : { id: 'fake-model', name: 'Fake Model' }
-      response.end(JSON.stringify({ data: [model] }))
+      const models = path.includes('/responses-api/')
+        ? [{ id: 'fake-responses-model', name: 'Fake Responses Model' }]
+        : [
+            { id: 'fake-model', name: 'Fake Model' },
+            { id: 'fake-text-model', name: 'Fake Text Model' },
+          ]
+      response.end(JSON.stringify({ data: models }))
       return
     }
     if (request.method === 'POST' && path.endsWith('/chat/completions')) {
       const titleRequest = body.includes('Create a concise title')
       response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
       response.write('data: ' + chunk(titleRequest ? 'E2E Session' : 'E2E_STREAM_OK') + '\n\n')
-      response.write('data: ' + chunk('', 'stop') + '\n\n')
+      response.write('data: ' + chunk('', 'stop', {
+        prompt_tokens: 1000,
+        completion_tokens: 5,
+        prompt_tokens_details: { cached_tokens: 999 },
+      }) + '\n\n')
       response.end('data: [DONE]\n\n')
       return
     }
@@ -385,13 +403,19 @@ completion_count_after="$(grep -c 'POST /v1/chat/completions' "$MOCK_LOG" 2>/dev
     .filter(line => line.startsWith(prefix))
     .map(line => JSON.parse(line.slice(prefix.length)))
   const request = requests.find(body => JSON.stringify(body.messages).includes("reply with the test marker"))
-  if (!request) throw new Error("minimal request was not captured")
+  if (!request) throw new Error("default standard request was not captured")
   const names = (request.tools ?? []).map(tool => tool.function?.name ?? tool.name).sort()
-  const expected = ["bash", "str_replace_editor"]
+  const expected = [
+    "ask_user_question", "bash", "create_goal", "edit", "exit_plan_mode",
+    "get_goal", "glob", "grep", "interrupt_agent", "job_kill", "job_list",
+    "job_output", "list_agents", "ralph", "read", "read_image", "send_message",
+    "skill", "subagent", "subagent_fork", "todo_write", "update_goal",
+    "web_search", "workflow", "write",
+  ].sort()
   if (JSON.stringify(names) !== JSON.stringify(expected)) {
-    throw new Error(`minimal tool roster drifted: ${JSON.stringify(names)}`)
+    throw new Error(`default standard tool roster drifted: ${JSON.stringify(names)}`)
   }
-' "$MOCK_LOG" || fail "minimal preset did not expose exactly bash + str_replace_editor"
+' "$MOCK_LOG" || fail "default preset did not expose the standard tool roster"
 if grep -Eqi 'grok-4|api\.x\.ai|xai\.com' "$HEADLESS_OUT" "$HEADLESS_ERR"; then
   fail "headless dscode leaked to the embedded xAI path"
 fi
@@ -405,7 +429,6 @@ wait_leader_exit "$HEADLESS_SOCKET"
     throw new Error("legacy credential reference was not retained")
   }
 ' "$SCRATCH/.credentials.yaml" || fail "dsh did not migrate the legacy credential document"
-
 
 audit_responses_preset() {
   preset="$1"
@@ -555,6 +578,30 @@ completion_count_after_reject="$(grep -c 'POST /v1/chat/completions' "$MOCK_LOG"
 wait_leader_exit "$HEADLESS_REJECT_SOCKET"
 
 audit_all_responses_presets
+echo "[headless] multimodal prompt through durable dsh attachments"
+IMAGE_PROMPT='[{"type":"text","text":"inspect the image test marker [Image #1]"},{"type":"image","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=","mimeType":"image/png"}]'
+env PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-headless-image" \
+  DSCODE_SOCKET="$HEADLESS_IMAGE_SOCKET" DSCODE_LOG="$LEADER_LOG" DSH_BIN="$DSH_BIN" \
+  FAKE_KEY=e2e-key DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 TERM=xterm-256color \
+  "$TUI_BIN" --prompt-json "$IMAGE_PROMPT" --output-format json \
+  --model fake-model --no-plan --always-approve \
+  >"$HEADLESS_IMAGE_OUT" 2>"$HEADLESS_IMAGE_ERR" \
+  || fail "headless multimodal dscode process failed"
+"$NODE_BIN" -e '
+  const fs = require("node:fs")
+  const result = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+  if (result.text !== "E2E_STREAM_OK") throw new Error("image turn marker was not returned")
+  const prefix = "POST /v1/chat/completions "
+  const requests = fs.readFileSync(process.argv[2], "utf8").split("\n")
+    .filter(line => line.startsWith(prefix))
+    .map(line => JSON.parse(line.slice(prefix.length)))
+  const request = requests.find(body => {
+    const wire = JSON.stringify(body.messages)
+    return wire.includes("image test marker") && wire.includes("data:image/png;base64,")
+  })
+  if (!request) throw new Error("image bytes did not reach the provider request")
+' "$HEADLESS_IMAGE_OUT" "$MOCK_LOG" || fail "multimodal prompt did not cross the complete product path"
+wait_leader_exit "$HEADLESS_IMAGE_SOCKET"
 
 capture() {
   tmux -L "$SESSION" -f /dev/null capture-pane -p -S - -t "$SESSION:0.0" >"$FRAME" 2>/dev/null
@@ -655,6 +702,7 @@ grep -q -- '--restore-code is not supported by dscode' "$RESTORE_CODE_ERR" \
 
 echo "[tui] booting CLI-managed worktree"
 boot "$SOCKET" "--worktree=$WORKTREE_LABEL" --worktree-ref HEAD
+wait_frame "default preset" 'preset: standard'
 grep -q '^version: 1' "$SCRATCH/.credentials.yaml" \
   || fail "new dsh did not migrate the legacy credentials document"
 grep -q '^refs:' "$SCRATCH/.credentials.yaml" \
@@ -694,6 +742,11 @@ if grep -q 'Presets' "$FRAME"; then
 fi
 wait_frame_absent "preset picker close" 'Presets'
 
+echo "[tui] preset-scoped manual compaction"
+clear_prompt
+send_line "/compact"
+wait_frame "manual compaction" 'No compactable history yet' 300
+
 echo "[tui] provider and model selection"
 clear_prompt
 send_line "/provider fake"
@@ -726,6 +779,7 @@ echo "[tui] streamed prompt through the real bridge"
 clear_prompt
 send_line "reply with the test marker"
 wait_frame "streamed prompt" 'E2E_STREAM_OK' 300
+wait_frame "cache hit status" 'cache 99\.9%' 300
 grep -q 'POST /v1/chat/completions' "$MOCK_LOG" \
   || fail "the mock gateway never received a completion request"
 for _ in $(seq 1 100); do
@@ -755,6 +809,22 @@ grep -q 'removed:' "$WORKTREE_RM_OUT" \
   || fail "worktree rm did not report the removed path"
 [[ ! -e "$WORKTREE_PATH" ]] || fail "worktree rm left the checkout on disk"
 WORKTREE_PATH=""
+echo "[headless] text-only model rejects image prompts before provider I/O"
+completion_count_before_text_image="$(grep -c 'POST /v1/chat/completions' "$MOCK_LOG" 2>/dev/null || true)"
+if env PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-headless-text-image" \
+  DSCODE_SOCKET="$HEADLESS_TEXT_IMAGE_SOCKET" DSCODE_LOG="$LEADER_LOG" DSH_BIN="$DSH_BIN" \
+  FAKE_KEY=e2e-key DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 TERM=xterm-256color \
+  "$TUI_BIN" --prompt-json "$IMAGE_PROMPT" --output-format json \
+  --model fake-text-model --no-plan --always-approve \
+  >"$HEADLESS_TEXT_IMAGE_OUT" 2>"$HEADLESS_TEXT_IMAGE_ERR"; then
+  fail "text-only model accepted an image prompt"
+fi
+grep -q 'does not support image input' "$HEADLESS_TEXT_IMAGE_OUT" "$HEADLESS_TEXT_IMAGE_ERR" \
+  || fail "text-only image rejection did not explain the model capability"
+completion_count_after_text_image="$(grep -c 'POST /v1/chat/completions' "$MOCK_LOG" 2>/dev/null || true)"
+[[ "$completion_count_after_text_image" -eq "$completion_count_before_text_image" ]] \
+  || fail "text-only image rejection still reached the provider"
+wait_leader_exit "$HEADLESS_TEXT_IMAGE_SOCKET"
 
 echo "PASS real TUI + dsh + bridge E2E run $RUN_ID"
 echo "  artifacts: $OUT (*-$RUN_ID.*)"

@@ -153,6 +153,7 @@ fn test_app() -> AppView {
         resume_local_miss: None,
         agent_override: None,
         persona_override: None,
+        preset_default: "standard".to_string(),
         bootstrap_acp_commands: Vec::new(),
         auth_methods: vec![acp::AuthMethod::Agent(acp::AuthMethodAgent::new(
             acp::AuthMethodId::new("grok.com"),

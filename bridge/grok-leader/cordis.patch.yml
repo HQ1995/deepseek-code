@@ -89,7 +89,7 @@
     - id: agent-presets
       name: '@deepseek-ai/dsh-agent-presets'
       config:
-        default: minimal
+        default: standard
 
 - insert:
     - id: cordis-host-runner
