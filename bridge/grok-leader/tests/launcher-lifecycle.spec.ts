@@ -42,12 +42,15 @@ describe('launcher lifecycle', () => {
     const tuiLog = join(home, 'tui.log')
     const npmLog = join(home, 'npm.log')
     const launcherLink = join(home, '.local', 'bin', 'dscode')
-    const legacyBin = join(home, 'legacy-bin', 'dscode')
+    const legacyRealBin = join(home, 'legacy-real', 'dscode')
+    const legacyAliasDir = join(home, 'legacy-alias')
+    const legacyBin = join(legacyAliasDir, 'dscode')
     mkdirSync(dirname(cachedTui), { recursive: true })
     mkdirSync(fakeBin, { recursive: true })
     mkdirSync(dirname(launcherLink), { recursive: true })
-    mkdirSync(dirname(legacyBin), { recursive: true })
-    writeFileSync(legacyBin, '#!/bin/sh\n')
+    mkdirSync(dirname(legacyRealBin), { recursive: true })
+    writeFileSync(legacyRealBin, '#!/bin/sh\n')
+    symlinkSync(dirname(legacyRealBin), legacyAliasDir)
     symlinkSync(legacyBin, launcherLink)
     writeFileSync(cachedTui, `#!/bin/sh
 if [ "\${1:-}" = "--version" ]; then
@@ -102,7 +105,7 @@ esac
         PATH: `${fakeBin}:/usr/bin:/bin`,
         DSCODE_BIN: '',
         DSH_BIN: '',
-        DSCODE_LEGACY_BIN: legacyBin,
+        DSCODE_LEGACY_BIN: legacyRealBin,
       },
     })
 

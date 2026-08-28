@@ -361,7 +361,7 @@ export const healLauncherLink = () => {
     const absoluteTarget = resolve(dirname(link), target)
     const legacyBin = process.env.DSCODE_LEGACY_BIN
     const isLegacyHandoff = legacyBin !== undefined && legacyBin !== ''
-      && absoluteTarget === resolve(legacyBin)
+      && realpathSync(absoluteTarget) === realpathSync(legacyBin)
     if (!isLegacyHandoff && !(target.includes('node_modules') && target.endsWith('/bin/dscode.mjs'))) return
     rmSync(link)
     symlinkSync(preferred, link)
