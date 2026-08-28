@@ -1202,16 +1202,20 @@ describe('grok leader over a unix socket', () => {
     const badCwd = await c.request(1, 'session/new', { cwd: 'relative', mcpServers: [] })
     expect(badCwd.error).toEqual({ code: -32602, message: 'cwd must be an absolute path: relative' })
 
-    const badMcp = await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [{ name: 'fs', command: 'node', args: [], env: [] }] })
-    expect(badMcp.error).toEqual({ code: -32602, message: 'mcpServers is not supported' })
+    const withMcp = await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [{ name: 'fs', command: 'node', args: [], env: [] }] })
+    expect(withMcp.error).toBeUndefined()
+    expect((withMcp.result as { sessionId: string }).sessionId).toBeTruthy()
 
-    const created = await c.request(3, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const badMcp = await c.request(3, 'session/new', { cwd: process.cwd(), mcpServers: 'not-an-array' })
+    expect(badMcp.error).toEqual({ code: -32602, message: 'mcpServers must be an array' })
+
+    const created = await c.request(4, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
 
-    const unknownSession = await c.request(4, 'session/prompt', { sessionId: 'missing', prompt: [{ type: 'text', text: 'x' }] })
+    const unknownSession = await c.request(5, 'session/prompt', { sessionId: 'missing', prompt: [{ type: 'text', text: 'x' }] })
     expect(unknownSession.error).toEqual({ code: -32602, message: 'unknown session: missing' })
 
-    const imagePrompt = await c.request(5, 'session/prompt', { sessionId, prompt: [{ type: 'image', data: '', mimeType: 'image/png' }] })
+    const imagePrompt = await c.request(6, 'session/prompt', { sessionId, prompt: [{ type: 'image', data: '', mimeType: 'image/png' }] })
     expect(imagePrompt.error).toEqual({ code: -32602, message: 'Image upload is not canonical base64.' })
   })
 
@@ -1337,16 +1341,18 @@ describe('grok leader over a unix socket', () => {
     })
   })
 
-  it('session/new rejects any non-empty or non-array mcpServers value', async () => {
+  it('session/new rejects only non-array mcpServers values', async () => {
     const { client: c } = await start()
     register(c)
     await c.next()
-    // Objects, strings, and any other non-array type reject outright instead
-    // of being silently ignored; non-empty arrays keep their own error.
+    // Non-array types reject outright instead of being silently ignored;
+    // a well-formed array (empty or not) is accepted — the bridge serves no
+    // MCP tools, so a TUI-discovered server must not brick the session.
     expect((await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: { name: 'fs' } })).error).toEqual({ code: -32602, message: 'mcpServers must be an array' })
     expect((await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: 'fs' })).error).toEqual({ code: -32602, message: 'mcpServers must be an array' })
     expect((await c.request(3, 'session/new', { cwd: process.cwd(), mcpServers: 7 })).error).toEqual({ code: -32602, message: 'mcpServers must be an array' })
-    expect((await c.request(4, 'session/new', { cwd: process.cwd(), mcpServers: [{}] })).error).toEqual({ code: -32602, message: 'mcpServers is not supported' })
+    expect((await c.request(4, 'session/new', { cwd: process.cwd(), mcpServers: [{}] })).error).toBeUndefined()
+    expect((await c.request(5, 'session/new', { cwd: process.cwd(), mcpServers: [] })).error).toBeUndefined()
   })
 
   it('session/load validates cwd and mcpServers like session/new', async () => {

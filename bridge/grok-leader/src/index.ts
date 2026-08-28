@@ -1941,15 +1941,19 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   /** session/new and session/load share the workspace gate: an absolute cwd
-   * and no MCP servers (an empty array only; any other mcpServers value is
-   * invalid, never silently ignored). Returns the validated cwd. */
+   * and a well-formed mcpServers array. The bridge advertises
+   * mcpCapabilities { http: false, sse: false } and has no MCP plumbing, but
+   * the grok TUI auto-discovers servers (e.g. ~/.claude.json) and sends them
+   * anyway; a discovered-but-unserved server must not brick every session.
+   * A non-array value is still malformed and rejects; a non-empty array is
+   * accepted and ignored with a logged warning (never silent). */
   const validateWorkspaceParams = (p: Record<string, unknown>): string => {
     const cwd = p.cwd
     if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw invalidParams('cwd must be an absolute path: ' + String(cwd))
     const mcpServers = p.mcpServers
     if (mcpServers !== undefined) {
       if (!Array.isArray(mcpServers)) throw invalidParams('mcpServers must be an array')
-      if (mcpServers.length > 0) throw invalidParams('mcpServers is not supported')
+      if (mcpServers.length > 0) logger.warn('grok-leader: ignoring ' + String(mcpServers.length) + ' MCP server(s); MCP is not supported by this bridge')
     }
     return cwd
   }
