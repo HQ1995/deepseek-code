@@ -24,9 +24,11 @@ afterEach(() => {
 })
 
 describe('launcher lifecycle', () => {
-  it('uses beta as the public channel name and keeps alpha compatible', () => {
+  it('uses the package release channel unless update overrides it', () => {
     expect(packageUpdateRef(['--beta'])).toBe('beta')
     expect(packageUpdateRef(['--alpha'])).toBe('beta')
+    expect(packageUpdateRef([], '0.0.13-beta.6')).toBe('beta')
+    expect(packageUpdateRef([], '0.0.13')).toBe('latest')
   })
 
   it.skipIf(productNode === undefined)('bootstraps an isolated profile, runtime, launcher, and cached TUI', () => {
@@ -39,8 +41,14 @@ describe('launcher lifecycle', () => {
     const fakeNpm = join(fakeBin, 'npm')
     const tuiLog = join(home, 'tui.log')
     const npmLog = join(home, 'npm.log')
+    const launcherLink = join(home, '.local', 'bin', 'dscode')
+    const legacyBin = join(home, 'legacy-bin', 'dscode')
     mkdirSync(dirname(cachedTui), { recursive: true })
     mkdirSync(fakeBin, { recursive: true })
+    mkdirSync(dirname(launcherLink), { recursive: true })
+    mkdirSync(dirname(legacyBin), { recursive: true })
+    writeFileSync(legacyBin, '#!/bin/sh\n')
+    symlinkSync(legacyBin, launcherLink)
     writeFileSync(cachedTui, `#!/bin/sh
 if [ "\${1:-}" = "--version" ]; then
   echo 'dscode ${packageVersion}-dev (e2e)'
@@ -50,6 +58,7 @@ fi
   printf 'DSH_BIN=%s\n' "\${DSH_BIN:-}"
   printf 'DSCODE_HOME=%s\n' "\${DSCODE_HOME:-}"
   printf 'DSH_PROFILE_DIR=%s\n' "\${DSH_PROFILE_DIR:-}"
+  printf 'DSCODE_MANAGED_LAUNCHER=%s\n' "\${DSCODE_MANAGED_LAUNCHER:-}"
   printf 'ARGS='
   printf '<%s>' "$@"
   printf '\n'
@@ -93,6 +102,7 @@ esac
         PATH: `${fakeBin}:/usr/bin:/bin`,
         DSCODE_BIN: '',
         DSH_BIN: '',
+        DSCODE_LEGACY_BIN: legacyBin,
       },
     })
 
@@ -102,12 +112,12 @@ esac
     const manifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')) as { dsh: { profile: { bundles: string[] } } }
     expect(manifest.dsh.profile.bundles).toContain('@hqzhao95/dscode')
     expect(existsSync(join(profile, 'runtime', 'bin', 'dsh'))).toBe(true)
-    const launcherLink = join(home, '.local', 'bin', 'dscode')
     expect(readlinkSync(launcherLink)).toBe(join(plugin, 'bin', 'dscode.mjs'))
     const launched = readFileSync(tuiLog, 'utf8')
     expect(launched).toContain(`DSH_BIN=${join(profile, 'runtime', 'bin', 'dsh')}`)
     expect(launched).toContain(`DSCODE_HOME=${profile}`)
     expect(launched).toContain(`DSH_PROFILE_DIR=${profile}`)
+    expect(launched).toContain('DSCODE_MANAGED_LAUNCHER=1')
     expect(launched).toContain('ARGS=<inspect><--json>')
     expect(readFileSync(npmLog, 'utf8')).toContain(`@hqzhao95/dscode@${packageVersion}`)
     expect(readFileSync(npmLog, 'utf8')).toContain(`@deepseek-ai/dsh@${dshVersion}`)

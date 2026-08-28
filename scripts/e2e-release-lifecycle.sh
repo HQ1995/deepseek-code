@@ -65,13 +65,14 @@ PROFILE="$DSH_HOME/profiles/dscode"
 LAUNCHER="$TEST_HOME/.local/bin/dscode"
 TUI_BIN="$PROFILE/bin/dscode"
 DSH_BIN="$PROFILE/runtime/bin/dsh"
+PROFILE_LAUNCHER="$PROFILE/node_modules/@hqzhao95/dscode/bin/dscode.mjs"
 
 echo "dscode published-release lifecycle E2E"
 echo "  host: $(uname -s)-$(uname -m)"
 echo "  node: $($NODE_BIN --version)"
 echo "  package: $PACKAGE_SPEC -> $EXPECTED_VERSION"
 
-echo "[1/5] cold install from npm"
+echo "[1/6] cold install from npm"
 (
   cd "$WORK_DIR"
   "$NPX_BIN" --yes "$PACKAGE_SPEC" --version \
@@ -88,6 +89,42 @@ const pkg = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 if (pkg.version !== process.argv[3]) process.exit(1)
 NODE
 
+echo "[2/6] legacy direct-link stale-profile handoff"
+"$NODE_BIN" - "$PROFILE/node_modules/@hqzhao95/dscode/package.json" <<'NODE'
+const fs = require('node:fs')
+const file = process.argv[2]
+const pkg = JSON.parse(fs.readFileSync(file, 'utf8'))
+pkg.version = '0.0.0-legacy'
+fs.writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`)
+NODE
+rm "$LAUNCHER"
+ln -s "$TUI_BIN" "$LAUNCHER"
+(
+  cd "$WORK_DIR"
+  "$LAUNCHER" inspect --json \
+    >"$RUN_ROOT/handoff-inspect.json" 2>"$RUN_ROOT/handoff-inspect.err"
+)
+"$NODE_BIN" - "$LAUNCHER" "$PROFILE_LAUNCHER" \
+  "$PROFILE/node_modules/@hqzhao95/dscode/package.json" \
+  "$PROFILE/runtime/lib/node_modules/@deepseek-ai/dsh/package.json" \
+  "$RUN_ROOT/handoff-inspect.json" "$EXPECTED_VERSION" <<'NODE'
+const fs = require('node:fs')
+const path = require('node:path')
+const link = process.argv[2]
+const target = path.resolve(path.dirname(link), fs.readlinkSync(link))
+if (target !== process.argv[3]) throw new Error(`legacy link points to ${target}`)
+const pkg = JSON.parse(fs.readFileSync(process.argv[4], 'utf8'))
+const runtime = JSON.parse(fs.readFileSync(process.argv[5], 'utf8'))
+if (pkg.version !== process.argv[7]) throw new Error(`profile stayed at ${pkg.version}`)
+const inspect = JSON.parse(fs.readFileSync(process.argv[6], 'utf8'))
+if (inspect.grokVersion !== process.argv[7]) {
+  throw new Error(`handoff ran TUI ${inspect.grokVersion}`)
+}
+if (pkg.dsh?.testedVersion !== runtime.version) {
+  throw new Error(`runtime ${runtime.version} does not match ${pkg.dsh?.testedVersion}`)
+}
+NODE
+
 wait_leader_exit() {
   socket="$1"
   lock="${socket%.*}.lock"
@@ -101,7 +138,7 @@ wait_leader_exit() {
   fail "leader remained alive after client exit: $socket"
 }
 
-echo "[2/5] provider-neutral first use"
+echo "[3/6] provider-neutral first use"
 ONBOARDING_SOCKET="$RUN_ROOT/onboarding.sock"
 if env DSCODE_SOCKET="$ONBOARDING_SOCKET" DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 \
   "$LAUNCHER" -p "must not reach a model" --output-format json --agent minimal \
@@ -189,7 +226,7 @@ agent-default-model:
   model: fixture-model
 EOF
 
-echo "[3/5] real headless turn through the bridge"
+echo "[4/6] real headless turn through the bridge"
 USE_SOCKET="$RUN_ROOT/use.sock"
 (
   cd "$WORK_DIR"
@@ -208,7 +245,7 @@ grep -Fq 'POST /v1/chat/completions' "$MOCK_LOG" \
   || fail "installed product did not call the mock provider"
 wait_leader_exit "$USE_SOCKET"
 
-echo "[4/5] uninstall owned product state"
+echo "[5/6] uninstall owned product state"
 mkdir -p "$DSH_HOME/sessions" "$DSH_HOME/storages"
 printf 'keep\n' >"$DSH_HOME/sessions/shared.keep"
 printf 'keep\n' >"$DSH_HOME/storages/shared.keep"
@@ -219,5 +256,5 @@ printf 'keep\n' >"$DSH_HOME/storages/shared.keep"
 [[ -f "$DSH_HOME/sessions/shared.keep" ]] || fail "uninstall removed shared sessions"
 [[ -f "$DSH_HOME/storages/shared.keep" ]] || fail "uninstall removed shared storages"
 
-echo "[5/5] cleanup isolation boundary"
-echo "PASS install -> provider onboarding -> use -> uninstall ($EXPECTED_VERSION)"
+echo "[6/6] cleanup isolation boundary"
+echo "PASS install -> legacy handoff -> provider onboarding -> use -> uninstall ($EXPECTED_VERSION)"

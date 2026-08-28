@@ -68,7 +68,8 @@ describe('installation lifecycle', () => {
   })
 
   it('keeps the npm package on the requested update channel', () => {
-    expect(packageUpdateRef([])).toBe('latest')
+    expect(packageUpdateRef([])).toBe('beta')
+    expect(packageUpdateRef([], '0.0.13')).toBe('latest')
     expect(packageUpdateRef(['--beta'])).toBe('beta')
     expect(packageUpdateRef(['--alpha'])).toBe('beta')
     expect(packageUpdateRef(['--version', '0.0.8'])).toBe('0.0.8')

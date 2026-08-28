@@ -339,10 +339,9 @@ const installBinary = async (release, asset) => {
 
 /** Point ~/.local/bin/dscode at the profile install's launcher (the stable
  *  copy — an npx temp-store copy of this file may be garbage-collected), or
- *  at this file when the profile copy is absent. Polite: create the link
- *  when missing, retarget only a symlink that points at a plugin launcher
- *  (a node_modules .../bin/dscode.mjs). A repo dev symlink
- *  (target/release/dscode) or anything user-made is left alone. */
+ *  at this file when the profile copy is absent. Retarget plugin launchers
+ *  and the exact legacy binary that asked this managed launch to take over;
+ *  anything else remains user-owned. */
 export const healLauncherLink = () => {
   try {
     const linkDir = join(homedir(), '.local', 'bin')
@@ -359,7 +358,11 @@ export const healLauncherLink = () => {
     if (!existing.isSymbolicLink()) return
     const target = readlinkSync(link)
     if (target === preferred) return
-    if (!(target.includes('node_modules') && target.endsWith('/bin/dscode.mjs'))) return
+    const absoluteTarget = resolve(dirname(link), target)
+    const legacyBin = process.env.DSCODE_LEGACY_BIN
+    const isLegacyHandoff = legacyBin !== undefined && legacyBin !== ''
+      && absoluteTarget === resolve(legacyBin)
+    if (!isLegacyHandoff && !(target.includes('node_modules') && target.endsWith('/bin/dscode.mjs'))) return
     rmSync(link)
     symlinkSync(preferred, link)
   } catch {
@@ -476,14 +479,16 @@ export const shouldReconcilePackageUpdate = (args) => {
   return !args.slice(updateIndex + 1).includes('--check')
 }
 
-export const packageUpdateRef = (args) => {
+export const packageUpdateRef = (args, currentVersion = pkg.version) => {
   const versionIndex = args.indexOf('--version')
   const equalsVersion = args.find(arg => arg.startsWith('--version='))?.slice('--version='.length)
   const version = equalsVersion ?? (versionIndex === -1 ? undefined : args[versionIndex + 1])
   if (version !== undefined && version !== '') return version
   if (args.includes('--alpha') || args.includes('--beta')) return 'beta'
+  if (args.includes('--stable')) return 'latest'
   if (args.includes('--enterprise')) return 'enterprise'
-  return 'latest'
+  if (/(?:^|-)enterprise(?:\.|$)/.test(currentVersion)) return 'enterprise'
+  return /-(?:alpha|beta)(?:\.|$)/.test(currentVersion) ? 'beta' : 'latest'
 }
 
 const main = async () => {
@@ -517,6 +522,8 @@ const main = async () => {
   const env = {
     ...process.env,
     PATH: [...extraBins, ...pathParts].join(delimiter),
+    DSCODE_MANAGED_LAUNCHER: '1',
+
     DSH_BIN: dshBin,
     DSCODE_HOME: tuiHome,
     // 0.0.10 TUI only reads DSC_HOME; drop after that binary is gone.

@@ -1873,7 +1873,162 @@ fn isolate_dscode_environment() {
         }
     }
 }
+const DSCODE_MANAGED_LAUNCHER_ENV: &str = "DSCODE_MANAGED_LAUNCHER";
+const DSCODE_NPM_PACKAGE: &str = "@hqzhao95/dscode";
 
+fn current_product_version() -> &'static str {
+    env!("VERSION_WITH_COMMIT")
+        .split_ascii_whitespace()
+        .next()
+        .unwrap_or(env!("VERSION_WITH_COMMIT"))
+}
+
+fn npm_channel_for_version(version: &str) -> &'static str {
+    match default_update_channel(version) {
+        "alpha" => "beta",
+        _ => "latest",
+    }
+}
+
+fn profile_install_matches_binary(profile_dir: &std::path::Path, current_version: &str) -> bool {
+    let package_path = profile_dir
+        .join("node_modules")
+        .join("@hqzhao95")
+        .join("dscode")
+        .join("package.json");
+    let runtime_path = profile_dir
+        .join("runtime")
+        .join("lib")
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("package.json");
+    let Ok(package_text) = std::fs::read_to_string(package_path) else {
+        return false;
+    };
+    let Ok(runtime_text) = std::fs::read_to_string(runtime_path) else {
+        return false;
+    };
+    let Ok(package) = serde_json::from_str::<serde_json::Value>(&package_text) else {
+        return false;
+    };
+    let Ok(runtime) = serde_json::from_str::<serde_json::Value>(&runtime_text) else {
+        return false;
+    };
+    let Some(installed_version) = package.get("version").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some(expected_runtime) = package
+        .pointer("/dsh/testedVersion")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(actual_runtime) = runtime.get("version").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    installed_version == current_version && expected_runtime == actual_runtime
+}
+fn invoked_through_public_link() -> bool {
+    let Some(argv0) = std::env::args_os().next() else {
+        return false;
+    };
+    let argv0 = std::path::PathBuf::from(argv0);
+    if argv0.components().count() == 1 {
+        return argv0 == std::path::Path::new("dscode");
+    }
+    let Some(home) = std::env::var_os("HOME") else {
+        return false;
+    };
+    let expected = std::path::Path::new(&home)
+        .join(".local")
+        .join("bin")
+        .join("dscode");
+    let actual = if argv0.is_absolute() {
+        argv0
+    } else {
+        let Ok(cwd) = std::env::current_dir() else {
+            return false;
+        };
+        cwd.join(argv0)
+    };
+    actual == expected
+}
+
+fn product_reconcile_spec_for(
+    args: &PagerArgs,
+    current_version: &str,
+    install_matches: bool,
+    managed: bool,
+    legacy_entrypoint: bool,
+) -> Option<String> {
+    if managed || current_version.contains("-dev") {
+        return None;
+    }
+    if let Some(Command::Update {
+        check,
+        version,
+        beta,
+        stable,
+        enterprise,
+        ..
+    }) = &args.command
+    {
+        if *check {
+            return None;
+        }
+        let reference = version.as_deref().unwrap_or_else(|| {
+            if *beta {
+                "beta"
+            } else if *stable {
+                "latest"
+            } else if *enterprise {
+                "enterprise"
+            } else {
+                npm_channel_for_version(current_version)
+            }
+        });
+        return Some(format!("{DSCODE_NPM_PACKAGE}@{reference}"));
+    }
+    (legacy_entrypoint && !install_matches).then(|| {
+        format!(
+            "{DSCODE_NPM_PACKAGE}@{}",
+            npm_channel_for_version(current_version)
+        )
+    })
+}
+
+fn delegate_product_if_needed(args: &PagerArgs) -> Result<Option<std::process::ExitStatus>> {
+    let current_version = current_product_version();
+    let profile_dir = std::env::var_os("GROK_HOME").map(std::path::PathBuf::from);
+    let install_matches = profile_dir
+        .as_deref()
+        .is_some_and(|profile| profile_install_matches_binary(profile, current_version));
+    let managed =
+        std::env::var_os(DSCODE_MANAGED_LAUNCHER_ENV).is_some_and(|value| !value.is_empty());
+    let Some(spec) = product_reconcile_spec_for(
+        args,
+        current_version,
+        install_matches,
+        managed,
+        invoked_through_public_link(),
+    ) else {
+        return Ok(None);
+    };
+
+    let mut command = std::process::Command::new("npx");
+    command
+        .arg("--yes")
+        .arg(&spec)
+        .args(std::env::args_os().skip(1));
+    if let Ok(executable) = std::env::current_exe() {
+        command.env("DSCODE_LEGACY_BIN", executable);
+    }
+    command
+        .status()
+        .map(Some)
+        .map_err(|error| anyhow::anyhow!("could not start npx {spec}: {error}"))
+}
 
 fn main() {
     isolate_dscode_environment();
@@ -1923,6 +2078,15 @@ fn main() {
         eprintln!("Error: {error}");
         std::process::exit(2);
     }
+    match delegate_product_if_needed(&args) {
+        Ok(Some(status)) => std::process::exit(status.code().unwrap_or(1)),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("dscode: managed update failed: {error}");
+            std::process::exit(1);
+        }
+    }
+
     xai_grok_pager_minimal::install();
     #[cfg(all(feature = "jemalloc", unix))]
     xai_grok_pager::memory_release::install_release_hook(purge_jemalloc_retained_pages);
@@ -2708,15 +2872,9 @@ mod tests {
         }
 
         isolate_dscode_environment();
-        assert_eq!(
-            std::env::var("GROK_CONFIG").unwrap(),
-            r#"{"models":{}}"#
-        );
+        assert_eq!(std::env::var("GROK_CONFIG").unwrap(), r#"{"models":{}}"#);
         assert!(std::env::var_os("GROK_CONFIG_PATH").is_none());
-        assert_eq!(
-            std::env::var("GROK_CONNECT_UI_TIMEOUT_SECS").unwrap(),
-            "60"
-        );
+        assert_eq!(std::env::var("GROK_CONNECT_UI_TIMEOUT_SECS").unwrap(), "60");
 
         // No public alias means an ambient Grok setting is ignored, not reused.
         unsafe {
@@ -2832,6 +2990,69 @@ mod tests {
         assert_eq!(default_update_channel("0.0.11-beta.1-dev"), "stable");
         assert_eq!(default_update_channel("not-semver"), "stable");
     }
+    #[test]
+    fn unmanaged_release_reconciles_the_whole_product() {
+        let normal = PagerArgs::try_parse_from(["dscode"]).unwrap();
+        assert_eq!(
+            product_reconcile_spec_for(&normal, "0.0.13-beta.7", false, false, true).as_deref(),
+            Some("@hqzhao95/dscode@beta")
+        );
+        assert!(product_reconcile_spec_for(&normal, "0.0.13-beta.7", true, false, true).is_none());
+        assert!(product_reconcile_spec_for(&normal, "0.0.13-beta.7", false, true, true).is_none());
+        assert!(
+            product_reconcile_spec_for(&normal, "0.0.13-beta.7", false, false, false).is_none()
+        );
+        assert!(
+            product_reconcile_spec_for(&normal, "0.0.13-beta.7-dev", false, false, true).is_none()
+        );
+
+        let beta = PagerArgs::try_parse_from(["dscode", "update", "--beta"]).unwrap();
+        assert_eq!(
+            product_reconcile_spec_for(&beta, "0.0.13-beta.7", true, false, false).as_deref(),
+            Some("@hqzhao95/dscode@beta")
+        );
+        let check = PagerArgs::try_parse_from(["dscode", "update", "--beta", "--check"]).unwrap();
+        assert!(product_reconcile_spec_for(&check, "0.0.13-beta.7", false, false, true).is_none());
+    }
+
+    #[test]
+    fn profile_match_requires_the_pinned_dsh_runtime() {
+        let profile =
+            std::env::temp_dir().join(format!("dscode-profile-match-{}", std::process::id()));
+        let package_dir = profile
+            .join("node_modules")
+            .join("@hqzhao95")
+            .join("dscode");
+        let runtime_dir = profile
+            .join("runtime")
+            .join("lib")
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh");
+        let _ = std::fs::remove_dir_all(&profile);
+        std::fs::create_dir_all(&package_dir).unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{"version":"0.0.13-beta.7","dsh":{"testedVersion":"0.1.1-rc.2"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            runtime_dir.join("package.json"),
+            r#"{"version":"0.1.1-rc.2"}"#,
+        )
+        .unwrap();
+        assert!(profile_install_matches_binary(&profile, "0.0.13-beta.7"));
+
+        std::fs::write(
+            runtime_dir.join("package.json"),
+            r#"{"version":"0.1.0-rc.8"}"#,
+        )
+        .unwrap();
+        assert!(!profile_install_matches_binary(&profile, "0.0.13-beta.7"));
+        let _ = std::fs::remove_dir_all(profile);
+    }
+
     #[test]
     fn version_flags_and_doctor_are_distinct_early_intents() {
         let version = PagerArgs::try_parse_from(["grok", "--version"]).unwrap();

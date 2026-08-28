@@ -29,6 +29,7 @@ const run = (home: string, args: string[]): RunResult => {
       DSH_HOME: join(home, '.dsh'),
       DSC_HOME: profile,
       DSCODE_HOME: profile,
+      DSCODE_MANAGED_LAUNCHER: '1',
       DSH_TELEMETRY_DISABLED: '1',
       NO_COLOR: '1',
     },

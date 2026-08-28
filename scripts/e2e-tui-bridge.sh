@@ -378,6 +378,11 @@ grep -q '^READY$' "$MOCK_LOG" 2>/dev/null || fail "mock gateway did not start"
 DSH_HOME="$SCRATCH" "$DSH_BIN" plugin --profile dscode add \
   "file:$BRIDGE_ARCHIVE" >"$PLUGIN_LOG" 2>&1 \
   || fail "could not install the bridge into the isolated dsh profile"
+# From here onward the product runs as the isolated user. Without HOME,
+# Claude/Cursor compatibility discovery can import the developer's MCP config
+# and invalidate the bridge fixture before the mock-model turn starts.
+export HOME="$SCRATCH"
+
 
 echo "[headless] compiled dscode -> dsh -> bridge -> mock gateway"
 completion_count_before="$(grep -c 'POST /v1/chat/completions' "$MOCK_LOG" 2>/dev/null || true)"
