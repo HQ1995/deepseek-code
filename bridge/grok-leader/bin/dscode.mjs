@@ -101,7 +101,7 @@ const cliVersion = (binary) => {
 }
 
 const runInstaller = (argv) => new Promise((resolveRun, rejectRun) => {
-  const child = spawn('npm', argv, { stdio: ['ignore', 'inherit', 'inherit'] })
+  const child = spawn('npm', argv, { stdio: ['ignore', 2, 2] })
   let timedOut = false
   const timer = setTimeout(() => {
     timedOut = true
@@ -246,7 +246,7 @@ export const ensureProfilePlugin = ({
   const argv = ['install', '--prefix', profileDir, spec, '--no-audit', '--no-fund', '--legacy-peer-deps']
   if (process.env.DSCODE_DEBUG !== undefined) console.error(`dscode: running: npm ${argv.join(' ')}`)
   const result = spawnSync('npm', argv, {
-    stdio: ['ignore', 'inherit', 'inherit'],
+    stdio: ['ignore', 2, 2],
     timeout: 120000,
   })
   if (result.error?.code === 'ETIMEDOUT') {

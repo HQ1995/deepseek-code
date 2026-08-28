@@ -70,6 +70,7 @@ fi
     chmodSync(cachedTui, 0o755)
     writeFileSync(fakeNpm, `#!/bin/sh
 printf '%s\n' "$*" >> ${JSON.stringify(npmLog)}
+printf 'npm chatter\n'
 prefix=''
 while [ "$#" -gt 0 ]; do
   if [ "$1" = '--prefix' ]; then prefix="$2"; shift 2; else shift; fi
@@ -110,6 +111,7 @@ esac
     })
 
     expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toBe('')
     const plugin = join(profile, 'node_modules', '@hqzhao95', 'dscode')
     expect(JSON.parse(readFileSync(join(plugin, 'package.json'), 'utf8')).version).toBe(packageVersion)
     const manifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')) as { dsh: { profile: { bundles: string[] } } }
