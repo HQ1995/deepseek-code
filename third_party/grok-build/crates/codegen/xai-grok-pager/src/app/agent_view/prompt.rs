@@ -506,21 +506,20 @@ impl AgentView {
 
         // 0b. (History-panel intercept lives at the top of this fn.)
 
-        // 0c. Prompt history panel. Two entry points, one panel:
-        //   - /history: search mode — the composer is the filter query.
-        //   - Up on an empty prompt: browse mode — opens with the newest
-        //     prompt filled into the composer; Up/Down step with
-        //     live-populate, Down at the newest closes, typing detaches to
-        //     edit. Down never opens the panel.
-        // Browse activation is Normal-input-mode only (recalling a chat
-        // prompt into a Bash/Remember composer would submit it under that
-        // mode); a recalled `! cmd` entry flips the composer to Bash itself.
+        // 0c. Up on an empty prompt focuses the newest queued follow-up first;
+        // prompt history receives the key only when the queue is empty.
+        // Browse activation is Normal-input-mode only (recalling a chat prompt
+        // into a Bash/Remember composer would submit it under that mode); a
+        // recalled `! cmd` entry flips the composer to Bash itself.
         if self.prompt_mode == PromptMode::Normal
             && self.prompt.text().is_empty()
             && !self.prompt.file_search_visible()
             && key!(Up).matches(key)
             && self.prompt_input_mode == PromptInputMode::Normal
         {
+            if let Some(outcome) = self.try_focus_queue_from_prompt() {
+                return outcome;
+            }
             let history = self.combined_prompt_history();
             let current_text = self.prompt.text().to_string();
             if !history.is_empty() {
@@ -2132,5 +2131,76 @@ mod apple_terminal_ctrl_o_upgrade_cta_tests {
             matches!(outcome, InputOutcome::Changed),
             "idle Ctrl+Enter must stay a silent interject no-op, got {outcome:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod queue_recall_tests {
+    use super::*;
+    use crate::app::agent_view::test_fixtures::make_running_agent;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn up(agent: &mut AgentView) -> InputOutcome {
+        agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn up_focuses_the_queue_on_its_bottom_row() {
+        let mut agent = make_running_agent();
+        agent.active_pane = AgentPane::Prompt;
+        agent.queue.overlay.focused = false;
+
+        up(&mut agent);
+
+        assert_eq!(agent.active_pane, AgentPane::Queue);
+        assert!(agent.queue.overlay.focused);
+        let bottom = *agent.queue.entry_ids().last().unwrap();
+        assert_eq!(agent.queue.selected_id(), Some(bottom));
+    }
+
+    #[test]
+    fn up_leaves_the_composer_and_history_untouched() {
+        let mut agent = make_running_agent();
+        agent.active_pane = AgentPane::Prompt;
+        agent.queue.overlay.focused = false;
+        agent.session.prompt_history = vec!["an older prompt".into()];
+
+        up(&mut agent);
+
+        assert!(agent.prompt.text().is_empty());
+        assert!(!matches!(
+            agent.prompt_mode,
+            PromptMode::EditingQueued { .. }
+        ));
+        assert!(!agent.prompt.history_search.is_browse());
+    }
+
+    #[test]
+    fn up_with_a_non_empty_composer_leaves_the_queue_alone() {
+        let mut agent = make_running_agent();
+        agent.active_pane = AgentPane::Prompt;
+        agent.queue.overlay.focused = false;
+        agent.prompt.set_text("half a thought");
+
+        up(&mut agent);
+
+        assert_eq!(agent.active_pane, AgentPane::Prompt);
+        assert_eq!(agent.prompt.text(), "half a thought");
+    }
+
+    #[test]
+    fn up_falls_back_to_history_with_an_empty_queue() {
+        let mut agent = make_running_agent();
+        agent.active_pane = AgentPane::Prompt;
+        agent.queue.overlay.focused = false;
+        agent.session.pending_prompts.clear();
+        agent.shared_queue.clear();
+        agent.sync_queue_pane();
+        agent.session.prompt_history = vec!["an older prompt".into()];
+
+        up(&mut agent);
+
+        assert_eq!(agent.active_pane, AgentPane::Prompt);
+        assert_eq!(agent.prompt.text(), "an older prompt");
     }
 }

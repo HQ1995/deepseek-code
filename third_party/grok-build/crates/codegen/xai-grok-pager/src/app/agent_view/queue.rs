@@ -38,6 +38,21 @@ impl AgentView {
         prompt
     }
 
+    /// Focus the bottom merged queue row from an empty composer.
+    pub(super) fn try_focus_queue_from_prompt(&mut self) -> Option<InputOutcome> {
+        self.sync_queue_pane();
+        let id = *self.queue.entry_ids().last()?;
+
+        if !self.set_active_pane(AgentPane::Queue, false) {
+            return Some(InputOutcome::Changed);
+        }
+
+        self.queue.overlay.visible = true;
+        self.queue.overlay.focused = true;
+        self.queue.list_state.select_by_id(id);
+        Some(InputOutcome::Changed)
+    }
+
     /// Force-send a queued follow-up mid-turn from the prompt (empty composer).
     ///
     /// Always the **top** visible row (first under the server-then-local merge

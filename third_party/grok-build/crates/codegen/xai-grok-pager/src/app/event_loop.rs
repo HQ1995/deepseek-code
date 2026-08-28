@@ -2081,6 +2081,9 @@ pub(crate) async fn run(
     // land in the same batch.
     let mut csi_filter = super::csi_filter::CsiFragmentFilter::new();
 
+    // Reassemble legacy X10 reports mangled by UTF-8-converting relays.
+    let mut x10_filter = super::x10_filter::X10ReassemblyFilter::new();
+
     // Swallows the fire-and-forget XTVERSION reply whenever it arrives;
     // armed only when the startup query is still unanswered.
     let mut xt_filter = super::xt_filter::XtversionFilter::new();
@@ -2554,7 +2557,7 @@ pub(crate) async fn run(
                 let Some(ev) = maybe_ev else { break };
                 let result = drain_and_process(
                     ev, &mut input_rx, &mut app, &mut tasks, &progress_tx,
-                    &mut csi_filter, &mut xt_filter,
+                    &mut csi_filter, &mut x10_filter, &mut xt_filter,
                 ).await;
                 if result.should_quit {
                     break;
@@ -3439,9 +3442,10 @@ fn normalize_input_event(timed: TimedInputEvent) -> RoutedInputEvent {
 /// of sequential draws, freezing the UI for seconds or minutes.
 ///
 /// Runs [`coalesce_rapid_keys`] and the persistent
-/// [`CsiFragmentFilter`](super::csi_filter::CsiFragmentFilter) before
-/// processing to fix paste on terminals without bracketed paste (e.g.
-/// Windows PowerShell) and filter leaked CSI fragments (SGR mouse and focus reports).
+/// [`CsiFragmentFilter`](super::csi_filter::CsiFragmentFilter) and
+/// [`X10ReassemblyFilter`](super::x10_filter::X10ReassemblyFilter) before
+/// processing to fix paste on terminals without bracketed paste, filter leaked
+/// CSI fragments, and recombine relay-mangled legacy X10 mouse reports.
 async fn drain_and_process(
     first: TimedInputEvent,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TimedInputEvent>,
@@ -3449,6 +3453,7 @@ async fn drain_and_process(
     tasks: &mut JoinSet<TaskResult>,
     progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
     csi_filter: &mut super::csi_filter::CsiFragmentFilter,
+    x10_filter: &mut super::x10_filter::X10ReassemblyFilter,
     xt_filter: &mut super::xt_filter::XtversionFilter,
 ) -> DrainResult {
     let mut needs_draw = false;
@@ -3489,6 +3494,7 @@ async fn drain_and_process(
         coalesce_rapid_keys(raw_events)
     };
     let coalesced = csi_filter.filter(coalesced);
+    let coalesced = x10_filter.filter(coalesced);
     let coalesced = coalesced
         .into_iter()
         .map(normalize_input_event)
@@ -3499,6 +3505,13 @@ async fn drain_and_process(
         let ev = &routed.event;
         match ev {
             Event::FocusGained => {
+                // ConPTY-backed relays can drop SGR mouse mode on refocus and
+                // fall back to X10. Reassert capture unless the user disabled it.
+                if crate::app::MOUSE_CAPTURE_ENABLED.load(std::sync::atomic::Ordering::Acquire) {
+                    xai_grok_shell::util::with_locked_stderr(|stderr| {
+                        let _ = crossterm::execute!(stderr, crossterm::event::EnableMouseCapture);
+                    });
+                }
                 // Force a full repaint on refocus to heal out-of-band stranded rows.
                 // Sets needs_draw (not had_non_resize_change); the draw site honors force_repaint
                 // ahead of the resize debounce, clearing even a coalesced same-size resize.
@@ -4611,6 +4624,7 @@ mod tests {
         let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut tasks = JoinSet::new();
         let mut csi_filter = super::super::csi_filter::CsiFragmentFilter::new();
+        let mut x10_filter = super::super::x10_filter::X10ReassemblyFilter::new();
         let mut xt_filter = super::super::xt_filter::XtversionFilter::new();
 
         let result = drain_and_process(
@@ -4620,6 +4634,7 @@ mod tests {
             &mut tasks,
             &progress_tx,
             &mut csi_filter,
+            &mut x10_filter,
             &mut xt_filter,
         )
         .await;

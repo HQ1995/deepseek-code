@@ -38,6 +38,7 @@ pub(crate) mod status_line;
 mod status_line_policy;
 pub mod subagent;
 pub mod subscription;
+mod x10_filter;
 pub(crate) use effects::sanitize_user_error;
 mod event_loop;
 mod exit_timeout;

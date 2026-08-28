@@ -103,6 +103,16 @@ branding (our identity). Keep this list current on every sync.
   `[steer]` removes the queued row and merges its text into the running turn
   without cancelling it, matching the composer's Alt+Enter steer. Local rows
   dispatch `Action::Interject`; server rows use the bridge's new `x.ai/queue/steer`.
+- Queue-first Up navigation (ported from upstream `07b2f7144f`): on an empty
+  Normal composer, Up focuses the bottom row of the merged server-then-local
+  queue before falling back to prompt history. Non-empty and non-Normal
+  composers keep their existing cursor/mode behavior.
+- X10 mouse reassembly (ported from upstream `77cd7eb675`):
+  `app/x10_filter.rs` reconstructs legacy X10 reports whose high coordinate
+  byte was UTF-8-expanded by a ConPTY/WSL/SSH relay, including pairs split
+  across reader batches, without consuming stale or unrelated typing.
+  `event_loop.rs` runs it after CSI filtering and reasserts mouse capture on
+  refocus when capture remains enabled.
 - Add-provider flow: the /provider dropdown's final row "+ Add provider…"
   accepts as /provider --add, which opens a two-step add-provider modal
   (crates/codegen/xai-grok-pager/src/views/add_provider_modal.rs, wired through
