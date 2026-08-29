@@ -38,6 +38,43 @@ pub fn leader_log_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp/dscode.log"))
 }
 
+/// Whether this build is running against the dsh backend (the managed dscode
+/// launcher sets `DSH_BIN` to the profile-owned dsh CLI). The grok-shell MCP
+/// runtime is absent in that backend — the bridge advertises
+/// `mcpCapabilities { http: false, sse: false }` and serves no MCP tools — so
+/// the standalone `mcp` CLI must not read grok-shell config files the bridge
+/// ignores, nor spawn servers the bridge never exposes.
+pub fn is_dsh_backend() -> bool {
+    std::env::var_os(DSH_BIN_ENV).is_some_and(|v| !v.is_empty())
+}
+
+/// The dscode profile directory (`$DSH_HOME/profiles/dscode`, or the
+/// public-knob overrides). Mirrors the launcher's `tui_home` resolution in
+/// `xai-grok-pager-bin/main.rs`: `DSH_PROFILE_DIR` > `DSCODE_HOME` > `DSC_HOME`
+/// > `$DSH_HOME/profiles/dscode` > `~/.dsh/profiles/dscode`.
+pub fn dsh_profile_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("DSH_PROFILE_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    if let Some(dir) = std::env::var_os("DSCODE_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    if let Some(dir) = std::env::var_os("DSC_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    if let Some(home) = std::env::var_os("DSH_HOME").filter(|v| !v.is_empty()) {
+        return Some(Path::new(&home).join("profiles").join("dscode"));
+    }
+    std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(|h| Path::new(&h).join(".dsh").join("profiles").join("dscode"))
+}
+
+/// The profile's user patch layer — the file `/mcp` composes into.
+pub fn cordis_patch_path() -> Option<PathBuf> {
+    dsh_profile_dir().map(|dir| dir.join("cordis.patch.yml"))
+}
+
 #[cfg(unix)]
 fn uid() -> u32 {
     // SAFETY: getuid has no failure mode.

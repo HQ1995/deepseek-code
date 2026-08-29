@@ -26,6 +26,23 @@ Examples:
   # Add to the project config (./.grok/config.toml) instead of ~/.grok/config.toml
   grok mcp add --scope project github -- npx -y @modelcontextprotocol/server-github";
 
+/// The dsh backend stores MCP servers as `cordis.patch.yml` insert entries and
+/// the leader owns connectivity — the standalone `mcp` CLI must not read
+/// grok-shell config files the bridge ignores. `add`/`list`/`remove` compose
+/// the patch directly; `enable`/`disable`/`doctor` have no dsh equivalent.
+
+/// Resolve the dsh profile's user patch path, or fail when the profile
+/// directory cannot be derived (no HOME and every override unset).
+fn dsh_patch_path() -> Result<PathBuf> {
+    crate::dsh_leader::cordis_patch_path()
+        .ok_or_else(|| anyhow::anyhow!("cannot locate the dsh profile directory"))
+}
+
+/// Read the dsh user MCP patch; an absent file reads as no servers.
+fn read_dsh_patch() -> Result<String> {
+    Ok(std::fs::read_to_string(dsh_patch_path()?).unwrap_or_default())
+}
+
 #[derive(Debug, clap::Args, Clone)]
 pub struct McpArgs {
     #[command(subcommand)]
@@ -157,8 +174,10 @@ pub async fn run(mcp_args: McpArgs) -> Result<()> {
         McpCommand::Doctor { json, name } => run_doctor(json, name).await,
     }
 }
-
 fn run_list(json: bool) -> Result<()> {
+    if crate::dsh_leader::is_dsh_backend() {
+        return run_list_dsh(json);
+    }
     // Include project-scoped servers (nearest definition wins), matching what
     // a session started in this directory would load from config.toml files.
     let cwd = current_dir_or_exit();
@@ -221,7 +240,11 @@ struct ResolvedAdd {
 }
 
 async fn run_add(args: AddArgs) -> Result<()> {
+    if crate::dsh_leader::is_dsh_backend() {
+        return run_add_dsh(&args);
+    }
     let resolved = resolve_add(&args)?;
+
     for warning in &resolved.warnings {
         eprintln!("{warning}");
     }
@@ -564,6 +587,10 @@ fn available_mcp_server_names(cwd: &Path) -> Vec<String> {
 }
 
 async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
+    if crate::dsh_leader::is_dsh_backend() {
+        return run_set_enabled_dsh(name, enabled);
+    }
+
     // Do not use validate_server_name (add-only: [A-Za-z0-9_-]). Enable/disable
     // also targets compat/plugin names that may contain dots or other keys.
     if name.is_empty() {
@@ -628,6 +655,10 @@ async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
 }
 
 async fn run_remove(name: &str, requested_scope: Option<McpScope>) -> Result<()> {
+    if crate::dsh_leader::is_dsh_backend() {
+        return run_remove_dsh(name);
+    }
+
     use xai_grok_shell::util::config::{
         delete_mcp_server_config_at, mcp_server_defined_at, user_config_path,
     };
@@ -686,6 +717,11 @@ async fn run_remove(name: &str, requested_scope: Option<McpScope>) -> Result<()>
 }
 
 async fn run_doctor(json: bool, name: Option<String>) -> Result<()> {
+    if crate::dsh_leader::is_dsh_backend() {
+        return run_doctor_dsh(json, name.as_deref());
+    }
+
+
     let cwd = current_dir_or_exit();
     let report = xai_grok_shell::mcp_doctor::run_doctor(&cwd, name.as_deref()).await;
 
@@ -710,6 +746,119 @@ async fn run_doctor(json: bool, name: Option<String>) -> Result<()> {
 
     if report.failing_count > 0 {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// List MCP servers stored in the dsh profile's `cordis.patch.yml`.
+fn run_list_dsh(json: bool) -> Result<()> {
+    let servers = crate::dsh_mcp_patch::list_servers(&read_dsh_patch()?);
+    if json {
+        let payload: Vec<serde_json::Value> = servers
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "transport": s.transport,
+                    "target": s.target,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else if servers.is_empty() {
+        println!("No MCP servers configured. Run `dscode mcp add --help` to get started.");
+    } else {
+        for s in &servers {
+            println!("  {}: {}", s.name, s.target);
+        }
+    }
+    Ok(())
+}
+
+/// Add or update an MCP server as a `cordis.patch.yml` insert entry. Idempotent:
+/// re-adding the same name rewrites its block in place.
+fn run_add_dsh(args: &AddArgs) -> Result<()> {
+    let resolved = resolve_add(args)?;
+    for warning in &resolved.warnings {
+        eprintln!("{warning}");
+    }
+    let name = &args.name;
+    // dsh-mcp-client supports stdio and streamable-http only; grok-shell SST
+    // maps onto the same streamable-http transport.
+    let block = match &resolved.transport {
+        McpServerTransportConfig::Stdio {
+            command,
+            args: cmd_args,
+            env,
+            ..
+        } => crate::dsh_mcp_patch::render_block_stdio(name, command, cmd_args, env.as_ref()),
+        McpServerTransportConfig::StreamableHttp { url, headers, .. } => {
+            crate::dsh_mcp_patch::render_block_http(name, url, headers.as_ref())
+        }
+    };
+    let path = dsh_patch_path()?;
+    let merged = crate::dsh_mcp_patch::upsert_server(&read_dsh_patch()?, name, &block);
+    std::fs::write(&path, merged)?;
+    println!("Added MCP server '{name}' to {} (all presets)", path.display());
+    println!("No restart needed: dscode hot-reloads cordis.patch.yml.");
+    Ok(())
+}
+
+/// Remove an MCP server from the dsh profile's patch.
+fn run_remove_dsh(name: &str) -> Result<()> {
+    let path = dsh_patch_path()?;
+    let (merged, removed) = crate::dsh_mcp_patch::remove_server(&read_dsh_patch()?, name);
+    if !removed {
+        eprintln!("No MCP server named '{name}'.");
+        std::process::exit(1);
+    }
+    std::fs::write(&path, merged)?;
+    println!("Removed MCP server '{name}' from {}.", path.display());
+    Ok(())
+}
+
+/// dsh mcp-client entries have no enabled flag; enable/disable are no-ops
+/// that point at the real verbs.
+fn run_set_enabled_dsh(name: &str, enabled: bool) -> Result<()> {
+    let verb = if enabled { "enable" } else { "disable" };
+    bail!(
+        "dsh MCP servers have no {verb} state; use `dscode mcp add {name}` or `dscode mcp remove {name}`."
+    );
+}
+
+/// dsh `mcp doctor` reduces to listing, since the leader owns connectivity.
+fn run_doctor_dsh(json: bool, name: Option<&str>) -> Result<()> {
+    let servers = crate::dsh_mcp_patch::list_servers(&read_dsh_patch()?);
+    let filtered: Vec<_> = servers
+        .iter()
+        .filter(|s| name.is_none_or(|n| s.name == n))
+        .collect();
+    if let Some(filter) = name
+        && filtered.is_empty()
+    {
+        eprintln!("MCP server '{filter}' not found.");
+        std::process::exit(1);
+    }
+    if json {
+        let payload: Vec<serde_json::Value> = filtered
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "transport": s.transport,
+                    "target": s.target,
+                    "status": "configured",
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else if filtered.is_empty() {
+        println!("No MCP servers configured.");
+    } else {
+        println!("Configured MCP servers (connectivity is managed by the dsh leader):");
+        for s in &filtered {
+            println!("  {}: {} ({})", s.name, s.target, s.transport);
+        }
     }
     Ok(())
 }
@@ -1269,6 +1418,25 @@ url = "https://mcp.example.test/sse"
         );
     }
 
+    /// `is_dsh_backend()` is the single chokepoint: the managed launcher sets
+    /// `DSH_BIN`, and every `mcp` subcommand must refuse rather than read
+    /// grok-shell config files the bridge ignores.
+    #[serial_test::serial(dsh_leader_env)]
+    #[test]
+    fn dsh_backend_detection_matches_dsh_bin_env() {
+        let _env = crate::test_util::EnvVarGuard::set(
+            crate::dsh_leader::DSH_BIN_ENV,
+            "/explicit/dsh",
+        );
+        assert!(crate::dsh_leader::is_dsh_backend());
+    }
+
+    #[serial_test::serial(dsh_leader_env)]
+    #[test]
+    fn dsh_backend_not_detected_without_dsh_bin() {
+        let _env = crate::test_util::EnvVarGuard::set(crate::dsh_leader::DSH_BIN_ENV, "");
+        assert!(!crate::dsh_leader::is_dsh_backend());
+    }
     #[test]
     fn surviving_definition_prefers_project_then_user() {
         let user = xai_grok_shell::util::config::user_config_path();
