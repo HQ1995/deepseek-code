@@ -78,6 +78,22 @@ pub fn list_servers(text: &str) -> Vec<ServerInfo> {
     out
 }
 
+/// The loader requires the patch file to be a top-level YAML array. An empty
+/// file parses to `undefined`, so the empty state must be written as `[]`.
+pub fn empty_patch() -> &'static str {
+    "[]\n"
+}
+
+/// Normalize any composed text so a file with no entries is `[]` (never the
+/// empty string), keeping the document loadable by dsh's patch parser.
+pub fn as_document(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed == "[]" {
+        empty_patch().to_string()
+    } else {
+        text.to_string()
+    }
+}
 /// Remove the `- insert:` block holding `mcp-client-<name>`. Returns the new
 /// text and whether anything was removed.
 pub fn remove_server(text: &str, name: &str) -> (String, bool) {
@@ -108,8 +124,12 @@ pub fn remove_server(text: &str, name: &str) -> (String, bool) {
 /// Add or update a server: drop any existing `mcp-client-<name>` block, then
 /// append a freshly rendered one.
 pub fn upsert_server(text: &str, name: &str, block: &str) -> String {
-    let (stripped, _) = remove_server(text, name);
-    let mut stripped = stripped;
+    // A bare `[]` is the empty-state placeholder, not a document prefix to
+    // keep: appending after it would yield a two-document stream dsh refuses.
+    let (mut stripped, _) = remove_server(text, name);
+    if stripped.trim() == "[]" {
+        stripped.clear();
+    }
     let trimmed_end = stripped.trim_end();
     if !trimmed_end.is_empty() {
         stripped.truncate(trimmed_end.len());
@@ -313,6 +333,16 @@ mod tests {
     }
 
     #[test]
+    fn upsert_onto_empty_array_document() {
+        // Start from the `[]` empty-state a prior remove leaves behind.
+        let block = render_block_stdio("x", "py", &[], None);
+        let text = upsert_server("[]\n", "x", &block);
+        assert!(text.starts_with("- insert:\n"));
+        assert!(!text.contains("[]"));
+        assert_eq!(list_servers(&text).len(), 1);
+    }
+
+    #[test]
     fn preserves_js_expr_and_comments() {
         // A `!!js` expression and a comment in an unrelated entry must survive.
         let text = "# top comment\n- id: grok-leader\n  config:\n    socketPath: !!js process.env.DSCODE_SOCKET\n";
@@ -320,5 +350,25 @@ mod tests {
         let merged = upsert_server(text, "x", &block);
         assert!(merged.contains("# top comment"));
         assert!(merged.contains("!!js process.env.DSCODE_SOCKET"));
+    }
+
+    #[test]
+    fn removing_last_server_yields_empty_array_document() {
+        // Deleting the only server must leave `[]`, not an empty file: dsh's
+        // patch parser requires a top-level YAML array and an empty file
+        // parses to `undefined`.
+        let (text, removed) = remove_server(ONE, "httptest");
+        assert!(removed);
+        let doc = as_document(&text);
+        assert_eq!(doc, "[]\n");
+        assert_eq!(list_servers(&doc), Vec::new());
+    }
+
+    #[test]
+    fn as_document_preserves_entries() {
+        assert_eq!(as_document(ONE.split_at(0).0), "[]\n");
+        assert_eq!(as_document(""), "[]\n");
+        assert_eq!(as_document("   \n\n"), "[]\n");
+        assert_eq!(as_document(ONE), ONE);
     }
 }

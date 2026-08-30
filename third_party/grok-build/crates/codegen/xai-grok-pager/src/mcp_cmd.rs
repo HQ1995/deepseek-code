@@ -798,7 +798,7 @@ fn run_add_dsh(args: &AddArgs) -> Result<()> {
     };
     let path = dsh_patch_path()?;
     let merged = crate::dsh_mcp_patch::upsert_server(&read_dsh_patch()?, name, &block);
-    std::fs::write(&path, merged)?;
+    std::fs::write(&path, crate::dsh_mcp_patch::as_document(&merged))?;
     println!("Added MCP server '{name}' to {} (all presets)", path.display());
     println!("No restart needed: dscode hot-reloads cordis.patch.yml.");
     Ok(())
@@ -812,7 +812,7 @@ fn run_remove_dsh(name: &str) -> Result<()> {
         eprintln!("No MCP server named '{name}'.");
         std::process::exit(1);
     }
-    std::fs::write(&path, merged)?;
+    std::fs::write(&path, crate::dsh_mcp_patch::as_document(&merged))?;
     println!("Removed MCP server '{name}' from {}.", path.display());
     Ok(())
 }
