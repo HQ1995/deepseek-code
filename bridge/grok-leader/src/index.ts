@@ -1406,22 +1406,31 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   /**
+   * Admit a dsh event once, before projecting its items. Replay/live overlap
+   * dedup happens at event granularity: several wire updates can come from one
+   * event (a user/message with many text blocks), and gating inside emitUpdate
+   * would drop every item after the first. Returns false when this seq was
+   * already forwarded (replay of a still-live session).
+   */
+  const admitEvent = (record: SessionRecord, seq: number): boolean => {
+    if (seq <= record.lastSeq) return false
+    record.lastSeq = seq
+    return true
+  }
+
+  /**
    * Forward one update with the leader _meta stamp. The eventSeq monotonic
    * counter plus the per-session dsh-seq high-water make replay/live overlap
    * deduplicable on the client side (server.rs eventId dedup).
+   * Event-to-wire admission is `admitEvent` — this only serializes.
    */
   const emitUpdate = (
     conn: ClientConnection,
     record: SessionRecord,
-    sourceSeq: number | undefined,
     item: ProjectedUpdate,
     isReplay: boolean,
     agentTimestampMs?: number,
   ): void => {
-    if (sourceSeq !== undefined) {
-      if (sourceSeq <= record.lastSeq) return
-      record.lastSeq = sourceSeq
-    }
     const eventSeq = record.eventSeq
     record.eventSeq = eventSeq + 1
     const inflight = record.inflight
@@ -1532,20 +1541,24 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const conn = connections.get(record.clientId)
     if (conn === undefined) return
     try {
-      if (event.type === 'turn/start') {
-        record.turnStartMs = event.time
-      }
-      if (event.type === 'todo/write') {
-        const data = event.data as { todos?: Array<{ content?: unknown; status?: unknown }> }
-        const entries = (data.todos ?? []).map(todo => ({
-          content: String(todo.content ?? ''),
-          priority: 'medium',
-          status: todo.status === 'in_progress' ? 'in_progress' : todo.status === 'completed' ? 'completed' : 'pending',
-        }))
-        emitUpdate(conn, record, event.seq, { sessionUpdate: 'plan', entries }, false, event.time)
-      }
-      for (const item of mapEvent(record, event, false)) {
-        emitUpdate(conn, record, event.seq, item, false, event.time)
+      // Live events admit until a replayed seq catches up; settle logic below
+      // still runs unconditionally in finally.
+      if (admitEvent(record, event.seq)) {
+        if (event.type === 'turn/start') {
+          record.turnStartMs = event.time
+        }
+        if (event.type === 'todo/write') {
+          const data = event.data as { todos?: Array<{ content?: unknown; status?: unknown }> }
+          const entries = (data.todos ?? []).map(todo => ({
+            content: String(todo.content ?? ''),
+            priority: 'medium',
+            status: todo.status === 'in_progress' ? 'in_progress' : todo.status === 'completed' ? 'completed' : 'pending',
+          }))
+          emitUpdate(conn, record, { sessionUpdate: 'plan', entries }, false, event.time)
+        }
+        for (const item of mapEvent(record, event, false)) {
+          emitUpdate(conn, record, item, false, event.time)
+        }
       }
     } finally {
       const inflight = record.inflight
@@ -2167,7 +2180,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       broadcastQueueChanged(record)
       const conn = connections.get(record.clientId)
       if (conn !== undefined) {
-        emitUpdate(conn, record, undefined, {
+        emitUpdate(conn, record, {
           sessionUpdate: 'user_message_chunk',
           content: { type: 'text', text },
         }, false, Date.now())
@@ -2332,7 +2345,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         // running transcript, mirroring runPrompt's admission echo.
         const conn = connections.get(record.clientId)
         if (conn !== undefined) {
-          emitUpdate(conn, record, undefined, {
+          emitUpdate(conn, record, {
             sessionUpdate: 'user_message_chunk',
             content: { type: 'text', text },
           }, false, Date.now())
@@ -2379,7 +2392,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const notifySession = (record: SessionRecord, message: string): void => {
     const conn = connections.get(record.clientId)
     if (conn === undefined) return
-    emitUpdate(conn, record, undefined, {
+    emitUpdate(conn, record, {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: message },
     }, false, Date.now())
@@ -3126,8 +3139,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (event.type === 'turn/start') record.turnStartMs = event.time
       const items = mapEvent(record, event, true)
       if (!noReplay && conn !== undefined) {
+        if (!admitEvent(record, event.seq)) continue
         for (const item of items) {
-          emitUpdate(conn, record, event.seq, item, true, event.time)
+          emitUpdate(conn, record, item, true, event.time)
         }
       } else {
         record.lastSeq = Math.max(record.lastSeq, event.seq)
@@ -4339,7 +4353,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         record.steered.push({ id: entry.id, resolve: entry.resolve })
         const conn = connections.get(record.clientId)
         if (conn !== undefined) {
-          emitUpdate(conn, record, undefined, {
+          emitUpdate(conn, record, {
             sessionUpdate: 'user_message_chunk',
             content: { type: 'text', text },
           }, false, Date.now())

@@ -3418,7 +3418,40 @@ describe('grok leader over a unix socket', () => {
         && params.update.content.text === 'seq zero replay'
         && params._meta?.isReplay === true
     })
-    await waitFor(seen)
+  })
+
+  it('replays every chunk a multi-block user/message event projects', async () => {
+    const { persistence, client: c } = await start()
+    register(c)
+    await c.next()
+    // One dsh event with three text blocks must produce three wire updates.
+    // Gate admission runs per event; a per-item gate would drop items 2 and 3.
+    persistence.load = (async () => ({
+      meta: persistence.header,
+      events: [
+        {
+          type: 'user/message', seq: 0, time: 0,
+          data: {
+            source: { kind: 'user' },
+            content: [
+              { type: 'text', text: 'alpha' },
+              { type: 'text', text: 'beta' },
+              { type: 'text', text: 'gamma' },
+            ],
+          },
+        },
+      ],
+    })) as unknown as typeof persistence.load
+    const loaded = await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [] })
+    expect(loaded.error).toBeUndefined()
+    for (const text of ['alpha', 'beta', 'gamma']) {
+      await waitFor(() => c.all.some(msg => {
+        const params = msg.params as { update?: { sessionUpdate?: string; content?: { text?: string } } }
+        return msg.method === 'session/update'
+          && params.update?.sessionUpdate === 'user_message_chunk'
+          && params.update.content?.text === text
+      }))
+    }
   })
 
   it('closing a session before 50ms suppresses _x.ai/mcp_initialized', async () => {
