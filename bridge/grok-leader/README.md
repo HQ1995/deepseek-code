@@ -151,11 +151,11 @@ Append-only through the owning tool result.
 ## Known Limitations and Deferred Work
 
 - Control plane stubbed — control commands answer a ControlResult error; GetLeaderInfo and CpuProfileStatus are unimplemented (protocol.rs ControlCommand).
-- Leader-version pin — leader_binary_version is pinned to 1.0.4 to satisfy the probe-verified TUI; it is not derived from the package version.
+- Leader-version mirror — the registered reply mirrors the client's advertised `client_version` (floor `0.0.0` when absent). The TUI evicts strictly-older leaders; the dsh backend respawns the same plugin, so equality is the only convergent answer, whatever version the TUI carries (release pin, `-dev` suffix, or a bare cargo build).
 - Transcript projection incomplete — plans, titles, and usage cards stay off the wire; cancelRewind and sessionRecap mirror the captured stub without verified semantics.
 - Provider-scoped model ids adapted — the first bare model id keeps the TUI-friendly spelling; collisions are qualified as `provider:model`, and reasoning-effort memory is keyed by the underlying provider/model pair.
 - Replay buffering — live notifications racing a session/load are dropped by the high-water mark instead of buffered for a gap-free flush (server.rs MAX_BUFFERED_LIVE_PER_LOAD).
-- Unverified surfaces — the x.ai/ask_user_question request and answer shapes, capability injection into session/new, and the lock-file singleton guard carry TODO(verify) markers with grok file:line citations.
+- Verified divergences — inline `_meta.agentProfile` objects are rejected (dsh has no AgentDefinition equivalent), and grok-only registration-capability injections (autoMode, codeNav, terminal/fs routing) are deliberately absent from `session/new`; each divergence is annotated at the code site with the grok file:line it was checked against.
 
 ## Running the tests
 

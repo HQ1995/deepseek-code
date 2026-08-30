@@ -465,6 +465,8 @@ describe('grok leader over a unix socket', () => {
 
   it('completes the probe-verified handshake with the captured reply shapes', async () => {
     const { registry, client: c } = await start()
+    // The registered reply mirrors the client's advertised version: the TUI
+    // evicts strictly-older leaders, and equal versions never evict.
     c.send({
       type: 'register',
       client_type: 'grok-shell',
@@ -514,6 +516,28 @@ describe('grok leader over a unix socket', () => {
       },
     })
     expect(registry.created).toHaveLength(0)
+  })
+
+  it('mirrors a -dev client version so dev TUI builds are never evicted', async () => {
+    const { client: c } = await start()
+    c.send({
+      type: 'register',
+      client_type: 'grok-shell',
+      mode: 'stdio',
+      capabilities: { client_version: '0.0.13-beta.12-dev' },
+    })
+    const reply = await c.next() as { type: string; leader_binary_version?: string }
+    expect(reply.type).toBe('registered')
+    // Strict semver: 0.0.13-beta.12-dev > 0.0.13-beta.12, so a leader reporting
+    // the plain package version would be evicted; mirroring keeps equality.
+    expect(reply.leader_binary_version).toBe('0.0.13-beta.12-dev')
+  })
+
+  it('falls back to the floor version when the client omits one', async () => {
+    const { client: c } = await start()
+    register(c)
+    const reply = await c.next() as { type: string; leader_binary_version?: string }
+    expect(reply.leader_binary_version).toBe('0.0.0')
   })
 
   it('advertises the package.json version in agentInfo', async () => {

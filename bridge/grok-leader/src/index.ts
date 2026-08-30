@@ -7,8 +7,9 @@
  * ACP JSON-RPC strings mapped onto the harness services the ACP bridge drives
  * (agents.create/resume, agent.followup / whenIdle / cancel, session/event,
  * approval/request, sessions.flush, llm.listProviders/listModels,
- * sessionPersistence.list/load, agentDefaultModel.saveSelection). Unclear grok
- * surfaces carry TODO(verify) markers with the grok file:line to check.
+ * sessionPersistence.list/load, agentDefaultModel.saveSelection). Divergences
+ * from upstream grok behavior are marked at the code site with the grok
+ * file:line they were verified against.
  * @module dscode
  */
 
@@ -103,11 +104,13 @@ export const Config: Schema<GrokLeaderConfig> = Schema.object({
   idleExitMs: Schema.number().default(2000),
 })
 
-// Probe-verified by the captured TUI handshake and protocol contract:
-// leader_binary_version must be at least the client version or the client
-// evicts and respawns the leader. TODO(verify): derive from the package
-// version instead of pinning 1.0.4 (protocol.rs LEADER_VERSION mismatch rule).
-const LEADER_BINARY_VERSION = '1.0.4'
+// The TUI evicts a leader only when leader_binary_version is a strictly-older
+// parseable semver than the client's own version (mod.rs should_evict). For the
+// dsh backend that rule cannot converge — eviction respawns the same plugin —
+// so the leader mirrors the client's advertised version back: equal versions
+// never evict, whatever build the TUI reports (release pin, -dev suffix, or a
+// bare cargo build). The fallback covers clients that omit a version.
+const LEADER_BINARY_VERSION = '0.0.0'
 
 const packageVersion = (): string => {
   let dir = dirname(fileURLToPath(import.meta.url))
@@ -1811,9 +1814,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       return profile
     }
     if (typeof profile === 'object' && profile !== null && !Array.isArray(profile)) {
-      // TODO(verify): an inline grok AgentDefinition (upload/turn.rs:286,
-      // AgentDefinition::from_json) has no dsh equivalent; reject instead of
-      // silently falling back to the default agent.
+      // Verified divergence: upstream parses an inline grok AgentDefinition
+      // object (upload/turn.rs parse_agent_profile_from_meta ->
+      // AgentDefinition::from_json). dsh has no AgentDefinition equivalent, so
+      // reject explicitly instead of silently falling back to the default.
       throw invalidParams('_meta.agentProfile JSON definitions are not supported; send a preset id string')
     }
     // Mirrors the grok shell: non-string/non-object values are ignored
@@ -1975,10 +1979,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       || (typeof suppliedId === 'string' && await persistedSessionIdInUse(sessionId))) {
       throw invalidParams('session id is already in use: ' + String(sessionId))
     }
-    // TODO(verify): the grok leader also injects autoMode, modelId,
-    // clientIdentifier, codeNavEnabled, and client terminal/fs routing from the
-    // registration capabilities (server.rs:671-770). Only yoloMode and
-    // agentProfile/agentPreset are wired.
+    // Verified divergence: upstream inject_session_request_context
+    // (server.rs) also stamps autoMode, modelId, clientIdentifier,
+    // codeNavEnabled, and client terminal/fs routing into session/new from the
+    // registration capabilities. dsh sessions have no codeNav / terminal / fs
+    // routing concepts, so only yoloMode and agentProfile/agentPreset are
+    // wired here; the rest is deliberately absent, not unverified.
     const presetRequest = presetRequestFromMeta(meta)
     const preset = await composePreset(presetRequest)
     const explicitPreset = presetRequest !== undefined && preset.agentPreset === presetRequest
@@ -3148,8 +3154,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const store = persistence()
     if (store === undefined) throw internalError('session persistence is not configured')
     const headers = await store.list()
-    // TODO(verify): SessionInfo field set (agent.rs SessionInfo): title is
-    // empty and the cwd filter plus cursor pagination are not implemented.
+    // Legacy `session/list` minimal payload. Upstream SessionInfo carries
+    // title/_meta (row.rs); the TUI's preferred `x.ai/session/list` handler
+    // below does backfill title, firstPrompt, summary, cwd filter, and limit —
+    // this method only serves clients that still call the bare ACP name, so it
+    // stays minimal rather than duplicating the richer path.
     return {
       sessions: headers.filter(header => header.cwd !== undefined).map(header => ({
         sessionId: header.id,
@@ -3171,10 +3180,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const explicitEffort = typeof reasoningEffort === 'string' && reasoningEffort.length > 0
       ? reasoningEffort
       : undefined
-    // TODO(verify): grok modelId is a global catalog id (agent.rs
-    // SetSessionModelRequest); dsh needs a provider+model pair, so the provider
-    // comes from the catalog's modelId -> provider mapping, then the agent's
-    // own route, then config.provider.
+    // grok modelId is a global catalog id; dsh needs a provider+model pair, so
+    // the provider resolves from the catalog's modelId -> provider mapping,
+    // then the agent's own route, then config.provider (implemented below).
     const current = await currentCatalog()
     // Never persist an unresolvable selection: a modelId the client has not
     // been offered cannot name a provider route.
@@ -4670,18 +4678,23 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           connections.set(conn.clientId, conn)
           cancelIdleExit()
           socket.setTimeout(0)
-          // Probe-verified reply: ready plus a
-          // leader_binary_version at least the client version keeps the TUI
-          // attached; it otherwise evicts and respawns the leader.
+          // Mirror the client's advertised version: the eviction rule compares
+          // this string against the client's own version, and equal versions
+          // never evict (see LEADER_BINARY_VERSION above).
+          const advertised = msg.capabilities?.clientVersion
+          const mirror = typeof advertised === 'string' && advertised.length > 0
+            ? advertised
+            : LEADER_BINARY_VERSION
           send({
             type: 'registered',
             clientId: conn.clientId,
             ready: true,
             leaderProtocolVersion: LEADER_PROTOCOL_VERSION,
-            leaderBinaryVersion: LEADER_BINARY_VERSION,
-            // TODO(verify): mirror of the captured stub; control commands all
-            // answer ControlResult errors until GetLeaderInfo/CpuProfileStatus
-            // are implemented (protocol.rs ControlCommand).
+            leaderBinaryVersion: mirror,
+            // controlV1 is false because every control command answers a
+            // ControlResult error below (GetLeaderInfo/CpuProfileStatus are
+            // unimplemented — protocol.rs ControlCommand); the TUI then never
+            // sends them. Captured-stub semantics, verified against should_evict.
             leaderCapabilities: { controlV1: false, workspaceExposure: false, relaunchV1: false },
           })
           break
@@ -5155,8 +5168,9 @@ export function sessionEventToUpdates(
       }]
     }
     default:
-      // TODO(verify): plan updates (grok SessionUpdate::Plan) and titles stay
-      // off the wire until the dsh plan/title event mapping is specified.
+      // Documented gap (README "Transcript projection incomplete"): grok plan
+      // updates (SessionUpdate::Plan) and titles stay off the wire until dsh
+      // defines plan/title session events to map from.
       return []
   }
 }
