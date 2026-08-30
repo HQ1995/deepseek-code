@@ -20,7 +20,8 @@ import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server, type Socket } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
+
 import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -34,7 +35,7 @@ import {
   type ImageAttachmentRef,
   type ImageMediaType,
 } from '@deepseek-ai/dsh-attachment'
-import { CallId, ReasoningEffortId, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import { KNOWN_SESSION_EVENT_TYPES, SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-user-approval'

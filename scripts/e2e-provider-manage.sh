@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end provider manage: isolated DSH_HOME + tmux TUI + mock gateway.
-# Flow: add fake-gw through the modal (the e2e-add-provider path), edit it
+# Flow: add fake-gw through the modal, edit it
 # through the prefilled modal (Ctrl+E), assert the update preserved models
 # and the roster refreshed, then delete it (Ctrl+D, y confirm) and assert
 # the route left settings.yaml; the current provider's delete is refused

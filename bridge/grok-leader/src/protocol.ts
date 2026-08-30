@@ -194,22 +194,6 @@ export function decodeClientMessage(value: unknown): ClientMessage {
   }
 }
 
-/** Inner JSON-RPC 2.0 request/notification; an absent id means notification. */
-export interface JsonRpcRequest {
-  jsonrpc: '2.0'
-  id?: string | number | null
-  method: string
-  params?: unknown
-}
-
-/** Inner JSON-RPC 2.0 response object. */
-export interface JsonRpcResponse {
-  jsonrpc: '2.0'
-  id: string | number | null
-  result?: unknown
-  error?: { code: number; message: string; data?: unknown }
-}
-
 /** A dispatch error carrying its JSON-RPC error code. */
 export class RpcError extends Error {
   constructor(readonly code: number, message: string) {

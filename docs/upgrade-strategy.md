@@ -33,7 +33,12 @@ To upgrade dsh:
 3. mirror that pinned dsh dependency tree's Node floor in the launcher and npm
    metadata, but never install or switch the user's Node runtime;
 4. rebuild the bridge and run the complete E2E suite;
-5. update launcher arguments only if the dsh CLI contract changed.
+
+The production pin stays on the published `0.1.1-rc.2` family: the newer
+`0.1.2-alpha.1` GitHub prerelease has no npm packages, so the launcher cannot
+provision it. Start a source-only pilot after a coherent `0.1.2` package family
+is published; promote only after it stabilizes. Never mix source alpha packages
+with rc.2 npm packages — duplicate Cordis/service/type identities.
 
 The launcher may reuse an exact matching `dsh` from `PATH`; otherwise it owns a
 private runtime under the dscode profile. It never upgrades a global install.
