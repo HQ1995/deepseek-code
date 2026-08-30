@@ -157,6 +157,12 @@ Append-only through the owning tool result.
 - Replay buffering — live notifications racing a session/load are dropped by the high-water mark instead of buffered for a gap-free flush (server.rs MAX_BUFFERED_LIVE_PER_LOAD).
 - Verified divergences — inline `_meta.agentProfile` objects are rejected (dsh has no AgentDefinition equivalent), and grok-only registration-capability injections (autoMode, codeNav, terminal/fs routing) are deliberately absent from `session/new`; each divergence is annotated at the code site with the grok file:line it was checked against.
 
+## Product decisions (2026-08-30)
+
+- **Workflows**: `x.ai/workflows/list` returns `{ workflows: [] }`. dsh's workflow engine is per-session and its runs are not enumerated as a global roster; wiring a list here needs an upstream enumeration seam. Decision: keep the honest empty response; revisit when dsh exposes workflow-run discovery (candidate: the workflow engine's session events).
+- **Control plane**: `controlV1: false` and every control command answers a ControlResult error. The dsh backend has no relaunch orchestration (the launcher owns binary updates, eviction converges to version mirror), so GetLeaderInfo/CpuProfileStatus serve no consumer. Decision: leave stubbed; implement only if the TUI starts sending control commands unconditionally.
+- **MCP scope**: MCP servers compose into the profile's `cordis.patch.yml` as global insert entries; their tools are visible to every preset, minimal included. Deliberate: dsh MCP tools register into the host tools registry without a realm. `mcp add` reminds the user of the scope; per-preset isolation is a future refinement, not a current goal.
+
 ## Running the tests
 
 The bridge builds and tests against the official npm `@deepseek-ai/dsh-*`
