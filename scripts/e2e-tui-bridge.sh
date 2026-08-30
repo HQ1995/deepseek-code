@@ -706,6 +706,16 @@ grep -q -- '--restore-code is not supported by dscode' "$RESTORE_CODE_ERR" \
   || fail "unsupported --restore-code did not explain the dsh limitation"
 
 echo "[tui] booting CLI-managed worktree"
+# Release-stamped TUIs gate session creation behind the folder-trust prompt for
+# repo roots that carry repo-local code-exec config. The product loop's own
+# checkpoint is the trusted workspace root: seed it (and everything below it,
+# trust cascades) so the boot can reach the preset frame instead of blocking on
+# the trust question, exactly like a user who already answered it once.
+trust_store="$SCRATCH/dsc-tui/trusted_folders.toml"
+mkdir -p "$(dirname "$trust_store")"
+if [[ ! -f "$trust_store" ]]; then
+  printf '[folders."%s"]\ntrusted = true\ndecided_at = 0\n' "$BOOT_CWD" >"$trust_store"
+fi
 boot "$SOCKET" "--worktree=$WORKTREE_LABEL" --worktree-ref HEAD
 wait_frame "default preset" 'preset: standard'
 grep -q '^version: 1' "$SCRATCH/.credentials.yaml" \
