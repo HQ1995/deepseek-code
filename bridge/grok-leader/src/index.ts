@@ -60,12 +60,24 @@ declare module '@deepseek-ai/dsh-session/types' {
 
 const MODEL_SELECTION_EVENT = 'dscode/model-selected' as const
 const LEGACY_MODEL_SELECTION_EVENT = 'model/selected' as const
-// dsh exports its persistence vocabulary as a mutable Set but has no downstream
-// registration method. Register before any session restore.
+/**
+ * Register the bridge's durable event vocabulary with dsh's persistence read
+ * gate. Upstream deliberately ships the Set as a mutable export while deferring
+ * a registration API ("a registration surface ... is deferred until such a
+ * consumer exists" — dsh-session known-event-types); the declared type is
+ * ReadonlySet, so this is the ONE sanctioned seam. Guard it against upstream
+ * mutations: a frozen Set would silently drop registration and the persistence
+ * layer would refuse every dscode session log containing a model-selected
+ * event. Call once, before any session load/restore.
+ */
 const knownSessionEventTypes = KNOWN_SESSION_EVENT_TYPES as Set<string>
+if (Object.isFrozen(knownSessionEventTypes)) {
+  // Fail loudly at module load rather than letting resumed sessions hit
+  // SessionFormatUnsupportedError later for an event we wrote ourselves.
+  throw new Error('dsh session event vocabulary is frozen; dscode cannot register its model-selected event')
+}
 knownSessionEventTypes.add(MODEL_SELECTION_EVENT)
 knownSessionEventTypes.add(LEGACY_MODEL_SELECTION_EVENT)
-
 export const name = 'grok-leader'
 /** The bridge cannot accept clients until agents and durable session discovery are ready. */
 export const inject = ['agents', 'sessionPersistence', 'attachments']

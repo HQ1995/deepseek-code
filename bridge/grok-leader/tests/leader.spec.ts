@@ -13,7 +13,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-attachment'
-import { SessionId, type SessionEvent, type UserMessage } from '@deepseek-ai/dsh-session'
+import { KNOWN_SESSION_EVENT_TYPES, SessionId, type SessionEvent, type UserMessage } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -538,6 +538,18 @@ describe('grok leader over a unix socket', () => {
     register(c)
     const reply = await c.next() as { type: string; leader_binary_version?: string }
     expect(reply.leader_binary_version).toBe('0.0.0')
+  })
+
+  it('registers the dscode model-selected vocabulary in the dsh persistence gate', async () => {
+    // The bridge must extend KNOWN_SESSION_EVENT_TYPES before any session
+    // restore: the persistence read path refuses logs carrying unknown
+    // non-ignorable types (dsh-session-persistence). Lock the seam so an
+    // upstream switch to a frozen Set fails HERE, not at user session load.
+    for (const type of ['dscode/model-selected', 'model/selected']) {
+      expect((KNOWN_SESSION_EVENT_TYPES as Set<string>).has(type)).toBe(true)
+    }
+    // And the guard the bridge raises when the Set is frozen stays congruent.
+    expect(Object.isFrozen(KNOWN_SESSION_EVENT_TYPES)).toBe(false)
   })
 
   it('advertises the package.json version in agentInfo', async () => {
