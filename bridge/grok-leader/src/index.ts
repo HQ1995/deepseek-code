@@ -4832,6 +4832,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     stopReason?: { kind?: string }
     lastAssistantMessage?: unknown
   }
+  // Durable child_session_id -> parent session id, recorded at spawn. The
+  // `subagent/end` edge arrives AFTER the child Agent has been disposed
+  // (settled), so `agents.get(childId)` is already undefined by then and the
+  // parent cannot be resolved from the live registry; this map is the only
+  // reliable parent lookup for the finish notification. Without it the TUI's
+  // `SubagentFinished` never arrives, `SubagentInfo.finished` stays false, and
+  // a completed (ready) subagent is presented as still running forever.
+  const spawnedChildParents = new Map<string, string>()
   const subagentStartHandler = (info: SubagentRunInfoLike): void => {
     const childId = String(info.id)
     const agents = ctx.get('agents') as
@@ -4841,6 +4849,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const parentId = child?.session.header.parentSession
     const record = typeof parentId === 'string' ? sessions.get(SessionId(parentId)) : undefined
     if (record === undefined) return
+    // Remember the parent for the finish edge (see map comment above).
+    if (typeof parentId === 'string') spawnedChildParents.set(childId, parentId)
     const conn = connections.get(record.clientId)
     if (conn === undefined) return
     sendNotification(conn, 'x.ai/session_notification', {
@@ -4861,7 +4871,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       | { get(id: unknown): { session: { header: { parentSession?: unknown } } } | undefined }
       | undefined
     const child = agents?.get(info.id)
-    const parentId = child?.session.header.parentSession
+    // Prefer the spawn-time mapping: the child Agent is already disposed when
+    // `subagent/end` fires, so the live-registry lookup below fails exactly
+    // when this notification matters most. Fall back to the live Agent only
+    // for children this bridge did not spawn (e.g. parent attached later).
+    const parentId = spawnedChildParents.get(childId) ?? child?.session.header.parentSession
+    spawnedChildParents.delete(childId)
     const record = typeof parentId === 'string' ? sessions.get(SessionId(parentId)) : undefined
     if (record === undefined) return
     const conn = connections.get(record.clientId)

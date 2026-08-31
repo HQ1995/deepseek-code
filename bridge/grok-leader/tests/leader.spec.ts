@@ -1391,6 +1391,65 @@ describe('grok leader over a unix socket', () => {
     expect((await c.request(5, 'session/new', { cwd: process.cwd(), mcpServers: [] })).error).toBeUndefined()
   })
 
+  it('sends subagent_finished even after the child Agent was disposed (ready snapshot)', async () => {
+    // Regression: `subagent/end` fires after the child Agent has been disposed
+    // and unregistered, so `agents.get(childId)` is undefined by then. The
+    // bridge must resolve the parent from its spawn-time mapping instead of
+    // dropping the finish (which left the TUI's `finished` flag unset and
+    // presented a completed/ready subagent as still running forever).
+    const { registry, pluginCtx, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const childId = 'child-' + randomUUID().slice(0, 12)
+    // The child exists (spawned Agent is live) and carries its parent's id in
+    // the header so the bridge can resolve the owner at spawn time.
+    const child = await registry.create({
+      sessionId: SessionId(childId),
+      meta: { cwd: process.cwd(), agentPreset: undefined },
+    })
+    ;(child.agent.session.header as { parentSession?: string }).parentSession = sessionId
+    registry.byId.set(childId, child.agent as MockAgent)
+    // Spawn: the child Agent is live, so the bridge records childId -> parent.
+    pluginCtx.emit('subagent/start', { runId: 'run-' + childId, provider: 'spawn', id: childId, local: true })
+    const spawned = await waitForNotification(() => c.all.find((msg) =>
+      (msg as { params?: { update?: { sessionUpdate?: string; child_session_id?: string } } })
+        .params?.update?.sessionUpdate === 'subagent_spawned'
+        && msg !== undefined))
+    expect(spawned).toBeDefined()
+    const spawnedParams = (spawned as { params?: { update?: { sessionUpdate?: string; child_session_id?: string } } }).params
+    expect(spawnedParams?.update?.child_session_id).toBe(childId)
+    expect(spawnedParams?.update?.sessionUpdate).toBe('subagent_spawned')
+
+    // Simulate completion: the child Agent is disposed/unregistered before the
+    // end edge arrives (this is exactly the ready-snapshot case).
+    registry.byId.delete(childId)
+    await child.dispose().catch(() => undefined)
+    pluginCtx.emit('subagent/end', { runId: 'run-' + childId, provider: 'spawn', id: childId, local: true, stopReason: { kind: 'completed' } })
+    const finished = await waitForNotification(() => c.all.find((msg) =>
+      (msg as { params?: { update?: { sessionUpdate?: string; subagent_id?: string } } })
+        .params?.update?.sessionUpdate === 'subagent_finished'
+        && msg !== undefined))
+    expect(finished).toBeDefined()
+    const finishedUpdate = (finished as { params?: { update?: { subagent_id?: string; status?: string } } }).params?.update
+    expect(finishedUpdate?.subagent_id).toBe(childId)
+    expect(finishedUpdate?.status).toBe('completed')
+  })
+
+  function waitForNotification<T>(fn: () => T | undefined): Promise<T> {
+    const deadline = Date.now() + 2_000
+    return new Promise<T>((resolve, reject) => {
+      const tick = (): void => {
+        const found = fn()
+        if (found !== undefined) { resolve(found); return }
+        if (Date.now() >= deadline) { reject(new Error('timed out waiting for notification')); return }
+        setTimeout(tick, 10)
+      }
+      tick()
+    })
+  }
+
   it('session/load validates cwd and mcpServers like session/new', async () => {
     const { client: c } = await start()
     register(c)
