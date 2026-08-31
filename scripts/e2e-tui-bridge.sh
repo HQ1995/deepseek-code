@@ -259,6 +259,26 @@ const chunk = (text, finishReason = null, usage = undefined) => JSON.stringify({
   choices: [{ index: 0, delta: text === '' ? {} : { role: 'assistant', content: text }, finish_reason: finishReason }],
   ...(usage === undefined ? {} : { usage }),
 })
+const toolCallChunk = (name, argumentsJson) => JSON.stringify({
+  id: 'dscode-e2e-tool',
+  object: 'chat.completion.chunk',
+  created: 1,
+  model: 'fake-model',
+  choices: [{
+    index: 0,
+    delta: {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{
+        index: 0,
+        id: 'ask-user-e2e',
+        type: 'function',
+        function: { name, arguments: argumentsJson },
+      }],
+    },
+    finish_reason: null,
+  }],
+})
 const responsesEvent = (type, sequenceNumber, response) => JSON.stringify({
   type,
   sequence_number: sequenceNumber,
@@ -284,8 +304,28 @@ http.createServer((request, response) => {
     }
     if (request.method === 'POST' && path.endsWith('/chat/completions')) {
       const titleRequest = body.includes('Create a concise title')
+      const askRequest = body.includes('exercise the ask_user_question bridge')
+      const answeredAsk = body.includes('"tool_call_id":"ask-user-e2e"')
       response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
-      response.write('data: ' + chunk(titleRequest ? 'E2E Session' : 'E2E_STREAM_OK') + '\n\n')
+      if (!titleRequest && askRequest && !answeredAsk) {
+        const argumentsJson = JSON.stringify({
+          questions: [{
+            id: 'bridge-e2e',
+            header: 'Bridge question',
+            question: 'Does the dscode question card round-trip?',
+            options: [
+              { label: 'Works', description: 'Submit this answer through the bridge.' },
+              { label: 'Broken', description: 'The card or response path failed.' },
+            ],
+          }],
+        })
+        response.write('data: ' + toolCallChunk('ask_user_question', argumentsJson) + '\n\n')
+        response.write('data: ' + chunk('', 'tool_calls') + '\n\n')
+        response.end('data: [DONE]\n\n')
+        return
+      }
+      const text = titleRequest ? 'E2E Session' : answeredAsk ? 'ASK_USER_QUESTION_OK' : 'E2E_STREAM_OK'
+      response.write('data: ' + chunk(text) + '\n\n')
       response.write('data: ' + chunk('', 'stop', {
         prompt_tokens: 1000,
         completion_tokens: 5,
@@ -797,6 +837,16 @@ wait_frame "streamed prompt" 'E2E_STREAM_OK' 300
 wait_frame "cache hit status" 'cache 99\.9%' 300
 grep -q 'POST /v1/chat/completions' "$MOCK_LOG" \
   || fail "the mock gateway never received a completion request"
+
+echo "[tui] ask_user_question through the real bridge"
+clear_prompt
+send_line "exercise the ask_user_question bridge"
+wait_frame "ask_user_question card" 'Does the dscode question card round-trip\?' 300
+grep -q 'Works' "$FRAME" || fail "ask_user_question options did not render"
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Enter
+wait_frame "ask_user_question answer" 'ASK_USER_QUESTION_OK' 300
+grep -q '"tool_call_id":"ask-user-e2e"' "$MOCK_LOG" \
+  || fail "ask_user_question answer never returned to the model"
 for _ in $(seq 1 100); do
   worktree_session_roots=("$SCRATCH/sessions"/*"$WORKTREE_LABEL"*)
   if [[ -d "${worktree_session_roots[0]}" ]]; then

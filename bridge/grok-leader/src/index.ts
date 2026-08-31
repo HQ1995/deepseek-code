@@ -1301,15 +1301,29 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   /** A client that never answers a reverse request is rejected after this long. */
   const REVERSE_REQUEST_TIMEOUT_MS = 60_000
 
-  /** Send a JSON-RPC request to one client and wait for its response. */
-  const requestClient = <T>(conn: ClientConnection, method: string, params: unknown, sessionId?: SessionId): Promise<T> => {
+  /**
+   * Send a JSON-RPC request to one client and wait for its response.
+   * `timeoutMs` overrides the default 60s budget; pass `Infinity` to wait
+   * indefinitely (used for ask_user_question, which must hang until the
+   * human answers — a bounded window here would surface a "user didn't
+   * answer" tool failure the agent cannot distinguish from a real answer).
+   */
+  const requestClient = <T>(
+    conn: ClientConnection,
+    method: string,
+    params: unknown,
+    sessionId?: SessionId,
+    timeoutMs?: number,
+  ): Promise<T> => {
     const id = conn.nextRequestId++
     sendAcp(conn, { jsonrpc: '2.0', id, method, params })
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        conn.pending.delete(String(id))
-        reject(new RpcError(JSONRPC_INTERNAL_ERROR, 'client did not answer ' + method + ' within 60s'))
-      }, REVERSE_REQUEST_TIMEOUT_MS)
+      const timer = Number.isFinite(timeoutMs ?? REVERSE_REQUEST_TIMEOUT_MS)
+        ? setTimeout(() => {
+            conn.pending.delete(String(id))
+            reject(new RpcError(JSONRPC_INTERNAL_ERROR, 'client did not answer ' + method + ' within ' + (timeoutMs ?? REVERSE_REQUEST_TIMEOUT_MS) + 'ms'))
+          }, timeoutMs ?? REVERSE_REQUEST_TIMEOUT_MS)
+        : undefined
       conn.pending.set(String(id), {
         resolve: (value: unknown) => {
           clearTimeout(timer)
@@ -1598,7 +1612,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           toolCallId: randomUUID(),
           questions: grokQuestions,
           mode: 'default',
-        }, record.agent.session.id)
+          // Wait for the human answer indefinitely (`Infinity` disables the
+          // reverse-request timeout). A bounded window would surface a
+          // "client did not answer" tool failure that the agent cannot
+          // distinguish from a real user decision; the question stays up in
+          // the TUI until answered, cancelled, or its session is torn down
+          // (which rejectPendingFor reports as a proper cancellation).
+        }, record.agent.session.id, Infinity)
         // Validate the tagged wire shape instead of blind casts: anything but
         // a well-formed accepted payload reads as a user cancellation.
         if (typeof response !== 'object' || response === null || Array.isArray(response)) {
