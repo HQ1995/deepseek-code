@@ -28,6 +28,10 @@ jobs:
         working-directory: bridge/grok-leader
         run: |
           pnpm install --frozen-lockfile
+          # vitest transpiles without type-checking, so a PR can ship type
+          # errors that only surface at publish. Compile the bridge here too;
+          # this is the same `tsc -b` scripts/release.sh runs before publish.
+          pnpm exec tsc -b tsconfig.json
           pnpm exec vitest run
   rust-check:
     strategy:
@@ -50,3 +54,9 @@ jobs:
       - name: Test leader protocol gate
         working-directory: third_party/grok-build
         run: cargo test -p xai-grok-shell wrong_protocol_version_fails_registration --lib
+      - name: Test TUI CLI metadata contracts
+        # Release-only E2E runs the full `to_meta_` suite (e2e-product.sh
+        # [4/5]); surface it on every PR so CLI/contract drift is caught
+        # before a tag, not by the release pipeline.
+        working-directory: third_party/grok-build
+        run: cargo test --manifest-path crates/codegen/xai-grok-pager/Cargo.toml to_meta_

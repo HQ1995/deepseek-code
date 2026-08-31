@@ -573,6 +573,43 @@ interface SettingsLike {
   describe?(): Array<{ ns: string; user?: unknown }>
 }
 
+/** Raw user section of the llm-pi-ai namespace, when the settings service exposes it. */
+export function providerUserSection(providerService: SettingsLike | undefined): Record<string, unknown> | undefined {
+  const descriptor = providerService?.describe?.().find(entry => entry.ns === PROVIDER_SETTINGS_NS)
+  const user = descriptor?.user
+  return user !== null && typeof user === 'object' ? user as Record<string, unknown> : undefined
+}
+
+/** One provider's raw user profile ({} when the section does not name it). */
+export function providerUserProfile(userSection: Record<string, unknown> | undefined, id: string): Record<string, unknown> {
+  const providers = userSection?.providers
+  const profile = providers !== null && typeof providers === 'object'
+    ? (providers as Record<string, unknown>)[id]
+    : undefined
+  return profile !== null && typeof profile === 'object' ? profile as Record<string, unknown> : {}
+}
+
+export function hasUserProviderRoute(providerService: SettingsLike | undefined, id: string): boolean {
+  const providers = providerUserSection(providerService)?.providers
+  return providers !== null
+    && typeof providers === 'object'
+    && Object.prototype.hasOwnProperty.call(providers, id)
+}
+
+/** baseURLs of the provider routes already persisted in the user settings
+ * section: the only endpoints a resolved env secret may be sent to. */
+export function knownRouteBaseUrls(providerService: SettingsLike | undefined): string[] {
+  const providers = providerUserSection(providerService)?.providers
+  if (providers === null || typeof providers !== 'object') return []
+  const urls: string[] = []
+  for (const profile of Object.values(providers as Record<string, unknown>)) {
+    if (profile === null || typeof profile !== 'object') continue
+    const baseURL = (profile as { baseURL?: unknown }).baseURL
+    if (typeof baseURL === 'string' && baseURL.length > 0) urls.push(baseURL)
+  }
+  return urls
+}
+
 /** Structural read of the session store: this bridge needs only one flush entry point. */
 interface SessionsLike {
   flush(session: object): Promise<unknown>
@@ -980,46 +1017,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     sessionProjectionInspected.add(sessionId)
   }
 
-  /** Raw user section of the llm-pi-ai namespace, when the settings service exposes it. */
-  const providerUserSection = (providerService?: SettingsLike): Record<string, unknown> | undefined => {
-    const descriptor = providerService?.describe?.().find(entry => entry.ns === PROVIDER_SETTINGS_NS)
-    const user = descriptor?.user
-    return user !== null && typeof user === 'object' ? user as Record<string, unknown> : undefined
-  }
-
-  /** One provider's raw user profile ({} when the section does not name it). */
-  const providerUserProfile = (userSection: Record<string, unknown> | undefined, id: string): Record<string, unknown> => {
-    const providers = userSection?.providers
-    const profile = providers !== null && typeof providers === 'object'
-      ? (providers as Record<string, unknown>)[id]
-      : undefined
-    return profile !== null && typeof profile === 'object' ? profile as Record<string, unknown> : {}
-  }
-
-  const hasUserProviderRoute = (providerService: SettingsLike | undefined, id: string): boolean => {
-    const providers = providerUserSection(providerService)?.providers
-    return providers !== null
-      && typeof providers === 'object'
-      && Object.prototype.hasOwnProperty.call(providers, id)
-  }
-
+  /** providerUserSection / providerUserProfile / hasUserProviderRoute /
+   * knownRouteBaseUrls live at module scope (pure: no apply() state). */
   const providerExists = (providerService: SettingsLike | undefined, id: string): boolean =>
     hasUserProviderRoute(providerService, id)
     || llm()?.listProviders().some(provider => provider.id === id) === true
-
-  /** baseURLs of the provider routes already persisted in the user settings
-   * section: the only endpoints a resolved env secret may be sent to. */
-  const knownRouteBaseUrls = (): string[] => {
-    const providers = providerUserSection(settings())?.providers
-    if (providers === null || typeof providers !== 'object') return []
-    const urls: string[] = []
-    for (const profile of Object.values(providers as Record<string, unknown>)) {
-      if (profile === null || typeof profile !== 'object') continue
-      const baseURL = (profile as { baseURL?: unknown }).baseURL
-      if (typeof baseURL === 'string' && baseURL.length > 0) urls.push(baseURL)
-    }
-    return urls
-  }
 
   /** Resolve a credential per operation, matching dsh's credential seam. */
   const resolveCredentialValue = async (ref: string | undefined): Promise<string | undefined> => {
@@ -1656,18 +1658,20 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
             ...(question.id !== undefined ? { id: question.id } : {}),
           }
         })
-        // The ACP ext_method reverse request rides the wrapped wire form: a
-        // top-level `_x.ai/ask_user_question` with method + params nested one
-        // level (server.rs method_of / interaction_inner_params). dsh does not
-        // expose the tool call id, so mint an opaque one the client echoes back.
+        // The ACP ext_method reverse request carries the typed payload FLATLY
+        // under params: the pager's handle_ask_user_question does
+        // `from_str(ext.request.params)` straight into AskUserQuestionExtRequest
+        // (uses crate fixtures/tests serialize `{sessionId,toolCallId,
+        // questions,mode}` — camelCase, no `method` wrapper). The earlier
+        // wrapped `{method, params}` two-level form made the pager's serde
+        // reject with `missing field 'sessionId'`, so keep the method in the
+        // JSON-RPC method slot and the fields flat. dsh does not expose the
+        // tool call id, so mint an opaque one the client echoes back.
         const response = await requestClient<AskUserQuestionExtResponse>(conn, '_x.ai/ask_user_question', {
-          method: WIRE.askUserQuestion,
-          params: {
-            sessionId: record.agent.session.id,
-            toolCallId: randomUUID(),
-            questions: grokQuestions,
-            mode: 'default',
-          },
+          sessionId: record.agent.session.id,
+          toolCallId: randomUUID(),
+          questions: grokQuestions,
+          mode: 'default',
         }, record.agent.session.id)
         // Validate the tagged wire shape instead of blind casts: anything but
         // a well-formed accepted payload reads as a user cancellation.
@@ -3263,7 +3267,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
     const apiKeyEnv = nonEmpty(p.apiKeyEnv) ? p.apiKeyEnv : undefined
     const baseURL = nonEmpty(p.baseURL) ? p.baseURL : undefined
-    const knownEndpoint = baseURL !== undefined && knownRouteBaseUrls().includes(baseURL)
+    const knownEndpoint = baseURL !== undefined && knownRouteBaseUrls(settings()).includes(baseURL)
     // Exfil guard: the resolved env value may only be handed to an endpoint
     // whose baseURL is already a persisted provider route (re-provide under a
     // known endpoint). Anything else — including a brand-new baseURL — gets

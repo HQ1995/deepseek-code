@@ -2649,16 +2649,17 @@ describe('grok leader over a unix socket', () => {
 
     sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/confirm go' }], _meta: { promptId: 'ask-1' } })
 
-    // The command handler blocks on the question: the client sees the wrapped
-    // ext reverse request (leading '_' stripped by the decode mirror; the
-    // inner method + params ride one level down).
+    // The command handler blocks on the question: the client sees the ext
+    // reverse request with the typed payload FLAT under params (camelCase,
+    // matching the pager's AskUserQuestionExtRequest serde — it parses
+    // `ext.request.params` directly with from_str, no method wrapper).
     await waitFor(() => c.all.some(m => m.method === 'x.ai/ask_user_question' && typeof m.id === 'number'))
     const reverse = c.all.find(m => m.method === 'x.ai/ask_user_question')!
-    const inner = reverse.params as { method: string; params: { sessionId: string; questions: Array<{ question: string; options: Array<{ label: string }> }> } }
-    expect(inner.params.sessionId).toBe(sessionId)
+    const inner = reverse.params as { sessionId: string; questions: Array<{ question: string; options: Array<{ label: string }> }> }
+    expect(inner.sessionId).toBe(sessionId)
     const displayQuestion = 'Deployment decision\nProceed?\nReview both lines.\nKeep the rollback ready.'
-    expect(inner.params.questions[0].question).toBe(displayQuestion)
-    expect(inner.params.questions[0].options.map(o => o.label)).toEqual(['Yes', 'No'])
+    expect(inner.questions[0].question).toBe(displayQuestion)
+    expect(inner.questions[0].options.map(o => o.label)).toEqual(['Yes', 'No'])
 
     // Answer as the grok TUI would: accepted, keyed by question text.
     c.send({ type: 'acp', payload: JSON.stringify({
