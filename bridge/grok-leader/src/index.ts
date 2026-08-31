@@ -43,6 +43,7 @@ import { load as loadYaml } from 'js-yaml'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 import { encodeJsonFrame, FrameDecoder } from './codec.ts'
 import { LEADER_PROTOCOL_VERSION, RpcError, decodeClientMessage, encodeServerMessage, type ClientMessage, type ServerMessage } from './protocol.ts'
+import { SessionListIndex } from './session-list.ts'
 import { acpPromptToText, cacheHitPercent, parseJsonObject, promptHasUnsupportedContent, sessionEventToUpdates, textBlocks, toolKindForName, turnEndToStopReason, type GrokSessionUpdate, type ProjectedUpdate, type StopReasonWire, type ToolKindWire, type ToolResultContentBlock } from './projection.ts'
 
 export { acpPromptToText, cacheHitPercent, promptHasUnsupportedContent, sessionEventToUpdates, toolKindForName, turnEndToStopReason }
@@ -952,70 +953,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const idleExitMs = config.idleExitMs ?? 2000
   /** x.ai/session/list rows served when the request carries no (or an oversized) limit. */
   const DEFAULT_SESSION_LIST_LIMIT = 50
-  /** First user prompt per session id, memoized across x.ai/session/list calls. */
-  const firstPromptCache = new Map<string, string>()
-  /** Latest durable session title and activity timestamp for list/resume. */
-  const sessionTitleCache = new Map<string, string>()
-  const sessionActivityCache = new Map<string, number>()
-  const sessionProjectionInspected = new Set<string>()
-  /** First-prompt loads in flight; concurrent list calls share them and never
-   * cache the '' placeholder as a successful title. */
-  const firstPromptInFlight = new Set<string>()
-  /** Cap the title cache: the oldest entry is evicted, read hits refresh recency. */
-  const FIRST_PROMPT_CACHE_LIMIT = 100
-  const cacheFirstPrompt = (sessionId: string, title: string): void => {
-    firstPromptCache.delete(sessionId)
-    // A '' miss is NOT a title: a session prompted after an empty list would
-    // otherwise serve the poisoned empty string forever. Misses retry.
-    if (title === '') return
-    firstPromptCache.set(sessionId, title)
-    while (firstPromptCache.size > FIRST_PROMPT_CACHE_LIMIT) {
-      const oldest = firstPromptCache.keys().next().value as string | undefined
-      if (oldest === undefined) break
-      firstPromptCache.delete(oldest)
-    }
-  }
-  const cachedFirstPrompt = (sessionId: string): string | undefined => {
-    const title = firstPromptCache.get(sessionId)
-    if (title === undefined) return undefined
-    firstPromptCache.delete(sessionId)
-    firstPromptCache.set(sessionId, title)
-    return title
-  }
-  const firstUserPrompt = (events: readonly SessionEvent[]): string => {
-    for (const event of events) {
-      if (event.type !== 'user/message') continue
-      const data = event.data as { source?: unknown; content?: unknown }
-      if ((data.source as { kind?: unknown } | undefined)?.kind !== 'user') continue
-      if (!Array.isArray(data.content)) continue
-      for (const block of data.content) {
-        const b = block as { type?: unknown; text?: unknown }
-        if (b.type === 'text' && typeof b.text === 'string' && b.text.trim().length > 0) return b.text.trim()
-      }
-    }
-    return ''
-  }
-  const foldedSessionTitle = (events: readonly SessionEvent[]): string => {
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-      const event = events[index] as { type: string; data: unknown } | undefined
-      if (event?.type !== 'session/title') continue
-      const title = (event.data as { title?: unknown }).title
-      if (typeof title === 'string' && title.trim().length > 0) return title.trim()
-    }
-    return ''
-  }
-  const cacheSessionProjection = (
-    sessionId: string,
-    createdAt: number,
-    events: readonly SessionEvent[],
-  ): void => {
-    const title = foldedSessionTitle(events)
-    if (title === '') sessionTitleCache.delete(sessionId)
-    else sessionTitleCache.set(sessionId, title)
-    const latest = events.reduce((time, event) => Math.max(time, event.time), createdAt)
-    sessionActivityCache.set(sessionId, latest)
-    sessionProjectionInspected.add(sessionId)
-  }
+  /** First-prompt / title / activity index for the session picker and live log. */
+  const sessionListIndex = new SessionListIndex()
 
   /** providerUserSection / providerUserProfile / hasUserProviderRoute /
    * knownRouteBaseUrls live at module scope (pure: no apply() state). */
@@ -1527,20 +1466,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   ctx.on('session/event', (session, event: SessionEvent) => {
     const record = sessions.get(session.header.id)
     if (record === undefined || record.agent.session !== session) return
-    sessionActivityCache.set(session.header.id, Math.max(
-      sessionActivityCache.get(session.header.id) ?? session.header.createdAt,
-      event.time,
-    ))
-    sessionProjectionInspected.add(session.header.id)
-    const rawEvent = event as { type: string; data: unknown }
-    if (rawEvent.type === 'session/title') {
-      const title = (rawEvent.data as { title?: unknown }).title
-      if (typeof title === 'string' && title.trim().length > 0) {
-        sessionTitleCache.set(session.header.id, title.trim())
-      }
-    } else if (event.type === 'user/message' && cachedFirstPrompt(session.header.id) === undefined) {
-      cacheFirstPrompt(session.header.id, firstUserPrompt([event]))
-    }
+    sessionListIndex.recordEvent(session.header.id, session.header.createdAt, event)
     const conn = connections.get(record.clientId)
     if (conn === undefined) return
     try {
@@ -4143,27 +4069,25 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         // match prompt text. Misses stay uncached (retried on the next list)
         // and the in-flight set stops concurrent list calls stacking loads.
         await Promise.all(headers.map(async header => {
-          if ((firstPromptCache.has(header.id) && sessionProjectionInspected.has(header.id))
-            || firstPromptInFlight.has(header.id)) return
-          firstPromptInFlight.add(header.id)
+          if (!sessionListIndex.beginInspection(header.id)) return
           try {
             const inspection = await store.load(SessionId(header.id))
-            cacheFirstPrompt(header.id, firstUserPrompt(inspection.events))
-            cacheSessionProjection(header.id, header.createdAt, inspection.events)
+            sessionListIndex.recordInspection(header.id, header.createdAt, inspection.events)
           } catch {
             // A broken artifact must not sink the list; the miss is retried.
           } finally {
-            firstPromptInFlight.delete(header.id)
+            sessionListIndex.finishInspection(header.id)
           }
         }))
         let rows = headers.map(header => {
-          const title = sessionTitleCache.get(header.id) ?? ''
+          const projection = sessionListIndex.projection(header.id, header.createdAt)
+          const title = projection.title
           return {
             sessionId: header.id,
             cwd: header.cwd ?? '',
             createdAt: new Date(header.createdAt).toISOString(),
-            updatedAt: new Date(sessionActivityCache.get(header.id) ?? header.createdAt).toISOString(),
-            firstPrompt: cachedFirstPrompt(header.id) ?? '',
+            updatedAt: new Date(projection.updatedAt).toISOString(),
+            firstPrompt: projection.firstPrompt,
             title,
             summary: title,
             // Chat-kind rows skip the TUI's local-store gate (grok's own session
