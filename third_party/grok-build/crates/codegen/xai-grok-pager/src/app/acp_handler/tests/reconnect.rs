@@ -2,7 +2,7 @@
     use super::*;
 
     #[test]
-    fn handle_updates_total_tokens_used_for_active_agent() {
+    fn handle_updates_projected_context_for_active_agent() {
         let mut app = make_app_with_agent("sess-1");
         assert!(app.agents.get(&AgentId(0)).unwrap().context_state.is_none());
 
@@ -38,6 +38,49 @@
                 .map(|c| c.used),
             Some(12_345),
         );
+    }
+    #[test]
+    fn current_context_clears_unknown_and_preserves_known_zero() {
+        let mut app = make_app_with_agent("sess-1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.apply_full_context_info(serde_json::from_value(serde_json::json!({"used": 42, "total": 1000})).unwrap());
+        agent.apply_full_context_info(serde_json::from_value(serde_json::json!({"available": false})).unwrap());
+        assert!(agent.context_state.is_none());
+        agent.apply_full_context_info(serde_json::from_value(serde_json::json!({"available": true, "used": 0, "capacityAvailable": false, "total": 1000})).unwrap());
+        let context = agent.context_state.as_ref().unwrap();
+        assert_eq!(context.used, 0);
+        assert_eq!(context.total, 0);
+        assert_eq!(context.capacity_available, Some(false));
+        agent.apply_context_used(0, 0);
+        assert_eq!(agent.context_state.as_ref().unwrap().total, 0);
+    }
+
+    #[test]
+    fn cumulative_tokens_do_not_overwrite_current_context() {
+        let mut app = make_app_with_agent("sess-1");
+        handle(make_token_notification_message("sess-1", 42), &mut app);
+        let mut message = make_token_notification_message("sess-1", 999_999);
+        if let AcpClientMessage::SessionNotification(args) = &mut message {
+            args.request.meta.as_mut().unwrap().remove("contextInfo");
+        }
+        handle(message, &mut app);
+        assert_eq!(app.agents[&AgentId(0)].context_state.as_ref().unwrap().used, 42);
+    }
+
+    #[test]
+    fn live_unknown_context_clears_cache_and_stale_snapshot_cannot_restore_it() {
+        let mut app = make_app_with_agent("sess-1");
+        handle(make_token_notification_with_event("sess-1", 42, "sess-1-1"), &mut app);
+        let mut unknown = make_token_notification_with_event("sess-1", 999, "sess-1-3");
+        if let AcpClientMessage::SessionNotification(args) = &mut unknown {
+            args.request.meta.as_mut().unwrap().insert("contextInfo".into(), serde_json::json!({"available": false}));
+            args.request.meta.as_mut().unwrap().remove("eventId");
+            args.request.meta.as_mut().unwrap().insert("eventSeq".into(), serde_json::json!(3));
+        }
+        handle(unknown, &mut app);
+        assert!(app.agents[&AgentId(0)].context_state.is_none());
+        handle(make_token_notification_with_event("sess-1", 42, "sess-1-2"), &mut app);
+        assert!(app.agents[&AgentId(0)].context_state.is_none());
     }
 
     #[test]
@@ -1004,8 +1047,8 @@
         // Regression: the context bar must not drop when a stale, already-passed
         // replay delta arrives after a fresher live one. In leader / reconnect /
         // replay-live-overlap, a historical delta (LOWER eventId, LOWER
-        // totalTokens) is deduped for rendering — but `refresh_context_used`
-        // must respect the dedup too, otherwise the bar regresses below the real
+        // contextInfo.used) is deduped for rendering — context metadata must
+        // respect the dedup too, otherwise the bar regresses below the real
         // usage (the reported "resume shows lower context" bug).
         let mut app = make_app_with_agent("sess-ctx");
         let id = AgentId(0);

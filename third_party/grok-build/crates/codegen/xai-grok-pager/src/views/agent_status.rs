@@ -215,6 +215,8 @@ fn format_elapsed_compact(ms: u64) -> String {
 /// uses the shared [`active_phase_label`] suffix.
 fn goal_phase_label(goal: &GoalDisplayState) -> String {
     match goal.status {
+        GoalDisplayStatus::Armed => "Armed".into(),
+        GoalDisplayStatus::Disarmed => "Disarmed".into(),
         GoalDisplayStatus::UserPaused
         | GoalDisplayStatus::BackOffPaused
         | GoalDisplayStatus::NoProgressPaused
@@ -283,6 +285,32 @@ pub fn goal_status_line(
     context_used: Option<u64>,
     active_subagent_tokens: u64,
 ) -> Line<'static> {
+    if let Some(native) = &goal.native_goal {
+        let mut style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
+        if hovered {
+            style = style
+                .add_modifier(ratatui::style::Modifier::BOLD)
+                .add_modifier(ratatui::style::Modifier::UNDERLINED);
+        }
+        let mut line = Line::from(Span::styled(
+            format!(
+                "[Goal: {} · {}] Rounds {}/{} · Revision {}",
+                native.phase,
+                native.activation,
+                native.rounds_started,
+                native.max_goal_rounds,
+                native.revision,
+            ),
+            style,
+        ));
+        if let Some(reason) = &native.reason {
+            line.spans.push(Span::styled(
+                format!(" · Reason: {}: {}", reason.code, reason.message),
+                style,
+            ));
+        }
+        return line;
+    }
     let label = goal_phase_label(goal);
 
     let tokens_str =
@@ -379,6 +407,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_chip_uses_durable_rounds_without_spinner_or_legacy_metrics() {
+        use xai_grok_shell::extensions::notification::{NativeGoalReason, NativeGoalState};
+        let theme = Theme::current();
+        let mut goal = GoalDisplayState::test_stub();
+        // Deliberately leave a legacy Active status and stale accounting: the
+        // native projection, not these overlays, must determine visible truth.
+        goal.verifying_completion = true;
+        goal.planning = true;
+        goal.elapsed_ms = 180_000;
+        goal.tokens_used = 12_300;
+        for activation in ["armed", "disarmed"] {
+            goal.native_goal = Some(NativeGoalState {
+                revision: 9,
+                phase: "active".into(),
+                activation: activation.into(),
+                rounds_started: 2,
+                max_goal_rounds: 5,
+                reason: Some(NativeGoalReason {
+                    code: "manual".into(),
+                    message: "Waiting".into(),
+                }),
+            });
+            for tick in [0, 100] {
+                let line = goal_status_line(&goal, &theme, false, tick, Some(999_999), 999_999);
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert_eq!(
+                    text,
+                    format!(
+                        "[Goal: active · {activation}] Rounds 2/5 · Revision 9 · Reason: manual: Waiting"
+                    )
+                );
+            }
+            assert_eq!(
+                goal.live_elapsed_ms(),
+                180_000,
+                "native does not tick fake active time"
+            );
+            assert_eq!(
+                goal.live_tokens_used(Some(999_999), 999_999),
+                12_300,
+                "native does not extrapolate context counters"
+            );
+        }
+    }
+
+    #[test]
+    fn armed_and_disarmed_statuses_parse_without_active_timer() {
+        for (wire, expected) in [
+            ("armed", GoalDisplayStatus::Armed),
+            ("disarmed", GoalDisplayStatus::Disarmed),
+        ] {
+            assert_eq!(GoalDisplayStatus::parse(wire), expected);
+            let mut goal = GoalDisplayState::test_stub();
+            goal.status = expected;
+            goal.elapsed_ms = 123;
+            goal.received_at = std::time::Instant::now() - std::time::Duration::from_secs(60);
+            assert_eq!(goal.live_elapsed_ms(), 123);
+            assert!(!goal.status.is_paused());
+        }
+    }
+
+    #[test]
     fn tokens_compact_sub_thousand() {
         assert_eq!(format_tokens_compact(0), "0");
         assert_eq!(format_tokens_compact(500), "500");
@@ -437,6 +527,7 @@ mod tests {
     ) -> GoalDisplayState {
         GoalDisplayState {
             goal_id: "g-1".into(),
+            native_goal: None,
             objective: "Build widget".into(),
             status,
             phase,

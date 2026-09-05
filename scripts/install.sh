@@ -1,236 +1,112 @@
 #!/usr/bin/env bash
-# deepseek-code installer: the official @deepseek-ai/dsh CLI from npm, the
-# grok-leader bridge as an out-of-tree plugin in the dscode profile,
-# the prebuilt grok TUI into this repo tree, and launchers into ~/.local/bin.
-#
-# Known gap: the pinned npm dsh may still lack the EMFILE/ENOSPC watch-capacity
-# and persistent-bash-prompt fixes; watch-driven hot reload can degrade under
-# heavy watch pressure and persistent bash sessions may fall back to
-# idle-silence timeouts until they land upstream.
+# Install one validated product/runtime/plugin tuple. With no release selection,
+# build this checkout; an unpublished VERSION is never looked up on GitHub.
 set -euo pipefail
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=platform.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/platform.sh"
-# The prebuilt TUI is unchanged by harness migrations, so it keeps its own
-# release tag rather than tracking the repo release.
-TUI_RELEASE="${DEEPSEEK_CODE_TUI_RELEASE:-v0.0.4}"
-
-echo "deepseek-code installer"
-echo "  repo: $ROOT"
-
-# Toolchain gates: pinned dsh currently requires Node >=22.19.0. Validate that
-# floor, but never install or switch the user's runtime.
-node_version="$(node -p 'process.version.slice(1)' 2>/dev/null || true)"
-if [[ -z "$node_version" ]]; then
-  echo "error: node >=22.19.0 is required; install it first" >&2
-  exit 1
+source "$ROOT/scripts/platform.sh"
+PROFILE="${DSCODE_HOME:-${DSH_HOME:-$HOME/.dsh}/profiles/dscode}"
+VERSION="$(cat "$ROOT/VERSION")"
+release_args=()
+local_install=1
+for arg in "$@"; do
+  case "$arg" in
+    --help|-h)
+      echo "Usage: scripts/install.sh [--version VERSION] [--stable|--beta|--alpha|--enterprise]"
+      echo "No selection builds checkout VERSION. DSCODE_HOME/DSH_HOME select the profile."
+      echo "DSCODE_RELEASE_DIR supplies prebuilt checkout payloads; DSCODE_SOURCE_DIR and"
+      echo "DSCODE_RUNTIME_CONSUMER select the pinned source and source-built SDK consumer."
+      exit 0 ;;
+  esac
+done
+if [[ $# -gt 0 ]]; then release_args=("$@"); local_install=0; fi
+if [[ -n "${DSC_CHANNEL:-}" ]]; then
+  release_args+=("--$DSC_CHANNEL"); local_install=0
 fi
-if ! node -e 'const a=process.versions.node.split(".").map(Number), b=[22,19,0]; process.exit(a[0]>b[0] || (a[0]===b[0] && (a[1]>b[1] || (a[1]===b[1] && a[2]>=b[2]))) ? 0 : 1)'; then
-  echo "error: pinned dsh requires node >=22.19.0; found $node_version" >&2
-  exit 1
+if [[ -n "${DEEPSEEK_CODE_TUI_RELEASE:-}" ]]; then
+  echo "note: DEEPSEEK_CODE_TUI_RELEASE now selects the entire exact release tuple, not only the TUI" >&2
+  release_args+=(--version "$DEEPSEEK_CODE_TUI_RELEASE"); local_install=0
 fi
-if ! command -v npm >/dev/null 2>&1; then
-  echo "error: npm is required alongside node" >&2
-  exit 1
+if ! command -v node >/dev/null 2>&1 || ! node -e 'const a=process.versions.node.split(".").map(Number); process.exit(a[0]>22 || (a[0]===22 && (a[1]>19 || (a[1]===19 && a[2]>=0))) ? 0 : 1)'; then
+  echo "error: node >=22.19.0 is required; install it first" >&2; exit 1
 fi
-if ! command -v pnpm >/dev/null 2>&1; then
-  echo "error: pnpm is required by 'dsh plugin'; enable it with: corepack enable" >&2
-  exit 1
-fi
-
-# dsh is pinned to the exact version this dscode release was tested against.
-# Bump it deliberately in bridge/grok-leader/package.json (dsh.testedVersion)
-# and re-run the full bridge/e2e suite before releasing.
-DSH_VERSION="$(node -p "require('$ROOT/bridge/grok-leader/package.json').dsh.testedVersion")"
-if [[ -z "$DSH_VERSION" ]]; then
-  echo "error: dsh.testedVersion is missing in bridge/grok-leader/package.json" >&2
-  exit 1
-fi
-
-# The dsh profile used by the TUI leader.
-PROFILE_NAME="dscode"
-PROFILE_DIR="$HOME/.dsh/profiles/$PROFILE_NAME"
-
-# Source installs never mutate the user's global npm prefix. Provision the
-# exact tested dsh under the product profile before the TUI starts; npx is not
-# safe here because a PATH shim named dsh can shadow the requested package.
-RUNTIME_DIR="$PROFILE_DIR/runtime"
-DSH_BIN="$RUNTIME_DIR/bin/dsh"
-installed_dsh_version="$("$DSH_BIN" --version 2>/dev/null | head -1 || true)"
-if [[ "$installed_dsh_version" != "$DSH_VERSION" ]]; then
-  echo "  installing the tested dsh runtime..."
-  rm -rf "$RUNTIME_DIR"
-  npm install --global --prefix "$RUNTIME_DIR" \
-    "@deepseek-ai/dsh@$DSH_VERSION" --omit=dev --no-audit --no-fund
-fi
-DSH_RUN=("$DSH_BIN")
-
-# Build the bridge against its pinned npm peers, then install it as a plugin
-# into the dscode profile. The official CLI initializes the profile
-# with the dsh-base bundle and reconciles the bridge's cordis.patch.yml layer.
-echo "  building the grok-leader bridge..."
-( cd "$ROOT/bridge/grok-leader" && dscode_pnpm install && dscode_pnpm run build )
-echo "  installing the bridge into the $PROFILE_NAME profile..."
-"${DSH_RUN[@]}" plugin --profile "$PROFILE_NAME" add "file:$ROOT/bridge/grok-leader"
-# pnpm materializes the file: dependency as hard links through its store, so
-# on a RE-install over an existing profile the copy keeps serving the build
-# that was current when it was first linked (tsc replaces inodes). Rebuild
-# the copy from scratch so re-running this installer picks up the current
-# bridge; scripts/update-bridge.sh is the standalone form of this step.
-profile_dir="$PROFILE_DIR"
-if [[ -d "$profile_dir/node_modules" ]]; then
-  rm -rf "$profile_dir/node_modules"
-  ( cd "$profile_dir" && dscode_pnpm install --force )
-fi
-
-# Prebuilt TUI binary into the repo tree. The release channel picks which
-# GitHub release serves it: stable resolves /releases/latest (never a
-# prerelease); beta resolves the newest tag by semver INCLUDING prereleases.
-# DEEPSEEK_CODE_TUI_RELEASE pins an exact tag and skips channel resolution;
-# the baked-in pin is the offline fallback when the release API is
-# unreachable.
-mkdir -p "$ROOT/third_party/grok-build/target/release"
-DSC_CHANNEL="${DSC_CHANNEL:-stable}"
-RELEASE_REPO="HQ1995/deepseek-code"
-RELEASE_API="https://api.github.com/repos/$RELEASE_REPO/releases"
-BIN_PATH="$ROOT/third_party/grok-build/target/release/dscode"
 ASSET="$(dscode_prebuilt_asset)"
-
-resolve_release_tag() {
-  case "$DSC_CHANNEL" in
-    stable)
-      curl -fsSL "$RELEASE_API/latest" 2>/dev/null \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])' 2>/dev/null || true
-      ;;
-    beta)
-      curl -fsSL "$RELEASE_API?per_page=100" 2>/dev/null | python3 -c '
-import json, re, sys
-def key(tag):
-    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)(?:-(.+))?$", tag)
-    if not m:
-        return None
-    # A plain release outranks a prerelease of the same x.y.z (semver).
-    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4) is None, m.group(4) or "")
-tags = [r["tag_name"] for r in json.load(sys.stdin) if not r.get("draft")]
-keyed = sorted((key(t), t) for t in tags if key(t))
-print(keyed[-1][1] if keyed else "")' 2>/dev/null || true
-      ;;
-    *)
-      echo "error: DSC_CHANNEL must be stable or beta (got $DSC_CHANNEL)" >&2
-      exit 1
-      ;;
-  esac
-}
-
-if [[ -z "${DEEPSEEK_CODE_TUI_RELEASE:-}" ]]; then
-  resolved_tag="$(resolve_release_tag)"
-  if [[ -n "$resolved_tag" ]]; then
-    TUI_RELEASE="$resolved_tag"
-    echo "  channel $DSC_CHANNEL resolved to $TUI_RELEASE"
+[[ -n "$ASSET" ]] || { echo "error: source-built runtime payloads support Linux x86_64 and macOS arm64 only" >&2; exit 1; }
+# Keep local file URLs alive after installation. Never overwrite an artifact
+# directory referenced by an already installed profile manifest.
+stage="$(mktemp -d "${TMPDIR:-/tmp}/dscode-install.XXXXXX")"
+trap 'rm -rf "$stage"' EXIT
+payload="${DSCODE_RELEASE_DIR:-}"
+if [[ -z "$payload" ]]; then
+  if [[ "$local_install" == 1 ]]; then
+    cache="${XDG_CACHE_HOME:-$HOME/.cache}/dscode/releases"
+    mkdir -p "$cache"
+    payload="$(mktemp -d "$cache/checkout.XXXXXX")"
   else
-    echo "  release API unreachable; falling back to pinned $TUI_RELEASE"
+    payload="$stage/payload"
+  fi
+  build_args=(--version "$VERSION" --out "$payload")
+  [[ -z "${DSCODE_SOURCE_DIR:-}" ]] || build_args+=(--source "$DSCODE_SOURCE_DIR")
+  [[ -z "${DSCODE_RUNTIME_CONSUMER:-}" ]] || build_args+=(--consumer "$DSCODE_RUNTIME_CONSUMER")
+  [[ "$local_install" == 1 ]] || build_args+=(--plugin-only)
+  node "$ROOT/scripts/build-release-payload.mjs" "${build_args[@]}"
+  if [[ "$local_install" == 1 ]]; then
+    build_target="${CARGO_TARGET_DIR:-$ROOT/third_party/grok-build/target}"
+    [[ "$build_target" = /* ]] || build_target="$ROOT/third_party/grok-build/$build_target"
+    CARGO_TARGET_DIR="$build_target" GROK_VERSION="$VERSION" bash "$ROOT/scripts/build-deepseek-tui.sh"
+    cp "$build_target/release/dscode" "$payload/$ASSET"
+    dscode_write_sha256 "$payload/$ASSET" "$payload/$ASSET.sha256"
   fi
 fi
-
-# The expected SHA-256 for the release binary: the .sha256 release asset
-# (published by scripts/release.sh from v0.0.5 on), else the baked-in pin
-# for older releases. Empty means no digest is available.
-expected_dscode_sha256() {
-  local from_asset
-  from_asset="$(curl -fsSL "https://github.com/$RELEASE_REPO/releases/download/$TUI_RELEASE/$ASSET.sha256" 2>/dev/null | cut -d' ' -f1 || true)"
-  if [[ "$from_asset" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "$from_asset"
-    return
-  fi
-  case "$TUI_RELEASE" in
-    v0.0.4) echo '70e2541281b1f4afdab7d0d18cc2ceaf192d822370004cfee5b2fc4120a1f11f' ;;
-    *) echo '' ;;
-  esac
+# The packed helper carries its ordinary dependency closure. Importing it does
+# not require installing this checkout's unpublished SDK versions from npm.
+node --input-type=module - "$payload/dscode-plugin.tgz" <<'NODE'
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+const archive = process.argv[2];
+const expected = readFileSync(`${archive}.sha256`, 'utf8').trim().split(/\s+/)[0];
+if (!/^[a-f0-9]{64}$/.test(expected) || createHash('sha256').update(readFileSync(archive)).digest('hex') !== expected) throw new Error('bootstrap plugin checksum mismatch');
+NODE
+mkdir -p "$stage/helper"
+tar -xzf "$payload/dscode-plugin.tgz" -C "$stage/helper"
+node --input-type=module - "$ROOT" "$PROFILE" "$VERSION" "$ASSET" "$payload" "$stage/helper/package" "$local_install" "${release_args[@]}" <<'NODE'
+import { readFileSync, lstatSync, mkdirSync, readlinkSync, symlinkSync, renameSync, rmSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+const [root, profileArg, checkoutVersion, asset, payload, helper, local, ...args] = process.argv.slice(2);
+const profile = resolve(profileArg);
+const { installRelease, resolveRelease, updateOptions } = await import(pathToFileURL(join(helper, 'bin/update.mjs')));
+const { releaseChannel } = await import(pathToFileURL(join(root, 'scripts/build-release-payload.mjs')));
+const packageName = JSON.parse(readFileSync(join(root, 'bridge/grok-leader/package.json'), 'utf8')).name;
+// Only installation selections are meaningful here, not update/check modes.
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--version') { i++; continue; }
+  if (!/^--(?:stable|beta|alpha|enterprise)$/.test(args[i]) && !args[i].startsWith('--version=')) throw new Error(`unsupported install argument: ${args[i]}; use --version and/or a release lane`);
 }
-
-verify_or_fail() { # $1 = expected sha (may be empty), exits on mismatch
-  if [[ -z "$1" ]]; then
-    echo "  warning: no checksum published for $TUI_RELEASE; skipping verification" >&2
-    return 0
-  fi
-  local actual
-  actual="$(dscode_file_sha256 "$BIN_PATH")"
-  if [[ "$actual" != "$1" ]]; then
-    rm -f "$BIN_PATH"
-    echo "error: dscode failed its SHA-256 check for $TUI_RELEASE (got $actual, want $1)" >&2
-    exit 1
-  fi
+const options = local === '1' ? { version: checkoutVersion, channel: releaseChannel(checkoutVersion) } : updateOptions(args, profile, checkoutVersion);
+const version = local === '1' ? checkoutVersion : await resolveRelease(options);
+const localOptions = local === '1' ? {
+  base: pathToFileURL(resolve(payload)).href.replace(/\/$/, ''),
+  fetcher: async url => {
+    try { return new Response(readFileSync(fileURLToPath(url))); }
+    catch (error) { if (error.code === 'ENOENT') return new Response(null, { status: 404 }); throw error; }
+  },
+} : {};
+await installRelease({ profile, packageName, version, channel: options.channel, asset, ...localOptions });
+const launcher = join(profile, 'node_modules', ...packageName.split('/'), 'bin/dscode.mjs');
+const link = join(process.env.HOME, '.local/bin/dscode');
+try {
+let existing;
+try { existing = lstatSync(link); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+const owned = !existing || (existing.isSymbolicLink() && [launcher, join(profile, 'bin/dscode'), join(root, 'bin/dscode'), join(root, 'third_party/grok-build/target/release/dscode')].includes(resolve(join(link, '..'), readlinkSync(link))));
+if (owned) {
+  mkdirSync(join(process.env.HOME, '.local/bin'), { recursive: true });
+  const temporary = `${link}.install-${process.pid}`;
+  try { symlinkSync(launcher, temporary); renameSync(temporary, link); }
+  finally { rmSync(temporary, { force: true }); }
+} else console.error(`warning: ${link} is not owned by this installation; leaving it alone`);
+} catch (error) {
+  console.error(`warning: installed tuple is ready, but could not repair ${link}: ${error.message}`);
 }
-
-download_dscode() {
-  echo "  downloading prebuilt dscode ($TUI_RELEASE)..."
-  local base tmp
-  base="https://github.com/$RELEASE_REPO/releases/download/$TUI_RELEASE"
-  tmp="$BIN_PATH.download-$$"
-  if curl -fL "$base/$ASSET.gz" | gzip -dc > "$tmp"; then
-    mv "$tmp" "$BIN_PATH"
-  else
-    rm -f "$tmp"
-    curl -fL -o "$tmp" "$base/$ASSET"
-    mv "$tmp" "$BIN_PATH"
-  fi
-}
-
-if [[ -n "$ASSET" ]]; then
-  expected_sha="$(expected_dscode_sha256)"
-  if [[ -x "$BIN_PATH" && -n "$expected_sha" ]]; then
-    echo "  prebuilt dscode already present; verifying its SHA-256 before use"
-    actual_sha="$(dscode_file_sha256 "$BIN_PATH")"
-    if [[ "$actual_sha" == "$expected_sha" ]]; then
-      echo "  prebuilt dscode verified"
-    else
-      echo "  prebuilt dscode differs from $TUI_RELEASE (got $actual_sha); re-downloading"
-      rm -f "$BIN_PATH"
-      download_dscode
-      verify_or_fail "$expected_sha"
-    fi
-  elif [[ ! -x "$BIN_PATH" ]]; then
-    download_dscode
-    verify_or_fail "$expected_sha"
-  fi
-  chmod +x "$BIN_PATH"
-else
-  echo "  no prebuilt binary for this platform; building TUI with cargo (takes minutes)..."
-  ( cd "$ROOT/third_party/grok-build" && cargo build --release -p xai-grok-pager-bin )
-fi
-
-# Launchers. dscode links directly to the prebuilt TUI binary. If no compatible
-# dsh already owns the public command, expose the profile-owned tested runtime;
-# never install the old npx shim, which can recursively resolve itself.
-mkdir -p "$HOME/.local/bin"
-dscode_link="$HOME/.local/bin/dscode"
-if [[ -e "$dscode_link" && ! -L "$dscode_link" ]]; then
-  echo "  warning: $dscode_link exists and is not a symlink; leaving it alone" >&2
-elif [[ -L "$dscode_link" ]]; then
-  target="$(readlink "$dscode_link" 2>/dev/null || true)"
-  if [[ "$target" == "$ROOT/third_party/grok-build/target/release/dscode" ]]; then
-    ln -sf "$ROOT/third_party/grok-build/target/release/dscode" "$dscode_link"
-    echo "  linked dscode"
-  else
-    echo "  warning: $dscode_link points elsewhere ($target); leaving it alone" >&2
-  fi
-else
-  ln -sf "$ROOT/third_party/grok-build/target/release/dscode" "$dscode_link"
-  echo "  linked dscode"
-fi
-if [[ "$(dsh --version 2>/dev/null | head -1 || true)" == "$DSH_VERSION" ]]; then
-  echo "  compatible dsh already reachable on PATH; leaving it in place"
-elif [[ -e "$HOME/.local/bin/dsh" && ! -L "$HOME/.local/bin/dsh" ]]; then
-  echo "  warning: $HOME/.local/bin/dsh exists and is not a symlink; leaving it alone" >&2
-else
-  ln -sf "$DSH_BIN" "$HOME/.local/bin/dsh"
-  echo "  linked tested dsh runtime"
-fi
-
-echo
-echo "done. run: dscode"
-echo "  (make sure $HOME/.local/bin is on PATH)"
-echo "  note: the pinned npm dsh may still lack the EMFILE/ENOSPC watch-capacity"
-echo "  and persistent-bash-prompt fixes; watch-driven hot reload may degrade"
-echo "  under load and persistent bash may use idle timeouts."
+console.log(`Installed ${version} (${options.channel}) at ${profile}.`);
+console.log(`Run with the same profile environment: ${launcher}`);
+NODE

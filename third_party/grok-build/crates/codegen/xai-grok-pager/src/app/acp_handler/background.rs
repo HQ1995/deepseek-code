@@ -167,6 +167,7 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
     // Create central bg task state (description may still be filled from the
     // Execute block on demotion before we insert into the map).
     let mut bg_task = BgTaskState {
+        native_task: None,
         task_id: task_id.clone(),
         tool_call_id: tool_call_id.clone(),
         command: command.clone(),
@@ -624,6 +625,22 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
 
     // Stamps `restored_from_replay` on tombstones inserted below.
     let meta = NotificationMeta::from_json(session_notif.meta.as_ref().and_then(|v| v.as_object()));
+    let native_task = match session_notif
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("nativeTask"))
+    {
+        Some(value) => {
+            match serde_json::from_value::<crate::app::agent::NativeTaskInfo>(value.clone()) {
+                Ok(native) => Some(native),
+                Err(error) => {
+                    tracing::warn!(%error, "Failed to parse native task metadata");
+                    return false;
+                }
+            }
+        }
+        None => None,
+    };
 
     let (matched, is_active, agent) = match resolve_notif_agent(app, &session_notif.session_id) {
         Some(t) => t,
@@ -641,8 +658,17 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
         "Background task completed"
     );
 
-    // Determine success once, reused for both bg_task status and scrollback block.
-    let success = exit_code == Some(0) || (exit_code.is_none() && signal.is_none());
+    // Native status is authoritative; absent exit data does not prove success.
+    let explicitly_killed = task_snapshot.explicitly_killed
+        || native_task
+            .as_ref()
+            .is_some_and(|native| native.status == "killed");
+    let success = !explicitly_killed
+        && native_task.as_ref().map_or_else(
+            || exit_code == Some(0) || (exit_code.is_none() && signal.is_none()),
+            |native| native.status == "completed",
+        );
+    let duration_known = native_task.is_none() || task_snapshot.end_time.is_some();
 
     // Synthetic completion emitted by the agent's cold-load reconciliation
     // (`reconcile_stale_background_tasks`): the task's process died with a
@@ -662,6 +688,13 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
     // no description was supplied.
     let (command, elapsed, mut description, scrollback_entry_id) =
         if let Some(bg_task) = session.bg_tasks.get_mut(task_id) {
+            if native_task.is_some() {
+                bg_task.start_time = task_snapshot.start_time;
+            }
+            if !task_snapshot.output.is_empty() {
+                bg_task.set_stdout(task_snapshot.output.clone());
+            }
+            bg_task.truncated |= task_snapshot.truncated;
             bg_task.status = if success {
                 BgTaskStatus::Done
             } else {
@@ -669,7 +702,9 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
             };
             bg_task.exit_code = exit_code;
             bg_task.signal = signal.clone();
-            bg_task.end_time = Some(std::time::SystemTime::now());
+            bg_task.end_time = task_snapshot
+                .end_time
+                .or_else(|| native_task.is_none().then(std::time::SystemTime::now));
             bg_task.pending_kill = false;
             bg_task.kill_requested_at = None;
             (
@@ -726,6 +761,14 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
             (command, elapsed, description, None)
         };
 
+    if let Some(bg_task) = session.bg_tasks.get_mut(task_id) {
+        if native_task.is_some() {
+            bg_task.start_time = task_snapshot.start_time;
+            bg_task.end_time = task_snapshot.end_time;
+        }
+        bg_task.native_task = native_task;
+    }
+
     // Finish the "Task started" scrollback entry (stops bullet animation).
     // Also sync description onto that block so the historical "Task started"
     // line shows the label if it was missing at background time.
@@ -767,13 +810,17 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
 
     // Emit "Task completed/failed" scrollback block — uses description when
     // present so the label matches "Task started: <desc>" (not raw command).
-    let block = if success {
+    let mut block = if success {
         RenderBlock::bg_task_completed(&command, task_id, elapsed)
             .with_bg_task_description(description)
     } else {
         RenderBlock::bg_task_failed(&command, task_id, elapsed, exit_code, signal)
             .with_bg_task_description(description)
     };
+    if let RenderBlock::BgTask(bg) = &mut block {
+        bg.explicitly_killed = explicitly_killed;
+        bg.duration_known = duration_known;
+    }
     let completion_eid = scrollback.push_block(block);
 
     // Anchor tasks that have no "Task started" block (tombstones) to the

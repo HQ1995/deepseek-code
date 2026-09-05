@@ -1,70 +1,71 @@
 #!/usr/bin/env bash
-# Rebuild the grok-leader bridge and install a packed local copy into the
-# dscode profile. The profile may come from npx (registry dependency) or the
-# source installer (`file:` dependency); this script changes neither manifest.
+# Refresh only the local plugin copy; preserve the profile manifest, runtime,
+# channel, and live leader. Use install.sh when changing the installed tuple.
 set -euo pipefail
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BRIDGE="$ROOT/bridge/grok-leader"
-PROFILE="$HOME/.dsh/profiles/dscode"
-# shellcheck source=platform.sh
-source "$ROOT/scripts/platform.sh"
-
-echo "building the grok-leader bridge..."
-( cd "$BRIDGE" && dscode_pnpm install --silent && dscode_pnpm run build )
-
+PROFILE="${DSCODE_HOME:-${DSH_HOME:-$HOME/.dsh}/profiles/dscode}"
+if [[ $# -ne 0 ]]; then
+  echo "Usage: scripts/update-bridge.sh (DSCODE_HOME/DSH_HOME select the profile)" >&2
+  exit 1
+fi
 if [[ ! -d "$PROFILE" ]]; then
   echo "error: profile not found at $PROFILE; run scripts/install.sh first" >&2
   exit 1
 fi
-
-command -v npm >/dev/null 2>&1 || {
-  echo "error: npm is required to refresh the dscode profile" >&2
-  exit 1
-}
-
-stage="$(mktemp -d "${TMPDIR:-/tmp}/dscode-bridge.XXXXXX")"
-cleanup() {
-  find "$stage" -depth -delete 2>/dev/null || true
-}
-trap cleanup EXIT
-
-echo "packing the local bridge..."
-( cd "$BRIDGE" && npm pack --silent --pack-destination "$stage" >/dev/null )
-archive=""
-for candidate in "$stage"/*.tgz; do
-  if [[ -f "$candidate" ]]; then
-    archive="$candidate"
-    break
-  fi
-done
-if [[ -z "$archive" ]]; then
-  echo "error: npm pack did not produce a bridge archive" >&2
-  exit 1
+# Same filesystem as the active package so the final replacement is a rename.
+profile_parent="$(dirname "$PROFILE")"
+stage="$(mktemp -d "$profile_parent/.dscode-bridge.XXXXXX")"
+trap 'rm -rf "$stage"' EXIT
+VERSION="$(cat "$ROOT/VERSION")"
+payload="${DSCODE_RELEASE_DIR:-$stage/payload}"
+if [[ -z "${DSCODE_RELEASE_DIR:-}" ]]; then
+  build_args=(--plugin-only --version "$VERSION" --out "$payload")
+  [[ -z "${DSCODE_SOURCE_DIR:-}" ]] || build_args+=(--source "$DSCODE_SOURCE_DIR")
+  [[ -z "${DSCODE_RUNTIME_CONSUMER:-}" ]] || build_args+=(--consumer "$DSCODE_RUNTIME_CONSUMER")
+  node "$ROOT/scripts/build-release-payload.mjs" "${build_args[@]}"
 fi
-
-echo "refreshing the profile copy at $PROFILE..."
-installed="$PROFILE/node_modules/@hqzhao95/dscode"
-if [[ -e "$installed" || -L "$installed" ]]; then
-  find "$installed" -depth -delete
-fi
-npm install --prefix "$PROFILE" "$archive" \
-  --no-save --package-lock=false --legacy-peer-deps --no-audit --no-fund --force
-
-for sentinel in lib/types/index.js bin/dscode.mjs cordis.patch.yml; do
-  want="$(dscode_file_sha256 "$BRIDGE/$sentinel")"
-  got="$(dscode_file_sha256 "$installed/$sentinel")"
-  if [[ "$want" != "$got" ]]; then
-    echo "error: the profile copy differs at $sentinel ($got != $want)" >&2
-    exit 1
-  fi
-done
-echo "profile bridge, launcher, and composition match the fresh package"
-
-# A live leader keeps the code it loaded at spawn; only a new leader picks
-# up this refresh. Never kill it here: it may be serving live TUI sessions.
-if pgrep -f "profile dscode" >/dev/null 2>&1; then
-  echo "note: a dscode is running on the OLD build."
-  echo "      exit every dscode session (the leader exits with its last client),"
-  echo "      then start dscode again to spawn a leader on the new build."
+mkdir -p "$stage/archive"
+node --input-type=module - "$PROFILE" "$stage" "$payload" "$VERSION" <<'NODE'
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { cpSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const [profileArg, stageArg, payload, version] = process.argv.slice(2);
+const profile = resolve(profileArg), stage = resolve(stageArg);
+const unpacked = join(stage, 'archive/package');
+const json = path => JSON.parse(readFileSync(path, 'utf8'));
+const digest = path => createHash('sha256').update(readFileSync(path)).digest('hex');
+const archive = join(payload, 'dscode-plugin.tgz');
+const expected = readFileSync(`${archive}.sha256`, 'utf8').trim().split(/\s+/)[0];
+if (!/^[a-f0-9]{64}$/.test(expected) || digest(archive) !== expected) throw new Error('local plugin checksum mismatch');
+execFileSync('tar', ['-xzf', archive, '-C', join(stage, 'archive')], { stdio: 'inherit' });
+const metadata = json(join(unpacked, 'package.json'));
+if (metadata.name !== '@hqzhao95/dscode' || metadata.version !== version || metadata.dscode?.release !== version) throw new Error('local plugin must match checkout VERSION');
+const { commitInstallation, validateRuntime } = await import(pathToFileURL(join(unpacked, 'bin/update.mjs')));
+const entry = join('node_modules', ...metadata.name.split('/'));
+const installed = join(profile, entry);
+if (!existsSync(join(installed, 'package.json'))) throw new Error('installed plugin not found; run scripts/install.sh first');
+const current = json(join(installed, 'package.json'));
+if (current.version !== version || current.dscode?.release !== version) throw new Error('checkout VERSION differs from the installed tuple; run scripts/install.sh to install the complete checkout tuple');
+try { validateRuntime(join(profile, 'runtime'), metadata); }
+catch (error) { throw new Error(`installed runtime is incompatible with this checkout; run scripts/install.sh first: ${error.message}`); }
+for (const dependency of Object.keys(metadata.dependencies ?? {})) {
+  if (!existsSync(join(unpacked, 'node_modules', ...dependency.split('/'), 'package.json'))) throw new Error(`missing bundled dependency ${dependency}`);
+}
+const prepared = join(stage, 'profile', entry);
+mkdirSync(dirname(prepared), { recursive: true });
+cpSync(unpacked, prepared, { recursive: true, verbatimSymlinks: true });
+// Compare the prepared installation to the freshly compiled packed output,
+// not stale checkout lib/ files (the builder compiles in an isolated tree).
+for (const sentinel of ['lib/types/index.js', 'bin/dscode.mjs', 'cordis.patch.yml']) {
+  if (digest(join(unpacked, sentinel)) !== digest(join(prepared, sentinel))) throw new Error(`prepared profile copy differs at ${sentinel}`);
+}
+commitInstallation(profile, stage, [entry]);
+console.log('profile bridge, launcher, and composition match the fresh package');
+NODE
+# A live leader retains its loaded build; never interrupt live sessions.
+if pgrep -f 'profile dscode' >/dev/null 2>&1; then
+  echo "note: a dscode may be running on the OLD build."
+  echo "      exit every dscode session, then restart with the same profile environment."
 fi

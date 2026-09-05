@@ -191,27 +191,25 @@
     }
 
     fn running_bg_task(is_monitor: bool) -> crate::app::agent::BgTaskState {
-        crate::app::agent::BgTaskState {
-            task_id: "t1".into(),
-            tool_call_id: "c1".into(),
-            command: "sleep 5".into(),
-            description: None,
-            cwd: "/tmp".into(),
-            output_file: "/tmp/out".into(),
-            status: crate::app::agent::BgTaskStatus::Running,
-            start_time: std::time::SystemTime::now(),
-            end_time: None,
-            exit_code: None,
-            signal: None,
-            stdout: String::new(),
-            stdout_line_count: 0,
-            truncated: false,
-            pending_kill: false,
-            kill_requested_at: None,
-            scrollback_entry_id: None,
-            is_monitor,
-            restored_from_replay: false,
-        }
+        crate::app::agent::BgTaskState { native_task: None, task_id: "t1".into(),
+        tool_call_id: "c1".into(),
+        command: "sleep 5".into(),
+        description: None,
+        cwd: "/tmp".into(),
+        output_file: "/tmp/out".into(),
+        status: crate::app::agent::BgTaskStatus::Running,
+        start_time: std::time::SystemTime::now(),
+        end_time: None,
+        exit_code: None,
+        signal: None,
+        stdout: String::new(),
+        stdout_line_count: 0,
+        truncated: false,
+        pending_kill: false,
+        kill_requested_at: None,
+        scrollback_entry_id: None,
+        is_monitor,
+        restored_from_replay: false, }
     }
 
     #[test]

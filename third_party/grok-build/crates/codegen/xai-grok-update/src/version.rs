@@ -79,14 +79,14 @@ pub struct UpdateConfig {
     pub deployment_key: Option<String>,
     /// Optional extra auth material forwarded with requests when present.
     pub alpha_test_key: Option<String>,
-    /// Release channel: "stable" or internal "alpha" (user-facing beta).
+    /// Canonical release channel: stable, beta, alpha, or enterprise.
     pub channel: String,
     /// Custom npm registry URL. When set, passed as `--registry=` to npm CLI.
     pub npm_registry: Option<String>,
 }
 
 pub(crate) fn public_channel(channel: &str) -> &str {
-    if channel == "alpha" { "beta" } else { channel }
+    channel
 }
 
 impl UpdateConfig {
@@ -271,6 +271,8 @@ struct GithubRelease {
     tag_name: String,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    prerelease: bool,
 }
 
 /// Base URL for the deepseek-code GitHub Releases API.
@@ -303,54 +305,46 @@ fn dscode_release_api_base() -> String {
     DEEPSEEK_CODE_RELEASE_API.to_string()
 }
 
-/// Build the download URL for a deepseek-code release asset.
-///
-/// Honors the same loopback-only test seam as [`dscode_release_api_base`];
-/// production always points at GitHub.
-pub(crate) fn dscode_release_download_url(version: &str, asset_name: &str) -> String {
-    if let Some(base) = dscode_update_test_base() {
-        return format!(
-            "{base}/releases/download/v{}/{}",
-            version, asset_name
-        );
-    }
-    format!(
-        "https://github.com/{}/releases/download/v{}/{}",
-        DEEPSEEK_CODE_RELEASE_REPO,
-        version,
-        asset_name
-    )
-}
-
 /// Fetch the latest stable release version from the deepseek-code GitHub
 /// Releases API. Stable uses `/releases/latest`, which never returns a
 /// pre-release or draft.
 pub async fn fetch_dscode_release_version(channel: &str) -> Result<String> {
-    // "beta" is the user-facing name; "alpha" is the internal channel value
-    // shared with the upstream config plumbing. Both select the newest
-    // release INCLUDING prereleases; stable uses /releases/latest, which
-    // GitHub guarantees is never a prerelease or draft.
+    anyhow::ensure!(
+        matches!(channel, "stable" | "beta" | "alpha" | "enterprise"),
+        "Unsupported release channel: {channel}"
+    );
     if channel == "alpha" || channel == "beta" {
-        let releases = fetch_dscode_releases().await?;
-        let mut versions: Vec<(semver::Version, String)> = Vec::new();
-        for release in releases {
-            if release.draft {
-                continue;
-            }
-            let Some(tag) = release.tag_name.strip_prefix('v') else {
-                continue;
-            };
-            if let Ok(version) = semver::Version::parse(tag) {
-                versions.push((version, tag.to_string()));
-            }
-        }
-        versions.sort_by(|a, b| a.0.cmp(&b.0));
-        if let Some((_, version)) = versions.into_iter().last() {
-            return Ok(version);
-        }
-        anyhow::bail!("No releases found in {}", DEEPSEEK_CODE_RELEASE_REPO);
+        return newest_dscode_release(fetch_dscode_releases().await?, channel);
     }
     fetch_dscode_release_latest().await
+}
+
+fn newest_dscode_release(releases: Vec<GithubRelease>, channel: &str) -> Result<String> {
+    releases
+        .into_iter()
+        .filter(|release| !release.draft)
+        .filter_map(|release| {
+            let tag = release
+                .tag_name
+                .strip_prefix('v')
+                .unwrap_or(&release.tag_name);
+            let version = semver::Version::parse(tag).ok()?;
+            let allowed = if version.pre.is_empty() {
+                !release.prerelease
+            } else {
+                version
+                    .pre
+                    .as_str()
+                    .split_once('.')
+                    .is_some_and(|(lane, _)| lane == channel)
+            };
+            allowed.then(|| (version, tag.to_string()))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, tag)| tag)
+        .ok_or_else(|| {
+            anyhow::anyhow!("No {channel} releases found in {DEEPSEEK_CODE_RELEASE_REPO}")
+        })
 }
 
 async fn fetch_dscode_release_latest() -> Result<String> {
@@ -374,12 +368,19 @@ async fn fetch_dscode_release_latest() -> Result<String> {
         );
     }
     let release: GithubRelease = resp.json().await?;
+    anyhow::ensure!(
+        !release.draft && !release.prerelease,
+        "Latest release is not stable"
+    );
     let tag = release.tag_name;
     let version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
     if version.is_empty() {
         anyhow::bail!("No releases found in {}", DEEPSEEK_CODE_RELEASE_REPO);
     }
-    semver::Version::parse(&version)?;
+    anyhow::ensure!(
+        semver::Version::parse(&version)?.pre.is_empty(),
+        "Latest release is not stable"
+    );
     Ok(version)
 }
 
@@ -713,27 +714,18 @@ pub fn cached_stable_version() -> Option<String> {
     gv.stable_version
 }
 
-/// Pure comparison: derive the channel name from current vs stable pointer.
-///
-/// Returns `Some("alpha")` when `current > stable`, `Some("stable")` when
-/// `current <= stable`, or `None` when either version fails to parse.
+/// Derive the canonical channel from the product prerelease, independent of promotion.
 fn derive_channel<'a>(current: &str, stable: &str) -> Option<&'a str> {
     let current_v = semver::Version::parse(current).ok()?;
-    let stable_v = semver::Version::parse(stable).ok()?;
-    if current_v > stable_v {
-        Some("alpha")
-    } else {
-        Some("stable")
-    }
+    semver::Version::parse(stable).ok()?;
+    Some(match current_v.pre.as_str().split('.').next() {
+        Some("alpha") => "alpha",
+        Some("beta") => "beta",
+        _ => "stable",
+    })
 }
 
-/// Machine-readable channel name derived from the cached stable pointer.
-///
-/// Returns `Some("beta")` when the current version is ahead of the cached
-/// stable pointer, `Some("stable")` when at or behind, or `None` when no
-/// cached pointer is available (first launch, old cache format, parse error).
-///
-/// The result is computed once and cached for the process lifetime.
+/// Machine-readable product channel, available even before the first update check.
 pub fn channel_name() -> Option<&'static str> {
     use std::sync::OnceLock;
     static NAME: OnceLock<Option<&'static str>> = OnceLock::new();
@@ -743,20 +735,11 @@ pub fn channel_name() -> Option<&'static str> {
         if xai_grok_version::VERSION.contains("-dev") {
             return None;
         }
-        let stable = cached_stable_version()?;
-        derive_channel(xai_grok_version::VERSION, &stable).map(public_channel)
+        derive_channel(xai_grok_version::VERSION, "0.0.0")
     })
 }
 
-/// Channel label derived from the cached stable pointer.
-///
-/// Compares the compiled-in `VERSION` against the stable pointer stored in the
-/// dscode product home's `dscode-version.json` (written by the auto-updater):
-/// - `" [beta]"` when the current version is ahead of stable,
-/// - `" [stable]"` when at or behind stable,
-/// - `""` when no cached pointer is available (first launch, old cache format).
-///
-/// The result is computed once and cached for the process lifetime.
+/// Human-readable product channel label.
 pub fn channel_label() -> &'static str {
     use std::sync::OnceLock;
     static LABEL: OnceLock<&'static str> = OnceLock::new();
@@ -766,12 +749,9 @@ pub fn channel_label() -> &'static str {
         if xai_grok_version::VERSION.contains("-dev") {
             return "";
         }
-        let stable = match cached_stable_version() {
-            Some(s) => s,
-            None => return "",
-        };
-        match derive_channel(xai_grok_version::VERSION, &stable) {
-            Some("alpha") => " [beta]",
+        match channel_name() {
+            Some("alpha") => " [alpha]",
+            Some("beta") => " [beta]",
             Some(_) => " [stable]",
             None => "",
         }
@@ -795,6 +775,32 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn product_release_channels_filter_before_semver_selection() {
+        let releases = || {
+            serde_json::from_value(serde_json::json!([
+                {"tag_name":"v0.0.13", "draft":false, "prerelease":false},
+                {"tag_name":"v0.0.14-beta.2", "draft":false, "prerelease":true},
+                {"tag_name":"v0.0.15-alpha.1", "draft":false, "prerelease":true},
+                {"tag_name":"v0.0.16-rc.1", "draft":false, "prerelease":true},
+                {"tag_name":"v0.0.17", "draft":true, "prerelease":false}
+            ]))
+            .unwrap()
+        };
+        assert_eq!(
+            newest_dscode_release(releases(), "beta").unwrap(),
+            "0.0.14-beta.2"
+        );
+        assert_eq!(
+            newest_dscode_release(releases(), "alpha").unwrap(),
+            "0.0.15-alpha.1"
+        );
+        assert_eq!(
+            newest_dscode_release(releases(), "stable").unwrap(),
+            "0.0.13"
+        );
+    }
 
     /// Verifies that a future `checked_at` timestamp (e.g. from clock skew or
     /// NTP time-warp) is never considered fresh. Without the clock-skew guard
@@ -863,16 +869,17 @@ mod tests {
             ("0.1.220-alpha.2", "0.1.219", Some("alpha")), // alpha ahead of stable
             ("0.1.219", "0.1.219", Some("stable")),        // stable user on latest
             ("0.1.218", "0.1.219", Some("stable")),        // stable user behind latest
-            ("0.1.220-alpha.2", "0.1.220-alpha.2", Some("stable")), // pointer matches exactly
-            ("0.1.220-alpha.2", "0.1.220", Some("stable")), // semver: release > pre-release
+            ("0.1.220-alpha.2", "0.1.220-alpha.2", Some("alpha")),
+            ("0.1.220-alpha.2", "0.1.220", Some("alpha")),
+            ("0.1.220-beta.2", "0.1.220", Some("beta")),
             // ── Future 0.2.X workflow ──
-            ("0.2.5", "0.2.3", Some("alpha")), // alpha ahead of stable
+            ("0.2.5", "0.2.3", Some("stable")),
             ("0.2.5", "0.2.5", Some("stable")), // promoted to stable
             ("0.2.3", "0.2.5", Some("stable")), // behind stable
             ("0.2.0", "0.2.0", Some("stable")), // first release, both 0.2.0
             // ── Cross-regime upgrade ──
-            ("0.2.0", "0.1.219", Some("alpha")), // new regime ahead of old stable
-            ("0.1.220-alpha.2", "0.2.0", Some("stable")), // old pre-release < new stable
+            ("0.2.0", "0.1.219", Some("stable")),
+            ("0.1.220-alpha.2", "0.2.0", Some("alpha")),
             // ── Error cases ──
             ("garbage", "0.1.219", None), // unparseable current
             ("0.1.219", "garbage", None), // unparseable stable
@@ -892,7 +899,8 @@ mod tests {
 
     #[test]
     fn test_public_channel_names() {
-        assert_eq!(public_channel("alpha"), "beta");
+        assert_eq!(public_channel("alpha"), "alpha");
+        assert_eq!(public_channel("beta"), "beta");
         assert_eq!(public_channel("stable"), "stable");
         assert_eq!(public_channel("enterprise"), "enterprise");
     }

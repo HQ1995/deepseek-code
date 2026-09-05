@@ -171,6 +171,26 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                 /* rewind_prompt_id */ None,
             )];
         } else if !agent.session.state.is_turn_running() {
+            // Backend activity survives pausing/clearing the goal. Cancel it (or
+            // disarm future rounds) without inventing a foreground cancelling turn.
+            if agent.session.state.is_idle()
+                && (agent.native_session_running
+                    || agent
+                        .goal_state
+                        .as_ref()
+                        .is_some_and(|goal| goal.native_rounds_armed()))
+            {
+                let Some(session_id) = agent.session.session_id.clone() else {
+                    return vec![];
+                };
+                agent.clear_send_now_expectation();
+                return vec![Effect::CancelTurn {
+                    session_id,
+                    cancel_subagents: resolved_pref.unwrap_or(true),
+                    trigger: agent.cancel_trigger_hint.take(),
+                    rewind_prompt_id: None,
+                }];
+            }
             return vec![];
         } else if let Some(stop) = resolved_pref {
             Some(stop)

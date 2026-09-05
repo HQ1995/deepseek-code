@@ -32,14 +32,14 @@ pub enum SubagentBlockKind {
     /// Subagent is running (or was running — `finish_running` stops animation).
     Started,
     /// Subagent completed successfully.
-    Completed { elapsed: Duration },
+    Completed { elapsed: Option<Duration> },
     /// Subagent failed.
     Failed {
-        elapsed: Duration,
+        elapsed: Option<Duration>,
         error: Option<String>,
     },
     /// Subagent was cancelled.
-    Cancelled { elapsed: Duration },
+    Cancelled { elapsed: Option<Duration> },
 }
 
 /// Subagent scrollback block.
@@ -101,7 +101,7 @@ impl SubagentBlock {
     pub fn completed(
         description: impl Into<String>,
         child_session_id: impl Into<String>,
-        elapsed: Duration,
+        elapsed: Option<Duration>,
     ) -> Self {
         Self {
             description: description.into(),
@@ -120,7 +120,7 @@ impl SubagentBlock {
     pub fn failed(
         description: impl Into<String>,
         child_session_id: impl Into<String>,
-        elapsed: Duration,
+        elapsed: Option<Duration>,
         error: Option<String>,
     ) -> Self {
         Self {
@@ -140,7 +140,7 @@ impl SubagentBlock {
     pub fn cancelled(
         description: impl Into<String>,
         child_session_id: impl Into<String>,
-        elapsed: Duration,
+        elapsed: Option<Duration>,
     ) -> Self {
         Self {
             description: description.into(),
@@ -216,40 +216,44 @@ impl BlockContent for SubagentBlock {
             }
             // Completed: Subagent completed in Xs: "description"
             (SubagentBlockKind::Completed { elapsed }, _) => {
-                let time_str = format_duration(*elapsed);
-                // "Subagent completed in Xs: " = 26 + time_str.len()
-                let prefix_len = 26 + time_str.len();
+                let time_str = elapsed
+                    .map(|d| format!(" in {}", format_duration(d)))
+                    .unwrap_or_default();
+                let prefix_len = 20 + time_str.len();
                 let desc = quoted_desc(&self.description, w.saturating_sub(prefix_len));
                 Line::from(vec![
                     Span::styled("Subagent ", bold),
-                    Span::styled(format!("completed in {time_str}: "), muted),
+                    Span::styled(format!("completed{time_str}: "), muted),
                     Span::styled(desc, muted),
                 ])
             }
             // Failed: Subagent failed in Xs: "description"
             (SubagentBlockKind::Failed { elapsed, error }, _) => {
-                let time_str = format_duration(*elapsed);
+                let time_str = elapsed
+                    .map(|d| format!(" in {}", format_duration(d)))
+                    .unwrap_or_default();
                 let detail = error
                     .as_deref()
                     .map(|e| format!(" ({e})"))
                     .unwrap_or_default();
-                let prefix_len = 21 + time_str.len() + detail.len();
+                let prefix_len = 17 + time_str.len() + detail.len();
                 let desc = quoted_desc(&self.description, w.saturating_sub(prefix_len));
                 Line::from(vec![
                     Span::styled("Subagent ", bold),
-                    Span::styled(format!("failed in {time_str}{detail}: "), muted),
+                    Span::styled(format!("failed{time_str}{detail}: "), muted),
                     Span::styled(desc, muted),
                 ])
             }
             // Cancelled: Subagent cancelled in Xs: "description"
             (SubagentBlockKind::Cancelled { elapsed }, _) => {
-                let time_str = format_duration(*elapsed);
-                // "Subagent cancelled in Xs: " = 26 + time_str.len()
-                let prefix_len = 26 + time_str.len();
+                let time_str = elapsed
+                    .map(|d| format!(" in {}", format_duration(d)))
+                    .unwrap_or_default();
+                let prefix_len = 20 + time_str.len();
                 let desc = quoted_desc(&self.description, w.saturating_sub(prefix_len));
                 Line::from(vec![
                     Span::styled("Subagent ", bold),
-                    Span::styled(format!("cancelled in {time_str}: "), muted),
+                    Span::styled(format!("cancelled{time_str}: "), muted),
                     Span::styled(desc, muted),
                 ])
             }

@@ -14,8 +14,9 @@ Rust TUI, an isolated `dsh` profile, and the bridge between them.
 - GitHub network access for the first install
 - `~/.local/bin` on `PATH` after installation
 
-You do not need to install `dsh` globally. The launcher reuses an exactly
-compatible `dsh` from `PATH` or installs its own pinned runtime.
+You do not need to install `dsh` globally. Source-runtime releases use the
+profile-owned, provenance-checked runtime. Registry-backed releases may reuse
+an exactly compatible `dsh` from `PATH`; an explicit `DSH_BIN` must match the pin.
 
 ## Install
 
@@ -23,17 +24,17 @@ compatible `dsh` from `PATH` or installs its own pinned runtime.
 npx @hqzhao95/dscode
 ```
 
-The first run creates `~/.dsh/profiles/dscode`, installs the bridge and tested
-runtime, downloads the matching TUI binary with checksum verification, and
-links `~/.local/bin/dscode`. It does not change the global npm prefix.
-It never installs or switches Node for you.
-The dsh runtime install and compressed TUI download run in parallel.
+The first run prepares the matching bridge, tested runtime, and TUI under
+`~/.dsh/profiles/dscode`, verifies their versions and SHA-256 digests, and links
+`~/.local/bin/dscode`. Source-runtime releases include the built SDK and native
+helpers, so users do not need unpublished upstream npm packages or a compiler.
+It does not change the global npm prefix or install/switch Node for you.
 
 A fresh profile has no provider or API key. Open `/provider --add` and choose
 a template or Custom; dscode does not restrict which provider you use.
 Fresh profiles start new sessions with dsh's `standard` preset: native coding
 tools, automatic compaction, planning, skills, goals, subagents, and workflows.
-Choose `code`, `minimal`, `cordis`, or an installed preset with `/preset`; a
+Choose `code`, `minimal`, `cordis`, `history`, or an installed preset with `/preset`; a
 successful manual choice becomes the default for later new sessions.
 
 ## Use
@@ -69,11 +70,16 @@ Useful in-app commands:
 
 - `/model` — choose model and reasoning effort; choices persist
 - `/provider` and `/provider --add` — select or add any provider
-- `/preset` or `Ctrl+Y` — choose any discovered preset; four ship by default
+- `/preset` or `Ctrl+Y` — choose any discovered preset; `history` adds five official workspace-scoped history tools to `standard` without changing other presets
 - `/compact` — manually compact older history when the active preset provides dsh compaction
+- `/goal` — control native goals when the preset provides them; `/goal pause` stops future rounds but leaves the current turn running, and Ctrl+C cancels that turn. `/auto` remains unsupported and does not change permissions.
+- `/mcps` — inspect live per-session MCP servers and refresh their tool status
+- `/skills` — inspect and filter skills mounted by the active dsh preset
+- `/rewind` or `/undo` — fork at an earlier prompt and continue without destroying the source session
+- `/export [filename]` — copy or save the complete loaded transcript as Markdown
 - `/dsh plugins` — inspect profile plugins
 - `Ctrl+W` on the welcome screen — create a managed isolated Git worktree
-- `Ctrl+S` — open durable session resume
+- `Ctrl+S` — resume durable sessions; content search follows opaque result pages up to 100 matches
 
 Run `dscode --help` for the complete CLI.
 
@@ -104,11 +110,22 @@ dscode update --check              # check only
 dscode update                      # remembered/current channel
 dscode update --stable             # stable channel
 dscode update --beta               # beta channel
+dscode update --alpha              # independent experimental channel
 dscode update --version <version>  # exact version
 ```
 
-Update keeps the npm bridge, tested dsh runtime, and TUI binary on the same
-release channel. Explicit `--stable` and `--beta` selections are remembered.
+Each update resolves one exact product version, then installs its bridge, TUI,
+and pinned runtime together. Stable excludes prereleases; beta and alpha each
+accept only their own prereleases plus stable releases. `--check` is read-only;
+add `--json` for machine-readable output. Channel selections persist only after
+successful installation; download, validation, or ordinary commit failures
+retain the previous installation and channel.
+
+Historical `channel = "alpha"` settings without `channel_format = 1` meant beta
+and continue to resolve beta without rewriting the file. An explicit successful
+`--alpha` selection records the independent alpha channel and format marker.
+Fresh prerelease installs use `npx @hqzhao95/dscode@beta` or
+`npx @hqzhao95/dscode@alpha` once that product release is published.
 
 ## Uninstall
 

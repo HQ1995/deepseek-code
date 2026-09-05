@@ -204,10 +204,13 @@ pub struct TaskSnapshot {
     pub cwd: String,
     pub start_time: std::time::SystemTime,
     pub end_time: Option<std::time::SystemTime>,
+    #[serde(default)]
     pub output: String,
+    #[serde(default)]
     pub output_file: PathBuf,
     /// `output` may not be the whole output: read `output_file` for the rest.
     /// Says the copy is partial, not how it came to be.
+    #[serde(default)]
     pub truncated: bool,
     /// Total bytes the task has written, when the source tracks it. `output`
     /// may hold only part of that; zero means unknown.

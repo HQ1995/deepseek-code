@@ -1742,6 +1742,7 @@ mod watcher_tests {
         agent.session.bg_tasks.insert(
             task_id.into(),
             crate::app::agent::BgTaskState {
+                native_task: None,
                 task_id: task_id.into(),
                 tool_call_id: format!("call-{task_id}"),
                 command: "sleep 5".into(),

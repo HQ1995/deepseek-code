@@ -30,11 +30,11 @@ branding (our identity). Keep this list current on every sync.
 
 ## Feature
 
-- Single-entry-point leader bootstrap: the binary is the launcher. A plain TUI
-  run (no subcommand, no one-shot prompt, no --no-leader) defaults to leader
-  mode against the EXTERNAL dsh CLI instead of grok's self-spawn:
-  crates/codegen/xai-grok-pager/src/dsh_leader.rs resolves dsh (DSH_BIN env ->
-  "dsh" on PATH -> npx),
+- Managed product launcher and external leader bootstrap: the JS launcher
+  provisions and verifies the exact TUI/bridge/runtime tuple before starting
+  Rust and supplies the tested `DSH_BIN`. A plain TUI run defaults to leader
+  mode against the external DSH CLI instead of grok's self-spawn.
+  crates/codegen/xai-grok-pager/src/dsh_leader.rs
   spawns "dsh --profile dscode" with DSCODE_SOCKET /
   DSH_TELEMETRY_DISABLED=1 and a numactl node-1 wrapper (host policy,
   conditional), logs to /tmp/dscode.log, and records the PID in the
@@ -44,8 +44,15 @@ branding (our identity). Keep this list current on every sync.
   (connect-first adoption of a live leader, flock-serialized single spawner,
   one ~30s wait that covers a cold node boot, failed spawns are killed) so
   sessions spawned by the old shell leader on the same socket
-  are still adopted. scripts/dscode.sh + bin/dscode are gone; install.sh links
-  ~/.local/bin/dscode directly to the prebuilt binary.
+  are still adopted. scripts/install.sh links ~/.local/bin/dscode to the
+  profile-owned JS launcher; historical direct-binary links are migrated.
+- Independent stable/beta/alpha updater channels: legacy unmarked alpha config
+  resolves beta, while channel_format=1 records canonical selections. Read-only
+  checks bypass writeful startup and uncached checks do not persist anything.
+  Rust delegates an already resolved exact target to the managed JS updater;
+  the previous Rust binary-only dscode installer is removed. Direct updates,
+  background updates, and leader convergence share this whole-product path.
+  Source-runtime profile identity includes the pinned DSH revision/version.
 - Environment namespace isolation: pager-bin maps DSCODE_CONFIG,
   DSCODE_CONFIG_PATH, and DSCODE_CONNECT_UI_TIMEOUT_SECS onto the upstream
   GROK_* implementation names before configuration loads. When a DSCODE alias

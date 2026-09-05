@@ -2014,6 +2014,7 @@ pub struct ManualAuth {
 #[serde(rename_all = "snake_case")]
 pub enum CliUpdateChannel {
     Stable,
+    Beta,
     Alpha,
     Enterprise,
     Other,
@@ -2025,6 +2026,7 @@ impl CliUpdateChannel {
     pub fn from_channel_str(raw: &str) -> Self {
         match raw.trim() {
             "" | "stable" => Self::Stable,
+            "beta" => Self::Beta,
             "alpha" => Self::Alpha,
             "enterprise" => Self::Enterprise,
             _ => Self::Other,

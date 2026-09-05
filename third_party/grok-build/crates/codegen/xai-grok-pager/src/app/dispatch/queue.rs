@@ -1246,6 +1246,7 @@ mod tests {
     /// A running background bash task for the work-count fixtures.
     fn running_bg_task(task_id: &str) -> crate::app::agent::BgTaskState {
         crate::app::agent::BgTaskState {
+            native_task: None,
             task_id: task_id.into(),
             tool_call_id: format!("call-{task_id}"),
             command: "sleep 5".into(),

@@ -23,6 +23,14 @@
 # Long-lived server: no module-reload HMR.
 - id: hmr
   disabled: true
+
+# The session picker performs content search through x.ai/session/search.
+# Open the disposable derived index lazily so startup stays warning-free and
+# the first search reconciles both live and persisted dsh sessions.
+- id: session-query-sqlite
+  config:
+    path: !!js dshHomePath('session-search.sqlite')
+    openAt: first-search
 # The agent plane moves behind agent presets: the base host registers
 # the model-facing tools process-wide (single-session TUI layout); this
 # profile is multi-session like the web surface, so the host tool rows are
@@ -45,6 +53,8 @@
 - id: tool-skill
   disabled: true
 - id: tool-goal
+  disabled: true
+- id: command-goal
   disabled: true
 - id: plan-mode
   disabled: true
@@ -75,13 +85,15 @@
 - id: tool-web
   disabled: true
 
-# The preset roster, mirroring the web profile: the shipped preset root is
-# patched in by apps/cli profile-boot (SHIPPED_PRESET_ROOT) because only the
-# app can resolve its own config directory; the writable user root is the
-# roster's own default.
+# Keep the released official presets and writable user root. The installed
+# dscode bundle adds an opt-in history preset without changing standard.
 - insert:
-    # The shipped `code` preset selects Code Mode and therefore needs the same
-    # host-plane TypeScript runtime used by dsh's headless and web profiles.
+    # Host-owned subagent model selection sampled by preset-scoped tools.
+    - id: subagent-model-selection-settings
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+
+    # The shipped `ptc` preset needs the host-plane TypeScript runtime used by
+    # dsh's headless and web profiles.
     - id: code-runtime
       name: '@deepseek-ai/dsh-code-runtime-worker-thread'
 
@@ -90,6 +102,11 @@
       name: '@deepseek-ai/dsh-agent-presets'
       config:
         default: standard
+        roots:
+          - path: !!js dshHomePath('profiles/dscode/node_modules/@hqzhao95/dscode/presets')
+            trust: system
+        includeShippedRoot: true
+        includeUserRoot: true
 
 - insert:
     - id: cordis-host-runner

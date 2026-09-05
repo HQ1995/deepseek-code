@@ -108,13 +108,16 @@ Examples:
         #[arg(long)]
         version: Option<String>,
         /// Switch to the beta release channel (faster updates, may have bugs).
-        #[arg(long, alias = "alpha", conflicts_with_all = ["stable", "enterprise"])]
+        #[arg(long, conflicts_with_all = ["alpha", "stable", "enterprise"])]
         beta: bool,
+        /// Switch to the independent alpha release channel (experimental builds).
+        #[arg(long, conflicts_with_all = ["beta", "stable", "enterprise"])]
+        alpha: bool,
         /// Switch to the stable release channel.
-        #[arg(long, conflicts_with_all = ["beta", "enterprise"])]
+        #[arg(long, conflicts_with_all = ["alpha", "beta", "enterprise"])]
         stable: bool,
         /// Switch to the enterprise release channel.
-        #[arg(long, conflicts_with_all = ["beta", "stable"], hide = true)]
+        #[arg(long, conflicts_with_all = ["alpha", "beta", "stable"], hide = true)]
         enterprise: bool,
         /// Internal: what spawned this `grok update` (`user_command`,
         /// `auto_background`, `leader_converge`). Hidden.
@@ -622,11 +625,7 @@ pub struct PagerArgs {
     pub worktree: Option<String>,
     /// Branch, tag, or commit to base the worktree on (with `--worktree`).
     /// Defaults to the current HEAD of the source checkout when omitted.
-    #[arg(
-        long = "worktree-ref",
-        visible_alias = "ref",
-        requires = "worktree"
-    )]
+    #[arg(long = "worktree-ref", visible_alias = "ref", requires = "worktree")]
     pub worktree_ref: Option<String>,
     /// Restore the original session's repository snapshot when resuming.
     /// Remote sessions require `--worktree` (never checks out into the current
@@ -1084,19 +1083,26 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
-    fn update_beta_is_canonical_and_alpha_remains_compatible() {
+    fn update_preview_channels_are_independent_and_mutually_exclusive() {
         for flag in ["--beta", "--alpha"] {
-            let args = PagerArgs::try_parse_from(["dscode", "update", flag])
-                .unwrap_or_else(|error| panic!("{flag} must parse: {error}"));
-            assert!(matches!(
-                args.command,
+            let args = PagerArgs::try_parse_from(["dscode", "update", flag]).unwrap();
+            match args.command {
                 Some(Command::Update {
-                    beta: true,
-                    stable: false,
-                    enterprise: false,
+                    beta,
+                    alpha,
+                    stable,
+                    enterprise,
                     ..
-                })
-            ));
+                }) => {
+                    assert_eq!(beta, flag == "--beta");
+                    assert_eq!(alpha, flag == "--alpha");
+                    assert!(!stable && !enterprise);
+                }
+                _ => panic!("expected update"),
+            }
+        }
+        for other in ["--beta", "--stable", "--enterprise"] {
+            assert!(PagerArgs::try_parse_from(["dscode", "update", "--alpha", other]).is_err());
         }
 
         let mut command = PagerArgs::command();
@@ -1105,7 +1111,7 @@ mod tests {
             .expect("update subcommand");
         let help = update.render_long_help().to_string();
         assert!(help.contains("--beta"));
-        assert!(!help.contains("--alpha"));
+        assert!(help.contains("--alpha"));
     }
 
     #[test]
@@ -1517,7 +1523,8 @@ mod tests {
             vec!["grok", "-w", "--prompt-file", "prompt.txt"],
             vec!["grok", "-w", "--prompt-json", "[]"],
         ] {
-            let error = PagerArgs::try_parse_from(args).expect_err("worktree must stay interactive");
+            let error =
+                PagerArgs::try_parse_from(args).expect_err("worktree must stay interactive");
             assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
         }
     }

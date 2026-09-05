@@ -1,8 +1,6 @@
 {
-  // Out-of-tree build against the published npm dsh packages: the bridge's
-  // peers (@deepseek-ai/dsh-* on the ^0.1.1-rc.2 line) install as
-  // devDependencies for this tsc build and resolve at runtime from this
-  // tree — no harness checkout required.
+  // Compile against the SDK versions pinned in package.json; the selected
+  // DSH installation supplies the runtime implementation.
   "compilerOptions": {
     "target": "ES2022",
     "module": "NodeNext",

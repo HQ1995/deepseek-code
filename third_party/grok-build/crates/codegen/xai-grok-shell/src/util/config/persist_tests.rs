@@ -555,6 +555,7 @@ const CLI_CONFIG_OPTION_FIELDS: &[&str] = &[
     "installer",
     "npm_registry",
     "channel",
+    "channel_format",
     "use_leader",
     "show_tips",
     "worktree_type",

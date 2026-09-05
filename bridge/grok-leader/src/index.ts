@@ -7,7 +7,7 @@
  * ACP JSON-RPC strings mapped onto the harness services the ACP bridge drives
  * (agents.create/resume, agent.followup / whenIdle / cancel, session/event,
  * approval/request, sessions.flush, llm.listProviders/listModels,
- * sessionPersistence.list/load, agentDefaultModel.saveSelection). Divergences
+ * sessionPersistence.list/open, agentDefaultModel.saveSelection). Divergences
  * from upstream grok behavior are marked at the code site with the grok
  * file:line they were verified against.
  * @module dscode
@@ -23,7 +23,7 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { promisify } from 'node:util'
-import type { Context } from '@deepseek-ai/cordis'
+import { symbols, type Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import { installModelSelection, type Agent, type AgentOptions, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets'
@@ -35,16 +35,19 @@ import {
   type ImageAttachmentRef,
   type ImageMediaType,
 } from '@deepseek-ai/dsh-attachment'
-import { ReasoningEffortId, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
-import { KNOWN_SESSION_EVENT_TYPES, SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
-import type {} from '@deepseek-ai/dsh-session-persistence'
+import { ReasoningEffortId, createUserMessage, errorChain, type TokenUsage } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-llm-retry'
+import { KNOWN_SESSION_EVENT_TYPES, SessionId, SessionLogOffset, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
+import { SessionFormatUnsupportedError, SessionPersistenceCorruptionError, SessionPersistenceNotFoundError, type SessionInspection, type SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { load as loadYaml } from 'js-yaml'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 import { encodeJsonFrame, FrameDecoder } from './codec.ts'
+import { AcpMcpConfigError, mountMcpConfigs, resolveAcpMcpConfigs, type McpClientConfig } from './mcp.ts'
 import { LEADER_PROTOCOL_VERSION, RpcError, decodeClientMessage, encodeServerMessage, type ClientMessage, type ServerMessage } from './protocol.ts'
 import { SessionListIndex } from './session-list.ts'
-import { acpPromptToText, cacheHitPercent, parseJsonObject, promptHasUnsupportedContent, sessionEventToUpdates, textBlocks, toolKindForName, turnEndToStopReason, type GrokSessionUpdate, type ProjectedUpdate, type StopReasonWire, type ToolKindWire, type ToolResultContentBlock } from './projection.ts'
+import { acpPromptToText, assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, parseJsonObject, promptHasUnsupportedContent, sessionEventToUpdates, textBlocks, toolKindForName, turnEndToStopReason, type GrokSessionUpdate, type ProjectedUpdate, type StopReasonWire, type ToolKindWire, type ToolResultContentBlock } from './projection.ts'
+import { contextInfoFromProjection, goalUpdateFromView, type ContextProjectionValues, type NativeGoalView } from './projection.ts'
 
 export { acpPromptToText, cacheHitPercent, promptHasUnsupportedContent, sessionEventToUpdates, toolKindForName, turnEndToStopReason }
 export type { GrokSessionUpdate, ProjectedUpdate, StopReasonWire, ToolKindWire, ToolResultContentBlock }
@@ -355,9 +358,9 @@ const SHIPPED_PRESET_DISPLAY: Readonly<Record<string, { name: string; descriptio
     name: 'Standard mode',
     description: 'Full coding agent with file editing, shell, file and web search, skills, planning, goals, subagents, and workflows.',
   },
-  code: {
-    name: 'Code mode',
-    description: 'All Standard mode capabilities, with tools exposed through the Code Mode SDK so the model can combine multi-step operations in one TypeScript program.',
+  ptc: {
+    name: 'PTC mode',
+    description: 'Full coding agent without the workflow tool; other tools are exposed through the PTC mode SDK so the model can combine multi-step operations in one TypeScript program.',
   },
   minimal: {
     name: 'Minimal mode',
@@ -437,7 +440,7 @@ interface SessionRecord {
   turnStartMs: number | undefined
   /** Monotonic per-session counter stamped into every update _meta.eventSeq. */
   eventSeq: number
-  /** Cumulative session token accounting summed from assistant/message usage. */
+  /** Native settlement usage totals, with same-step replacement and retry fences. */
   inputTokens: number
   outputTokens: number
   /** Disjoint prompt-side cache token buckets from dsh TokenUsage. */
@@ -450,8 +453,6 @@ interface SessionRecord {
   compactionCount: number
   /** Pending tool-call facts keyed by callId, used to attach rawInput/rawOutput. */
   pendingToolCalls: Map<string, { name: string; arguments: unknown }>
-  /** True once the current step streamed a text-delta; suppresses the assembled-message re-emit. */
-  textStreamed: boolean
   /** Accepted user prompts, oldest first; served by x.ai/prompt_history. */
   prompts: string[]
   /** Serializes pre-enqueue image admission so later text prompts cannot overtake it. */
@@ -506,16 +507,24 @@ interface PromptSettleResult {
   _meta: { sessionId: string; promptId: string }
 }
 
-/** Structural read of the persistence service: list and load only. */
-interface PersistenceLike {
-  list(signal?: AbortSignal): Promise<Array<{ id: string; createdAt: number; cwd?: string }>>
-  load(id: SessionId): Promise<{ meta: { agentPreset?: string; cwd?: string }; events: readonly SessionEvent[] }>
+/** Header fields consumed by the bridge's discovery and selection projections. */
+interface PersistedHeader {
+  id: string
+  createdAt: number
+  cwd?: string
+  agentPreset?: string
+}
+type PersistenceLike = Pick<SessionPersistence, 'list' | 'open'>
+
+async function readPersistedSession(store: PersistenceLike, id: SessionId): Promise<SessionInspection> {
+  const handle = await store.open(id, 'read')
+  try {
+    return { meta: handle.header, inheritedEventCount: handle.inheritedEventCount, events: await handle.read() }
+  } finally {
+    await handle.close()
+  }
 }
 
-/** Structural read of the user-questions service: provider registration only. */
-interface UserQuestionsLike {
-  registerProvider(provider: { ask(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer> }): () => void
-}
 /** Structural read of the dsh command registry (@deepseek-ai/dsh-commands):
  *  plugin-registered human commands surfaced as pager slash commands. */
 interface CommandsLike {
@@ -622,6 +631,21 @@ interface AgentDefaultModelLike {
   saveSelection(next: { provider: string; model: string; reasoningEffort?: string }): Promise<unknown>
 }
 
+/** Structural read of the optional full-text session-query service. */
+interface SessionQueryLike {
+  searchSessions(request: {
+    query: string
+    limit?: number
+    cursor?: string
+  }): Promise<{
+    items: Array<{
+      header: PersistedHeader
+      bestMatch: { time: number; snippet: string; type: string }
+    }>
+    nextCursor?: string
+  }>
+}
+
 const nonEmptyString = (value: unknown): value is string =>
   typeof value === 'string' && value.length > 0
 
@@ -708,7 +732,7 @@ interface AgentPresetsLike {
   mount(agentCtx: Context, id?: string): Promise<unknown>
   recompose(agentCtx: Context, id: string): Promise<unknown>
   composedPreset?(agentCtx: Context): string | undefined
-  serviceForAgent?(agent: { ctx: Context }, name: string): unknown
+  serviceFor?(agent: { ctx: Context }, name: string): unknown
 }
 
 /**
@@ -865,7 +889,9 @@ export function inspectPluginRuntime(ctx: Context, packageName: string): string 
   const provided: string[] = []
   for (const key of Object.getOwnPropertySymbols(store)) {
     const impl = store[key]
-    if (roots.some(root => withinFiber(impl.fiber, root))) provided.push(impl.name)
+    if (impl !== undefined && roots.some(root => withinFiber(impl.fiber, root))) {
+      provided.push(impl.name)
+    }
   }
   const effectLabels = new Map<string, number>()
   for (const root of roots) {
@@ -936,7 +962,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const persistedSessionIdInUse = async (sessionId: SessionId): Promise<boolean> => {
     const store = persistence()
     if (store === undefined) throw internalError('session persistence is not configured')
-    return (await store.list()).some(header => header.id === sessionId)
+    return (await store.list()).some(({ header }) => header.id === sessionId)
   }
   let clientSeq = 0
   let closed = false
@@ -1374,6 +1400,18 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return true
   }
 
+  const contextSnapshot = (record?: SessionRecord): Record<string, unknown> => {
+    const projections = ctx.get('sessionProjections') as { snapshot(session: unknown, keys: readonly string[]): { values: ContextProjectionValues } } | undefined
+    const values = record === undefined ? {} : projections?.snapshot(record.agent.session, ['tokenUsage', 'contextPressure', 'contextBreakdown']).values ?? {}
+    return {
+      ...contextInfoFromProjection(values),
+      ...record === undefined ? {} : {
+        compactionCount: record.compactionCount, turnCount: record.turnCount,
+        toolCallCount: record.toolCallCount, messageCount: record.messageCount,
+      },
+    }
+  }
+
   /**
    * Forward one update with the leader _meta stamp. The eventSeq monotonic
    * counter plus the per-session dsh-seq high-water make replay/live overlap
@@ -1398,7 +1436,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         eventSeq,
         ...inflight === undefined ? {} : { promptId: inflight.promptId },
         ...isReplay ? { isReplay: true } : {},
-        ...totalTokens === undefined ? {} : { totalTokens },
+        contextInfo: contextSnapshot(record),
+        ...totalTokens === undefined ? {} : { cumulativeTokens: totalTokens },
         ...cacheHitPercent === undefined ? {} : { cacheHitPercent },
         ...agentTimestampMs === undefined ? {} : { agentTimestampMs },
         ...record.turnStartMs === undefined ? {} : { streamStartMs: record.turnStartMs, turnStartMs: record.turnStartMs },
@@ -1406,17 +1445,71 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     })
   }
 
+  const emitActivity = (record: SessionRecord): void => {
+    if (ownedAgentRecord(record.agent) !== record) return
+    const conn = connections.get(record.clientId)
+    if (conn === undefined) return
+    sendNotification(conn, WIRE.sessionUpdate, {
+      sessionId: record.agent.session.id,
+      update: { sessionUpdate: 'session_info_update' },
+      _meta: { eventSeq: record.eventSeq++, sessionRunning: record.agent.status === 'running' },
+    })
+  }
+
+  // Revisions belong to an attached Agent, not a session id. Keep the last
+  // closed revision too, so late chunks/start frames cannot resurrect it.
+  const assistantStreams = new WeakMap<Agent, {
+    attemptId: string; revision: number; turn: number; step: number
+    delivered: Set<number>; closed: boolean; pending: SessionEvent[]
+  }>()
+  ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+    const record = ownedAgentRecord(agent)
+    if (record === undefined) return
+    const previous = assistantStreams.get(agent)
+    if (frame.type === 'start') {
+      if (previous !== undefined && frame.revision <= previous.revision) return
+      if (previous?.attemptId === frame.attemptId) return
+      drainAssistantEvents(record)
+      assistantStreams.set(agent, {
+        attemptId: frame.attemptId, revision: frame.revision, turn: frame.turn, step: frame.step,
+        delivered: new Set(), closed: false, pending: [],
+      })
+      return
+    }
+    if (previous === undefined || previous.closed || frame.revision <= previous.revision
+      || previous.attemptId !== frame.attemptId) return
+    previous.revision = frame.revision
+    if (frame.type === 'end') {
+      previous.closed = true
+      drainAssistantEvents(record, frame.outcome.kind === 'committed' ? frame.outcome : undefined)
+      previous.delivered.clear()
+      return
+    }
+    const conn = connections.get(record.clientId)
+    if (conn === undefined || previous.delivered.has(frame.index)) return
+    for (const item of assistantChunkToUpdates(frame.chunk)) emitUpdate(conn, record, item, false, frame.time)
+    previous.delivered.add(frame.index)
+  })
+  const lastUsage = new WeakMap<SessionRecord, { turn: number; step: number; usage: TokenUsage }>()
+
   /** Accumulate the token and counter facts one session event contributes. */
   const noteEvent = (record: SessionRecord, event: SessionEvent): void => {
-    if (event.type === 'assistant/message') {
-      const usage = event.data.usage
+    if (event.type === 'llm/retry-started') {
+      const previous = lastUsage.get(record)
+      if (previous !== undefined && previous.turn === event.data.turn && previous.step === event.data.step) lastUsage.delete(record)
+    }
+    if (event.type === 'assistant/message' || event.type === 'assistant/attempt') {
+      const usage = assistantEventUsage(event)
       if (usage !== undefined) {
-        record.inputTokens += usage.inputTokens
-        record.outputTokens += usage.outputTokens
-        record.cacheReadTokens += usage.cacheReadTokens ?? 0
-        record.cacheWriteTokens += usage.cacheWriteTokens ?? 0
+        const last = lastUsage.get(record)
+        const previous = last?.turn === event.data.turn && last.step === event.data.step ? last.usage : undefined
+        record.inputTokens += usage.inputTokens - (previous?.inputTokens ?? 0)
+        record.outputTokens += usage.outputTokens - (previous?.outputTokens ?? 0)
+        record.cacheReadTokens += (usage.cacheReadTokens ?? 0) - (previous?.cacheReadTokens ?? 0)
+        record.cacheWriteTokens += (usage.cacheWriteTokens ?? 0) - (previous?.cacheWriteTokens ?? 0)
+        lastUsage.set(record, { turn: event.data.turn, step: event.data.step, usage })
       }
-      record.messageCount += 1
+      if (event.type === 'assistant/message') record.messageCount += 1
     } else if (event.type === 'tool/call') {
       record.toolCallCount += 1
       record.pendingToolCalls.set(String(event.data.callId), {
@@ -1437,19 +1530,18 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     record: SessionRecord,
     event: SessionEvent,
     replay: boolean,
+    streamedChunks?: ReadonlySet<number>,
   ): Array<ProjectedUpdate> => {
-    if (event.type === 'step/start') record.textStreamed = false
     noteEvent(record, event)
     const totalTokens = record.inputTokens + record.cacheReadTokens + record.cacheWriteTokens + record.outputTokens
     const hitPercent = cacheHitPercent(record.inputTokens, record.cacheReadTokens, record.cacheWriteTokens)
     const updates: Array<ProjectedUpdate> = []
     for (const item of sessionEventToUpdates(event, {
       replay,
-      textStreamed: record.textStreamed,
+      streamedChunks,
       toolCall: (callId) => record.pendingToolCalls.get(callId),
     })) {
       if (item.sessionUpdate === 'agent_message_chunk') {
-        if (item.content.text.length > 0) record.textStreamed = true
         updates.push({ ...item, totalTokens, ...hitPercent === undefined ? {} : { cacheHitPercent: hitPercent } })
       } else {
         updates.push(item)
@@ -1458,7 +1550,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // Streamed responses suppress their assembled assistant message. Emit one
     // empty content chunk so the terminal usage still reaches the TUI without
     // creating another scrollback block.
-    if (event.type === 'assistant/message' && event.data.usage !== undefined
+    if (assistantEventUsage(event) !== undefined
       && !updates.some(item => item.sessionUpdate === 'agent_message_chunk')) {
       updates.push({
         sessionUpdate: 'agent_message_chunk',
@@ -1474,12 +1566,28 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return updates
   }
 
+  // Native append dispatches session/event synchronously before end supplies
+  // its exact seq. Delay only assistant settlements across that tiny boundary:
+  // a same-step unrelated message must never borrow this attempt's live text.
+  const drainAssistantEvents = (record: SessionRecord, committed?: { seq: number; eventType: string }): void => {
+    const stream = assistantStreams.get(record.agent)
+    if (stream === undefined) return
+    const conn = connections.get(record.clientId)
+    for (const event of stream.pending) {
+      const delivered = committed?.seq === event.seq && committed.eventType === event.type ? stream.delivered : undefined
+      const updates = mapEvent(record, event, false, delivered)
+      if (conn !== undefined) for (const item of updates) emitUpdate(conn, record, item, false, event.time)
+    }
+    stream.pending.length = 0
+  }
+
   // Translate the session firehose into grok streaming deltas. Committed text,
   // reasoning deltas, tool calls, and tool results stream; titles, plans, and
   // retry markers are presentation or trace data and stay off the wire.
   ctx.on('session/event', (session, event: SessionEvent) => {
     const record = sessions.get(session.header.id)
     if (record === undefined || record.agent.session !== session) return
+    emitGoal(record)
     sessionListIndex.recordEvent(session.header.id, session.header.createdAt, event)
     const conn = connections.get(record.clientId)
     if (conn === undefined) return
@@ -1490,7 +1598,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         if (event.type === 'turn/start') {
           record.turnStartMs = event.time
         }
-        if (event.type === 'todo/write') {
+        const stream = assistantStreams.get(record.agent)
+        if ((event.type === 'assistant/message' || event.type === 'assistant/attempt')
+          && stream !== undefined && !stream.closed && stream.turn === event.data.turn && stream.step === event.data.step) {
+          stream.pending.push(event)
+          return
+        }
+        if (String(event.type) === 'todo/write') {
           const data = event.data as { todos?: Array<{ content?: unknown; status?: unknown }> }
           const entries = (data.todos ?? []).map(todo => ({
             content: String(todo.content ?? ''),
@@ -1568,87 +1682,79 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     })
   })
 
-  // Human questions route to the client owning the asking agent.
-  const questions = ctx.get('userQuestions') as UserQuestionsLike | undefined
-  if (questions !== undefined) {
-    const disposeProvider = questions.registerProvider({
-      async ask(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer> {
-        const record = request.agent === undefined ? undefined : ownedAgentRecord(request.agent)
-        const conn = record === undefined ? undefined : connections.get(record.clientId)
-        if (record === undefined || conn === undefined) {
-          throw new UserQuestionError('no connected grok client owns this agent', 'NO_CLIENT')
-        }
-        // grok keys accepted answers by question text, so remember each text's dsh id.
-        const textToId = new Map<string, string>()
-        const grokQuestions = request.questions.map((question) => {
-          // The pager's question card has one multiline heading slot. Preserve
-          // dsh's separate short header and supporting detail instead of
-          // dropping them at the adapter boundary.
-          const displayQuestion = [question.header, question.question, question.detail]
-            .filter(nonEmptyString)
-            .join('\n')
-          textToId.set(displayQuestion, question.id)
-          return {
-            question: displayQuestion,
-            options: (question.options ?? []).map(option => ({
-              label: option.label,
-              description: option.description ?? '',
-            })),
-            ...(question.multiSelect !== undefined ? { multiSelect: question.multiSelect } : {}),
-            ...(question.id !== undefined ? { id: question.id } : {}),
-          }
-        })
-        // The ACP ext_method reverse request carries the typed payload FLATLY
-        // under params: the pager's handle_ask_user_question does
-        // `from_str(ext.request.params)` straight into AskUserQuestionExtRequest
-        // (uses crate fixtures/tests serialize `{sessionId,toolCallId,
-        // questions,mode}` — camelCase, no `method` wrapper). The earlier
-        // wrapped `{method, params}` two-level form made the pager's serde
-        // reject with `missing field 'sessionId'`, so keep the method in the
-        // JSON-RPC method slot and the fields flat. dsh does not expose the
-        // tool call id, so mint an opaque one the client echoes back.
-        const response = await requestClient<AskUserQuestionExtResponse>(conn, '_x.ai/ask_user_question', {
-          sessionId: record.agent.session.id,
-          toolCallId: randomUUID(),
-          questions: grokQuestions,
-          mode: 'default',
-          // Wait for the human answer indefinitely (`Infinity` disables the
-          // reverse-request timeout). A bounded window would surface a
-          // "client did not answer" tool failure that the agent cannot
-          // distinguish from a real user decision; the question stays up in
-          // the TUI until answered, cancelled, or its session is torn down
-          // (which rejectPendingFor reports as a proper cancellation).
-        }, record.agent.session.id, Infinity)
-        // Validate the tagged wire shape instead of blind casts: anything but
-        // a well-formed accepted payload reads as a user cancellation.
-        if (typeof response !== 'object' || response === null || Array.isArray(response)) {
-          throw new UserQuestionError('malformed ask_user_question response', 'ASK_CANCELLED')
-        }
-        if (response.outcome !== 'accepted') {
-          throw new UserQuestionError('the user cancelled ask_user_question', 'ASK_CANCELLED')
-        }
-        if (typeof response.answers !== 'object' || response.answers === null || Array.isArray(response.answers)) {
-          throw new UserQuestionError('malformed ask_user_question answers', 'ASK_CANCELLED')
-        }
-        const annotationsRaw = response.annotations
-        const annotations = annotationsRaw !== undefined && typeof annotationsRaw === 'object' && !Array.isArray(annotationsRaw)
-          ? annotationsRaw as Record<string, { notes?: unknown }>
-          : undefined
-        const answers: AskUserQuestionAnswer['answers'] = []
-        for (const [text, labels] of Object.entries(response.answers)) {
-          const id = textToId.get(text)
-          if (id === undefined) continue
-          // ACP accepts both "value" and ["value"] per answer entry.
-          const rawLabels = Array.isArray(labels) ? labels : labels === undefined ? [] : [labels]
-          const notes = annotations?.[text]?.notes
-          const selected = rawLabels.filter((label): label is string => typeof label === 'string' && label !== 'Other')
-          answers.push({ id, selected, ...(typeof notes === 'string' && notes.length > 0 ? { custom: notes } : {}) })
-        }
-        return { answers }
-      },
+  // Human questions route through the native answerer waterfall to the owning client.
+  ctx.on('user-questions/request', async (request: AskUserQuestionRequest, next): Promise<AskUserQuestionAnswer> => {
+    const record = request.agent === undefined ? undefined : ownedAgentRecord(request.agent)
+    const conn = record === undefined ? undefined : connections.get(record.clientId)
+    if (record === undefined || conn === undefined) return next()
+    // grok keys accepted answers by question text, so remember each text's dsh id.
+    const textToId = new Map<string, string>()
+    const grokQuestions = request.questions.map((question) => {
+      // The pager's question card has one multiline heading slot. Preserve
+      // dsh's separate short header and supporting detail instead of
+      // dropping them at the adapter boundary.
+      const displayQuestion = [question.header, question.question, question.detail]
+        .filter(nonEmptyString)
+        .join('\n')
+      textToId.set(displayQuestion, question.id)
+      return {
+        question: displayQuestion,
+        options: (question.options ?? []).map(option => ({
+          label: option.label,
+          description: option.description ?? '',
+        })),
+        ...(question.multiSelect !== undefined ? { multiSelect: question.multiSelect } : {}),
+        ...(question.id !== undefined ? { id: question.id } : {}),
+      }
     })
-    ctx.effect(() => disposeProvider, 'grok-leader.userQuestions')
-  }
+    // The ACP ext_method reverse request carries the typed payload FLATLY
+    // under params: the pager's handle_ask_user_question does
+    // `from_str(ext.request.params)` straight into AskUserQuestionExtRequest
+    // (uses crate fixtures/tests serialize `{sessionId,toolCallId,
+    // questions,mode}` — camelCase, no `method` wrapper). The earlier
+    // wrapped `{method, params}` two-level form made the pager's serde
+    // reject with `missing field 'sessionId'`, so keep the method in the
+    // JSON-RPC method slot and the fields flat. dsh does not expose the
+    // tool call id, so mint an opaque one the client echoes back.
+    const response = await requestClient<AskUserQuestionExtResponse>(conn, '_x.ai/ask_user_question', {
+      sessionId: record.agent.session.id,
+      toolCallId: randomUUID(),
+      questions: grokQuestions,
+      mode: 'default',
+      // Wait for the human answer indefinitely (`Infinity` disables the
+      // reverse-request timeout). A bounded window would surface a
+      // "client did not answer" tool failure that the agent cannot
+      // distinguish from a real user decision; the question stays up in
+      // the TUI until answered, cancelled, or its session is torn down
+      // (which rejectPendingFor reports as a proper cancellation).
+    }, record.agent.session.id, Infinity)
+    // Validate the tagged wire shape instead of blind casts: anything but
+    // a well-formed accepted payload reads as a user cancellation.
+    if (typeof response !== 'object' || response === null || Array.isArray(response)) {
+      throw new UserQuestionError('malformed ask_user_question response', 'ASK_CANCELLED')
+    }
+    if (response.outcome !== 'accepted') {
+      throw new UserQuestionError('the user cancelled ask_user_question', 'ASK_CANCELLED')
+    }
+    if (typeof response.answers !== 'object' || response.answers === null || Array.isArray(response.answers)) {
+      throw new UserQuestionError('malformed ask_user_question answers', 'ASK_CANCELLED')
+    }
+    const annotationsRaw = response.annotations
+    const annotations = annotationsRaw !== undefined && typeof annotationsRaw === 'object' && !Array.isArray(annotationsRaw)
+      ? annotationsRaw as Record<string, { notes?: unknown }>
+      : undefined
+    const answers: AskUserQuestionAnswer['answers'] = []
+    for (const [text, labels] of Object.entries(response.answers)) {
+      const id = textToId.get(text)
+      if (id === undefined) continue
+      // ACP accepts both "value" and ["value"] per answer entry.
+      const rawLabels = Array.isArray(labels) ? labels : labels === undefined ? [] : [labels]
+      const notes = annotations?.[text]?.notes
+      const selected = rawLabels.filter((label): label is string => typeof label === 'string' && label !== 'Other')
+      answers.push({ id, selected, ...(typeof notes === 'string' && notes.length > 0 ? { custom: notes } : {}) })
+    }
+    return { answers }
+  })
 
   /** Normalize the two ext wire forms (server.rs method_of): direct x.ai/foo or wrapped _x.ai/foo. */
   const normalizeMethod = (msg: { method: string; params?: unknown }): string => {
@@ -1703,7 +1809,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       agentCapabilities: {
         loadSession: true,
         promptCapabilities: { embeddedContext: false },
-        mcpCapabilities: { http: false, sse: false },
+        mcpCapabilities: { http: true },
         sessionCapabilities: { list: {}, close: {} },
       },
       // Advertise the api-key method so the pager's fail-closed empty-list
@@ -1894,28 +2000,26 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
-  /** session/new and session/load share the workspace gate: an absolute cwd
-   * and a well-formed mcpServers array. The bridge advertises
-   * mcpCapabilities { http: false, sse: false } and has no MCP plumbing, but
-   * the grok TUI auto-discovers servers (e.g. ~/.claude.json) and sends them
-   * anyway; a discovered-but-unserved server must not brick every session.
-   * A non-array value is still malformed and rejects; a non-empty array is
-   * accepted and ignored with a logged warning (never silent). */
-  const validateWorkspaceParams = (p: Record<string, unknown>): string => {
+  /** Validate the workspace and translate its standard ACP MCP declarations
+   * before creating or replacing an Agent. */
+  const workspaceParams = (p: Record<string, unknown>): {
+    cwd: string
+    mcpConfigs: McpClientConfig[]
+  } => {
     const cwd = p.cwd
     if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw invalidParams('cwd must be an absolute path: ' + String(cwd))
-    const mcpServers = p.mcpServers
-    if (mcpServers !== undefined) {
-      if (!Array.isArray(mcpServers)) throw invalidParams('mcpServers must be an array')
-      if (mcpServers.length > 0) logger.warn('grok-leader: ignoring ' + String(mcpServers.length) + ' MCP server(s); MCP is not supported by this bridge')
+    try {
+      return { cwd, mcpConfigs: resolveAcpMcpConfigs(p.mcpServers, cwd) }
+    } catch (error) {
+      if (error instanceof AcpMcpConfigError) throw invalidParams(error.message)
+      throw error
     }
-    return cwd
   }
 
   const newSession = async (clientId: number, params: unknown): Promise<unknown> => {
     assertOpen()
     const p = paramRecord(params, 'session/new')
-    const cwd = validateWorkspaceParams(p)
+    const { cwd, mcpConfigs } = workspaceParams(p)
     const additionalDirectories = p.additionalDirectories
     if (Array.isArray(additionalDirectories) && additionalDirectories.length > 0) throw invalidParams('additionalDirectories is not supported')
     const meta = p._meta as Record<string, unknown> | null | undefined
@@ -1957,9 +2061,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         ...preset.agentPreset === undefined ? {} : { agentPreset: preset.agentPreset },
       },
       agentOptions: agentOptions(config, selection.current),
-      setup: (agentCtx) => {
+      setup: async (agentCtx) => {
         installModelSelection(agentCtx, selection)
-        return preset.mount === undefined ? undefined : preset.mount(agentCtx)
+        if (preset.mount !== undefined) await preset.mount(agentCtx)
+        await mountMcpConfigs(agentCtx, mcpConfigs)
       },
     })
     if (closed) {
@@ -1986,7 +2091,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       messageCount: 0,
       compactionCount: 0,
       pendingToolCalls: new Map(),
-      textStreamed: false,
       prompts: [],
       promptAdmissionTail: Promise.resolve(),
       promptQueue: [],
@@ -2019,6 +2123,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       }
     }
     sessions.set(sessionId, record)
+    emitActivity(record)
+    emitGoal(record, true)
+    emitJobsForRecord(record)
+    refreshChildren(record)
     void broadcastAvailableCommands(record)
     // The pager parks on "Starting session…" until this arrives (the probe
     // worker's scripted fake sends it 50 ms after the session/new result;
@@ -2350,7 +2458,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   const presetServiceFor = (record: SessionRecord, name: string): unknown =>
-    agentPresets()?.serviceForAgent?.(record.agent, name)
+    agentPresets()?.serviceFor?.(record.agent, name)
       ?? record.agent.ctx.get(name)
       ?? ctx.get(name)
 
@@ -2731,12 +2839,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const resolved = await resolvePresetId(requested)
     if (resolved === undefined) return settleBridgeCommand(record, p, 'Unknown preset "' + requested + '".')
     const current = roster.composedPreset?.(record.agent.ctx)
-      ?? sessionPresetFromLog(record.agent.session.header, record.agent.session.events)
+      ?? sessionPresetFromLog(record.agent.session.header, record.agent.session.snapshotEvents())
     if (current === resolved) {
       await persistPresetDefault(resolved)
       return settleBridgeCommand(record, p, 'Preset "' + resolved + '" is active and is now the default for new sessions.')
     }
-    if (record.runningPromptId !== undefined || presetSwitchLocked(record.agent.session.events)) {
+    if (record.runningPromptId !== undefined || presetSwitchLocked(record.agent.session.snapshotEvents())) {
       return settleBridgeCommand(record, p, 'agent-preset-locked: a preset can only be changed before the session has produced history')
     }
     await roster.recompose(record.agent.ctx, resolved)
@@ -2754,10 +2862,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   const unsupportedSlashCommands: Record<string, string> = {
+    auto: '/auto is unsupported: the permission classifier is not available in dscode.',
     delete: '/delete is not supported yet; use /exit to close without deleting durable history.',
     remember: '/remember is not supported by the dsh memory runtime yet.',
-    mcps: '/mcps management is not supported by this bridge yet.',
-    skills: '/skills management is not supported by this bridge yet.',
   }
   const imageMediaTypes: Record<ImageMediaType, true> = {
     'image/png': true,
@@ -2769,9 +2876,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   /** Validate ACP prompt blocks without committing image bytes. */
   const parsePrompt = (value: unknown): ParsedPrompt => {
     if (!Array.isArray(value)) throw invalidParams('session/prompt prompt must be an array')
-    if (promptHasUnsupportedContent(value)) {
-      throw invalidParams('only text, resource_link, and image prompt content is supported')
-    }
     const blocks: ParsedPrompt['blocks'] = []
     const images: EncodedImageAttachment[] = []
     for (const raw of value) {
@@ -2784,7 +2888,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         blocks.push({ type: 'text', text: block.text })
       } else if (block.type === 'resource_link') {
         blocks.push({ type: 'resource_link', name: block.name, uri: block.uri })
-      } else {
+      } else if (block.type === 'image') {
         if (typeof block.data !== 'string' || typeof block.mimeType !== 'string'
           || !Object.hasOwn(imageMediaTypes, block.mimeType)) {
           throw invalidParams('image prompt content requires canonical base64 data and a supported mimeType')
@@ -2795,9 +2899,30 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         }
         blocks.push({ type: 'image', image })
         images.push(image)
+      } else {
+        throw invalidParams('only text, resource_link, and image prompt content is supported')
       }
     }
     return { blocks, images, text: acpPromptToText(value) }
+  }
+
+  const executeGoalCommand = async (record: SessionRecord, parsed: ParsedPrompt): Promise<{ result: { kind: string; text: string } }> => {
+    const execution = await dshCommands()?.execute(record.agent, parsed.text, parsed.images, new AbortController().signal)
+    if (execution === undefined) throw invalidParams('Goal commands are unavailable in the selected preset.')
+    if (typeof execution.result?.kind !== 'string' || typeof execution.result.text !== 'string') {
+      throw internalError('invalid goal command response: expected result.kind and result.text')
+    }
+    return { result: { kind: execution.result.kind, text: execution.result.text } }
+  }
+
+  const goalCommand = async (clientId: number, params: unknown): Promise<unknown> => {
+    assertOpen()
+    const p = paramRecord(params, 'x.ai/goal')
+    const record = ownedRecord(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+    if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
+    const parsed = parsePrompt(p.prompt)
+    if (!/^\/goal(?:\s|$)/i.test(parsed.text.trim())) throw invalidParams('x.ai/goal requires a /goal invocation')
+    return await executeGoalCommand(record, parsed)
   }
 
   /** Commit one validated prompt's images, preserving ACP block order. */
@@ -2849,6 +2974,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (unsupported !== undefined) {
       if (parsed.images.length > 0) throw invalidParams('/' + slashName + ' does not accept image attachments')
       return settleBridgeCommand(record, p, unsupported)
+    }
+    if (slashName === 'goal') {
+      const execution = await executeGoalCommand(record, parsed)
+      const { kind, text: body } = execution.result
+      return settleBridgeCommand(record, p, kind === 'error' ? 'error: ' + body : body)
     }
     // Plugin-registered slash commands own image admission. Unknown slash text
     // still reaches the model unchanged (grok pass-through semantics).
@@ -2921,11 +3051,18 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const sessionId = p !== undefined && typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
     const record = ownedRecord(clientId, sessionId)
     if (record === undefined) return
-    record.agent.cancel({ kind: 'user' })
+    try {
+      const goals = goalService(record)
+      const goal = goals?.get(record.agent)
+      if (goal?.phase === 'active' && goal.activation === 'armed') goals?.pause(record.agent, { id: goal.id, revision: goal.revision })
+    } finally {
+      record.agent.cancel({ kind: 'user' })
     settlePrompt(record, 'cancelled')
     discardPromptQueue(record)
     rejectPendingFor(clientId, record.agent.session.id)
     broadcastQueueChanged(record)
+      emitGoal(record)
+    }
   }
 
   const loadSession = async (clientId: number, params: unknown): Promise<unknown> => {
@@ -2933,7 +3070,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const p = paramRecord(params, 'session/load')
     const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
     if (sessionId === undefined) throw invalidParams('session/load requires a sessionId')
-    validateWorkspaceParams(p)
+    const { mcpConfigs } = workspaceParams(p)
     const existing = sessions.get(sessionId)
     // A live session has exactly one owning connection. A foreign client never
     // displaces a live owner and reads exactly like an unknown id.
@@ -2945,9 +3082,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const noReplay = meta?.noReplay === true
     const store = persistence()
     if (store === undefined) throw internalError('session persistence is not configured')
-    let inspection: { meta: { agentPreset?: string }; events: readonly SessionEvent[] } = existing === undefined
-      ? await store.load(sessionId)
-      : { meta: existing.agent.session.header, events: existing.agent.session.events }
+    let inspection: SessionInspection = existing === undefined
+      ? await readPersistedSession(store, sessionId)
+      : { meta: existing.agent.session.header, inheritedEventCount: existing.agent.session.inheritedEventCount, events: existing.agent.session.snapshotEvents() }
     const explicit = presetRequestFromMeta(meta)
     const explicitPreset = explicit === undefined ? undefined : await resolvePresetId(explicit)
     if (explicit !== undefined && explicitPreset === undefined && !GROK_PROFILE_FALLBACKS.has(explicit)) {
@@ -2958,11 +3095,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const livePreset = existing === undefined
       ? undefined
       : roster?.composedPreset?.(existing.agent.ctx)
-        ?? sessionPresetFromLog(existing.agent.session.header, existing.agent.session.events)
+        ?? sessionPresetFromLog(existing.agent.session.header, existing.agent.session.snapshotEvents())
     const currentPreset = livePreset ?? persistedPreset
     const switchingPreset = explicitPreset !== undefined && explicitPreset !== currentPreset
     if (switchingPreset) {
-      const events = existing?.agent.session.events ?? inspection.events
+      const events = existing?.agent.session.snapshotEvents() ?? inspection.events
       if (presetSwitchLocked(events)) {
         throw invalidParams('agent-preset-locked: a preset can only be changed before the session has produced history')
       }
@@ -2996,7 +3133,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (liveStore !== undefined) await liveStore.flush(existing.agent.session)
       inspection = {
         meta: existing.agent.session.header,
-        events: existing.agent.session.events,
+        inheritedEventCount: existing.agent.session.inheritedEventCount,
+        events: existing.agent.session.snapshotEvents(),
       }
       await existing.dispose()
       sessions.delete(sessionId)
@@ -3012,9 +3150,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const handle = await agents.resume({
       resumeSessionId: sessionId,
       agentOptions: agentOptions(config, selection.current),
-      setup: (agentCtx) => {
+      setup: async (agentCtx) => {
         installModelSelection(agentCtx, selection)
-        return preset.mount === undefined ? undefined : preset.mount(agentCtx)
+        if (preset.mount !== undefined) await preset.mount(agentCtx)
+        await mountMcpConfigs(agentCtx, mcpConfigs)
       },
     })
     const record: SessionRecord = {
@@ -3037,7 +3176,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       messageCount: 0,
       compactionCount: 0,
       pendingToolCalls: new Map(),
-      textStreamed: false,
       prompts: [],
       promptAdmissionTail: Promise.resolve(),
       promptQueue: [],
@@ -3070,6 +3208,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       throw error
     }
     sessions.set(sessionId, record)
+    emitActivity(record)
+    emitGoal(record, true, true)
+    emitJobsForRecord(record)
+    refreshChildren(record)
     void broadcastAvailableCommands(record)
     // Rebuild the up-arrow history from the persisted user prompts so
     // x.ai/prompt_history serves them after resume.
@@ -3104,7 +3246,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const listSessions = async (): Promise<unknown> => {
     const store = persistence()
     if (store === undefined) throw internalError('session persistence is not configured')
-    const headers = await store.list()
+    const headers = (await store.list()).map(snapshot => snapshot.header)
     // Legacy `session/list` minimal payload. Upstream SessionInfo carries
     // title/_meta (row.rs); the TUI's preferred `x.ai/session/list` handler
     // below does backfill title, firstPrompt, summary, cwd filter, and limit —
@@ -3675,17 +3817,41 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     let events: readonly SessionEvent[]
     if (liveSource !== undefined) {
       sourceHeader = liveSource.agent.session.header
-      events = liveSource.agent.session.events
+      events = liveSource.agent.session.snapshotEvents()
     } else {
       const store = persistence()
       if (store === undefined) throw internalError('session persistence is not configured')
       try {
-        const inspection = await store.load(sourceId)
+        const inspection = await readPersistedSession(store, sourceId)
         sourceHeader = inspection.meta
         events = inspection.events
-      } catch {
-        throw invalidParams('unknown source session: ' + String(p.sourceSessionId))
+      } catch (error) {
+        if (error instanceof SessionPersistenceNotFoundError) throw invalidParams('unknown source session: ' + String(p.sourceSessionId))
+        throw error
       }
+    }
+    let rewindPromptText: string | undefined
+    const targetPromptIndex = typeof p.targetPromptIndex === 'number' && Number.isInteger(p.targetPromptIndex)
+      ? p.targetPromptIndex
+      : undefined
+    if (targetPromptIndex !== undefined) {
+      if (targetPromptIndex < 0) throw invalidParams('targetPromptIndex must be non-negative')
+      const promptEvents = events
+        .map((event, index) => ({ event, index }))
+        .filter(({ event }) => event.type === 'user/message'
+          && (event.data as { source?: { kind?: unknown } }).source?.kind === 'user')
+      const target = promptEvents[targetPromptIndex]
+      if (target === undefined) throw invalidParams('unknown targetPromptIndex: ' + targetPromptIndex)
+      rewindPromptText = textBlocks((target.event.data as { content: unknown }).content).map(block => block.text).join('')
+      let boundary = target.index
+      for (let index = target.index - 1; index >= 0; index -= 1) {
+        if (events[index]?.type === 'turn/start') {
+          boundary = index
+          break
+        }
+        if (events[index]?.type === 'turn/end') break
+      }
+      events = events.slice(0, boundary)
     }
     const newCwd = typeof p.newCwd === 'string' && isAbsolute(p.newCwd) ? p.newCwd : sourceHeader.cwd
     if (typeof newCwd !== 'string' || !isAbsolute(newCwd)) throw invalidParams('newCwd must be an absolute path')
@@ -3695,10 +3861,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       || (suppliedId !== undefined && await persistedSessionIdInUse(sessionId))) {
       throw invalidParams('session id is already in use: ' + String(sessionId))
     }
-    const last = events.at(-1)
-    // dsh's fork refuses to end inside an open turn; mirror that fail-closed.
-    if (last?.type === 'turn/start') throw invalidParams('cannot fork while a turn is open')
-    const seed = [...events]
+    const lastTurnBoundary = events.findLast(event => event.type === 'turn/start' || event.type === 'turn/end')
+    // Match the native fork boundary: no events from an unfinished turn are inherited.
+    if (lastTurnBoundary?.type === 'turn/start') throw invalidParams('cannot fork while a turn is open')
+    const seed = events
     const preset = await composePreset(sessionPresetFromLog(sourceHeader, events))
     const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
     const defaultSelection = defaultModel?.currentSelection?.()
@@ -3714,9 +3880,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       meta: {
         cwd: newCwd,
         parentSession: sourceId,
-        seedLength: seed.length,
+        isSeeded: true,
         ...preset.agentPreset === undefined ? {} : { agentPreset: preset.agentPreset },
       },
+      inheritedEventCount: SessionLogOffset(seed.length),
       agentOptions: agentOptions(config, selection.current),
       setup: (agentCtx) => {
         installModelSelection(agentCtx, selection)
@@ -3746,7 +3913,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       messageCount: 0,
       compactionCount: 0,
       pendingToolCalls: new Map(),
-      textStreamed: false,
       prompts: [],
       promptAdmissionTail: Promise.resolve(),
       promptQueue: [],
@@ -3771,6 +3937,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       throw error
     }
     sessions.set(sessionId, record)
+    emitActivity(record)
+    emitGoal(record, true)
+    emitJobsForRecord(record)
+    refreshChildren(record)
     void broadcastAvailableCommands(record)
     const conn = connections.get(clientId)
     if (conn !== undefined) {
@@ -3781,7 +3951,57 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         }
       }, 50)
     }
-    return { newSessionId: String(sessionId) }
+    return {
+      newSessionId: String(sessionId),
+      ...rewindPromptText === undefined ? {} : { promptText: rewindPromptText },
+    }
+  }
+  const rewindPoints = async (clientId: number, params: unknown): Promise<Record<string, unknown>> => {
+    const p = paramRecord(params, 'x.ai/rewind/points')
+    const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
+    const record = ownedRecord(clientId, sessionId)
+    if (sessionId === undefined || record === undefined) {
+      throw invalidParams('unknown session: ' + String(p.sessionId))
+    }
+    const points = record.agent.session.snapshotEvents()
+      .filter(event => event.type === 'user/message'
+        && (event.data as { source?: { kind?: unknown } }).source?.kind === 'user')
+      .map((event, promptIndex) => ({
+        promptIndex,
+        createdAt: new Date(event.time).toISOString(),
+        numFileSnapshots: 0,
+        promptPreview: textBlocks((event.data as { content: unknown }).content).map(block => block.text).join(''),
+        hasFileChanges: false,
+      }))
+    return { rewindPoints: points }
+  }
+
+  const executeRewind = async (clientId: number, params: unknown): Promise<Record<string, unknown>> => {
+    const p = paramRecord(params, 'x.ai/rewind/execute')
+    const sourceSessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
+    const source = ownedRecord(clientId, sourceSessionId)
+    if (sourceSessionId === undefined || source === undefined) {
+      throw invalidParams('unknown session: ' + String(p.sessionId))
+    }
+    const targetPromptIndex = typeof p.targetPromptIndex === 'number' ? p.targetPromptIndex : Number.NaN
+    if (!Number.isInteger(targetPromptIndex) || targetPromptIndex < 0) {
+      throw invalidParams('targetPromptIndex must be a non-negative integer')
+    }
+    const forked = await forkSession(clientId, {
+      sourceSessionId,
+      newCwd: source.agent.session.header.cwd,
+      targetPromptIndex,
+    }) as { newSessionId: string; promptText?: string }
+    return {
+      success: true,
+      targetPromptIndex,
+      revertedFiles: [],
+      cleanFiles: [],
+      conflicts: [],
+      mode: 'conversation_only',
+      newSessionId: forked.newSessionId,
+      ...forked.promptText === undefined ? {} : { promptText: forked.promptText },
+    }
   }
 
   const listMcpServers = (record: SessionRecord | undefined): { servers: Array<Record<string, unknown>> } => {
@@ -3813,6 +4033,45 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         },
         _meta: { toolCount },
       })),
+    }
+  }
+
+  const searchSessions = async (params: unknown): Promise<Record<string, unknown>> => {
+    const p = paramRecord(params, 'x.ai/session/search')
+    const query = typeof p.query === 'string' ? p.query.trim() : ''
+    if (query.length === 0) throw invalidParams('x.ai/session/search requires a non-empty query')
+    const requested = typeof p.limit === 'number' && Number.isFinite(p.limit)
+      ? Math.floor(p.limit)
+      : 20
+    const limit = Math.min(Math.max(requested, 1), 100)
+    const service = ctx.get('sessionQuery') as SessionQueryLike | undefined
+    if (service === undefined) throw internalError('session full-text search is not configured')
+    const cursor = typeof p.cursor === 'string' && p.cursor.length > 0 ? p.cursor : undefined
+    const page = await service.searchSessions({ query, limit, ...cursor === undefined ? {} : { cursor } })
+    const includeContent = p.includeContent === true
+    return {
+      results: page.items.map((hit) => {
+        // The resume picker has already populated this cheap projection via
+        // x.ai/session/list. A direct search can still fall back to its match
+        // snippet without re-reading every matching session log.
+        const projection = sessionListIndex.projection(hit.header.id, hit.header.createdAt)
+        const updatedAt = Math.max(hit.bestMatch.time, projection.updatedAt)
+        return {
+          sessionId: hit.header.id,
+          cwd: hit.header.cwd ?? '',
+          summary: projection.title || hit.bestMatch.snippet,
+          updatedAt: new Date(updatedAt).toISOString(),
+          // dsh deliberately exposes deterministic ordering without a
+          // provider-specific numeric score. Preserve that order on the wire.
+          score: 0,
+          matchedFields: ['content'],
+          ...includeContent ? { snippet: hit.bestMatch.snippet } : {},
+        }
+      }),
+      nextCursor: page.nextCursor ?? null,
+      nextOffset: null,
+      totalEstimate: null,
+      bootstrapping: false,
     }
   }
 
@@ -3956,6 +4215,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   const dispatchRequest = async (clientId: number, method: string, params: unknown): Promise<unknown> => {
     switch (method) {
+      case 'x.ai/goal':
+        return await goalCommand(clientId, params)
+      case 'x.ai/task/kill':
+        return await killTask(clientId, params)
+      case 'x.ai/subagent/cancel':
+        return await cancelSubagent(clientId, params)
       case WIRE.initialize:
         return await initializeResponse()
       case WIRE.authenticate:
@@ -3974,6 +4239,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return await setSessionMode(clientId, params)
       case 'x.ai/session/fork':
         return await forkSession(clientId, params)
+      case 'x.ai/rewind/points':
+        return await rewindPoints(clientId, params)
+      case 'x.ai/rewind/execute':
+        return await executeRewind(clientId, params)
       case 'x.ai/session/rename':
         return await renameSession(clientId, params)
       case WIRE.sessionClose:
@@ -4056,10 +4325,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
         const record = ownedRecord(clientId, sessionId)
         if (sessionId !== undefined && record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
-        const total = 100000
-        const used = record === undefined
-          ? 0
-          : record.inputTokens + record.cacheReadTokens + record.cacheWriteTokens + record.outputTokens
+        const context = contextSnapshot(record)
         return {
           result: {
             sessionId: record?.agent.session.id ?? '',
@@ -4067,15 +4333,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
             turns: record?.turnCount ?? 0,
             turnIndex: record === undefined ? 0 : Math.max(0, record.turnCount - 1),
             model: null,
-            context: {
-              used, total, systemPromptTokens: 0, toolDefinitionsCount: 0,
-              toolDefinitionsTokens: 0, compactionCount: record?.compactionCount ?? 0, turnCount: record?.turnCount ?? 0,
-              toolCallCount: record?.toolCallCount ?? 0, messageCount: record?.messageCount ?? 0,
-              messageTokens: used, freeTokens: total - used, usagePct: Math.min(100, Math.round((used / total) * 100)),
-            },
+            context,
           },
         }
       }
+      case 'x.ai/session/search':
+        return await searchSessions(params)
       case 'x.ai/session/list': {
         const lp = paramRecord(params, 'x.ai/session/list')
         const query = typeof lp.query === 'string' ? lp.query.toLowerCase() : undefined
@@ -4084,22 +4347,31 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const limit = Math.min(requested, DEFAULT_SESSION_LIST_LIMIT)
         const store = persistence()
         if (store === undefined) throw internalError('session persistence is not configured')
-        const headers = await store.list()
-        // Backfill display titles BEFORE the query filter so picker search can
-        // match prompt text. Misses stay uncached (retried on the next list)
-        // and the in-flight set stops concurrent list calls stacking loads.
-        await Promise.all(headers.map(async header => {
+        const headers = (await store.list()).map(snapshot => snapshot.header)
+        // The picker normally scopes to cwd. Filter headers before loading any
+        // logs so unrelated repositories never enter the projection pipeline;
+        // retain an exact-id query for cross-cwd resume.
+        const candidateHeaders = cwd === undefined
+          ? headers
+          : headers.filter(header => header.cwd === cwd
+            || (query !== undefined && header.id.toLowerCase() === query))
+        // Backfill display titles BEFORE the text query so picker search can
+        // match prompt text. Misses stay uncached and in-flight loads dedupe.
+        await Promise.all(candidateHeaders.map(async header => {
           if (!sessionListIndex.beginInspection(header.id)) return
           try {
-            const inspection = await store.load(SessionId(header.id))
+            const inspection = await readPersistedSession(store, SessionId(header.id))
             sessionListIndex.recordInspection(header.id, header.createdAt, inspection.events)
-          } catch {
-            // A broken artifact must not sink the list; the miss is retried.
+          } catch (error) {
+            // Retry missing or invalid artifacts, but surface operational storage failures.
+            if (!(error instanceof SessionPersistenceNotFoundError)
+              && !(error instanceof SessionPersistenceCorruptionError)
+              && !(error instanceof SessionFormatUnsupportedError)) throw error
           } finally {
             sessionListIndex.finishInspection(header.id)
           }
         }))
-        let rows = headers.map(header => {
+        let rows = candidateHeaders.map(header => {
           const projection = sessionListIndex.projection(header.id, header.createdAt)
           const title = projection.title
           return {
@@ -4115,10 +4387,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
             _meta: { 'x.ai/session': { kind: 'chat' } },
           }
         })
-        if (cwd !== undefined) {
-          rows = rows.filter(row => row.cwd === cwd
-            || (query !== undefined && row.sessionId.toLowerCase() === query))
-        }
         if (query !== undefined && query.length > 0) {
           rows = rows.filter(row => (row.sessionId + ' ' + row.cwd + ' ' + row.title + ' ' + row.firstPrompt).toLowerCase().includes(query))
         }
@@ -4129,7 +4397,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       case 'x.ai/sessions/list': {
         const store = persistence()
         if (store === undefined) throw internalError('session persistence is not configured')
-        const headers = await store.list()
+        const headers = (await store.list()).map(snapshot => snapshot.header)
         return {
           result: {
             sessions: headers.map(header => ({
@@ -4149,7 +4417,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
-  const SUPPORTED_PERMISSION_MODES = new Set(['default', 'workspace-write', 'plan', 'bypassPermissions', 'always-approve'])
+  const SUPPORTED_PERMISSION_MODES = new Set(['default', 'ask', 'workspace-write', 'plan', 'bypassPermissions', 'always-approve'])
 
   const applyPermissionMode = (record: SessionRecord, mode: string | undefined, yolo: boolean | undefined): void => {
     if (mode === undefined && yolo === undefined) return
@@ -4672,6 +4940,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const quiesce = (): Promise<void> => {
     if (quiescing !== undefined) return quiescing
     closed = true
+    clearInterval(goalRefreshTimer)
     const records = [...sessions.values()]
     sessions.clear()
     for (const record of records) {
@@ -4700,216 +4969,279 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return quiescing
   }
 
-  // Bridge dsh background jobs into the TUI's /tasks notifications.
-  const jobs = ctx.get('jobs') as
-    | {
-        list(owner?: unknown): Array<Record<string, unknown>>
-        onJobsChanged?(listener: (owner: unknown) => void): unknown
-      }
-    | undefined
-  if (jobs !== undefined && typeof jobs.onJobsChanged === 'function') {
-    const emitJobsForRecord = (record: SessionRecord): void => {
-      const conn = connections.get(record.clientId)
-      if (conn === undefined) return
-      const cwd = record.agent.session.header.cwd ?? ''
-      const systemTime = (ms: number | undefined): unknown => {
-        const value = ms ?? Date.now()
-        const secs = Math.floor(value / 1000)
-        const nanos = (value % 1000) * 1_000_000
-        return { secs_since_epoch: secs, nanos_since_epoch: nanos }
-      }
-      for (const job of jobs.list(record.agent)) {
-        const id = String(job.id ?? '')
-        const label = String(job.label ?? '')
-        const status = String(job.status ?? 'running')
-        if (status === 'running' || status === 'stopping') {
-          sendNotification(conn, 'x.ai/task_backgrounded', {
-            sessionId: record.agent.session.id,
-            update: {
-              sessionUpdate: 'task_backgrounded',
-              tool_call_id: id,
-              task_id: id,
-              command: label,
-              cwd,
-              output_file: '',
-              description: label,
-            },
-          })
-        } else {
-          sendNotification(conn, 'x.ai/task_completed', {
-            sessionId: record.agent.session.id,
-            update: {
-              sessionUpdate: 'task_completed',
-              task_snapshot: {
-                task_id: id,
-                command: label,
-                display_command: label,
-                cwd,
-                start_time: systemTime(typeof job.startedAt === 'number' ? job.startedAt : undefined),
-                end_time: typeof job.finishedAt === 'number' ? systemTime(job.finishedAt) : null,
-                output: '',
-                output_file: '',
-                truncated: false,
-                exit_code: status === 'completed' ? 0 : 1,
-                signal: null,
-                completed: true,
-                kind: 'bash',
-                output_total_bytes: 0,
-              },
-            },
-          })
-        }
-      }
-    }
-    const emitForOwner = (owner: unknown): void => {
+  const projections = ctx.get('sessionProjections') as {
+    onChanged(listener: (session: unknown, key: string) => void): (() => void)
+  } | undefined
+  if (projections !== undefined) {
+    const unsubscribe = projections.onChanged((session, key) => {
+      if (!['tokenUsage', 'contextPressure', 'contextBreakdown', 'goal'].includes(key)) return
       for (const record of sessions.values()) {
-        if (owner === undefined || record.agent === owner) emitJobsForRecord(record)
+        if (record.agent.session !== session) continue
+        if (key === 'goal') { queueMicrotask(() => emitGoal(record)); continue }
+        const conn = connections.get(record.clientId)
+        if (conn !== undefined) emitUpdate(conn, record, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '' } }, false)
+      }
+    })
+    ctx.effect(() => unsubscribe)
+  }
+  type JobSnapshotLike = {
+    id: string; kind: string; label: string; ownerSession?: string
+    status: 'running' | 'stopping' | 'completed' | 'killed' | 'failed'
+    detail?: string; startedAt: number; finishedAt?: number
+  }
+  type JobsLike = {
+    list(caller: Agent): JobSnapshotLike[]
+    get(id: string, caller: Agent): JobSnapshotLike
+    kill(id: string, caller: Agent, reason?: string): 'requested' | 'already-finished'
+    wait(id: string, timeoutMs: number, caller: Agent): Promise<JobSnapshotLike>
+    onJobsChanged(listener: (owner: Agent | undefined) => void): () => void
+  }
+  const jobsService = (record: SessionRecord): JobsLike | undefined => {
+    let service = presetServiceFor(record, 'jobs') as JobsLike | undefined
+    // Cordis lookups can stack fresh context proxies. Subscribe once on the
+    // underlying registry so identity and listener scope cover every owner.
+    for (;;) {
+      const original = (service as (JobsLike & Record<symbol, JobsLike>) | undefined)?.[symbols.original]
+      if (original === undefined) break
+      service = original
+    }
+    return typeof service?.list === 'function' && typeof service.get === 'function'
+      && typeof service.kill === 'function' && typeof service.wait === 'function'
+      && typeof service.onJobsChanged === 'function' ? service : undefined
+  }
+  const jobSubscriptions = new WeakSet<JobsLike>()
+  const jobSnapshots = new WeakMap<SessionRecord, Map<string, string>>()
+  const jobIsRunning = (job: JobSnapshotLike): boolean => job.status === 'running' || job.status === 'stopping'
+  const emitJobsForRecord = (record: SessionRecord): void => {
+    if (sessions.get(record.agent.session.id) !== record) return
+    const jobs = jobsService(record)
+    const conn = connections.get(record.clientId)
+    if (jobs === undefined || conn === undefined) return
+    if (!jobSubscriptions.has(jobs)) {
+      jobSubscriptions.add(jobs)
+      const unsubscribe = jobs.onJobsChanged(owner => {
+        for (const owned of sessions.values()) {
+          if ((owner === undefined || owned.agent === owner) && jobsService(owned) === jobs) emitJobsForRecord(owned)
+        }
+      })
+      ctx.effect(() => unsubscribe)
+    }
+    let previous = jobSnapshots.get(record)
+    if (previous === undefined) { previous = new Map(); jobSnapshots.set(record, previous) }
+    const systemTime = (ms: number): unknown => ({ secs_since_epoch: Math.floor(ms / 1000), nanos_since_epoch: (ms % 1000) * 1_000_000 })
+    for (const job of jobs.list(record.agent)) {
+      const serialized = JSON.stringify(job)
+      if (previous.get(job.id) === serialized) continue
+      previous.set(job.id, serialized)
+      const cwd = record.agent.session.header.cwd ?? ''
+      if (jobIsRunning(job)) {
+        sendNotification(conn, 'x.ai/task_backgrounded', {
+          sessionId: record.agent.session.id,
+          update: { sessionUpdate: 'task_backgrounded', tool_call_id: job.id, task_id: job.id, command: job.label, cwd, description: job.label },
+          _meta: { eventSeq: record.eventSeq++ },
+        })
+      } else {
+        sendNotification(conn, 'x.ai/task_completed', {
+          sessionId: record.agent.session.id,
+          update: {
+            sessionUpdate: 'task_completed',
+            task_snapshot: {
+              task_id: job.id, command: job.label, display_command: job.label, cwd,
+              start_time: systemTime(job.startedAt),
+              end_time: job.finishedAt === undefined ? null : systemTime(job.finishedAt),
+              exit_code: null, signal: null, completed: true,
+            },
+          },
+          _meta: { eventSeq: record.eventSeq++, nativeTask: { status: job.status, kind: job.kind, outputAvailable: false, ...job.detail === undefined ? {} : { detail: job.detail } } },
+        })
       }
     }
-    jobs.onJobsChanged(emitForOwner)
-    for (const record of sessions.values()) emitJobsForRecord(record)
   }
 
-  // Bridge dsh subagent lifecycle events into the TUI's subagent notifications.
-  type SubagentRunInfoLike = { runId: unknown; provider: string; id: unknown; local: boolean }
-  type SubagentRunEndInfoLike = SubagentRunInfoLike & {
-    stopReason?: { kind?: string }
-    lastAssistantMessage?: unknown
+  const killTask = async (clientId: number, params: unknown): Promise<unknown> => {
+    const p = paramRecord(params, 'x.ai/task/kill')
+    if (!nonEmptyString(p.sessionId) || !nonEmptyString(p.taskId) || (p.source !== 'clientUi' && p.source !== 'teardown')) throw invalidParams('x.ai/task/kill requires sessionId, taskId and source')
+    const record = ownedRecord(clientId, SessionId(p.sessionId))
+    if (record === undefined) throw invalidParams('unknown session: ' + p.sessionId)
+    const taskId = p.taskId
+    const jobs = jobsService(record)
+    if (jobs === undefined || !jobs.list(record.agent).some(job => job.id === taskId)) return { result: { taskId, outcome: 'not_found' } }
+    const before = jobs.get(taskId, record.agent)
+    if (!jobIsRunning(before)) { emitJobsForRecord(record); return { result: { taskId, outcome: 'already_exited' } } }
+    const requested = jobs.kill(taskId, record.agent, p.source)
+    const settled = requested === 'already-finished' ? jobs.get(taskId, record.agent) : await jobs.wait(taskId, 5000, record.agent)
+    emitJobsForRecord(record)
+    if (jobIsRunning(settled)) throw internalError('task cancellation requested; producer has not settled yet')
+    return { result: { taskId, outcome: settled.status === 'killed' ? 'killed' : 'already_exited' } }
   }
-  // Durable child_session_id -> parent session id, recorded at spawn. The
-  // `subagent/end` edge arrives AFTER the child Agent has been disposed
-  // (settled), so `agents.get(childId)` is already undefined by then and the
-  // parent cannot be resolved from the live registry; this map is the only
-  // reliable parent lookup for the finish notification. Without it the TUI's
-  // `SubagentFinished` never arrives, `SubagentInfo.finished` stays false, and
-  // a completed (ready) subagent is presented as still running forever.
-  const spawnedChildParents = new Map<string, string>()
-  const subagentStartHandler = (info: SubagentRunInfoLike): void => {
-    const childId = String(info.id)
-    const agents = ctx.get('agents') as
-      | { get(id: unknown): { session: { header: { parentSession?: unknown } } } | undefined }
-      | undefined
-    const child = agents?.get(info.id)
-    const parentId = child?.session.header.parentSession
-    const record = typeof parentId === 'string' ? sessions.get(SessionId(parentId)) : undefined
-    if (record === undefined) return
-    // Remember the parent for the finish edge (see map comment above).
-    if (typeof parentId === 'string') spawnedChildParents.set(childId, parentId)
+
+  type ChildRow = { kind: 'child' | 'diagnostic'; id: string; mode?: 'continuable' | 'one-shot'; label?: string; parentId?: string }
+  type SubagentsLike = {
+    listDescendants(root: SessionId): Promise<ChildRow[]>
+    interrupt(id: SessionId, authority: { kind: 'ancestor'; agent: Agent }): void
+  }
+  const subagentsService = (record: SessionRecord): SubagentsLike | undefined => {
+    const service = presetServiceFor(record, 'subagents') as SubagentsLike | undefined
+    return typeof service?.listDescendants === 'function' && typeof service.interrupt === 'function' ? service : undefined
+  }
+  type ChildState = { agent: Agent; label: string; status: string; output?: string }
+  // Exact child handles survive disposal long enough to attribute the native end edge.
+  const childStates = new WeakMap<SessionRecord, Map<string, ChildState>>()
+  const childSettlements = new WeakMap<Agent, Set<(status: string) => void>>()
+  const emitChildFinished = (record: SessionRecord, id: string, status: string, output?: unknown): void => {
+    const state = childStates.get(record)?.get(id)
+    if (state === undefined) return
+    for (const settle of childSettlements.get(state.agent) ?? []) settle(status)
+    const text = output === undefined ? undefined : typeof output === 'string' ? output : textBlocks(output).map(block => block.text).join('\n')
+    if (state.status === status && (text === undefined || text === state.output)) return
+    if (text !== undefined) state.output = text
+    state.status = status
     const conn = connections.get(record.clientId)
-    if (conn === undefined) return
+    if (conn === undefined || sessions.get(record.agent.session.id) !== record) return
     sendNotification(conn, 'x.ai/session_notification', {
       sessionId: record.agent.session.id,
       update: {
-        sessionUpdate: 'subagent_spawned',
-        subagent_id: childId,
-        parent_session_id: String(record.agent.session.id),
-        child_session_id: childId,
-        subagent_type: info.provider || 'general-purpose',
-        description: info.provider || 'subagent',
+        sessionUpdate: 'subagent_finished', subagent_id: id, child_session_id: id, status,
+        ...state.output === undefined ? {} : { output: state.output },
       },
+      _meta: { eventSeq: record.eventSeq++, subagentMetricsAvailable: false },
     })
   }
-  const subagentEndHandler = (info: SubagentRunEndInfoLike): void => {
-    const childId = String(info.id)
-    const agents = ctx.get('agents') as
-      | { get(id: unknown): { session: { header: { parentSession?: unknown } } } | undefined }
-      | undefined
-    const child = agents?.get(info.id)
-    // Prefer the spawn-time mapping: the child Agent is already disposed when
-    // `subagent/end` fires, so the live-registry lookup below fails exactly
-    // when this notification matters most. Fall back to the live Agent only
-    // for children this bridge did not spawn (e.g. parent attached later).
-    const parentId = spawnedChildParents.get(childId) ?? child?.session.header.parentSession
-    spawnedChildParents.delete(childId)
-    const record = typeof parentId === 'string' ? sessions.get(SessionId(parentId)) : undefined
-    if (record === undefined) return
+  const emitChildrenForRecord = async (record: SessionRecord): Promise<void> => {
+    const service = subagentsService(record)
+    if (service === undefined) return
+    const rows = await service.listDescendants(record.agent.session.id)
     const conn = connections.get(record.clientId)
-    if (conn === undefined) return
-    const kind = info.stopReason?.kind
-    const status = kind === 'completed' || kind === 'max-tokens' ? 'completed'
-      : kind === 'interrupted' || kind === 'aborted' || kind === 'cancelled' ? 'cancelled'
-        : 'failed'
-    sendNotification(conn, 'x.ai/session_notification', {
-      sessionId: record.agent.session.id,
-      update: {
-        sessionUpdate: 'subagent_finished',
-        subagent_id: childId,
-        child_session_id: childId,
-        status,
-        error: status === 'failed' ? 'subagent failed' : undefined,
-        tool_calls: 0,
-        turns: 0,
-        duration_ms: 0,
-        tokens_used: 0,
-        output: undefined,
-      },
-    })
-  }
-  ;(ctx as unknown as { on(event: string, listener: (info: SubagentRunInfoLike) => void): void }).on('subagent/start', subagentStartHandler)
-  ;(ctx as unknown as { on(event: string, listener: (info: SubagentRunEndInfoLike) => void): void }).on('subagent/end', subagentEndHandler)
-
-  // Bridge dsh goal changes into the TUI's GoalUpdated notifications.
-  type GoalChangedLike = {
-    operation: string
-    ref?: { id?: unknown; revision?: unknown }
-    goal?: {
-      id?: unknown
-      revision?: unknown
-      objective?: unknown
-      phase?: unknown
-      blockedReason?: { code?: unknown; message?: unknown }
-      maxGoalRounds?: unknown
-      roundsStarted?: unknown
-      createdAt?: unknown
-      updatedAt?: unknown
-    }
-  }
-  const goalChangedHandler = (payload: { agent: unknown; change: GoalChangedLike }): void => {
-    const agent = payload.agent as { session?: { id?: unknown } } | undefined
-    const sessionId = agent?.session?.id
-    const record = typeof sessionId === 'string' ? sessions.get(SessionId(sessionId)) : undefined
-    if (record === undefined) return
-    const conn = connections.get(record.clientId)
-    if (conn === undefined) return
-    const goal = payload.change.goal
-    if (goal === undefined) {
-      // Clear tombstone.
+    if (conn === undefined || sessions.get(record.agent.session.id) !== record) return
+    let known = childStates.get(record)
+    if (known === undefined) { known = new Map(); childStates.set(record, known) }
+    for (const row of rows) {
+      // One-shot runs are holder-owned; interrupt is an accepted no-op for them.
+      if (row.kind !== 'child' || row.mode !== 'continuable') continue
+      const child = agents.get(SessionId(row.id))
+      if (child === undefined || child.status !== 'running') continue
+      const previous = known.get(row.id)
+      if (previous?.agent === child && previous.status === 'running') continue
+      known.set(row.id, { agent: child, label: row.label ?? '', status: 'running' })
       sendNotification(conn, 'x.ai/session_notification', {
         sessionId: record.agent.session.id,
-        update: {
-          sessionUpdate: 'goal_updated',
-          goal_id: String(payload.change.ref?.id ?? ''),
-          objective: '',
-          status: 'cleared',
-          phase: 'idle',
-          elapsed_ms: 0,
-          total_deliverables: 0,
-          completed_deliverables: 0,
-          total_worker_rounds: 0,
-          total_verify_rounds: 0,
-        },
+        update: { sessionUpdate: 'subagent_spawned', subagent_id: row.id, child_session_id: row.id, parent_session_id: row.parentId ?? record.agent.session.id, subagent_type: 'continuable', description: row.label ?? '' },
+        _meta: { eventSeq: record.eventSeq++ },
       })
-      return
     }
-    const phase = String(goal.phase ?? 'active')
-    const status = phase === 'complete' ? 'complete' : phase === 'blocked' ? 'blocked' : phase === 'paused' ? 'user_paused' : 'active'
+  }
+  const refreshChildren = (record: SessionRecord): void => {
+    void emitChildrenForRecord(record).catch(error => logger.warn('grok-leader: subagent snapshot failed: ' + errorChain(error)))
+  }
+  const childTerminalStatus = (kind: string): string => kind === 'completed' || kind === 'max-tokens' ? 'completed'
+    : kind === 'aborted' || kind === 'interrupted' ? 'cancelled' : 'failed'
+  ctx.on('session/event', (session, event: SessionEvent) => {
+    if (event.type !== 'turn/start' && event.type !== 'turn/end') return
+    for (const record of sessions.values()) {
+      const child = childStates.get(record)?.get(session.id)
+      if (event.type === 'turn/end' && child?.agent.session === session) emitChildFinished(record, session.id, childTerminalStatus(event.data.reason.kind))
+      else if (event.type === 'turn/start' && session !== record.agent.session) refreshChildren(record)
+    }
+  })
+  type SubagentLifecycle = { id: string; stopReason?: string; lastAssistantMessage?: unknown }
+  const subagentEvents = ctx as unknown as { on(event: string, listener: (info: SubagentLifecycle) => void): void }
+  subagentEvents.on('subagent/start', () => { for (const record of sessions.values()) refreshChildren(record) })
+  subagentEvents.on('subagent/end', info => {
+    for (const record of sessions.values()) {
+      if (childStates.get(record)?.has(info.id) === true) emitChildFinished(record, info.id, childTerminalStatus(info.stopReason ?? 'error'), info.lastAssistantMessage)
+    }
+  })
+
+  const cancelSubagent = async (clientId: number, params: unknown): Promise<unknown> => {
+    const p = paramRecord(params, 'x.ai/subagent/cancel')
+    if (!nonEmptyString(p.sessionId) || !nonEmptyString(p.subagentId)) throw invalidParams('x.ai/subagent/cancel requires sessionId and subagentId')
+    const record = ownedRecord(clientId, SessionId(p.sessionId))
+    if (record === undefined) throw invalidParams('unknown session: ' + p.sessionId)
+    const subagentId = p.subagentId
+    const result = (cancelled: boolean, kind: 'cancelled' | 'already_finished' | 'not_found', status?: string): unknown => ({ result: { subagentId, cancelled, outcome: { kind, ...status === undefined ? {} : { status } } } })
+    const service = subagentsService(record)
+    if (service === undefined) return result(false, 'not_found')
+    const rows = await service.listDescendants(record.agent.session.id)
+    if (sessions.get(record.agent.session.id) !== record || record.clientId !== clientId) throw invalidParams('unknown session: ' + p.sessionId)
+    const row = rows.find(entry => entry.id === subagentId && entry.kind === 'child')
+    if (row === undefined) return result(false, 'not_found')
+    const child = agents.get(SessionId(subagentId))
+    if (child === undefined || child.status !== 'running') return result(false, 'already_finished', child?.status ?? 'inactive')
+    if (row.mode !== 'continuable') throw internalError('one-shot subagents are not interruptible through the released subagent service')
+    let known = childStates.get(record)
+    if (known === undefined) { known = new Map(); childStates.set(record, known) }
+    known.set(subagentId, { agent: child, label: row.label ?? '', status: 'running' })
+    let listeners = childSettlements.get(child)
+    if (listeners === undefined) { listeners = new Set(); childSettlements.set(child, listeners) }
+    let settle!: (status: string) => void
+    const settled = new Promise<string>(resolve => { settle = resolve })
+    listeners.add(settle)
+    let timer: NodeJS.Timeout | undefined
+    try {
+      service.interrupt(SessionId(subagentId), { kind: 'ancestor', agent: record.agent })
+      const status = await Promise.race([
+        settled,
+        new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(internalError('subagent interruption requested; no terminal turn observed yet')), 5000); timer.unref() }),
+      ])
+      return result(status === 'cancelled', status === 'cancelled' ? 'cancelled' : 'already_finished', status)
+    } finally {
+      clearTimeout(timer)
+      listeners.delete(settle)
+    }
+  }
+
+  type GoalsLike = {
+    get(agent: Agent): NativeGoalView | undefined
+    pause(agent: Agent, ref: { id: string; revision: number }): unknown
+  }
+  const goalService = (record: SessionRecord): GoalsLike | undefined => presetServiceFor(record, 'goals') as GoalsLike | undefined
+  const goalSnapshots = new WeakMap<SessionRecord, { id: string; serialized: string }>()
+  const emitGoal = (record: SessionRecord, initial = false, replay = false, clearedId?: string): void => {
+    if (sessions.get(record.agent.session.id) !== record) return
+    const conn = connections.get(record.clientId)
+    if (conn === undefined) return
+    const goal = goalService(record)?.get(record.agent)
+    const previous = goalSnapshots.get(record)
+    const id = goal?.id ?? clearedId ?? previous?.id ?? (initial ? '' : undefined)
+    if (id === undefined) return
+    const update = goal === undefined
+      ? { sessionUpdate: 'goal_updated', goal_id: id, objective: '', status: 'cleared', phase: 'idle' }
+      : goalUpdateFromView(goal)
+    const serialized = JSON.stringify(update)
+    if (!initial && previous?.serialized === serialized) return
+    goalSnapshots.set(record, { id, serialized })
     sendNotification(conn, 'x.ai/session_notification', {
       sessionId: record.agent.session.id,
-      update: {
-        sessionUpdate: 'goal_updated',
-        goal_id: String(goal.id ?? ''),
-        objective: String(goal.objective ?? ''),
-        status,
-        phase: 'idle',
-        elapsed_ms: 0,
-        total_deliverables: 0,
-        completed_deliverables: 0,
-        total_worker_rounds: typeof goal.roundsStarted === 'number' ? goal.roundsStarted : 0,
-        total_verify_rounds: 0,
-      },
+      update: { ...update, ...initial ? { is_snapshot: true } : {} },
+      _meta: { eventSeq: record.eventSeq++, ...replay ? { isReplay: true } : {} },
     })
   }
-  ;(ctx as unknown as { on(event: string, listener: (payload: { agent: unknown; change: GoalChangedLike }) => void): void }).on('goal/changed', goalChangedHandler)
+  const goalEvents = ctx as unknown as { on(event: string, listener: (payload: { agent: Agent; change?: { ref?: { id?: string } } }) => void): void }
+  goalEvents.on('goal/changed', ({ agent, change }) => {
+    const record = ownedAgentRecord(agent)
+    if (record !== undefined) emitGoal(record, false, false, change?.ref?.id)
+  })
+  ctx.on('agent/status', ({ agent, status }) => {
+    const record = ownedAgentRecord(agent)
+    if (record !== undefined) {
+      emitActivity(record)
+      queueMicrotask(() => emitGoal(record))
+    }
+    else if (status === 'running') for (const owner of sessions.values()) refreshChildren(owner)
+  })
+  ctx.on('agent/session-start', ({ agent }) => {
+    const record = ownedAgentRecord(agent)
+    if (record !== undefined) queueMicrotask(() => emitGoal(record))
+  })
+  // ponytail: native disarm has no complete activation feed; one 1s timer reconciles connected sessions until the native feed covers it.
+  const goalRefreshTimer = setInterval(() => {
+    for (const record of sessions.values()) {
+      if (!connections.has(record.clientId) || goalService(record) === undefined) continue
+      try { emitGoal(record) } catch (error) { logger.warn('grok-leader: goal refresh failed: ' + errorChain(error)) }
+    }
+  }, 1000)
+  goalRefreshTimer.unref()
+  ctx.effect(() => () => clearInterval(goalRefreshTimer))
 
   const socketPath = config.socketPath ?? '/tmp/dsh-grok-leader.sock'
   const server: Server = createServer((socket) => { handleSocket(socket) })

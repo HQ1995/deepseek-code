@@ -45,6 +45,9 @@ pub struct BgTaskBlock {
     pub kind: BgTaskKind,
     /// Optional description (from the tool call's description field).
     pub description: Option<String>,
+    /// Actual kill outcome, independent of unavailable process signal data.
+    pub explicitly_killed: bool,
+    pub duration_known: bool,
 }
 
 impl BgTaskBlock {
@@ -55,6 +58,8 @@ impl BgTaskBlock {
             task_id: task_id.into(),
             kind: BgTaskKind::Started,
             description: None,
+            explicitly_killed: false,
+            duration_known: true,
         }
     }
 
@@ -69,6 +74,8 @@ impl BgTaskBlock {
             task_id: task_id.into(),
             kind: BgTaskKind::Completed { elapsed },
             description: None,
+            explicitly_killed: false,
+            duration_known: true,
         }
     }
 
@@ -89,6 +96,8 @@ impl BgTaskBlock {
                 signal,
             },
             description: None,
+            explicitly_killed: false,
+            duration_known: true,
         }
     }
 
@@ -156,7 +165,11 @@ impl BlockContent for BgTaskBlock {
             BgTaskKind::Completed { elapsed } => Line::from(vec![
                 Span::styled("Task ", bold),
                 Span::styled(
-                    format!("completed in {}: ", format_duration(*elapsed)),
+                    if self.duration_known {
+                        format!("completed in {}: ", format_duration(*elapsed))
+                    } else {
+                        "completed: ".to_string()
+                    },
                     muted,
                 ),
                 Span::styled(display, muted),
@@ -167,9 +180,10 @@ impl BlockContent for BgTaskBlock {
                 signal,
             } => {
                 // Detect kill signals to show "killed" instead of "failed"
-                let is_killed = signal
-                    .as_deref()
-                    .is_some_and(|s| matches!(s, "killed" | "SIGTERM" | "SIGKILL" | "oom"));
+                let is_killed = self.explicitly_killed
+                    || signal
+                        .as_deref()
+                        .is_some_and(|s| matches!(s, "killed" | "SIGTERM" | "SIGKILL" | "oom"));
                 let verb = if is_killed { "killed" } else { "failed" };
                 let detail = if is_killed {
                     String::new()
@@ -182,7 +196,14 @@ impl BlockContent for BgTaskBlock {
                 };
                 Line::from(vec![
                     Span::styled("Task ", bold),
-                    Span::styled(format!("{verb} in {}: ", format_duration(*elapsed)), muted),
+                    Span::styled(
+                        if self.duration_known {
+                            format!("{verb} in {}: ", format_duration(*elapsed))
+                        } else {
+                            format!("{verb}: ")
+                        },
+                        muted,
+                    ),
                     Span::styled(format!("{}{}", display, detail), muted),
                 ])
             }
@@ -368,6 +389,24 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn explicit_kill_does_not_require_a_fabricated_signal() {
+        let mut block = BgTaskBlock::failed("native job", "job-1", Duration::ZERO, None, None);
+        block.explicitly_killed = true;
+        block.duration_known = false;
+        assert_eq!(line_text(&block), "Task killed: native job");
+    }
+
+    #[test]
+    fn native_completion_omits_unknown_duration() {
+        let mut block = BgTaskBlock::completed("native job", "job-1", Duration::ZERO);
+        block.duration_known = false;
+        assert_eq!(line_text(&block), "Task completed: native job");
+        let mut failed = BgTaskBlock::failed("native job", "job-2", Duration::ZERO, None, None);
+        failed.duration_known = false;
+        assert_eq!(line_text(&failed), "Task failed: native job");
     }
 
     #[test]

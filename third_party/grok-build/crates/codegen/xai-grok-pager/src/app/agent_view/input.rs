@@ -2403,6 +2403,77 @@ mod jump_backout_key_tests {
     fn ctrl_c() -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
     }
+
+    #[test]
+    fn ctrl_c_stops_native_goal_between_rounds_with_or_without_jump_picker() {
+        for jump_open in [false, true] {
+            let mut agent = make_agent();
+            let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+            goal.native_goal = Some(
+                serde_json::from_value(serde_json::json!({
+                    "revision": 1, "phase": "active", "activation": "armed",
+                    "rounds_started": 0, "max_goal_rounds": 4
+                }))
+                .unwrap(),
+            );
+            agent.goal_state = Some(goal);
+            if jump_open {
+                open_jump(&mut agent);
+            }
+            let outcome = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults());
+            assert!(
+                matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+                "{outcome:?}"
+            );
+            assert!(agent.session.state.is_idle());
+            assert!(agent.session.current_prompt_id.is_none());
+            assert!(agent.jump_state.is_none());
+            // A still-armed snapshot must not defeat the existing stuck-cancel escape hatch.
+            agent.session.state = AgentState::TurnCancelling;
+            let outcome = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults());
+            assert!(
+                matches!(outcome, InputOutcome::Action(Action::Quit)),
+                "{outcome:?}"
+            );
+        }
+    }
+    #[test]
+    fn ctrl_c_stops_running_native_round_after_goal_pause_or_clear() {
+        for cleared in [false, true] {
+            for jump_open in [false, true] {
+                let mut agent = make_agent();
+                agent.native_session_running = true;
+                if !cleared {
+                    let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+                    goal.native_goal = Some(
+                        serde_json::from_value(serde_json::json!({
+                            "revision": 2, "phase": "paused", "activation": "disarmed",
+                            "rounds_started": 1, "max_goal_rounds": 4
+                        }))
+                        .unwrap(),
+                    );
+                    agent.goal_state = Some(goal);
+                }
+                if jump_open {
+                    open_jump(&mut agent);
+                }
+                let outcome = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults());
+                assert!(
+                    matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+                    "{outcome:?}"
+                );
+                assert!(agent.session.state.is_idle());
+                assert!(agent.session.current_prompt_id.is_none());
+                assert!(agent.jump_state.is_none());
+                agent.native_session_running = false;
+                let outcome = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults());
+                assert!(
+                    !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+                    "{outcome:?}"
+                );
+            }
+        }
+    }
     /// In the dashboard overlay, a bare Esc backs out via
     /// `no_esc_consumer_pending`; the open `/jump` picker must count as a
     /// consumer so Esc dismisses it (restoring the viewport) instead of

@@ -218,27 +218,25 @@ pub(super) fn insert_running_task(agent: &mut AgentView, task_id: &str, command:
         .bg_tasks
         .insert(
             task_id.into(),
-            crate::app::agent::BgTaskState {
-                task_id: task_id.into(),
-                tool_call_id: format!("call-{task_id}"),
-                command: command.into(),
-                description: None,
-                cwd: "/tmp".into(),
-                output_file: "/tmp/out".into(),
-                status: BgTaskStatus::Running,
-                start_time: std::time::SystemTime::now(),
-                end_time: None,
-                exit_code: None,
-                signal: None,
-                stdout: String::new(),
-                stdout_line_count: 0,
-                truncated: false,
-                pending_kill: false,
-                kill_requested_at: None,
-                scrollback_entry_id: None,
-                is_monitor: false,
-                restored_from_replay: false,
-            },
+            crate::app::agent::BgTaskState { native_task: None, task_id: task_id.into(),
+            tool_call_id: format!("call-{task_id}"),
+            command: command.into(),
+            description: None,
+            cwd: "/tmp".into(),
+            output_file: "/tmp/out".into(),
+            status: BgTaskStatus::Running,
+            start_time: std::time::SystemTime::now(),
+            end_time: None,
+            exit_code: None,
+            signal: None,
+            stdout: String::new(),
+            stdout_line_count: 0,
+            truncated: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            is_monitor: false,
+            restored_from_replay: false, },
         );
 }
 pub(super) fn park_on_subagents(agent: &mut AgentView, child_ids: &[&str]) {
@@ -739,6 +737,7 @@ pub(super) fn make_token_notification_message(
         )
         .meta(serde_json::json!({
                 "totalTokens": total_tokens,
+                "contextInfo": {"used": total_tokens, "total": 1_000_000},
             }).as_object().cloned());
     AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
         request,
@@ -891,7 +890,7 @@ pub(super) fn xai_unhandled_notif(
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
-/// Build an `agent_message_chunk` notification carrying both `totalTokens`
+/// Build an `agent_message_chunk` notification carrying current `contextInfo`
 /// and an explicit `eventId`, for context/dedup interaction tests.
 pub(super) fn make_token_notification_with_event(
     session_id: &str,
@@ -910,6 +909,7 @@ pub(super) fn make_token_notification_with_event(
         .meta(
             serde_json::json!({
                 "totalTokens": total_tokens,
+                "contextInfo": {"used": total_tokens, "total": 1_000_000},
                 "eventId": event_id,
             })
                 .as_object()

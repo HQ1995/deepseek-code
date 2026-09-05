@@ -1885,7 +1885,8 @@ fn current_product_version() -> &'static str {
 
 fn npm_channel_for_version(version: &str) -> &'static str {
     match default_update_channel(version) {
-        "alpha" => "beta",
+        "alpha" => "alpha",
+        "beta" => "beta",
         _ => "latest",
     }
 }
@@ -1896,13 +1897,12 @@ fn profile_install_matches_binary(profile_dir: &std::path::Path, current_version
         .join("@hqzhao95")
         .join("dscode")
         .join("package.json");
-    let runtime_path = profile_dir
-        .join("runtime")
-        .join("lib")
-        .join("node_modules")
-        .join("@deepseek-ai")
-        .join("dsh")
-        .join("package.json");
+    let descriptor_path = profile_dir.join("runtime/dscode-runtime.json");
+    let runtime_path = if descriptor_path.is_file() {
+        profile_dir.join("runtime/node_modules/@deepseek-ai/dsh/package.json")
+    } else {
+        profile_dir.join("runtime/lib/node_modules/@deepseek-ai/dsh/package.json")
+    };
     let Ok(package_text) = std::fs::read_to_string(package_path) else {
         return false;
     };
@@ -1924,6 +1924,33 @@ fn profile_install_matches_binary(profile_dir: &std::path::Path, current_version
     else {
         return false;
     };
+    if let Some(source_commit) = package
+        .pointer("/dsh/sourceCommit")
+        .and_then(serde_json::Value::as_str)
+    {
+        let descriptor = std::fs::read_to_string(&descriptor_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+        let Some(descriptor) = descriptor else {
+            return false;
+        };
+        if descriptor.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
+            || descriptor
+                .get("sourceCommit")
+                .and_then(serde_json::Value::as_str)
+                != Some(source_commit)
+            || descriptor
+                .get("dshVersion")
+                .and_then(serde_json::Value::as_str)
+                != Some(expected_runtime)
+            || package
+                .pointer("/dscode/release")
+                .and_then(serde_json::Value::as_str)
+                != Some(current_version)
+        {
+            return false;
+        }
+    }
     let Some(actual_runtime) = runtime.get("version").and_then(serde_json::Value::as_str) else {
         return false;
     };
@@ -1965,30 +1992,10 @@ fn product_reconcile_spec_for(
     if managed || current_version.contains("-dev") {
         return None;
     }
-    if let Some(Command::Update {
-        check,
-        version,
-        beta,
-        stable,
-        enterprise,
-        ..
-    }) = &args.command
-    {
-        if *check {
-            return None;
-        }
-        let reference = version.as_deref().unwrap_or_else(|| {
-            if *beta {
-                "beta"
-            } else if *stable {
-                "latest"
-            } else if *enterprise {
-                "enterprise"
-            } else {
-                npm_channel_for_version(current_version)
-            }
-        });
-        return Some(format!("{DSCODE_NPM_PACKAGE}@{reference}"));
+    // Updates resolve once in Rust and hand that exact target to the launcher.
+    // Never bootstrap before resolution, especially for read-only checks.
+    if matches!(&args.command, Some(Command::Update { .. })) {
+        return None;
     }
     (legacy_entrypoint && !install_matches).then(|| {
         format!(
@@ -2072,6 +2079,40 @@ fn main() {
     }
     let args = PagerArgs::parse_cli();
     if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
+        return;
+    }
+    // Bypass normal startup's docs, crash files, and session cleanup for --check.
+    if let Some(Command::Update {
+        check: true,
+        json,
+        version,
+        beta,
+        alpha,
+        stable,
+        enterprise,
+        ..
+    }) = &args.command
+    {
+        let result = (|| -> Result<()> {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let config = build_update_config()?;
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(run_update_command(
+                    true,
+                    *json,
+                    false,
+                    version.clone(),
+                    get_channel_switch(*beta, *alpha, *stable, *enterprise),
+                    auto_update::CliUpdateTrigger::UserCommand,
+                    &config,
+                ))
+        })();
+        if let Err(error) = result {
+            eprintln!("Error: {error:#}");
+            std::process::exit(1);
+        }
         return;
     }
     if let Some(error) = unsupported_dscode_cli(&args) {
@@ -2250,7 +2291,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     } else {
         xai_grok_workspace::permission::ClientType::Generic
     });
-    let update_config = build_update_config();
+    let update_config = build_update_config()?;
     if let Some(command) = args.command.take() {
         match command {
             Command::Version { json } => {
@@ -2375,6 +2416,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 force_reinstall,
                 version,
                 beta,
+                alpha,
                 stable,
                 enterprise,
                 trigger,
@@ -2382,7 +2424,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             } => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                let channel_switch = get_channel_switch(beta, stable, enterprise);
+                let channel_switch = get_channel_switch(beta, alpha, stable, enterprise);
                 let trigger = resolve_update_trigger(trigger.as_deref(), auto);
                 return run_update_command(
                     check,
@@ -2592,7 +2634,7 @@ async fn finish_update_on_exit(
     }
 }
 /// Build an [`UpdateConfig`] from the current environment and config files.
-fn build_update_config() -> UpdateConfig {
+fn build_update_config() -> Result<UpdateConfig> {
     let environment = xai_grok_shell::env::GrokBuildEnvironment::from_flags(false, false);
     let mut config = UpdateConfig::from_environment(&environment);
     config.channel = default_update_channel(xai_grok_version::VERSION).to_string();
@@ -2605,27 +2647,25 @@ fn build_update_config() -> UpdateConfig {
     config.npm_registry = std::env::var(obfstr::obfstr!("GROK_NPM_REGISTRY"))
         .ok()
         .or_else(xai_grok_shell::util::config::load_npm_registry_sync);
-    if let Ok(root) = xai_grok_shell::config::load_effective_config_disk_only()
-        && let Some(ch) = xai_grok_shell::util::config::channel_from_toml_opt(&root)
-    {
+    let root = xai_grok_shell::config::load_effective_config_disk_only()?;
+    if let Some(ch) = xai_grok_shell::util::config::channel_from_toml_opt(&root)? {
         config.channel = ch;
     }
-    config
+    Ok(config)
 }
 
 fn default_update_channel(version: &str) -> &'static str {
     if version.ends_with("-dev") {
         return "stable";
     }
-    if semver::Version::parse(version).is_ok_and(|version| {
-        matches!(
-            version.pre.as_str().split('.').next(),
-            Some("alpha" | "beta")
-        )
-    }) {
-        "alpha"
-    } else {
-        "stable"
+    match semver::Version::parse(version)
+        .ok()
+        .as_ref()
+        .map(|v| v.pre.as_str().split('.').next())
+    {
+        Some(Some("alpha")) => "alpha",
+        Some(Some("beta")) => "beta",
+        _ => "stable",
     }
 }
 /// Central gate for auto-update checks; add new suppression rules here,
@@ -2669,9 +2709,16 @@ fn is_managed_install(exe: Option<std::path::PathBuf>, grok_home: &std::path::Pa
 }
 /// Map the mutually-exclusive channel flags to a channel name. clap enforces
 /// that at most one is set, so the order is irrelevant.
-fn get_channel_switch(beta: bool, stable: bool, enterprise: bool) -> Option<&'static str> {
-    if beta {
+fn get_channel_switch(
+    beta: bool,
+    alpha: bool,
+    stable: bool,
+    enterprise: bool,
+) -> Option<&'static str> {
+    if alpha {
         Some("alpha")
+    } else if beta {
+        Some("beta")
     } else if stable {
         Some("stable")
     } else if enterprise {
@@ -2983,7 +3030,7 @@ mod tests {
     }
     #[test]
     fn beta_releases_default_to_beta_updates_but_dev_builds_do_not() {
-        assert_eq!(default_update_channel("0.0.11-beta.1"), "alpha");
+        assert_eq!(default_update_channel("0.0.11-beta.1"), "beta");
         assert_eq!(default_update_channel("0.0.11-alpha.1"), "alpha");
         assert_eq!(default_update_channel("0.0.11"), "stable");
         assert_eq!(default_update_channel("0.0.11-dev"), "stable");
@@ -3007,10 +3054,7 @@ mod tests {
         );
 
         let beta = PagerArgs::try_parse_from(["dscode", "update", "--beta"]).unwrap();
-        assert_eq!(
-            product_reconcile_spec_for(&beta, "0.0.13-beta.7", true, false, false).as_deref(),
-            Some("@hqzhao95/dscode@beta")
-        );
+        assert!(product_reconcile_spec_for(&beta, "0.0.13-beta.7", true, false, false).is_none());
         let check = PagerArgs::try_parse_from(["dscode", "update", "--beta", "--check"]).unwrap();
         assert!(product_reconcile_spec_for(&check, "0.0.13-beta.7", false, false, true).is_none());
     }
@@ -3050,6 +3094,28 @@ mod tests {
         )
         .unwrap();
         assert!(!profile_install_matches_binary(&profile, "0.0.13-beta.7"));
+
+        let source_runtime_dir = profile.join("runtime/node_modules/@deepseek-ai/dsh");
+        std::fs::create_dir_all(&source_runtime_dir).unwrap();
+        std::fs::write(
+            source_runtime_dir.join("package.json"),
+            r#"{"version":"0.1.1-alpha.1"}"#,
+        )
+        .unwrap();
+        std::fs::write(package_dir.join("package.json"), r#"{"version":"0.0.14-alpha.1","dscode":{"release":"0.0.14-alpha.1"},"dsh":{"testedVersion":"0.1.1-alpha.1","sourceCommit":"abc123"}}"#).unwrap();
+        let descriptor = profile.join("runtime/dscode-runtime.json");
+        std::fs::write(
+            &descriptor,
+            r#"{"schema":1,"dshVersion":"0.1.1-alpha.1","sourceCommit":"abc123"}"#,
+        )
+        .unwrap();
+        assert!(profile_install_matches_binary(&profile, "0.0.14-alpha.1"));
+        std::fs::write(
+            &descriptor,
+            r#"{"schema":1,"dshVersion":"0.1.1-alpha.1","sourceCommit":"wrong"}"#,
+        )
+        .unwrap();
+        assert!(!profile_install_matches_binary(&profile, "0.0.14-alpha.1"));
         let _ = std::fs::remove_dir_all(profile);
     }
 

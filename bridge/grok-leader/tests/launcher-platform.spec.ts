@@ -10,14 +10,14 @@ import {
   nodeVersionSupported,
   ownedLauncherTarget,
   packageNeedsInstall,
-  packageUpdateRef,
   parseCliVersion,
   profileDir,
   profileLauncher,
-  shouldReconcilePackageUpdate,
+  updateCommandIndex,
   tuiAssetName,
   tuiHome,
 } from '../bin/dscode.mjs'
+import { updateOptions } from '../bin/update.mjs'
 
 describe('tuiAssetName', () => {
   it('maps the two shipped prebuilts', () => {
@@ -67,24 +67,30 @@ describe('installation lifecycle', () => {
     expect(packageNeedsInstall('0.0.11', '0.0.11')).toBe(false)
   })
 
-  it('keeps the npm package on the requested update channel', () => {
-    expect(packageUpdateRef([])).toBe('beta')
-    expect(packageUpdateRef([], '0.0.13')).toBe('latest')
-    expect(packageUpdateRef(['--beta'])).toBe('beta')
-    expect(packageUpdateRef(['--alpha'])).toBe('beta')
-    expect(packageUpdateRef(['--version', '0.0.8'])).toBe('0.0.8')
-    expect(packageUpdateRef(['--version=0.0.9'])).toBe('0.0.9')
-    expect(packageUpdateRef(['--stable'])).toBe('latest')
-    expect(packageUpdateRef(['--enterprise'])).toBe('enterprise')
+  it('selects canonical channels and exact versions', () => {
+    const home = mkdtempSync(join(tmpdir(), 'dscode-options-'))
+    try {
+      expect(updateOptions([], home, '0.0.13-beta.1').channel).toBe('beta')
+      expect(updateOptions([], home, '0.0.13-alpha.1').channel).toBe('alpha')
+      expect(updateOptions([], home, '0.0.13').channel).toBe('stable')
+      expect(updateOptions(['--alpha'], home, '0.0.13').channel).toBe('alpha')
+      expect(updateOptions(['--stable'], home, '0.0.13-alpha.1').channel).toBe('stable')
+      expect(updateOptions(['--version', '0.0.8'], home, '0.0.13').version).toBe('0.0.8')
+      expect(updateOptions(['--version=0.0.9'], home, '0.0.13').version).toBe('0.0.9')
+      expect(updateOptions(['--check'], home, '0.0.13').check).toBe(true)
+      expect(updateOptions(['--check', '--json'], home, '0.0.13')).toMatchObject({ check: true, json: true })
+      expect(updateOptions(['--force-reinstall'], home, '0.0.13').force).toBe(true)
+      expect(updateOptions(['--force'], home, '0.0.13').force).toBe(true)
+      expect(updateOptions(['--trigger', 'leader_converge'], home, '0.0.13').trigger).toBe('leader_converge')
+      expect(updateOptions(['--trigger=auto_background'], home, '0.0.13').trigger).toBe('auto_background')
+      expect(updateOptions(['--auto'], home, '0.0.13').trigger).toBe('auto_background')
+    } finally { rmSync(home, { recursive: true, force: true }) }
   })
 
-  it('finds update after global flags but keeps --check observational', () => {
-    expect(shouldReconcilePackageUpdate(['--debug', 'update', '--alpha'])).toBe(true)
-    expect(shouldReconcilePackageUpdate(['update', '--check'])).toBe(false)
-    expect(shouldReconcilePackageUpdate(['--debug'])).toBe(false)
-    expect(shouldReconcilePackageUpdate(['-p', 'update'])).toBe(false)
-    expect(shouldReconcilePackageUpdate(['--model', 'update'])).toBe(false)
-    expect(shouldReconcilePackageUpdate(['wrap', 'update'])).toBe(false)
+  it('finds update only in command position after global debug flags', () => {
+    expect(updateCommandIndex(['--debug', 'update', '--alpha'])).toBe(1)
+    expect(updateCommandIndex(['update', '--check'])).toBe(0)
+    for (const args of [['--debug'], ['-p', 'update'], ['--model', 'update'], ['wrap', 'update']]) expect(updateCommandIndex(args)).toBe(-1)
   })
 
   it('parses the official dsh version output', () => {

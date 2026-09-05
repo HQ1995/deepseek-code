@@ -1,6 +1,52 @@
 use super::*;
 use xai_grok_shell::sampling::error::format_rate_limited_user_message;
 use xai_grok_shell::session::storage::ReplayLookupFallback;
+
+/// Enrich an already-terminal transcript without replaying its lifecycle transition.
+fn retain_subagent_terminal_output(
+    agent: &mut AgentView,
+    child_session_id: &str,
+    output: &str,
+) -> bool {
+    if output.is_empty() || !agent.subagent_views.contains_key(child_session_id) {
+        return false;
+    }
+    // A completed view may have been evicted to a prompt-only shell. Hydrate its
+    // retained transcript before adding memory-only output, not instead of it.
+    crate::app::subagent::ensure_subagent_child_replayed(agent, child_session_id);
+    let Some(child_view) = agent.subagent_views.get_mut(child_session_id) else {
+        return false;
+    };
+    let already_present = (0..child_view.scrollback.len())
+        .rev()
+        .find_map(|idx| {
+            let entry = child_view.scrollback.entry(idx)?;
+            match &entry.block {
+                RenderBlock::AgentMessage(message) => Some(message.text() == output),
+                _ => None,
+            }
+        })
+        .unwrap_or(false);
+    if already_present {
+        return false;
+    }
+    let footer = child_view.scrollback.last().and_then(|entry| {
+        matches!(&entry.block, RenderBlock::SessionEvent(block)
+            if matches!(block.event, crate::scrollback::blocks::SessionEvent::TurnCompleted { .. }))
+        .then_some(entry.id)
+    });
+    let block = RenderBlock::agent_message(output);
+    if let Some(footer) = footer {
+        child_view.scrollback.insert_block_before(footer, block);
+    } else {
+        child_view.scrollback.push_block(block);
+    }
+    if let Some(info) = agent.subagent_sessions.get_mut(child_session_id) {
+        info.transcript.discovered_memory_only();
+    }
+    true
+}
+
 /// Stash a live stop-family batch under `stash_pid` for the turn marker
 /// to fold. `merge_same_name` merges a same-name repeat instead of standalone.
 pub(super) fn stash_live_stop_batch(
@@ -47,7 +93,8 @@ pub(super) fn refresh_context_used(view: &mut AgentView, used: u64) {
     view.apply_context_used(used, total);
 }
 /// Refresh the bar and record `used` as the confirmed count for a pending
-/// compaction message; call only from the `meta.totalTokens` path.
+/// compaction message in tests; production snapshots use explicit contextInfo.
+#[cfg(test)]
 pub(super) fn confirm_context_used(view: &mut AgentView, used: u64) {
     refresh_context_used(view, used);
     view.session.note_context_used(used);
@@ -187,27 +234,55 @@ pub(super) fn handle_session_notification_with_origin(
         &session_notif.update,
         XaiSessionUpdate::WorkflowUpdated { .. }
     );
-    let is_subagent_lifecycle =
-        if let Some(lifecycle) = classify_subagent_lifecycle(&session_notif.update, origin) {
-            match gate_subagent_lifecycle(
-                &agent.subagent_sessions,
-                &agent.scrollback,
-                &mut agent.deferred_subagent_finishes,
-                &lifecycle,
-                meta.is_replay,
-                session_notif.session_id.0.as_ref(),
-                meta.event_id.as_deref(),
-                &session_notif,
-                std::time::Instant::now(),
-            ) {
-                LifecycleDelivery::Apply => true,
-                LifecycleDelivery::DropDuplicate | LifecycleDelivery::AwaitSpawn => {
-                    return false;
+    let is_subagent_lifecycle = if let Some(lifecycle) =
+        classify_subagent_lifecycle(&session_notif.update, origin)
+    {
+        match gate_subagent_lifecycle(
+            &agent.subagent_sessions,
+            &agent.scrollback,
+            &mut agent.deferred_subagent_finishes,
+            &lifecycle,
+            meta.is_replay,
+            session_notif.session_id.0.as_ref(),
+            meta.event_id.as_deref(),
+            &session_notif,
+            std::time::Instant::now(),
+        ) {
+            LifecycleDelivery::Apply => true,
+            LifecycleDelivery::DropDuplicate => {
+                if let XaiSessionUpdate::SubagentFinished {
+                    child_session_id,
+                    status,
+                    output: Some(output),
+                    ..
+                } = &session_notif.update
+                    && agent
+                        .subagent_sessions
+                        .get(child_session_id)
+                        .is_some_and(|info| {
+                            info.finished && info.status.as_deref() == Some(status.as_str())
+                        })
+                {
+                    let changed = retain_subagent_terminal_output(agent, child_session_id, output);
+                    if changed {
+                        let elapsed = agent
+                            .subagent_sessions
+                            .get(child_session_id)
+                            .and_then(|info| info.duration_ms)
+                            .map(std::time::Duration::from_millis);
+                        if let Some(child_view) = agent.subagent_views.get_mut(child_session_id) {
+                            crate::app::subagent::finalize_finished_child_view(child_view, elapsed);
+                        }
+                    }
+                    return changed && is_active;
                 }
+                return false;
             }
-        } else {
-            false
-        };
+            LifecycleDelivery::AwaitSpawn => return false,
+        }
+    } else {
+        false
+    };
     if !is_workflow_update
         && !is_subagent_lifecycle
         && !meta.is_replay
@@ -432,7 +507,19 @@ pub(super) fn handle_session_notification_with_origin(
                         output: None,
                         will_wake: false,
                     },
-                    meta: session_notif.meta.clone(),
+                    meta: {
+                        let mut meta = session_notif.meta.clone();
+                        if info.duration_ms.is_none() {
+                            let value = meta.get_or_insert_with(|| serde_json::json!({}));
+                            if let Some(object) = value.as_object_mut() {
+                                object.insert(
+                                    "subagentMetricsAvailable".into(),
+                                    serde_json::json!(false),
+                                );
+                            }
+                        }
+                        meta
+                    },
                 });
             agent.subagent_sessions.insert(
                 child_session_id.clone(),
@@ -680,6 +767,7 @@ pub(super) fn handle_session_notification_with_origin(
             turns,
             duration_ms,
             tokens_used,
+            output,
             ..
         } => {
             tracing::info!(
@@ -690,7 +778,14 @@ pub(super) fn handle_session_notification_with_origin(
                 duration_ms = duration_ms,
                 "Subagent finished"
             );
-            let elapsed_dur = std::time::Duration::from_millis(duration_ms);
+            let metrics_available = session_notif
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("subagentMetricsAvailable"))
+                .and_then(serde_json::Value::as_bool)
+                != Some(false);
+            let elapsed_dur =
+                metrics_available.then(|| std::time::Duration::from_millis(duration_ms));
             let info_ref = agent.subagent_sessions.get(&child_session_id);
             let entry_id = info_ref.and_then(|s| s.scrollback_entry_id);
             let is_background = info_ref.is_some_and(|s| s.is_background);
@@ -793,15 +888,22 @@ pub(super) fn handle_session_notification_with_origin(
                 info.finished = true;
                 info.status = Some(Arc::from(status));
                 info.error = error.map(Arc::from);
-                info.duration_ms = Some(duration_ms);
-                info.tool_calls = Some(tool_calls);
-                info.turns = Some(turns);
-                if tokens_used > 0 {
+                info.duration_ms = metrics_available.then_some(duration_ms);
+                info.tool_calls = metrics_available.then_some(tool_calls);
+                info.turns = metrics_available.then_some(turns);
+                if !metrics_available {
+                    info.turn_count = None;
+                    info.tool_call_count = None;
+                    info.tokens_used = None;
+                } else if tokens_used > 0 || info.tokens_used.is_none() {
                     info.tokens_used = Some(tokens_used);
                 }
                 info.pending_kill = false;
                 info.kill_requested_at = None;
                 info.last_progress_at = std::time::Instant::now();
+            }
+            if let Some(output) = output.as_deref() {
+                retain_subagent_terminal_output(agent, &child_session_id, output);
             }
             let resuming = agent.session.loading_replay;
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
@@ -1147,6 +1249,8 @@ pub(super) fn handle_session_notification_with_origin(
         XaiSessionUpdate::GoalUpdated {
             goal_id,
             objective,
+            native_goal,
+            is_snapshot,
             status,
             phase,
             token_budget,
@@ -1178,41 +1282,70 @@ pub(super) fn handle_session_notification_with_origin(
             planning,
             ..
         } => {
-            let new_status = GoalDisplayStatus::parse(&status);
+            let new_status =
+                GoalDisplayStatus::parse(native_goal.as_ref().map_or(status.as_str(), |g| {
+                    match g.phase.as_str() {
+                        "active" => g.activation.as_str(),
+                        "paused" => "user_paused",
+                        phase => phase,
+                    }
+                }));
             let just_completed = new_status == GoalDisplayStatus::Complete
-                && agent
+                && !meta.is_replay
+                && !is_snapshot.unwrap_or(false)
+                && agent.goal_state.as_ref().is_none_or(|g| {
+                    g.goal_id != goal_id || g.status != GoalDisplayStatus::Complete
+                });
+            if status == "cleared" {
+                // Legacy clears carry no id. Native tombstones always identify
+                // the cleared goal, even if its first snapshot has not arrived.
+                let legacy_clear = goal_id.is_empty();
+                let clears_current = agent
                     .goal_state
                     .as_ref()
-                    .is_none_or(|g| g.status != GoalDisplayStatus::Complete);
-            if status == "cleared" {
-                if let Some(g) = agent.goal_state.take() {
-                    agent.last_cleared_goal_id = Some(g.goal_id);
+                    .is_some_and(|g| legacy_clear || g.goal_id == goal_id);
+                if clears_current {
+                    let cleared = agent.goal_state.take().unwrap();
+                    agent.last_cleared_goal_id = Some(cleared.goal_id);
+                    agent.show_goal_detail = false;
+                } else if !legacy_clear {
+                    agent.last_cleared_goal_id = Some(goal_id);
                 }
-                agent.show_goal_detail = false;
-                true
+                if legacy_clear {
+                    agent.show_goal_detail = false;
+                }
+                clears_current || legacy_clear
             } else if agent.last_cleared_goal_id.as_deref() == Some(goal_id.as_str()) {
                 false
             } else {
-                let elapsed_floor_ms = agent
-                    .goal_state
-                    .as_ref()
-                    .filter(|g| g.goal_id == goal_id)
-                    .map(|g| g.live_elapsed_ms())
-                    .unwrap_or(0)
-                    .max(elapsed_ms);
+                let elapsed_floor_ms = if native_goal.is_some() {
+                    0
+                } else {
+                    agent
+                        .goal_state
+                        .as_ref()
+                        .filter(|g| g.goal_id == goal_id)
+                        .map(|g| g.live_elapsed_ms())
+                        .unwrap_or(0)
+                        .max(elapsed_ms)
+                };
                 if just_completed {
                     agent.scrollback.push_block(RenderBlock::session_event(
                         SessionEvent::GoalCompleted {
-                            elapsed: std::time::Duration::from_millis(elapsed_floor_ms),
+                            elapsed: native_goal
+                                .is_none()
+                                .then(|| std::time::Duration::from_millis(elapsed_floor_ms)),
                         },
                     ));
                 }
-                let last_classifier_details_exists = last_classifier_details_path
-                    .as_deref()
-                    .is_some_and(|p| std::path::Path::new(p).exists());
+                let last_classifier_details_exists = native_goal.is_none()
+                    && last_classifier_details_path
+                        .as_deref()
+                        .is_some_and(|p| std::path::Path::new(p).exists());
                 agent.goal_state = Some(GoalDisplayState {
                     goal_id,
                     objective,
+                    native_goal,
                     status: new_status,
                     phase: GoalDisplayPhase::parse(&phase),
                     token_budget,

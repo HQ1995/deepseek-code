@@ -1621,6 +1621,19 @@ impl TasksPane {
                 }
             }
         };
+        let right_text = if task.native_task.is_some() {
+            if task.end_time.is_some() {
+                format!(
+                    "{} {} ",
+                    task.status_label(),
+                    format_duration(task.elapsed())
+                )
+            } else {
+                format!("{} ", task.status_label())
+            }
+        } else {
+            right_text
+        };
 
         buf.set_span(area.x, y, &Span::styled(icon, icon_style), 2);
 
@@ -1996,6 +2009,7 @@ mod tests {
 
     fn make_bg_task(task_id: &str, command: &str, status: BgTaskStatus) -> BgTaskState {
         BgTaskState {
+            native_task: None,
             task_id: task_id.into(),
             tool_call_id: String::new(),
             command: command.into(),

@@ -1518,12 +1518,15 @@ impl AgentView {
         }
         if let Some(ref goal) = self.goal_state {
             let tick = self.tasks.tick_count() as usize;
-            let active_subagent_tokens: u64 = self
-                .subagent_sessions
-                .values()
-                .filter(|s| !s.finished && s.workflow_run_id.is_none())
-                .filter_map(|s| s.tokens_used)
-                .sum();
+            let active_subagent_tokens: u64 = if goal.native_goal.is_none() {
+                self.subagent_sessions
+                    .values()
+                    .filter(|s| !s.finished && s.workflow_run_id.is_none())
+                    .filter_map(|s| s.tokens_used)
+                    .sum()
+            } else {
+                0
+            };
             status.push(
                 "goal",
                 crate::views::agent_status::goal_status_line(
@@ -1531,7 +1534,10 @@ impl AgentView {
                     &theme,
                     self.hit_goal_status.hovered,
                     tick,
-                    self.context_state.as_ref().map(|c| c.used),
+                    self.context_state
+                        .as_ref()
+                        .filter(|_| goal.native_goal.is_none())
+                        .map(|c| c.used),
                     active_subagent_tokens,
                 ),
             );
@@ -1556,12 +1562,10 @@ impl AgentView {
             );
         }
         let ctx_used = self.context_state.as_ref().map(|c| c.used);
-        let model_window = self.session.models.get_context_window();
         let ctx_total = self
             .context_state
             .as_ref()
-            .and_then(|c| (c.total > 0).then_some(c.total))
-            .or(model_window);
+            .and_then(|c| (c.capacity_available != Some(false)).then_some(c.total));
         if let Some(percent) = self.cache_hit_percent.as_deref() {
             let label = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
             let value = Style::default().fg(theme.text_primary).bg(theme.bg_base);
@@ -3957,6 +3961,23 @@ impl AgentView {
                         .collect()
                 })
                 .unwrap_or_default();
+            if let Some(native) = viewer
+                .bg_task_id
+                .as_ref()
+                .and_then(|task_id| self.session.bg_tasks.get(task_id))
+                .and_then(|task| task.native_task.as_ref())
+            {
+                for line in native.display_detail().lines() {
+                    prepend_lines.extend(crate::render::wrapping::wrap_header_flush(
+                        ratatui::text::Line::from(ratatui::text::Span::styled(
+                            line.to_owned(),
+                            theme.muted(),
+                        )),
+                        content_w as usize,
+                        0,
+                    ));
+                }
+            }
             if !prepend_lines.is_empty() {
                 prepend_lines.push(ratatui::text::Line::from(""));
             }
@@ -4349,19 +4370,25 @@ impl AgentView {
             let todos = self.todo.todos();
             let overlay_rect = crate::views::goal_detail::goal_detail_area(area, goal, todos);
             let tick = self.tasks.tick_count() as usize;
-            let active_subagent_tokens: u64 = self
-                .subagent_sessions
-                .values()
-                .filter(|s| !s.finished && s.workflow_run_id.is_none())
-                .filter_map(|s| s.tokens_used)
-                .sum();
+            let active_subagent_tokens: u64 = if goal.native_goal.is_none() {
+                self.subagent_sessions
+                    .values()
+                    .filter(|s| !s.finished && s.workflow_run_id.is_none())
+                    .filter_map(|s| s.tokens_used)
+                    .sum()
+            } else {
+                0
+            };
             let close_rect = crate::views::goal_detail::render_goal_detail(
                 buf,
                 overlay_rect,
                 goal,
                 todos,
                 tick,
-                self.context_state.as_ref().map(|c| c.used),
+                self.context_state
+                    .as_ref()
+                    .filter(|_| goal.native_goal.is_none())
+                    .map(|c| c.used),
                 active_subagent_tokens,
                 self.hit_goal_close.hovered,
             );

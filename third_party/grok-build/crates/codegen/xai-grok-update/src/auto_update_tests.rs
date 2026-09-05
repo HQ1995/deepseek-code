@@ -54,7 +54,52 @@ fn test_needs_update_invalid_versions() {
 
 #[test]
 fn test_needs_update_unknown_channel() {
-    assert_eq!(needs_update("0.1.140", "0.1.141", "beta", false), None);
+    assert_eq!(needs_update("0.1.140", "0.1.141", "unknown", false), None);
+}
+
+#[test]
+fn preview_channels_never_select_each_other() {
+    for (channel, other) in [("beta", "alpha"), ("alpha", "beta")] {
+        assert_eq!(
+            needs_update("0.1.140", &format!("0.1.141-{other}.1"), channel, true),
+            Some(false)
+        );
+        assert_eq!(
+            needs_update("0.1.140", &format!("0.1.141-{channel}.1"), channel, false),
+            Some(true)
+        );
+        assert_eq!(
+            needs_update(
+                &format!("0.1.142-{other}.1"),
+                &format!("0.1.141-{channel}.1"),
+                channel,
+                false
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            needs_update(&format!("0.1.140-{channel}.1"), "0.1.140", channel, false),
+            Some(true)
+        );
+    }
+}
+
+#[test]
+fn product_delegate_carries_one_exact_target_and_channel() {
+    let command = dscode_update_command("0.0.14-alpha.1", "alpha").unwrap();
+    let args: Vec<_> = command
+        .as_std()
+        .get_args()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
+    assert!(args.ends_with(&[
+        "update".into(),
+        "--version".into(),
+        "0.0.14-alpha.1".into(),
+        "--alpha".into()
+    ]));
+    assert!(dscode_update_command("not-semver", "alpha").is_err());
+    assert!(dscode_update_command("0.0.14", "unknown").is_err());
 }
 
 #[test]
@@ -1239,20 +1284,24 @@ fn test_update_status_with_error_field_serialized() {
 }
 
 #[test]
-fn test_update_status_beta_channel_serialized() {
-    let s = UpdateStatus {
-        current_version: "0.1.150-alpha.1".to_string(),
-        latest_version: Some("0.1.150-alpha.2".to_string()),
-        update_available: true,
-        installer: Some("npm".to_string()),
-        channel: "alpha".to_string(),
-        auto_update: Some(true),
-        error: None,
-    };
-    let v = serde_json::to_value(&s).unwrap();
-    assert_eq!(v["channel"], "beta");
-    assert_eq!(v["currentVersion"], "0.1.150-alpha.1");
-    assert_eq!(v["latestVersion"], "0.1.150-alpha.2");
+fn test_update_status_preview_channels_serialize_independently() {
+    for channel in ["alpha", "beta"] {
+        let current = format!("0.1.150-{channel}.1");
+        let latest = format!("0.1.150-{channel}.2");
+        let s = UpdateStatus {
+            current_version: current.clone(),
+            latest_version: Some(latest.clone()),
+            update_available: true,
+            installer: Some("dscode".to_string()),
+            channel: channel.to_string(),
+            auto_update: Some(true),
+            error: None,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["channel"], channel);
+        assert_eq!(v["currentVersion"], current);
+        assert_eq!(v["latestVersion"], latest);
+    }
 }
 
 #[test]
@@ -1364,8 +1413,8 @@ fn test_needs_update_channel_is_case_sensitive() {
 
 #[test]
 fn test_needs_update_unknown_channels_return_none() {
-    // Unknown channels (not stable/alpha/enterprise) return None.
-    assert_eq!(needs_update("0.1.140", "0.1.141", "beta", false), None);
+    // Unknown channels (not stable/beta/alpha/enterprise) return None.
+    assert_eq!(needs_update("0.1.140", "0.1.141", "preview", false), None);
     assert_eq!(needs_update("0.1.140", "0.1.141", "nightly", false), None);
     assert_eq!(needs_update("0.1.140", "0.1.141", "", false), None);
     assert_eq!(needs_update("0.1.140", "0.1.141", "rc", false), None);
@@ -1375,7 +1424,7 @@ fn test_needs_update_unknown_channels_return_none() {
         Some(true)
     );
     // Unknown channels return None regardless of allow_downgrade.
-    assert_eq!(needs_update("0.1.140", "0.1.141", "beta", true), None);
+    assert_eq!(needs_update("0.1.140", "0.1.141", "preview", true), None);
     assert_eq!(needs_update("0.1.140", "0.1.141", "", true), None);
 }
 
@@ -1408,10 +1457,31 @@ fn test_needs_update_alpha_to_alpha_same_version_not_upgrade() {
 }
 
 #[test]
-fn test_needs_update_alpha_to_beta_same_base_is_upgrade_per_semver() {
-    // semver: alpha.5 < beta.1 (lexicographic on identifiers per spec)
+fn test_needs_update_cross_lane_candidates_require_selecting_the_target_lane() {
+    // Semver alone must not make beta leak into the selected alpha lane.
+    for allow_downgrade in [false, true] {
+        assert_eq!(
+            needs_update(
+                "0.1.150-alpha.5",
+                "0.1.150-beta.1",
+                "alpha",
+                allow_downgrade
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            needs_update("0.1.150-beta.1", "0.1.150-alpha.5", "beta", allow_downgrade),
+            Some(false)
+        );
+    }
+    // Explicit channel selection is applied before comparison. Switching to
+    // the target lane permits convergence even when semver orders it lower.
     assert_eq!(
-        needs_update("0.1.150-alpha.5", "0.1.150-beta.1", "alpha", false),
+        needs_update("0.1.150-alpha.5", "0.1.150-beta.1", "beta", false),
+        Some(true)
+    );
+    assert_eq!(
+        needs_update("0.1.150-beta.1", "0.1.150-alpha.5", "alpha", false),
         Some(true)
     );
 }

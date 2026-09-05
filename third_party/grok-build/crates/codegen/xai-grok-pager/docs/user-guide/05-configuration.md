@@ -346,7 +346,7 @@ To pin the model a subagent uses, set its entry under `[subagents.models]`.
 
 ### Goal mode and background workflows
 
-`/goal` has two drivers, chosen by the background-workflows setting. With workflows enabled, the host-owned workflow engine evaluates rounds and drives completion verification; with them disabled, `/goal` falls back to the legacy model-facing `update_goal` tool. Whether `/goal` is available at all is a separate switch (the goal feature setting).
+In dscode, `/goal` is supplied by the selected native DSH agent preset. Its availability and execution do not depend on Grok's goal feature or background-workflow settings. See [goal commands](04-slash-commands.md#goal) for the native grammar.
 
 Background workflows — the `workflow` tool, named `.grok/workflows/*.rhai` scripts, `/deep-research`, and `/workflow` launches — are **on by default**. Disable with config, env, or remote settings.
 
@@ -764,7 +764,7 @@ The key ones. See the README for the complete list.
 |----------|-------------|
 | `GROK_MEMORY` | Enable (`1`) or disable (`0`) cross-session memory |
 | `GROK_SUBAGENTS` | Enable (`1`) or disable (`0`) subagents |
-| `GROK_WORKFLOWS` | Enable (`1`) or disable (`0`) background workflows and select the `/goal` driver (default on: host-owned workflow driver; off: legacy `update_goal`) |
+| `GROK_WORKFLOWS` | Enable (`1`) or disable (`0`) Grok background workflows (default on); does not configure native DSH goals |
 | `GROK_WEB_FETCH` | Enable (`1`) or disable (`0`) the web_fetch tool |
 | `GROK_WEB_FETCH_ALLOW_LOCAL` | Allow `web_fetch` to explicit loopback hosts only (`localhost` / `127.0.0.0/8` / `::1`). Same as `[toolset.web_fetch] allow_local`. Default off; private/metadata stay blocked. |
 | `GROK_AGENT` | Custom agent definition path or name |

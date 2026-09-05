@@ -1,21 +1,25 @@
 # dscode
 
-DeepSeek Harness coding TUI, distributed as a dsh plugin: this package
-carries the grok-leader bridge (the dsh-side server the TUI drives) plus the
-`dscode` launcher, which materializes the release-pinned TUI binary from
-GitHub Releases on first run (SHA-256 verified, cached at
-`~/.dsh/profiles/dscode/bin/`).
+DeepSeek Harness coding TUI, distributed as a dsh plugin: this package carries
+the grok-leader bridge and managed `dscode` launcher. One release pins the
+bridge, TUI, and tested DSH runtime; source-runtime releases also distribute
+their built SDK dependency tree and native helpers through GitHub Releases.
 
 ```sh
 npx @hqzhao95/dscode
 ```
 
-First run reuses an exactly tested `dsh` on PATH or installs the pin under
-`~/.dsh/profiles/dscode/runtime`, downloads the TUI binary, and links
-`dscode`. It never mutates the global npm prefix.
+First run prepares and verifies the whole tuple under `~/.dsh/profiles/dscode`
+before activating it, then links `dscode`. It never mutates the global npm
+prefix. Source releases use the private runtime; registry-backed releases may
+reuse an exactly tested `dsh` on PATH.
 
-`dscode update` reconciles the profile package from the matching npm ref
-(`latest`, `beta`, or an explicit version) before updating the TUI.
+`dscode update --stable`, `--beta`, and `--alpha` select independent channels;
+`--version VERSION` selects one exact target. `--check` performs no installation
+or configuration writes (`--json` selects JSON output). Installation commits
+the saved channel last and rolls back ordinary commit failures. Legacy unmarked
+`channel = "alpha"` still means beta; a successful explicit selection writes
+the canonical channel and `channel_format = 1`.
 `dscode uninstall` removes only the owned profile and launcher; shared dsh
 sessions and storages remain.
 
@@ -35,7 +39,7 @@ This package is a transport adapter, not a UI integration. Interactive rendering
 
 apply(ctx, config) binds a node:net unix socket after agents and sessionPersistence are ready, answers the registration handshake, and drives the remaining dsh services through structural reads. The socket file is unlinked on disposal, but the bridge never unlinks on EADDRINUSE: it fails loud instead of orphaning a live leader. The launcher owns the path and removes stale files before spawning the leader.
 
-The package doubles as the dscode profile bundle: cordis.patch.yml mounts the server over dsh-base, disables HMR and the implicit DeepSeek route, and inserts the agent-presets roster (default: standard) plus the host code runtime available to the optional `code` preset. A fresh profile is provider-neutral; users add any catalog or custom route through `/provider`. apps/cli profile-boot patches in the shipped preset root (apps/cli/config/agent-presets) for any composition whose rows include agent-presets.
+The package doubles as the dscode profile bundle: cordis.patch.yml mounts the server over dsh-base, disables HMR and the implicit DeepSeek route, and inserts the agent-presets roster (default: standard), the host subagent-selection service, and the code runtime required by the optional `ptc` preset. A fresh profile is provider-neutral; users add any catalog or custom route through `/provider`. apps/cli profile-boot patches in the shipped preset root for any composition whose rows include agent-presets.
 
 Fresh profiles default to `standard`. A preset picked in the TUI or through
 raw `/preset` is saved through the `agent-presets` settings namespace and
@@ -57,13 +61,14 @@ unless the user explicitly switches a still-blank session.
 |---|---|
 | register / registered | The first envelope frame must be register; the leader answers registered with ready: true and a leader_binary_version at least the client version, or the TUI evicts and respawns its own leader. A non-register first frame gets envelope error 1, a second registration error 2, and a 30 s registration timeout error 3. |
 | ping / pong | Keepalive pair exchanged every 30 s. |
-| initialize | Advertises protocol version 1 and the xai.api_key auth method (the pager fails closed on an empty list), plus the persisted model catalog in _meta.modelState. Remote catalog discovery runs afterward and broadcasts an update, so endpoint latency never blocks startup. |
+| initialize | Advertises protocol version 1, Streamable HTTP MCP support, and the xai.api_key auth method (the pager fails closed on an empty list), plus the persisted model catalog in _meta.modelState. Remote catalog discovery runs afterward and broadcasts an update, so endpoint latency never blocks startup. |
 | authenticate | No-op because credentials belong to the harness-side providers; the advertised compatibility method only satisfies the pager's auth gate. |
-| session/new | Creates a fresh agent with an absolute cwd; a non-array mcpServers rejects, but a well-formed array (empty or not) is accepted and ignored with a logged warning — the bridge advertises mcpCapabilities http/sse false and serves no MCP tools, so a TUI-discovered server must not brick the session. _meta.sessionId pins the session id. Permission modes `default`, `workspace-write`, `plan`, `bypassPermissions`, and `always-approve` map to dsh's permission/plan services; an explicit mode wins over _meta.yoloMode. Modes or CLI metadata the bridge cannot enforce (`auto`, `acceptEdits`, `dontAsk`, confining sandbox/tool/rule overrides, `--no-subagents`, and similar) reject instead of silently weakening the launch. `sandbox=off` and its `none` alias are accepted because they match the external dsh leader's actual unconfined execution. _meta.agentProfile (a string preset id) or the dsh-native _meta.agentPreset resolves throu…
-| session/prompt | Validates text, resource-link, and image blocks. Images are batch-admitted through dsh's durable attachment store before one user message is appended, preserving block order; image-bearing queued rows never combine with another prompt. Plugin slash commands receive their raw image uploads through the rc.2 command registry, which owns command-specific admission. The bridge permits one in-flight request per session, echoes the accepted display text, then settles at the correlated turn end with the grok stopReason vocabulary; a turnless admission settles cancelled. |
-| session/cancel | Cancels the addressed agent and settles its pending prompt as cancelled; unknown ids are no-ops. |
-| session/update | Streams user_message_chunk, agent_message_chunk, agent_thought_chunk, tool_call, and tool_call_update notifications with per-session eventSeq and promptId stamps. Terminal dsh usage includes cache reads/writes in `totalTokens` and carries the exact display-ready `cacheHitPercent`, including an empty non-rendering chunk when streamed text already suppressed the assembled message. |
-| session/load | Validates cwd/mcpServers and CLI metadata like session/new, then resumes the durable session. Interactive loads replay the transcript as isReplay updates; `_meta.noReplay: true` rebuilds state without emitting prior text for headless output. Only the owning client may reload a live session. The latest durable preset and model selections win; a preset may change only before model-visible history exists. |
+| session/new | Creates a fresh agent with an absolute cwd. Standard ACP stdio and Streamable HTTP `mcpServers` are validated, connected, and mounted into that Agent before the session is published; invalid declarations or startup failures reject instead of creating a tool-incomplete session. `_meta.sessionId` pins the session id. Permission modes `default`, `workspace-write`, `plan`, `bypassPermissions`, and `always-approve` map to dsh's permission/plan services; an explicit mode wins over `_meta.yoloMode`. Modes or CLI metadata the bridge cannot enforce (`auto`, `acceptEdits`, `dontAsk`, confining sandbox/tool/rule overrides, `--no-subagents`, and similar) reject instead of silently weakening the launch. `sandbox=off` and its `none` alias are accepted as explicit no-sandbox requests. |
+| session/prompt | Validates text, resource-link, and image blocks. Images are batch-admitted through dsh's durable attachment store before one user message is appended, preserving block order; image-bearing queued rows never combine with another prompt. Plugin slash commands receive their raw image uploads through the scoped command registry, which owns command-specific admission. Generic-file upload is not part of the ACP content contract; the bridge does not invent a private wire block for the browser-only upload lifecycle. The bridge permits one in-flight request per session, echoes the accepted display text, then settles at the correlated turn end with the grok stopReason vocabulary; a turnless admission settles cancelled. |
+| session/cancel | Cancels actual native activity, including a goal round without a foreground prompt, and settles pending prompts as cancelled. An underway armed goal becomes paused/disarmed with exactly one revision increment. The bridge pre-pauses only active/armed goals (native idle cancel is a no-op), leaving dormant active/disarmed goals unchanged; unknown ids are no-ops. |
+| session/update | Streams user_message_chunk, agent_message_chunk, agent_thought_chunk, tool_call, and tool_call_update notifications with per-session eventSeq and foreground-only promptId stamps. DSH 0.1.3-alpha.1 `agent/assistant-stream` frames provide live text/reasoning; v2 `assistant/message` and `assistant/attempt` embedded streams provide durable reconciliation and replay. Only the exact committed event and already-delivered stream indices are suppressed, not unrelated messages or retry attempts in the same step. Terminal usage includes cache reads/writes and exact display-ready `cacheHitPercent`, with an empty non-rendering chunk when necessary to deliver usage after live text. |
+| session/update activity | `_meta.sessionRunning` reflects native agent status separately from foreground prompt IDs and remains running until the backend actually settles, including cancellation of autonomous goal rounds. |
+| session/load | Validates cwd/MCP declarations and CLI metadata like session/new, reconnects the supplied MCP servers, then resumes the durable session. Interactive loads replay the transcript as isReplay updates; `_meta.noReplay: true` rebuilds state without emitting prior text for headless output. Only the owning client may reload a live session. The latest durable preset and model selections win; a preset may change only before model-visible history exists. |
 | session/list | Lists persisted session headers. |
 | session/set_model | Switches the live selection, appends a durable session event, and saves the default for new sessions through agentDefaultModel. Provider and effort memory are keyed by the exact provider/model route. A modelId outside the catalog rejects; unsupported saved efforts are dropped instead of reaching the provider. |
 | session/set_mode | Maps `plan` to the selected preset's plan-mode service and all other ids to leaving plan mode; rejects when that service is not present. |
@@ -74,8 +79,14 @@ unless the user explicitly switches a still-blank session.
 | x.ai/providers/update | Merges the form fields over one route's user profile (empty fields unset, models preserved) through the same settings seam. Returns the refreshed roster and broadcasts the new catalog. |
 | x.ai/providers/remove | Unsets one provider route through the settings seam; refuses the provider that owns the current model. Returns the refreshed roster and broadcasts the new catalog. |
 | x.ai/commands/list | Returns the built-in bridge commands plus commands registered by the live session's plugin composition. A supplied session id must belong to the caller. |
+| x.ai/goal | Executes the preset-scoped native `/goal` command directly, bypassing ordinary prompt admission; returns native `result.kind` and `result.text` without inventing model calls or prompt-complete events. Unavailable presets reject. In 0.1.3-alpha.1, host `/goal pause` disarms continuation and aborts the live turn; model-initiated pause finishes its own turn. Restore preserves durable goal ID, revision, phase, and counters without rearming or repeating completion celebration. `/auto` is unsupported and cannot change permissions or call the model. |
 | x.ai/ask_user_question | Routes dsh questions to the owning TUI. Separate header, question, and supporting detail fields are preserved in the card's multiline heading; multiline free-form notes return unchanged. |
-| x.ai/session/list | Session-picker and dashboard list over persisted headers and logs (cwd/query/limit filters, durable title and firstPrompt projection, latest-event ordering, rows tagged chat-kind so the TUI bypasses its local-store gate and loads via session/load). |
+| x.ai/session/list | Session-picker list over persisted headers and logs. Cwd and exact-id filters apply before projection reads, so unrelated repositories are not opened; selected rows retain durable title, firstPrompt and latest-event ordering. |
+| x.ai/session/search | Full-text content search for the `/resume` picker through dsh-session-query-sqlite. The derived SQLite index opens lazily; opaque continuation cursors are preserved so the pager can collect up to 100 ranked matches. |
+| x.ai/session/info | Context pressure and capacity come from native next-request projections, not cumulative billed tokens. Native breakdowns are approximate; absent pressure, capacity, breakdown, and auto-compaction threshold data are explicitly unavailable. |
+| x.ai/task/kill, x.ai/subagent/cancel | Control owned native jobs and child agents through their services. Task rows preserve native kind/status; terminal jobs do not invent shell exit codes or output availability. |
+| x.ai/skills/list | Read-only inventory of skills mounted by the active dsh preset. The TUI exposes filtering and reload but not non-durable enable/disable mutations. |
+| x.ai/rewind/points, x.ai/rewind/execute | Conversation-only rewind. Execute creates a seeded child at the selected user-prompt boundary, returns the prompt to the composer, and moves the TUI onto the child id; the source session remains durable and unchanged. |
 | notification wire form | Every extension notification (x.ai/*) rides the wire with the ACP '_' prefix (_x.ai/queue/changed, _x.ai/session/prompt_complete, …): the pager's agent-client-protocol decode strips the prefix before dispatching to its x.ai/* handlers and silently drops unprefixed unknown methods as method_not_found. session/update is the sole typed (unprefixed) notification. |
 | x.ai/queue/changed | Broadcast on every queue mutation: pending rows (id, version, kind, text, position) plus the running prompt (runningPromptId/runningText/runningKind). Each snapshot carries a strictly increasing seq (epoch-seeded, so a restarted leader outranks its predecessor); the TUI drops any snapshot whose seq is not strictly newer for the session and adopts current_prompt_id from the applied ones. |
 | x.ai/queue/interject, /remove, /reorder, /clear | Queue edit notifications. interject is grok send-now: the row jumps to front, the running turn is cancelled (prompt_complete carries cancelTrigger=send_now) and the row runs next. remove (running row falls back to cancel), reorder by orderedIds, clear. |
@@ -100,11 +111,11 @@ an unset `{{model}}` prompt variable.
 
 ## Slash commands and plugins
 
-Preset support is registry-driven, not an allowlist. The four shipped presets are regression baselines (`minimal`: two native tools; `code`: `run_code`; `standard`: native catalog; `cordis`: native plus Cordis tools). User presets under dsh's preset root appear in `/preset` with their own ids and names. Their actual tool schemas drive TUI capability flags, and commands registered in their dsh scope flow through `available_commands_update`.
+Preset support is registry-driven, not an allowlist. The shipped coding presets are regression baselines (`minimal`: two native tools; `ptc`: `run_code`; `standard`: native catalog; `cordis`: native plus Cordis tools). The `history` preset adds exactly five official tools to `standard`: `session_search`, `session_event_search`, `session_trace`, `session_event_trace`, and `session_event_read`. These tools remain scoped to the caller workspace, including explicit session-ID access, and are not mounted globally into other presets. User presets under dsh's preset root appear in `/preset` with their own ids and names. Their actual tool schemas drive TUI capability flags, and commands registered in their dsh scope flow through `available_commands_update`.
 
-The automatic compatibility boundary is the standard dsh seams: presets, tools, commands, providers, models, settings, and session services. A plugin that requires a browser-only UI slot, a custom frontend panel, a private ACP method, or its own durable session-event vocabulary needs an explicit dscode adapter; pinned dsh 0.1.1-rc.2 has no public downstream event-type registration seam. The bridge does not guess or silently emulate unsupported surfaces, and mount or protocol failures stay visible.
+The automatic compatibility boundary is the standard dsh seams: presets, tools, commands, providers, models, settings, and session services. A plugin requiring a browser-only UI slot, custom frontend panel, private ACP method, or its own durable session-event vocabulary needs an explicit dscode adapter. The target baseline is 0.1.3-alpha.1: scoped question/approval waterfalls, non-owning persistence read handles with awaited closure, immutable header/revision snapshots, and native assistant-stream frames with v2 durable records. Unsupported durable formats are refused without downgrading or rewriting their logs; mount and protocol failures stay visible.
 
-The bridge owns `/dsh` and the headless/raw `/preset` path. `/preset` changes composition only before model-visible history exists. Model-facing add-ons are not mounted globally over the preset layer: in particular, the shipped `minimal` preset remains exactly `bash` plus `str_replace_editor`. `/compact` is discovered and executed through the preset-scoped dsh command registry (`standard`, `code`, and `cordis`); a raw request under `minimal` gets a precise unavailable result. `/loop` is likewise capability-gated and stays hidden unless a preset-scoped scheduling composition supplies it. Unsupported dsh extension commands (`/delete`, `/remember`, `/mcps`, and `/skills`) are hard-hidden in the TUI and explicitly refused by the bridge, so they never fall through as model prompts.
+The bridge owns `/dsh` and the headless/raw `/preset` path. `/preset` changes composition only before model-visible history exists. Model-facing add-ons are not mounted globally over the preset layer: in particular, the shipped `minimal` preset remains exactly `bash` plus `str_replace_editor`. `/compact` is discovered and executed through the preset-scoped dsh command registry (`standard`, `ptc`, and `cordis`); a raw request under `minimal` gets a precise unavailable result. `/loop` is likewise capability-gated and stays hidden unless a preset-scoped scheduling composition supplies it. Unsupported dsh extension commands (`/delete`, `/remember`, `/mcps`, and `/skills`) are hard-hidden in the TUI and explicitly refused by the bridge, so they never fall through as model prompts.
 
 `/dsh add [--trust] <spec>` first installs into an isolated npm stage with lifecycle scripts disabled, parses and reports every bundle's composition patch, and requires `--trust` before registering any executable bundle. The real profile install is re-verified before its bundle list is atomically updated. `/dsh remove <name>` unregisters the bundle before uninstalling the dependency, so an npm failure leaves inert files rather than a broken profile reference. Core profile packages cannot be added or removed through this path.
 
@@ -116,7 +127,9 @@ Client disconnect and Cordis disposal share the per-client teardown: owned agent
 
 The dscode binary bootstraps the leader directly: it resolves the tested dsh from the launcher's `DSH_BIN` or an existing `dsh` on `PATH`, spawns `dsh --profile dscode` bound to the socket, removes any stale socket file first, waits for the socket, and attaches through the normal `--leader` path (`third_party/grok-build/crates/codegen/xai-grok-pager/src/dsh_leader.rs`). It never starts an npm install after entering the alternate screen. The same composition underneath is the agent loop, LLM adapters, session persistence, and this plugin in the dscode profile.
 
-After changing this package, run `scripts/update-bridge.sh` (repo root): building alone does not replace the copy already installed in the profile. The script packs the local bridge, installs it without changing the profile's registry or `file:` dependency, and verifies the bridge, launcher, and composition files. A leader that is already running keeps its loaded code either way; it exits with its last client, and the next dscode spawn picks up the refreshed profile.
+The managed launcher requires an explicit `DSH_BIN` to report the exact `dsh.testedVersion`; missing, unversioned, or older overrides fail instead of falling back. Without an override, source-runtime releases validate the private runtime's source commit, SDK version, platform, and native helper. Unpublished upstream npm packages are not needed at user installation: the release contains their source-built runtime and the plugin's bundled ordinary dependencies. Host SDK peers remain shared with the runtime.
+
+After changing this package, run `scripts/update-bridge.sh` (repo root): building alone does not replace the copy already installed in the profile. The script builds a dependency-bundled plugin against the coherent SDK, verifies it and the installed runtime, and transactionally replaces only the plugin. It preserves the profile manifest, channel, and runtime; a different product/runtime tuple requires `scripts/install.sh`. A running leader keeps its loaded code until its last client exits.
 
 ## Model Experience
 
@@ -161,19 +174,30 @@ Append-only through the owning tool result.
 
 - **Workflows**: `x.ai/workflows/list` returns `{ workflows: [] }`. dsh's workflow engine is per-session and its runs are not enumerated as a global roster; wiring a list here needs an upstream enumeration seam. Decision: keep the honest empty response; revisit when dsh exposes workflow-run discovery (candidate: the workflow engine's session events).
 - **Control plane**: `controlV1: false` and every control command answers a ControlResult error. The dsh backend has no relaunch orchestration (the launcher owns binary updates, eviction converges to version mirror), so GetLeaderInfo/CpuProfileStatus serve no consumer. Decision: leave stubbed; implement only if the TUI starts sending control commands unconditionally.
-- **MCP scope**: MCP servers compose into the profile's `cordis.patch.yml` as global insert entries; their tools are visible to every preset, minimal included. Deliberate: dsh MCP tools register into the host tools registry without a realm. `mcp add` reminds the user of the scope; per-preset isolation is a future refinement, not a current goal.
+- **MCP scope**: ACP-provided stdio and Streamable HTTP servers mount inside the unpublished Agent scope and are disposed with that session. Their tools use stable `mcp__<server>__<tool>` names and appear through the TUI's read-only `/mcps` status modal. `r` re-reads the live registry; server discovery and durable configuration stay TUI-owned, so mutation shortcuts are not advertised.
+- **Skills scope**: `/skills` is a read-only view of the active preset composition. Mutation stays hidden until dsh owns a durable skill-enable setting.
+- **Rewind safety**: `/rewind` never truncates a dsh log. It forks the durable prefix before the selected prompt and adopts the child session, leaving filesystem changes and the source session untouched.
 
 ## Running the tests
 
-The bridge builds and tests against the official npm `@deepseek-ai/dsh-*`
-packages, declared as devDependencies. No deepseek-harness checkout is
-required.
+The bridge's SDK devDependencies and runtime must match `dsh.testedVersion`.
+When that family is published on npm, the normal development commands are:
 
 ```sh
 pnpm install
 pnpm run build
 pnpm exec vitest run
 ```
+
+The current 0.1.3-alpha.1 target is not yet published on npm, so ordinary registry installation and regeneration of the registry lockfile are blocked. Source acceptance uses the matching upstream build and official tarballs installed into an isolated runtime; the bridge is compiled and tested against those actual SDKs, not an older family or edited version strings.
+
+For source-built end-to-end runs, `DSCODE_E2E_DSH_BIN` selects the installed CLI and `DSCODE_E2E_PNPM_CONFIG` supplies its tarball dependency policy. Override only ordinary `parent>dependency` edges and leave SDK peers on native runtime resolution. Global `file:` peer overrides are unsafe: pnpm promotes them to dependencies, creating independent `dsh-scope` instances whose private scope identities do not match.
+
+Source-aware E2Es build or consume the same release payloads by default.
+`DSCODE_RELEASE_DIR` selects an existing payload directory;
+`DSCODE_SOURCE_DIR` and `DSCODE_RUNTIME_CONSUMER` reuse a pinned source checkout
+and its installed SDK consumer. `DSCODE_E2E_PLUGIN_TGZ` selects an explicit packed
+plugin alongside the existing runtime override.
 
 ## License
 

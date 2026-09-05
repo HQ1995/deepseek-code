@@ -69,6 +69,8 @@ pub fn reset_home() {
     let _ = std::fs::remove_file(home.join("config.toml"));
     let _ = std::fs::remove_file(home.join("version.json"));
     let _ = std::fs::remove_file(home.join("version.json.tmp"));
+    let _ = std::fs::remove_file(home.join("dscode-version.json"));
+    let _ = std::fs::remove_file(home.join("dscode-version.json.tmp"));
     let _ = std::fs::remove_dir_all(home.join("bin"));
     let _ = std::fs::remove_dir_all(home.join("downloads"));
     // SAFETY: tests using this helper must be `#[serial]`.

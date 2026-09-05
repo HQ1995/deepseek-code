@@ -11,8 +11,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use tokio::io::AsyncWriteExt;
 
 use crate::version::{
-    UpdateConfig, fetch_latest_version, get_installed_grok_version, get_latest_version,
-    is_version_cache_fresh, public_channel, stable_pointer_for, write_version_cache,
+    UpdateConfig, fetch_latest_version, get_installed_grok_version, is_version_cache_fresh,
+    public_channel, stable_pointer_for, write_version_cache,
 };
 use xai_grok_shell::util::config;
 use xai_grok_shell::util::grok_home::{grok_application, grok_home};
@@ -238,7 +238,10 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
         return Ok(());
     }
 
-    println!("Deepseek Code - v{}{}", status.current_version, channel_label);
+    println!(
+        "Deepseek Code - v{}{}",
+        status.current_version, channel_label
+    );
     Ok(())
 }
 
@@ -261,7 +264,7 @@ pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
         };
     };
 
-    match get_latest_version(inst, update_config).await {
+    match fetch_latest_version(inst, update_config).await {
         // --check shares the updater's decision, so it never advertises a version
         // the policy would skip, clamp away, or can't satisfy.
         Ok(latest) => match plan_for(&config::VersionPolicy::resolve(), latest) {
@@ -281,7 +284,7 @@ pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
                         error = Some(if parse_ok {
                             format!(
                                 "Unsupported release channel '{channel}' (current={current_version}, latest={target}). \
-                                     Supported channels: stable, beta, enterprise."
+                                     Supported channels: stable, beta, alpha, enterprise."
                             )
                         } else {
                             format!(
@@ -364,7 +367,24 @@ async fn fetch_update_plan(
     policy: &config::VersionPolicy,
 ) -> Result<UpdatePlan> {
     let latest = fetch_latest_version(installer, update_config).await?;
-    Ok(plan_for(policy, latest))
+    let plan = plan_for(policy, latest);
+    if installer == "dscode"
+        && let UpdatePlan::Install { target, .. } = &plan
+    {
+        let version = semver::Version::parse(target)?;
+        anyhow::ensure!(
+            version.pre.is_empty()
+                || version
+                    .pre
+                    .as_str()
+                    .split_once('.')
+                    .is_some_and(|(lane, _)| lane == update_config.channel
+                        && matches!(lane, "alpha" | "beta")),
+            "Version policy target {target} is outside the {} channel",
+            update_config.channel
+        );
+    }
+    Ok(plan)
 }
 
 /// Installer + version the leader/background path should converge to: an
@@ -505,9 +525,8 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
 fn disk_version_for_installer(installer: &str) -> Option<String> {
     match installer {
         "internal" | "gh-release" => crate::version::installed_on_disk_version(),
-        // dscode replaces the running executable directly; there is no
-        // versioned download symlink to inspect, so the compiled-in version
-        // is the source of truth.
+        // A TUI symlink alone cannot prove the whole product is current.
+        // After successful delegation, use the exact installed target for relaunch.
         "dscode" => None,
         _ => None,
     }
@@ -594,7 +613,26 @@ fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: boo
                 return Some(true);
             }
         }
-        "alpha" => {}
+        "alpha" | "beta" => {
+            if !target.pre.is_empty()
+                && !target
+                    .pre
+                    .as_str()
+                    .split_once('.')
+                    .is_some_and(|(lane, _)| lane == channel)
+            {
+                return Some(false);
+            }
+            if !current.pre.is_empty()
+                && !current
+                    .pre
+                    .as_str()
+                    .split_once('.')
+                    .is_some_and(|(lane, _)| lane == channel)
+            {
+                return Some(true);
+            }
+        }
         _ => return None,
     }
     Some(if allow_downgrade {
@@ -727,8 +765,14 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
     // Kick off a non-blocking download so the binary is ready when the
     // user restarts (or accepts the in-TUI restart prompt).
     let download = if disk_needs_download {
-        match run_update_subcommand(UpdateRunMode::NonBlocking, CliUpdateTrigger::AutoBackground)
-            .await
+        match run_update_subcommand(
+            UpdateRunMode::NonBlocking,
+            CliUpdateTrigger::AutoBackground,
+            installer,
+            &target_version,
+            update_config,
+        )
+        .await
         {
             Ok(child) => child,
             Err(e) => {
@@ -791,7 +835,8 @@ pub async fn run_update_if_available(
     // Resolve effective auto_update: None defaults to true (first-run).
     let auto_update = current_config.cli.auto_update.unwrap_or(true);
 
-    if current_config.cli.auto_update.is_none()
+    if inst != "dscode"
+        && current_config.cli.auto_update.is_none()
         && let Err(e) = config::update_config(|st| {
             if st.cli.auto_update.is_none() {
                 st.cli.auto_update = Some(true);
@@ -831,7 +876,9 @@ pub async fn run_update_if_available(
             current_version, latest_version, channel_label
         );
         if interactive {
-            if let Err(e) = run_update_subcommand(run_mode, trigger).await {
+            if let Err(e) =
+                run_update_subcommand(run_mode, trigger, inst, &latest_version, update_config).await
+            {
                 eprintln!("Update failed: {}", e);
             } else if matches!(run_mode, UpdateRunMode::Blocking) {
                 return Ok(true);
@@ -839,7 +886,9 @@ pub async fn run_update_if_available(
                 eprintln!("{}", MSG_AUTO_UPDATE_BACKGROUND);
                 return Ok(false);
             }
-        } else if let Err(e) = run_update_subcommand(run_mode, trigger).await {
+        } else if let Err(e) =
+            run_update_subcommand(run_mode, trigger, inst, &latest_version, update_config).await
+        {
             eprintln!("Update failed: {}", e);
         } else if matches!(run_mode, UpdateRunMode::Blocking) {
             return Ok(true);
@@ -865,8 +914,14 @@ pub async fn run_update_if_available(
                 let ans = line.trim().to_ascii_lowercase();
                 if ans.is_empty() || ans == "y" || ans == "yes" {
                     // Accepted prompt = consent, whatever the caller was.
-                    if let Err(e) =
-                        run_update_subcommand(run_mode, CliUpdateTrigger::UserCommand).await
+                    if let Err(e) = run_update_subcommand(
+                        run_mode,
+                        CliUpdateTrigger::UserCommand,
+                        inst,
+                        &latest_version,
+                        update_config,
+                    )
+                    .await
                     {
                         eprintln!("Update failed: {}", e);
                     } else if matches!(run_mode, UpdateRunMode::Blocking) {
@@ -903,13 +958,18 @@ pub async fn run_update_if_available(
 async fn run_update_subcommand(
     run_mode: UpdateRunMode,
     trigger: CliUpdateTrigger,
+    installer: &str,
+    target: &str,
+    update_config: &UpdateConfig,
 ) -> Result<Option<tokio::process::Child>> {
-    let exe = std::env::current_exe()?;
-    let mut cmd = tokio::process::Command::new(exe);
-    // One trigger representation end to end: the enum crosses the process
-    // boundary as --trigger=<value> (FromStr on the other side).
-    cmd.arg("update");
-    cmd.arg(format!("--trigger={}", trigger.as_str()));
+    let mut cmd = if installer == "dscode" {
+        dscode_update_command(target, &update_config.channel)?
+    } else {
+        let mut cmd = tokio::process::Command::new(std::env::current_exe()?);
+        cmd.arg("update");
+        cmd.arg(format!("--trigger={}", trigger.as_str()));
+        cmd
+    };
     // Hand the resolved telemetry mode to the child, which cannot see the
     // remote-settings layer (requirement pins still beat env). None at the
     // startup spawns — they run before the settings prefetch, when this
@@ -1027,12 +1087,23 @@ pub async fn run_install_script(
         )
         .map(|()| None),
         "gh-release" => install_gh_release(target).await.map(|()| None),
-        "dscode" => install_dscode_release(target, &update_config.channel).await.map(|()| None),
+        "dscode" => install_dscode_release(target, &update_config.channel)
+            .await
+            .map(|()| None),
         _ => install_internal(target, update_config).await.map(Some),
     };
     // Before the success-only cache sweep, so it cannot inflate successes.
     let duration_ms = started.elapsed().as_millis() as u64;
     if result.is_ok() {
+        if installer != "dscode" {
+            config::update_config(|st| {
+                st.cli.installer = Some(installer.to_string());
+                st.cli.channel = Some(update_config.channel.clone());
+                st.cli.channel_format = Some(1);
+            })
+            .await
+            .context("Failed to remember the successful installation")?;
+        }
         remove_stale_models_cache().await;
     }
     let (outcome, error_kind) = match &result {
@@ -2550,76 +2621,59 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Download and install dscode from the deepseek-code GitHub Releases.
-///
-/// This is the self-update path for the dscode fork: it fetches the stable
-/// release asset (`dscode-<os>-<arch>`) directly from
-/// `HQ1995/deepseek-code` and atomically replaces the currently running
-/// executable. It does not use the x.ai CDN or require the `gh` CLI.
-#[doc(hidden)]
+/// Delegate whole-product preparation and commit to the profile launcher.
 pub async fn install_dscode_release(target: Option<&str>, channel: &str) -> Result<()> {
-    let (os, arch) = detect_platform()?;
-    let version = match target {
+    let version = resolve_dscode_target(target, channel).await?;
+    let status = dscode_update_command(&version, channel)?
+        .status()
+        .await
+        .context("Failed to start the dscode product launcher")?;
+    anyhow::ensure!(
+        status.success(),
+        "dscode product update failed with {status}"
+    );
+    Ok(())
+}
+
+async fn resolve_dscode_target(target: Option<&str>, channel: &str) -> Result<String> {
+    match target {
         Some(v) => {
             semver::Version::parse(v)
                 .map_err(|_| anyhow::anyhow!("invalid version format: '{}'", v))?;
-            v.to_string()
+            Ok(v.to_string())
         }
-        None => crate::version::fetch_dscode_release_version(channel).await?,
-    };
+        None => crate::version::fetch_dscode_release_version(channel).await,
+    }
+}
 
-    let asset_name = if cfg!(windows) {
-        format!("dscode-{}-{}.exe", os, arch)
-    } else {
-        format!("dscode-{}-{}", os, arch)
-    };
-
-    let exe = std::env::current_exe()
-        .context("cannot locate the running dscode executable")?;
-    let dest = std::fs::canonicalize(&exe).unwrap_or(exe);
-    let tmp = tmp_download_path(&dest);
-    let url = crate::version::dscode_release_download_url(&version, &asset_name);
-
-    eprintln!(
-        "  Downloading dscode v{} ({}) from GitHub Releases...",
-        version, asset_name
+fn dscode_update_command(version: &str, channel: &str) -> Result<tokio::process::Command> {
+    semver::Version::parse(version).context("Invalid dscode target version")?;
+    anyhow::ensure!(
+        matches!(channel, "stable" | "beta" | "alpha" | "enterprise"),
+        "Unsupported release channel: {channel}"
     );
-    download_with_progress(&url, &tmp).await?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).await?;
+    let launcher = grok_home().join("node_modules/@hqzhao95/dscode/bin/dscode.mjs");
+    let mut command = if launcher.is_file() {
+        let mut command = tokio::process::Command::new("node");
+        command.arg(launcher);
+        command
+    } else {
+        let mut command = tokio::process::Command::new("npx");
+        command
+            .arg("--yes")
+            .arg(format!("@hqzhao95/dscode@{version}"));
+        command
+    };
+    command
+        .arg("update")
+        .arg("--version")
+        .arg(version)
+        .arg(format!("--{channel}"));
+    command.env("DSCODE_HOME", grok_home());
+    if let Ok(executable) = std::env::current_exe() {
+        command.env("DSCODE_LEGACY_BIN", executable);
     }
-
-    if let Err(e) = smoke_test_binary(&tmp).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(e.into());
-    }
-
-    #[cfg(unix)]
-    {
-        publish_downloaded_artifact(&tmp, &dest).await?;
-    }
-    #[cfg(windows)]
-    {
-        windows_replace_exe(&tmp, &dest).await?;
-        let _ = tokio::fs::remove_file(&tmp).await;
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        anyhow::bail!("Unsupported platform for dscode self-update");
-    }
-
-    // Remember the dscode installer so future auto-update checks use the
-    // same GitHub Releases source instead of falling back to x.ai.
-    let _ = config::update_config(|st| {
-        st.cli.installer = Some("dscode".to_string());
-    })
-    .await;
-
-    eprintln!("  ✓ dscode v{} installed successfully!", version);
-    Ok(())
+    Ok(command)
 }
 
 /// Creates a temporary .npmrc file with the NPM token if present.
@@ -2776,16 +2830,11 @@ pub async fn apply_channel_switch(
     update_config: &mut UpdateConfig,
 ) -> Result<()> {
     if let Some(ch) = channel_switch {
-        let changed = update_config.channel != ch;
-        config::update_config(|st| {
-            st.cli.channel = Some(ch.to_string());
-        })
-        .await
-        .context("Failed to remember the release channel")?;
+        anyhow::ensure!(
+            matches!(ch, "stable" | "beta" | "alpha" | "enterprise"),
+            "Unsupported release channel: {ch}"
+        );
         update_config.channel = ch.to_string();
-        if changed {
-            eprintln!("Switched to {} channel.", public_channel(ch));
-        }
     }
     Ok(())
 }
@@ -2813,16 +2862,10 @@ pub async fn run_update(
             return Ok(None);
         }
     };
-    // Persist installer if not already saved
-    let cfg = config::load_config().await;
-    if cfg.cli.installer.is_none() {
-        let _ = config::update_config(|st| {
-            st.cli.installer = Some(installer.to_string());
-        })
-        .await;
+    // Product updates let the launcher commit all settings only after success.
+    if installer != "dscode" {
+        heal_managed_install(installer).await;
     }
-
-    heal_managed_install(installer).await;
 
     let current_version = get_installed_grok_version();
     let policy = config::VersionPolicy::resolve();
@@ -2839,10 +2882,11 @@ pub async fn run_update(
         eprintln!();
         run_install_script(installer, Some(version), update_config, trigger).await?;
         refresh_deployment_config().await;
-        if let Err(e) = config::update_config(|st| {
-            st.cli.auto_update = Some(false);
-        })
-        .await
+        if installer != "dscode"
+            && let Err(e) = config::update_config(|st| {
+                st.cli.auto_update = Some(false);
+            })
+            .await
         {
             tracing::warn!("Failed to persist auto_update=false for pinned install: {e}");
         }
@@ -2897,7 +2941,7 @@ pub async fn run_update(
     let effective_current =
         disk_version_for_installer(installer).unwrap_or_else(|| current_version.clone());
 
-    if !force {
+    if !force && !(installer == "dscode" && channel_switch.is_some()) {
         match needs_update(
             &effective_current,
             &install_target,
@@ -2934,8 +2978,8 @@ pub async fn run_update(
                 if parse_ok {
                     anyhow::bail!(
                         "Unsupported release channel '{}' (current={}, target={}). \
-                         Supported channels: stable, beta, enterprise. \
-                         Use --stable or --beta to override.",
+                         Supported channels: stable, beta, alpha, enterprise. \
+                         Use --stable, --beta or --alpha to override.",
                         update_config.channel,
                         effective_current,
                         install_target
@@ -2952,6 +2996,7 @@ pub async fn run_update(
     }
 
     let target_version = if force
+        && installer != "dscode"
         && !needs_update(
             &effective_current,
             &install_target,

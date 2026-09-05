@@ -171,6 +171,8 @@ pub(crate) fn build_goal_updated(
 
     XaiSessionUpdate::GoalUpdated {
         goal_id: o.goal_id.clone(),
+        native_goal: None,
+        is_snapshot: None,
         objective: o.objective.clone(),
         status: status_str.to_owned(),
         phase: phase_str.to_owned(),
@@ -231,6 +233,8 @@ pub(crate) fn build_goal_updated(
 pub(crate) fn build_goal_cleared() -> XaiSessionUpdate {
     XaiSessionUpdate::GoalUpdated {
         goal_id: String::new(),
+        native_goal: None,
+        is_snapshot: None,
         objective: String::new(),
         status: "cleared".to_owned(),
         phase: "idle".to_owned(),

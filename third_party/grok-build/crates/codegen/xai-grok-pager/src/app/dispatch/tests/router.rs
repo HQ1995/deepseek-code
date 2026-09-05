@@ -2293,6 +2293,66 @@ fn show_tasks_lists_a_scheduled_task() {
     assert!(text.contains("scheduled"), "got: {text:?}");
 }
 #[test]
+fn show_tasks_preserves_native_and_legacy_status_labels() {
+    use crate::app::agent::{BgTaskStatus, NativeTaskInfo};
+
+    for (native_status, status, expected) in [
+        (Some("killed"), BgTaskStatus::Failed, "killed"),
+        (Some("failed"), BgTaskStatus::Failed, "failed"),
+        (Some("completed"), BgTaskStatus::Done, "completed"),
+        (None, BgTaskStatus::Running, "running"),
+        (None, BgTaskStatus::Done, "done"),
+        (None, BgTaskStatus::Failed, "failed"),
+    ] {
+        let mut app = test_app_with_agent();
+        let mut task = make_bg_task("t1");
+        task.status = status;
+        task.native_task = native_status.map(|status| NativeTaskInfo {
+            status: status.into(),
+            kind: "bash".into(),
+            detail: None,
+            output_available: false,
+        });
+        assert_eq!(task.status_label(), expected);
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .bg_tasks
+            .insert("t1".into(), task);
+
+        dispatch(Action::ShowTasks, &mut app);
+        let text = last_system_text(&app, AgentId(0));
+        let row = text.lines().nth(1).unwrap();
+        assert_eq!(
+            row.split_whitespace().take(2).collect::<Vec<_>>(),
+            [expected, "Task"]
+        );
+    }
+}
+
+#[test]
+fn show_tasks_separates_cancelled_status_from_type() {
+    let mut app = test_app_with_agent();
+    let mut subagent = make_test_subagent("child", "sa1");
+    subagent.subagent_type = Arc::from("continuable");
+    subagent.finished = true;
+    subagent.status = Some("cancelled".into());
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .subagent_sessions
+        .insert("child".into(), subagent);
+
+    dispatch(Action::ShowTasks, &mut app);
+    let text = last_system_text(&app, AgentId(0));
+    assert!(
+        text.contains("cancelled Continuable · test subagent"),
+        "got: {text:?}"
+    );
+}
+
+#[test]
 fn show_tasks_no_active_agent_is_noop() {
     let mut app = test_app();
     let effects = dispatch(Action::ShowTasks, &mut app);

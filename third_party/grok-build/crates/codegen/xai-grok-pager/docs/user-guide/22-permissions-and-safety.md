@@ -17,7 +17,7 @@ Modes set a baseline. Allow, ask, and deny [rules](#configuring-permissions) sti
 
 | Situation | Mode |
 | --------- | ---- |
-| Interactive TUI | Default (ask), or auto for fewer prompts with background checks |
+| Interactive TUI | Default (ask); auto permission classification is unsupported in dscode |
 | Scripts, SDKs, CI, agent servers | Always-approve; add [deny rules](#configuring-permissions) or hooks for hard limits |
 
 ```bash
@@ -35,21 +35,20 @@ ACP clients can set `"_meta": { "yoloMode": true }` on `session/new`. See [Agent
 | `default` (**ask**) | Read-only tools and built-in read-only shell commands | Interactive day-to-day use |
 | `acceptEdits` | File edits without a prompt | Local coding while you review diffs later |
 | `plan` | Accepted for compatibility; use [plan mode](19-plan-mode.md) for gated planning | Claude-compatible settings |
-| `auto` | Work the safety check allows; other calls are blocked or escalated | Interactive sessions that want fewer prompts |
+| `auto` | Unsupported in dscode | Not available; unrelated to autonomous goals |
 | `dontAsk` | Only pre-approved tools and built-in read-only handling | Strict CI allowlists |
 | `bypassPermissions` (**always-approve**) | Tool calls in general (`deny` rules, hooks, and some shell `ask` rules still apply) | Trusted automation and agent servers |
 
-**Always-approve** is the product name; config and Claude-compatible settings may use `bypassPermissions` for the same mode. Always-approve and auto are mutually exclusive (always-approve takes precedence when both are requested).
+**Always-approve** is the product name; config and Claude-compatible settings may use `bypassPermissions` for the same mode. It is distinct from auto permission classification, which dscode does not support.
 
 ### How to set the mode
 
-**Interactive TUI:** `Shift+Tab` / `Ctrl+O`, `/always-approve` or `/auto`, or `/settings` ([shortcuts](03-keyboard-shortcuts.md), [commands](04-slash-commands.md)).
+**Interactive TUI:** `Shift+Tab` / `Ctrl+O`, `/always-approve`, or `/settings` ([shortcuts](03-keyboard-shortcuts.md), [commands](04-slash-commands.md)). `/auto` is unsupported and does not control goals.
 
 **CLI:**
 
 ```bash
 grok --always-approve -p "Run the test suite"
-grok --permission-mode auto
 grok agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
 ```
 
@@ -57,7 +56,7 @@ grok agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
 
 ```toml
 [ui]
-permission_mode = "always-approve"   # or "auto", "ask", …
+permission_mode = "always-approve"   # or "ask", …
 ```
 
 Claude-compatible `defaultMode` in `.claude/settings.json` is also supported (see [Claude-compatible settings](#3-claude-code-compatibility-claudesettingsjson)). CLI overrides config for that process.
@@ -97,9 +96,9 @@ Deny always wins over allow and over always-approve’s normal pass-through. See
 
 ### Auto mode
 
-Reduces interactive prompts by checking many tool calls before they run. Routine local work often proceeds; other calls may be blocked or escalated. In non-interactive sessions, a blocked call fails and is reported to the model (for example `Auto mode blocked this action …`). Behavior is the same for `grok -p`, `agent stdio`, and `agent serve`.
+Auto mode is a permission classifier, not autonomous goal execution. It is unsupported in dscode: `/auto` is unavailable, and native goals use `/goal` without changing the permission mode.
 
-For automation that must run tools without interactive approval, use always-approve (and deny rules if you need hard blocks) rather than auto alone.
+Use ask mode for interactive approval, or explicitly choose always-approve for trusted automation (with deny rules where hard limits are needed).
 
 ### Disable always-approve (administrators)
 

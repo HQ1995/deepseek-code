@@ -524,6 +524,47 @@ pub(super) fn dispatch_send_prompt_inner(
         return vec![];
     }
 
+    // Native goal controls are session RPCs, never model turns or queued prompts.
+    if !literal && let Some(invocation) = crate::slash::parse_invocation(trimmed) {
+        if invocation.token.eq_ignore_ascii_case("auto") {
+            if consume_input {
+                agent.prompt.set_text("");
+            }
+            push_and_page_flip(
+                &mut agent.scrollback,
+                RenderBlock::system(
+                    "/auto is unsupported: the permission classifier is not available in dscode.",
+                ),
+            );
+            return vec![];
+        }
+        if invocation.token.eq_ignore_ascii_case("goal") {
+            let Some(session_id) = agent.session.session_id.clone() else {
+                agent.show_toast("No active session");
+                return vec![];
+            };
+            let images = if consume_input {
+                interject::record_interject_prompt_history(agent, &text);
+                agent.prompt.drain_images()
+            } else {
+                Vec::new()
+            };
+            let prompt = crate::prompt_images::build_content_blocks_with_workspace(
+                text,
+                images,
+                Some(std::path::Path::new(&agent.session.cwd)),
+            );
+            if consume_input {
+                agent.prompt.set_text("");
+            }
+            return vec![Effect::RunGoalCommand {
+                agent_id: id,
+                session_id,
+                prompt,
+            }];
+        }
+    }
+
     // ── Registry-based slash command execution ─────────────────────
     // If the text starts with `/`, run it through the slash registry.
     // The registry resolves builtins, ACP-advertised commands, and

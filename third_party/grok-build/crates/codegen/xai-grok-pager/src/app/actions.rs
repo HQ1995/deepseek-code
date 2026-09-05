@@ -1973,6 +1973,12 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
+    /// Execute a native goal control independently of the active model turn.
+    RunGoalCommand {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        prompt: Vec<acp::ContentBlock>,
+    },
     /// Fetch and display session info via x.ai/session/info.
     /// Auth lines are derived in the effect from SessionFlags + env (not Effect fields).
     ShowSessionInfo {
@@ -2755,6 +2761,12 @@ pub enum TaskResult {
     ShareSessionFailed {
         agent_id: AgentId,
         error: String,
+    },
+    /// Native goal control output; never settles a model prompt.
+    GoalCommandComplete {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        result: Result<String, String>,
     },
     /// Session info fetched successfully.
     SessionInfoComplete {

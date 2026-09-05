@@ -821,7 +821,7 @@ mod tests {
         let cfg = default_config();
         let mut mgr = TitleManager::new(&cfg);
         mgr.update(&idle_state());
-        assert_eq!(mgr.last_title, "grok");
+        assert_eq!(mgr.last_title, "dscode");
     }
 
     // --- Multi-item combinations ---

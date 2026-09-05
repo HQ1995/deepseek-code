@@ -562,7 +562,10 @@ fn top_level_row(
         pinned,
         is_active,
         badges,
-        context_pct: agent.context_state.as_ref().map(|c| c.usage_pct),
+        context_pct: agent
+            .context_state
+            .as_ref()
+            .and_then(|c| (c.capacity_available != Some(false)).then_some(c.usage_pct)),
         indent: 0,
         parent_label: None,
         is_more_placeholder: false,
@@ -1845,6 +1848,7 @@ mod tests {
     fn bg_badge_only_for_running_tasks() {
         use crate::app::agent::{BgTaskState, BgTaskStatus};
         let make_task = |status: BgTaskStatus| BgTaskState {
+            native_task: None,
             task_id: "t1".into(),
             tool_call_id: String::new(),
             command: "sleep 99".into(),
@@ -1886,6 +1890,7 @@ mod tests {
     /// A running background task (`run_terminal_command background=true`).
     fn running_bg_task(task_id: &str, is_monitor: bool) -> crate::app::agent::BgTaskState {
         crate::app::agent::BgTaskState {
+            native_task: None,
             task_id: task_id.into(),
             tool_call_id: String::new(),
             command: "sleep 99".into(),

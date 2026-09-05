@@ -7,6 +7,7 @@
  * @module dscode/projection
  */
 import type { TurnEndReason, SessionEvent } from '@deepseek-ai/dsh-session'
+import { expandAssistantStream, type StreamChunk, type TokenUsage } from '@deepseek-ai/dsh-llm'
 
 /** The grok StopReason vocabulary (agent.rs StopReason). */
 export type StopReasonWire = 'end_turn' | 'max_tokens' | 'cancelled'
@@ -23,6 +24,61 @@ export type GrokSessionUpdate =
 export type ProjectedUpdate = GrokSessionUpdate & {
   totalTokens?: number
   cacheHitPercent?: string
+}
+
+/** Released token-meter values: usage is cumulative; pressure is next-request occupancy. */
+export interface ContextProjectionValues {
+  tokenUsage?: { uncachedInputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }
+  contextPressure?: { projectedTokens?: number; contextWindow?: number }
+  contextBreakdown?: { systemTokens: number; toolsTokens: number; messageTokens: number }
+}
+
+export function contextInfoFromProjection(values: ContextProjectionValues): Record<string, unknown> {
+  const used = values.contextPressure?.projectedTokens
+  const total = values.contextPressure?.contextWindow
+  const breakdown = values.contextBreakdown
+  return {
+    available: used !== undefined,
+    capacityAvailable: total !== undefined,
+    breakdownAvailable: breakdown !== undefined,
+    autoCompactThresholdAvailable: false,
+    ...used === undefined ? {} : { used },
+    ...total === undefined ? {} : { total },
+    ...used === undefined || total === undefined ? {} : {
+      freeTokens: Math.max(0, total - used),
+      ...total <= 0 ? {} : { usagePct: Math.round(used / total * 100) },
+    },
+    ...breakdown === undefined ? {} : {
+      breakdownApproximate: true,
+      systemPromptTokens: breakdown.systemTokens,
+      toolDefinitionsTokens: breakdown.toolsTokens,
+      messageTokens: breakdown.messageTokens,
+    },
+  }
+}
+
+export interface NativeGoalView {
+  id: string
+  revision: number
+  objective: string
+  phase: 'active' | 'paused' | 'blocked' | 'complete'
+  activation: 'armed' | 'disarmed'
+  roundsStarted: number
+  maxGoalRounds: number
+  blockedReason?: { code: string; message: string }
+}
+
+export function goalUpdateFromView(goal: NativeGoalView): Record<string, unknown> {
+  return {
+    sessionUpdate: 'goal_updated', goal_id: goal.id, objective: goal.objective,
+    status: goal.phase === 'active' ? goal.activation : goal.phase === 'paused' ? 'user_paused' : goal.phase,
+    phase: 'idle',
+    native_goal: {
+      revision: goal.revision, phase: goal.phase, activation: goal.activation,
+      rounds_started: goal.roundsStarted, max_goal_rounds: goal.maxGoalRounds,
+      ...goal.blockedReason === undefined ? {} : { reason: goal.blockedReason },
+    },
+  }
 }
 
 /** grok ACP ToolKind vocabulary the TUI renders for a tool call. */
@@ -127,23 +183,43 @@ export function cacheHitPercent(
   }
   return `99.${'9'.repeat(decimalPlaces - 1)}${10 - roundedLoss}`
 }
+/** Map native live or expanded durable chunks; tool execution uses tool/call. */
+export function assistantChunkToUpdates(
+  chunk: StreamChunk,
+): Array<GrokSessionUpdate> {
+  if (!('text' in chunk) || chunk.text.length === 0) return []
+  if (chunk.type === 'text-delta') {
+    return [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk.text } }]
+  }
+  if (chunk.type === 'reasoning-delta') {
+    return [{ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: chunk.text } }]
+  }
+  return []
+}
+
+/** Native token-meter precedence: explicit usage, otherwise last stream sample. */
+export function assistantEventUsage(event: SessionEvent): TokenUsage | undefined {
+  if (event.type === 'assistant/message' && event.data.usage !== undefined) return event.data.usage
+  if (event.type !== 'assistant/message' && event.type !== 'assistant/attempt') return undefined
+  // Usage records are never delta-compacted, so no expansion/allocation is needed.
+  for (let index = event.data.stream.length - 1; index >= 0; index -= 1) {
+    const record = event.data.stream[index]!
+    if (record.type === 'chunk' && record.chunk.type === 'usage') return record.chunk.usage
+  }
+  return undefined
+}
 
 /**
- * Map one harness session event to the streaming deltas the grok client
- * renders. Assistant text and reasoning stream from assistant/chunk deltas;
- * the assembled assistant/message is a fallback for providers that never
- * streamed. Tool calls and tool results stream; user messages map only on
- * replay because the bridge echoes the accepted prompt itself.
- * @param event - harness session event.
- * @param options.replay - true while replaying a persisted transcript.
- * @param options.textStreamed - true once this step already streamed its text.
- * @returns zero or more wire-shaped updates.
+ * Map native durable settlements to TUI deltas. The embedded stream preserves
+ * reasoning and failed-attempt content; dense positions already delivered live
+ * are skipped. Tool calls/results remain owned by their durable execution events.
+ * Empty streams are native seeded messages and use their assembled content.
  */
 export function sessionEventToUpdates(
   event: SessionEvent,
   options: {
     replay: boolean
-    textStreamed: boolean
+    streamedChunks?: ReadonlySet<number>
     toolCall?: (callId: string) => { name: string; arguments: unknown } | undefined
   },
 ): Array<GrokSessionUpdate> {
@@ -157,25 +233,18 @@ export function sessionEventToUpdates(
         content,
       }))
     }
-    case 'assistant/chunk': {
-      const chunk = event.data.chunk as { type?: string; text?: string }
-      if (typeof chunk.text !== 'string' || chunk.text.length === 0) return []
-      if (chunk.type === 'text-delta') {
-        return [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk.text } }]
-      }
-      if (chunk.type === 'reasoning-delta') {
-        return [{ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: chunk.text } }]
-      }
-      return []
-    }
+    case 'assistant/attempt':
     case 'assistant/message': {
-      // Text deltas already streamed this step; re-emitting the assembled
-      // content would duplicate them in the TUI. Keep it only as the fallback.
-      if (options.textStreamed) return []
-      return textBlocks(event.data.message.content).map(content => ({
-        sessionUpdate: 'agent_message_chunk',
-        content,
-      }))
+      if (event.data.stream.length > 0) {
+        return expandAssistantStream(event.data.stream).flatMap(({ chunk }, index) =>
+          options.streamedChunks?.has(index) === true ? [] : assistantChunkToUpdates(chunk))
+      }
+      if (event.type === 'assistant/attempt') return []
+      return event.data.message.content.flatMap(block => {
+        if (block.type === 'text') return assistantChunkToUpdates({ type: 'text-delta', index: 0, text: block.text })
+        if (block.type === 'reasoning') return assistantChunkToUpdates({ type: 'reasoning-delta', index: 0, text: block.text })
+        return []
+      })
     }
     case 'tool/call': {
       const args = parseJsonObject(event.data.arguments)

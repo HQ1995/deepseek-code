@@ -905,6 +905,23 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::GoalCommandComplete {
+            agent_id,
+            session_id,
+            result,
+        } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                if agent.session.session_id.as_ref() != Some(&session_id) {
+                    return vec![];
+                }
+                let text = result.unwrap_or_else(|error| format!("Goal command failed: {error}"));
+                push_and_page_flip(
+                    &mut agent.scrollback,
+                    crate::scrollback::block::RenderBlock::system(text),
+                );
+            }
+            vec![]
+        }
         TaskResult::SessionInfoComplete {
             agent_id,
             session_id,

@@ -1,17 +1,8 @@
 use semver::Version;
 use toml::Value as TomlValue;
 
-/// Machine-readable channel name derived from the cached stable release.
-///
-/// Reads `stable_version` from the dscode product home's
-/// `dscode-version.json` (written by the auto-updater) and compares the
-/// compiled-in version against it:
-/// - `Some("beta")` when the current version is ahead of stable,
-/// - `Some("stable")` when at or behind stable,
-/// - `None` when no cached pointer is available (first launch, old cache).
-///
-/// This is a lightweight duplicate of `xai_grok_update::channel_name()` for
-/// use in `xai-grok-shell` which cannot depend on `xai-grok-update`.
+/// Product prerelease channel, matching `xai_grok_update::channel_name()` without
+/// introducing a dependency cycle or requiring a populated version cache.
 pub(crate) fn channel_name_from_cache() -> Option<&'static str> {
     use std::sync::OnceLock;
     static NAME: OnceLock<Option<&'static str>> = OnceLock::new();
@@ -19,18 +10,18 @@ pub(crate) fn channel_name_from_cache() -> Option<&'static str> {
         if xai_grok_version::VERSION.contains("-dev") {
             return None;
         }
-        let version_path = crate::util::grok_home::grok_home().join("dscode-version.json");
-        let content = std::fs::read_to_string(&version_path).ok()?;
-        let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
-        let stable = parsed.get("stable_version")?.as_str()?;
-        channel_name_for_versions(xai_grok_version::VERSION, stable)
+        channel_name_for_versions(xai_grok_version::VERSION, "0.0.0")
     })
 }
 
 fn channel_name_for_versions(current: &str, stable: &str) -> Option<&'static str> {
     let current = semver::Version::parse(current).ok()?;
-    let stable = semver::Version::parse(stable).ok()?;
-    Some(if current > stable { "beta" } else { "stable" })
+    semver::Version::parse(stable).ok()?;
+    Some(match current.pre.as_str().split('.').next() {
+        Some("alpha") => "alpha",
+        Some("beta") => "beta",
+        _ => "stable",
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -305,6 +296,10 @@ mod tests {
         assert_eq!(
             channel_name_for_versions("0.0.11-beta.1", "0.0.10"),
             Some("beta")
+        );
+        assert_eq!(
+            channel_name_for_versions("0.0.11-alpha.1", "0.0.12"),
+            Some("alpha")
         );
         assert_eq!(
             channel_name_for_versions("0.0.10", "0.0.10"),

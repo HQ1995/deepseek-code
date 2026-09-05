@@ -5,6 +5,7 @@
 # Channels are encoded in the version itself:
 #   0.0.5         -> stable release (marked latest; /releases/latest serves it)
 #   0.0.6-beta.1  -> beta prerelease (only the beta channel resolves it)
+#   0.0.6-alpha.1 -> independent alpha prerelease (npm alpha)
 #
 # Usage:
 #   scripts/release.sh            # release $(cat VERSION)
@@ -12,12 +13,12 @@
 #
 # Consumers of the published artifacts:
 #   - scripts/install.sh / npx launcher (dscode-linux-x86_64 + dscode-macos-aarch64)
-#   - dscode update (xai-grok-update install_dscode_release)
+#   - managed dscode update (one exact plugin/TUI/runtime tuple)
 #
 # This script can run on Linux or macOS. It builds the native TUI as a local
 # preflight, creates the draft release with metadata assets, and waits for CI
-# (.github/workflows/release.yml) to upload both platform binaries before
-# publishing npm. CI is the sole platform-asset uploader so users never see
+# (.github/workflows/release.yml) to upload both platforms' required payloads
+# before publishing npm. CI is the sole platform-asset uploader so users never see
 # mixed files while duplicate uploads are being clobbered.
 set -euo pipefail
 
@@ -40,8 +41,9 @@ if [[ "$PACKAGE_VERSION" != "$VERSION" ]]; then
   echo "error: VERSION ($VERSION) and bridge package version ($PACKAGE_VERSION) differ" >&2
   exit 1
 fi
+CHANNEL="$(node "$ROOT/scripts/build-release-payload.mjs" --channel --version "$VERSION")"
 PUBLISH_FLAGS=(--latest)
-[[ "$VERSION" == *-* ]] && PUBLISH_FLAGS=(--prerelease)
+[[ "$CHANNEL" != stable ]] && PUBLISH_FLAGS=(--prerelease)
 
 if [[ "$DRY_RUN" == 0 ]]; then
   if ! command -v gh >/dev/null 2>&1; then
@@ -106,23 +108,11 @@ echo "  bundled $(basename "$LICENSES")"
 # materializes exactly this release's binary. Plugin-native install:
 #   dsh plugin --profile dscode add \
 #     https://github.com/HQ1995/deepseek-code/releases/latest/download/dscode-plugin.tgz
-echo "  building the plugin tarball..."
-( cd "$ROOT/bridge/grok-leader" && dscode_pnpm install --silent && dscode_pnpm run --silent build )
-plugin_stage="$(mktemp -d)"
-cp -r "$ROOT/bridge/grok-leader/lib" "$ROOT/bridge/grok-leader/src" \
-      "$ROOT/bridge/grok-leader/bin" "$plugin_stage/"
-cp "$ROOT/bridge/grok-leader/cordis.patch.yml" "$plugin_stage/"
-python3 - "$ROOT/bridge/grok-leader/package.json" "$plugin_stage/package.json" "$VERSION" <<'PY'
-import json, sys
-pkg = json.load(open(sys.argv[1]))
-pkg["version"] = sys.argv[3]
-pkg["dscode"] = {"release": sys.argv[3]}
-json.dump(pkg, open(sys.argv[2], "w"), indent=2)
-PY
-( cd "$plugin_stage" && npm pack --silent --pack-destination "$DIST" >/dev/null )
-mv "$DIST"/hqzhao95-dscode-*.tgz "$DIST/dscode-plugin.tgz"
-rm -rf "$plugin_stage"
-echo "  bundled dscode-plugin.tgz (pinned to $VERSION)"
+echo "  building release payloads from the pinned SDK..."
+payload_args=(--version "$VERSION" --out "$DIST")
+[[ -n "${DSCODE_SOURCE_DIR:-}" ]] && payload_args+=(--source "$DSCODE_SOURCE_DIR")
+[[ -n "${DSCODE_RUNTIME_CONSUMER:-}" ]] && payload_args+=(--consumer "$DSCODE_RUNTIME_CONSUMER")
+node "$ROOT/scripts/build-release-payload.mjs" "${payload_args[@]}"
 
 if [[ "$DRY_RUN" == 1 ]]; then
   echo "dry run: artifacts staged in $DIST; no tag or release created"
@@ -133,12 +123,12 @@ git -C "$ROOT" tag -a "$TAG" -m "deepseek-code $TAG"
 git -C "$ROOT" push origin "$TAG"
 # CI is the sole owner of platform assets. Concurrent host + CI uploads replace
 # the raw, checksum, and gzip files separately and can expose a mixed asset set.
-gh_files=("$LICENSES" "$DIST/dscode-plugin.tgz")
+gh_files=("$LICENSES" "$DIST/dscode-plugin.tgz" "$DIST/dscode-plugin.tgz.sha256")
 release_args=(
   --repo "$RELEASE_REPO"
   --title "deepseek-code $TAG"
   --draft
-  --notes "deepseek-code $TAG (channel: $([[ "$VERSION" == *-* ]] && echo beta || echo stable))
+  --notes "deepseek-code $TAG (channel: $CHANNEL)
 
 Prebuilt TUI: Linux x86_64 (\`dscode-linux-x86_64\`) and macOS Apple Silicon (\`dscode-macos-aarch64\`).
 
@@ -150,10 +140,9 @@ fi
 gh release create "$TAG" "${release_args[@]}" "${gh_files[@]}"
 echo "created draft release $TAG"
 
-echo "  waiting for CI to attach both platform binaries and checksums..."
+echo "  waiting for CI to attach both platforms' complete release payloads..."
 deadline=$((SECONDS + 2400))
-for asset in "${DSCODE_REQUIRED_ASSETS[@]}"; do
-  for required in "$asset" "$asset.sha256" "$asset.gz"; do
+while IFS= read -r required; do
     while ! gh release view "$TAG" --repo "$RELEASE_REPO" --json assets --jq '.assets[].name' \
       | grep -Fxq "$required"; do
       if (( SECONDS >= deadline )); then
@@ -165,8 +154,7 @@ for asset in "${DSCODE_REQUIRED_ASSETS[@]}"; do
       sleep 20
     done
     echo "    $required ready"
-  done
-done
+done < <(node "$ROOT/scripts/build-release-payload.mjs" --assets --version "$VERSION")
 
 gh release edit "$TAG" --repo "$RELEASE_REPO" --draft=false "${PUBLISH_FLAGS[@]}"
 echo "published $TAG with complete platform assets"

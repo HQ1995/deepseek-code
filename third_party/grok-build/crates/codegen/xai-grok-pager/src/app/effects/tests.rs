@@ -1,6 +1,69 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
+#[test]
+fn native_goal_response_requires_native_kind_and_text() {
+    assert_eq!(parse_goal_command_result(r#"{"result":{"kind":"success","text":"Goal paused."}}"#), Ok("Goal paused.".into()));
+    assert_eq!(parse_goal_command_result(r#"{"result":{"kind":"error","text":"Images require an objective."}}"#), Err("Images require an objective.".into()));
+    for raw in [
+        "not json", "null", "{}", r#"{"result":null}"#,
+        r#"{"result":{"kind":"success"}}"#,
+        r#"{"result":{"kind":"success","text":null}}"#,
+        r#"{"result":{"kind":"success","text":42}}"#,
+        r#"{"result":{"text":"Goal paused."}}"#,
+        r#"{"result":{"kind":42,"text":"Goal paused."}}"#,
+        r#"{"error":"unavailable"}"#,
+    ] {
+        assert!(parse_goal_command_result(raw).is_err(), "accepted malformed goal result: {raw}");
+    }
+}
+
+#[tokio::test]
+async fn native_goal_effect_uses_control_wire_and_dedicated_result() {
+    use std::sync::Arc;
+    use xai_acp_lib::AcpAgentMessage;
+    for (raw, expected) in [
+        (r#"{"result":{"kind":"success","text":"Goal paused."}}"#, Ok("Goal paused.".to_string())),
+        (r#"{"result":{"kind":"error","text":"native refusal"}}"#, Err("native refusal".to_string())),
+        (r#"{"result":{"kind":"success"}}"#, Err("invalid goal command response".to_string())),
+    ] {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = JoinSet::new();
+        let session_id = acp::SessionId::new("goal-session");
+        execute(
+            Effect::RunGoalCommand {
+                agent_id: AgentId(7),
+                session_id: session_id.clone(),
+                prompt: vec![acp::ContentBlock::Text(acp::TextContent::new("/goal pause"))],
+            },
+            &mut tasks,
+            &tx,
+            Path::new("."),
+            &SessionFlags::default(),
+            &progress_tx,
+        );
+        let Some(AcpAgentMessage::ExtMethod(args)) = rx.recv().await else {
+            panic!("goal must use ExtMethod, never a model prompt");
+        };
+        assert_eq!(args.request.method.as_ref(), "x.ai/goal");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(args.request.params.get()).unwrap(),
+            serde_json::json!({ "sessionId": "goal-session", "prompt": [{ "type": "text", "text": "/goal pause" }] }));
+        let body = serde_json::value::RawValue::from_string(raw.to_string()).unwrap();
+        args.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(body)))).unwrap();
+        match tasks.join_next().await.unwrap().unwrap() {
+            TaskResult::GoalCommandComplete { agent_id, session_id: receiving_session, result } => {
+                assert_eq!(agent_id, AgentId(7));
+                assert_eq!(receiving_session, session_id);
+                assert_eq!(result, expected);
+            }
+            other => panic!("expected dedicated goal result, got {other:?}"),
+        }
+        assert!(tasks.is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+}
+
 /// The invalid-params server detail survives `attach_prompt_usage`
 /// wrapping `error.data` as `{message, promptUsage}`.
 #[test]
@@ -1022,33 +1085,35 @@ fn unregister_best_effort_swallows_io_error() {
 async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
     use agent_client_protocol as acp;
     let _guard = setup_grok_home_in_tempdir();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let counter = spawn_fake_acp_agent(rx);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpAgentMessage>();
+    let received = tokio::spawn(async move {
+        let mut payloads = Vec::new();
+        while let Some(message) = rx.recv().await {
+            if let xai_acp_lib::AcpAgentMessage::ExtNotification(args) = message {
+                assert_eq!(args.request.method.as_ref(), "x.ai/yolo_mode_changed");
+                payloads.push(serde_json::from_str::<serde_json::Value>(args.request.params.get()).unwrap());
+                let _ = args.response_tx.send(Ok(()));
+            }
+        }
+        payloads
+    });
     let session_id = Some(acp::SessionId::new(Arc::from("test-session")));
     let result = persist_permission_mode_and_notify(
-            "always-approve",
-            session_id,
-            PermissionModePersist::BestEffort,
-            tx,
-        )
-        .await;
-    tokio::task::yield_now().await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(
-            counter.load(Ordering::SeqCst),
-            1,
-            "ACP `x.ai/yolo_mode_changed` notification must fire exactly once \
-             on BestEffort path (regardless of disk outcome)",
-        );
+        "always-approve",
+        session_id,
+        PermissionModePersist::BestEffort,
+        tx,
+    ).await;
+    assert_eq!(received.await.unwrap(), vec![serde_json::json!({
+        "sessionId": "test-session",
+        "yolo_mode": true,
+        "auto_mode": false,
+        "permission_mode": "always-approve",
+    })]);
     assert!(
-            matches!(
-                result,
-                TaskResult::SettingPersisted { .. }
-                    | TaskResult::SettingPersistFailedBestEffort { .. },
-            ),
-            "BestEffort path must return SettingPersisted (Ok) or \
-             SettingPersistFailedBestEffort (Err), got {result:?}",
-        );
+        matches!(result, TaskResult::SettingPersisted { .. } | TaskResult::SettingPersistFailedBestEffort { .. }),
+        "BestEffort must report the actual disk outcome, got {result:?}",
+    );
 }
 /// WithRollback: notification count matches disk outcome
 /// (1 on Ok, 0 on Err).
@@ -2496,6 +2561,15 @@ fn make_session_info(
             },
         },
     }
+}
+#[test]
+fn session_info_context_availability_preserves_known_zero() {
+    let mut info = make_session_info("route", None, 0, 1000);
+    assert!(format_session_info(&info, None, false, false, false).contains("Context: 0 / 1000 tokens (0%)"));
+    info.data.context.capacity_available = Some(false);
+    assert!(format_session_info(&info, None, false, false, false).contains("Context: 0 tokens (capacity unavailable)"));
+    info.data.context.available = Some(false);
+    assert!(format_session_info(&info, None, false, false, false).contains("Context: unavailable"));
 }
 #[test]
 fn format_session_info_session_auth_ignores_api_key_env() {

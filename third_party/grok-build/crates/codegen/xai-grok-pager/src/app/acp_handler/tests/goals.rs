@@ -1,6 +1,200 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
+    fn native_activity(session_id: &str, running: bool, seq: u64, replay: bool) -> AcpClientMessage {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+            request: acp::SessionNotification::new(
+                acp::SessionId::new(session_id),
+                acp::SessionUpdate::SessionInfoUpdate(acp::SessionInfoUpdate::new()),
+            ).meta(serde_json::json!({
+                "eventSeq": seq, "sessionRunning": running, "isReplay": replay,
+            }).as_object().cloned()),
+            response_tx: tx,
+        })
+    }
+
+    #[test]
+    fn native_activity_survives_goal_pause_and_clear_until_backend_idle() {
+        let mut app = make_app_with_agent("sess-A");
+        dispatch_goal_update(&mut app, native_goal_update("native", "active", "armed"));
+        assert!(handle(native_activity("sess-A", true, 10, false), &mut app));
+        dispatch_goal_update(&mut app, native_goal_update("native", "paused", "disarmed"));
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.native_session_running);
+        assert!(agent.stoppable_activity_running());
+        assert!(matches!(agent.wake_display_state(), Some(AgentState::TurnRunning)));
+        assert!(agent.session.state.is_idle());
+        assert!(agent.session.current_prompt_id.is_none());
+        assert_eq!(agent.goal_state.as_ref().unwrap().native_goal.as_ref().unwrap().revision, 7);
+        dispatch_goal_update(&mut app, native_goal_update("native", "cleared", "disarmed"));
+        assert!(app.agents[&AgentId(0)].stoppable_activity_running());
+        assert!(handle(native_activity("sess-A", false, 11, false), &mut app));
+        assert!(!app.agents[&AgentId(0)].stoppable_activity_running());
+    }
+
+    #[test]
+    fn native_activity_rejects_stale_replay_foreign_and_rebound_sessions() {
+        let mut app = make_app_with_agent("sess-A");
+        handle(native_activity("sess-A", false, 10, false), &mut app);
+        handle(native_activity("sess-A", true, 9, false), &mut app);
+        handle(native_activity("foreign", true, 11, false), &mut app);
+        app.agents.get_mut(&AgentId(0)).unwrap().begin_replay_window();
+        handle(native_activity("sess-A", true, 12, true), &mut app);
+        assert!(!app.agents[&AgentId(0)].native_session_running);
+        handle(native_activity("sess-A", true, 13, false), &mut app);
+        assert!(app.agents[&AgentId(0)].native_session_running);
+        app.agents.get_mut(&AgentId(0)).unwrap().bind_session_id(acp::SessionId::new("sess-B"));
+        handle(native_activity("sess-A", true, 14, false), &mut app);
+        assert!(!app.agents[&AgentId(0)].native_session_running);
+    }
+
+    #[test]
+    fn native_activity_does_not_adopt_or_complete_an_owned_prompt() {
+        let mut app = make_app_with_agent("sess-A");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("owned".into());
+        agent.attached_as_viewer = true;
+        let before = agent.scrollback.len();
+        for (seq, running) in [(10, true), (11, false)] {
+            handle(native_activity("sess-A", running, seq, false), &mut app);
+            let agent = &app.agents[&AgentId(0)];
+            assert!(agent.session.state.is_turn_running());
+            assert_eq!(agent.session.current_prompt_id.as_deref(), Some("owned"));
+            assert_eq!(agent.scrollback.len(), before);
+        }
+    }
+
+    #[test]
+    fn missing_native_goal_snapshot_clears_existing_state() {
+        let mut app = make_app_with_agent("sess-A");
+        dispatch_goal_update(&mut app, native_goal_update("old", "active", "armed"));
+        app.agents.get_mut(&AgentId(0)).unwrap().show_goal_detail = true;
+        let mut clear = native_goal_update("", "cleared", "disarmed");
+        clear["is_snapshot"] = serde_json::json!(true);
+        assert!(dispatch_goal_update(&mut app, clear));
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.goal_state.is_none());
+        assert!(!agent.show_goal_detail);
+        assert_eq!(agent.last_cleared_goal_id.as_deref(), Some("old"));
+        assert!(native_completion_markers(&app).is_empty());
+    }
+
+    fn native_goal_update(goal_id: &str, phase: &str, activation: &str) -> serde_json::Value {
+        if phase == "cleared" {
+            return serde_json::json!({
+                "sessionUpdate": "goal_updated", "goal_id": goal_id,
+                "objective": "", "status": "cleared", "phase": "idle",
+            });
+        }
+        serde_json::json!({
+            "sessionUpdate": "goal_updated",
+            "goal_id": goal_id,
+            "objective": "native objective",
+            "status": match phase { "active" => activation, "paused" => "user_paused", other => other },
+            "phase": "idle",
+            "native_goal": {
+                "revision": 7,
+                "phase": phase,
+                "activation": activation,
+                "rounds_started": 2,
+                "max_goal_rounds": 5,
+                "reason": { "code": "round_limit", "message": "Admitted rounds exhausted" },
+            },
+        })
+    }
+
+    fn native_completion_markers(app: &AppView) -> Vec<Option<std::time::Duration>> {
+        let sb = &app.agents[&AgentId(0)].scrollback;
+        (0..sb.len()).filter_map(|i| match sb.get(i).map(|e| &e.block) {
+            Some(RenderBlock::SessionEvent(b)) => match &b.event {
+                SessionEvent::GoalCompleted { elapsed } => Some(*elapsed),
+                _ => None,
+            },
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn native_goal_hydration_preserves_durable_state_without_celebration() {
+        for (snapshot, replay) in [(true, false), (false, true), (true, true)] {
+            let mut app = make_app_with_agent("sess-A");
+            if replay {
+                // Historical hydration is admitted only during session/load;
+                // new/fork snapshots must work without opening that window.
+                app.agents.get_mut(&AgentId(0)).unwrap().begin_replay_window();
+            }
+            let mut update = native_goal_update("native", "complete", "disarmed");
+            update["is_snapshot"] = serde_json::json!(snapshot);
+            let payload = serde_json::json!({
+                "sessionId": "sess-A", "update": update, "_meta": { "isReplay": replay },
+            });
+            let raw = serde_json::value::to_raw_value(&payload).unwrap();
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            assert!(handle(AcpClientMessage::ExtNotification(xai_acp_lib::AcpArgs {
+                request: acp::ExtNotification::new("x.ai/session_notification", raw.into()),
+                response_tx: tx,
+            }), &mut app));
+            let goal = app.agents[&AgentId(0)].goal_state.as_ref().unwrap();
+            assert_eq!(goal.status, GoalDisplayStatus::Complete);
+            assert_eq!(goal.phase, GoalDisplayPhase::Idle);
+            let native = goal.native_goal.as_ref().unwrap();
+            assert_eq!((native.revision, native.rounds_started, native.max_goal_rounds), (7, 2, 5));
+            assert_eq!(native.phase, "complete");
+            assert_eq!(native.activation, "disarmed");
+            assert_eq!(native.reason.as_ref().unwrap().code, "round_limit");
+            assert!(native_completion_markers(&app).is_empty());
+            dispatch_goal_update(&mut app, native_goal_update("native", "complete", "disarmed"));
+            assert!(native_completion_markers(&app).is_empty(), "repeat hydration is not a live transition");
+        }
+    }
+
+    #[test]
+    fn native_goal_activation_is_not_running_and_completion_elapsed_is_unknown() {
+        let mut app = make_app_with_agent("sess-A");
+        for (activation, expected) in [("armed", GoalDisplayStatus::Armed), ("disarmed", GoalDisplayStatus::Disarmed)] {
+            assert!(dispatch_goal_update(&mut app, native_goal_update("native", "active", activation)));
+            let goal = app.agents[&AgentId(0)].goal_state.as_ref().unwrap();
+            assert_eq!(goal.status, expected);
+            assert_eq!(goal.native_rounds_armed(), activation == "armed");
+            assert_eq!(goal.live_elapsed_ms(), 0);
+        }
+        for _ in 0..2 {
+            dispatch_goal_update(&mut app, native_goal_update("native", "complete", "disarmed"));
+        }
+        assert_eq!(native_completion_markers(&app), vec![None]);
+        dispatch_goal_update(&mut app, native_goal_update("another", "complete", "disarmed"));
+        assert_eq!(native_completion_markers(&app), vec![None, None], "new goal has its own completion edge");
+    }
+
+    #[test]
+    fn exact_goal_clear_before_initial_state_prevents_resurrection() {
+        let mut app = make_app_with_agent("sess-A");
+        dispatch_goal_update(&mut app, native_goal_update("old", "cleared", "disarmed"));
+        assert_eq!(app.agents[&AgentId(0)].last_cleared_goal_id.as_deref(), Some("old"));
+        assert!(!dispatch_goal_update(&mut app, native_goal_update("old", "active", "armed")));
+        assert!(app.agents[&AgentId(0)].goal_state.is_none());
+        assert!(dispatch_goal_update(&mut app, native_goal_update("new", "active", "armed")));
+    }
+
+    #[test]
+    fn stale_exact_clear_keeps_new_goal_and_its_open_modal() {
+        let mut app = make_app_with_agent("sess-A");
+        dispatch_goal_update(&mut app, native_goal_update("new", "active", "armed"));
+        app.agents.get_mut(&AgentId(0)).unwrap().show_goal_detail = true;
+        assert!(!dispatch_goal_update(&mut app, native_goal_update("old", "cleared", "disarmed")));
+        assert!(!dispatch_goal_update(&mut app, native_goal_update("old", "complete", "disarmed")));
+        let agent = &app.agents[&AgentId(0)];
+        assert_eq!(agent.last_cleared_goal_id.as_deref(), Some("old"));
+        assert_eq!(agent.goal_state.as_ref().unwrap().goal_id, "new");
+        assert!(agent.show_goal_detail);
+        assert!(native_completion_markers(&app).is_empty());
+        assert!(dispatch_goal_update(&mut app, native_goal_update("new", "cleared", "disarmed")));
+        assert!(app.agents[&AgentId(0)].goal_state.is_none());
+        assert!(!app.agents[&AgentId(0)].show_goal_detail);
+    }
+
     #[test]
     fn goal_updated_ignores_unknown_json_fields_via_serde() {
         // Serde-side half of the forward-compat story: a payload that
@@ -154,7 +348,7 @@
             );
         };
 
-        let goal_markers = |app: &AppView| -> Vec<std::time::Duration> {
+        let goal_markers = |app: &AppView| -> Vec<Option<std::time::Duration>> {
             let sb = &app.agents.get(&AgentId(0)).unwrap().scrollback;
             (0..sb.len())
                 .filter_map(|i| match sb.get(i).map(|e| &e.block) {
@@ -173,7 +367,7 @@
         send(&mut app, "complete", 619_000);
         assert_eq!(
             goal_markers(&app),
-            vec![std::time::Duration::from_millis(619_000)],
+            vec![Some(std::time::Duration::from_millis(619_000))],
             "transition to Complete pushes one e2e marker with the goal's total time",
         );
 

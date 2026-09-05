@@ -106,7 +106,7 @@ ln -s "$TUI_BIN" "$LAUNCHER"
 )
 "$NODE_BIN" - "$LAUNCHER" "$PROFILE_LAUNCHER" \
   "$PROFILE/node_modules/@hqzhao95/dscode/package.json" \
-  "$PROFILE/runtime/lib/node_modules/@deepseek-ai/dsh/package.json" \
+  "$DSH_BIN" \
   "$RUN_ROOT/handoff-inspect.json" "$EXPECTED_VERSION" <<'NODE'
 const fs = require('node:fs')
 const path = require('node:path')
@@ -114,7 +114,21 @@ const link = process.argv[2]
 const target = path.resolve(path.dirname(link), fs.readlinkSync(link))
 if (target !== process.argv[3]) throw new Error(`legacy link points to ${target}`)
 const pkg = JSON.parse(fs.readFileSync(process.argv[4], 'utf8'))
-const runtime = JSON.parse(fs.readFileSync(process.argv[5], 'utf8'))
+let runtimeDir = path.dirname(fs.realpathSync(process.argv[5]))
+let runtime
+for (;;) {
+  const manifest = path.join(runtimeDir, 'package.json')
+  if (fs.existsSync(manifest)) {
+    const candidate = JSON.parse(fs.readFileSync(manifest, 'utf8'))
+    if (candidate.name === '@deepseek-ai/dsh') {
+      runtime = candidate
+      break
+    }
+  }
+  const parent = path.dirname(runtimeDir)
+  if (parent === runtimeDir) throw new Error('installed dsh executable has no CLI package')
+  runtimeDir = parent
+}
 if (pkg.version !== process.argv[7]) throw new Error(`profile stayed at ${pkg.version}`)
 const inspect = JSON.parse(fs.readFileSync(process.argv[6], 'utf8'))
 if (inspect.grokVersion !== process.argv[7]) {

@@ -1527,7 +1527,7 @@ mod searchable_text_tests {
         let mut block = RenderBlock::Subagent(SubagentBlock::failed(
             "investigate flaky test",
             "child-1",
-            Duration::from_secs(3),
+            Some(Duration::from_secs(3)),
             Some("panicked at assert".into()),
         ));
         // Populate the metadata fields a failed background block leaves empty.
@@ -1577,6 +1577,7 @@ mod searchable_text_tests {
             usage_pct: 10,
             auto_compact_threshold_percent: 85,
             usage_categories: vec![],
+            ..ContextInfo::default()
         };
         let block = RenderBlock::context_info(snapshot, "grok-4.5");
         // Only the model name is source text; the rest is a numeric breakdown.

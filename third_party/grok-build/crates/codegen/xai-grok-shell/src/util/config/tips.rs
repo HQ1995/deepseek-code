@@ -169,18 +169,42 @@ pub fn resolve_slash_command_tags(
     resolve_slash_command_tags_with_env(effective_config, remote, slash_command_tags_from_env())
 }
 
-/// Read `[cli] channel` from config.toml.
-/// Returns `None` when absent (falls through to remote settings).
-pub fn channel_from_toml_opt(root: &TomlValue) -> Option<String> {
-    if let TomlValue::Table(table) = root
-        && let Some(TomlValue::Table(cli)) = table.get("cli")
-    {
-        cli.get("channel")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    } else {
-        None
-    }
+/// Read canonical release-channel semantics without migrating the config on disk.
+pub fn channel_from_toml_opt(root: &TomlValue) -> anyhow::Result<Option<String>> {
+    let Some(cli) = root.get("cli") else {
+        return Ok(None);
+    };
+    let cli = cli
+        .as_table()
+        .ok_or_else(|| anyhow::anyhow!("[cli] must be a table"))?;
+    let format = match cli.get("channel_format") {
+        None => 0,
+        Some(value) => value
+            .as_integer()
+            .ok_or_else(|| anyhow::anyhow!("cli.channel_format must be an integer"))?,
+    };
+    anyhow::ensure!(
+        matches!(format, 0 | 1),
+        "Unsupported cli.channel_format: {format}"
+    );
+    let Some(channel) = cli.get("channel") else {
+        return Ok(None);
+    };
+    let channel = channel
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("cli.channel must be a string"))?;
+    anyhow::ensure!(
+        matches!(channel, "stable" | "beta" | "alpha" | "enterprise"),
+        "Unsupported release channel: {channel}"
+    );
+    Ok(Some(
+        if channel == "alpha" && format == 0 {
+            "beta"
+        } else {
+            channel
+        }
+        .to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -188,6 +212,35 @@ mod tests {
     use crate::util::config::RemoteSettings;
 
     use super::*;
+
+    #[test]
+    fn channel_format_preserves_legacy_preview_without_writes() {
+        for (body, expected) in [
+            ("channel = 'alpha'", "beta"),
+            ("channel = 'alpha'\nchannel_format = 0", "beta"),
+            ("channel = 'alpha'\nchannel_format = 1", "alpha"),
+            ("channel = 'beta'\nchannel_format = 1", "beta"),
+            ("channel = 'stable'", "stable"),
+        ] {
+            let root: TomlValue = toml::from_str(&format!("[cli]\n{body}")).unwrap();
+            let original = root.clone();
+            assert_eq!(
+                channel_from_toml_opt(&root).unwrap().as_deref(),
+                Some(expected)
+            );
+            assert_eq!(root, original);
+        }
+        for body in [
+            "channel = 'unknown'",
+            "channel = 1",
+            "channel_format = 2",
+            "channel_format = '1'",
+            "channel_format = -1",
+        ] {
+            let root: TomlValue = toml::from_str(&format!("[cli]\n{body}")).unwrap();
+            assert!(channel_from_toml_opt(&root).is_err(), "{body}");
+        }
+    }
     use toml::Value as TomlValue;
 
     #[test]

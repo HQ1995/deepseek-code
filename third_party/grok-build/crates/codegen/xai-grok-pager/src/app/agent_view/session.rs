@@ -40,6 +40,7 @@ impl AgentView {
             self.last_seen_event_seq = None;
             self.last_applied_event_seq = None;
             self.last_applied_xai_event_seq = None;
+            self.native_session_running = false;
             self.deferred_subagent_finishes.clear();
             self.clear_minimal_btw_lifecycle();
         }
@@ -139,6 +140,7 @@ impl AgentView {
             replayed_terminal_prompts: HashSet::new(),
             failed_wake_marker_for: None,
             running_wake_turn: None,
+            native_session_running: false,
             finished_wake_prompts: HashSet::new(),
             active_pane: ActivePane::Prompt,
             prompt_mode: PromptMode::Normal,
@@ -699,11 +701,18 @@ impl AgentView {
             cancel_sent: false,
         });
     }
-    /// Local turn, running `/compact`, or streaming wake not yet asked to stop.
+    /// Local turn, running `/compact`, streaming wake, native round, or armed goal.
     pub(crate) fn stoppable_activity_running(&self) -> bool {
         self.session.state.is_turn_running()
             || self.session.state.is_compact_running()
             || (self.wake_turn_active() && !self.wake_turn_cancelling())
+            || (self.session.state.is_idle()
+                && !self.any_cancel_pending()
+                && (self.native_session_running
+                    || self
+                        .goal_state
+                        .as_ref()
+                        .is_some_and(|goal| goal.native_rounds_armed())))
     }
     /// Local or wake cancel still in flight.
     pub(crate) fn any_cancel_pending(&self) -> bool {
@@ -724,18 +733,24 @@ impl AgentView {
             false
         }
     }
-    /// Status-row chrome for a wake turn, or `None` when a local turn owns it.
+    /// Status-row chrome for a wake/native round, or `None` when a local turn owns it.
     pub(crate) fn wake_display_state(&self) -> Option<&'static crate::app::agent::AgentState> {
         if !self.session.state.is_idle() {
             return None;
         }
-        self.running_wake_turn.as_ref().map(|wake| {
-            if wake.cancel_sent {
-                &crate::app::agent::AgentState::TurnCancelling
-            } else {
-                &crate::app::agent::AgentState::TurnRunning
-            }
-        })
+        self.running_wake_turn
+            .as_ref()
+            .map(|wake| {
+                if wake.cancel_sent {
+                    &crate::app::agent::AgentState::TurnCancelling
+                } else {
+                    &crate::app::agent::AgentState::TurnRunning
+                }
+            })
+            .or_else(|| {
+                self.native_session_running
+                    .then_some(&crate::app::agent::AgentState::TurnRunning)
+            })
     }
     /// Finalize a reconnect-reload window and, iff the running prompt is
     /// adoptable, adopt it. Returns whether the window finalized.
@@ -1111,10 +1126,15 @@ impl AgentView {
     ///
     /// No-op for gateway/chat-kind sessions — local GetSessionInfo / sampler
     /// breakdowns must not populate the context bar (remote owns context).
-    pub fn apply_full_context_info(&mut self, next: xai_grok_shell::session::ContextInfo) {
-        if self.chat_kind {
+    pub fn apply_full_context_info(&mut self, mut next: xai_grok_shell::session::ContextInfo) {
+        if self.chat_kind || next.available == Some(false) {
             self.context_state = None;
             return;
+        }
+        if next.capacity_available == Some(false) {
+            next.total = 0;
+            next.free_tokens = 0;
+            next.usage_pct = 0;
         }
         self.context_state = Some(next);
     }
@@ -1128,17 +1148,12 @@ impl AgentView {
             self.context_state = None;
             return;
         }
-        let total = if total > 0 {
-            total
-        } else {
-            self.context_state.as_ref().map(|s| s.total).unwrap_or(0)
-        };
         match self.context_state.as_mut() {
             Some(snap) => {
                 snap.used = used;
-                if total > 0 {
-                    snap.total = total;
-                }
+                snap.total = total;
+                snap.available = Some(true);
+                snap.capacity_available = Some(true);
                 snap.usage_pct = xai_token_estimation::usage_percentage_u8(used, snap.total);
                 snap.free_tokens = xai_token_estimation::free_tokens(snap.total, used);
             }
@@ -1774,6 +1789,7 @@ mod resolve_turn_activity_tests {
         view.session.bg_tasks.insert(
             "bg-1".into(),
             BgTaskState {
+                native_task: None,
                 task_id: "bg-1".into(),
                 tool_call_id: "tc-1".into(),
                 command: "cargo test --release".into(),
@@ -1848,6 +1864,7 @@ mod resolve_turn_activity_tests {
         view.session.bg_tasks.insert(
             "bg-2".into(),
             BgTaskState {
+                native_task: None,
                 task_id: "bg-2".into(),
                 tool_call_id: "tc-2".into(),
                 command: "sleep 30".into(),
@@ -1903,6 +1920,7 @@ mod resolve_turn_activity_tests {
         view.session.bg_tasks.insert(
             "bg-a".into(),
             BgTaskState {
+                native_task: None,
                 task_id: "bg-a".into(),
                 tool_call_id: "tc-a".into(),
                 command: "echo a".into(),
@@ -1967,6 +1985,7 @@ mod resolve_turn_activity_tests {
         view.session.bg_tasks.insert(
             "bg-long".into(),
             BgTaskState {
+                native_task: None,
                 task_id: "bg-long".into(),
                 tool_call_id: "tc-long".into(),
                 command: "echo long".into(),
@@ -2117,6 +2136,7 @@ mod resolve_turn_activity_tests {
         view.session.bg_tasks.insert(
             "bg-3".into(),
             BgTaskState {
+                native_task: None,
                 task_id: "bg-3".into(),
                 tool_call_id: "tc-3".into(),
                 command: long_cmd,

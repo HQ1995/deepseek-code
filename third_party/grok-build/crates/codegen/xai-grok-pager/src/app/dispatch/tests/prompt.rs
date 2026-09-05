@@ -2972,6 +2972,12 @@ fn palette_dispatch_preserves_prompt_draft() {
     // its effect but the textarea contents survive.
     let mut app = test_app_with_agent();
     let id = AgentId(0);
+    let models = app.agents[&id].session.models.clone();
+    app.agents.get_mut(&id).unwrap().prompt.sync_acp_commands(
+        &[acp::AvailableCommand::new("compact", "Compact history")],
+        None,
+        &models,
+    );
     // User has a draft typed in the prompt.
     app.agents
         .get_mut(&id)
@@ -2986,10 +2992,9 @@ fn palette_dispatch_preserves_prompt_draft() {
         &mut app,
     );
 
-    // The slash command still runs end-to-end: it produces the same
-    // Compact effect that Action::SendPrompt would.
+    // Native compact remains an ordinary advertised ACP prompt.
     assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::Compact { .. }));
+    assert!(matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "/compact"));
     // But the user's draft text is intact.
     assert_eq!(app.agents[&id].prompt.text(), "hello");
     // And the slash command was not inserted into prompt history,
@@ -3003,12 +3008,213 @@ fn palette_dispatch_preserves_prompt_draft() {
 #[test]
 fn slash_compact_with_context_enqueues_command() {
     let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let models = app.agents[&id].session.models.clone();
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.prompt.sync_acp_commands(
+        &[acp::AvailableCommand::new("compact", "Compact history")],
+        None,
+        &models,
+    );
+    agent.session.state = AgentState::TurnRunning;
     let effects = dispatch(
         Action::SendPrompt("/compact focus on auth".into()),
         &mut app,
     );
-    assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::Compact { .. }));
+    assert!(
+        effects.is_empty(),
+        "ordinary native commands wait behind the active turn"
+    );
+    assert_eq!(
+        app.agents[&id].session.pending_prompts[0].text,
+        "/compact focus on auth"
+    );
+    assert!(app.agents[&id].session.state.is_turn_running());
+}
+
+#[test]
+fn native_goal_controls_bypass_busy_queue_without_starting_a_turn() {
+    for command in [
+        "/goal",
+        "/goal pause",
+        "/goal resume",
+        "/goal clear",
+        "/goal edit  keep\n raw --budget 42  ",
+        "/goal status",
+    ] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("held-round".into());
+        agent.session.enqueue_prompt("already queued".into());
+        agent.prompt.set_text(command);
+        let session_id = agent.session.session_id.clone().unwrap();
+        let scrollback_len = agent.scrollback.len();
+        let next_queue_id = agent.session.next_queue_id;
+        let effects = dispatch(Action::SendPrompt(command.into()), &mut app);
+        match effects.as_slice() {
+            [
+                Effect::RunGoalCommand {
+                    agent_id,
+                    session_id: receiving_session,
+                    prompt,
+                },
+            ] => {
+                assert_eq!(*agent_id, id);
+                assert_eq!(*receiving_session, session_id);
+                assert_eq!(
+                    serde_json::to_value(prompt).unwrap(),
+                    serde_json::json!([
+                        { "type": "text", "text": command }
+                    ])
+                );
+            }
+            other => panic!("expected only immediate native control, got {other:?}"),
+        }
+        let agent = &app.agents[&id];
+        assert!(agent.session.state.is_turn_running());
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some("held-round")
+        );
+        assert_eq!(agent.session.pending_prompts.len(), 1);
+        assert_eq!(agent.session.pending_prompts[0].text, "already queued");
+        assert_eq!(agent.session.next_queue_id, next_queue_id);
+        assert!(agent.shared_queue.is_empty());
+        assert_eq!(agent.scrollback.len(), scrollback_len);
+        assert!(agent.prompt.text().is_empty());
+    }
+}
+
+#[test]
+fn native_goal_palette_preserves_draft_and_attachments_while_busy() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.state = AgentState::TurnRunning;
+    agent.prompt.set_text("unfinished draft");
+    agent
+        .prompt
+        .insert_image(crate::prompt_images::PastedImage {
+            element_id: xai_ratatui_textarea::ElementId::from_raw(0),
+            display_number: 0,
+            mime_type: "image/png".into(),
+            dimensions: Some((8, 8)),
+            byte_len: 3,
+            encoded_bytes: Some(vec![1, 2, 3].into()),
+            source_path: None,
+            staged_temp_path: None,
+            session_image_path: None,
+            preview: crate::prompt_images::PromptImagePreview::default(),
+        })
+        .unwrap();
+    let draft = agent.prompt.text().to_owned();
+    let effects = dispatch(
+        Action::SendSlashCommandPreservingDraft("/goal".into()),
+        &mut app,
+    );
+    match effects.as_slice() {
+        [Effect::RunGoalCommand { prompt, .. }] => assert_eq!(
+            serde_json::to_value(prompt).unwrap(),
+            serde_json::json!([{ "type": "text", "text": "/goal" }]),
+        ),
+        other => panic!("expected native goal control, got {other:?}"),
+    }
+    assert_eq!(app.agents[&id].prompt.text(), draft);
+    assert_eq!(app.agents[&id].prompt.images.len(), 1);
+    assert!(app.agents[&id].session.pending_prompts.is_empty());
+    assert!(app.agents[&id].session.state.is_turn_running());
+
+    // A real submit carries its images without requiring a selected image model;
+    // native command admission, not the model prompt path, decides legality.
+    let command = "/goal edit  exact\n objective --budget 42  ";
+    let effects = dispatch(Action::SendPrompt(command.into()), &mut app);
+    match effects.as_slice() {
+        [Effect::RunGoalCommand { prompt, .. }] => {
+            let blocks = serde_json::to_value(prompt).unwrap();
+            assert_eq!(blocks[0]["text"], command);
+            assert!(blocks.as_array().unwrap().iter().any(|block| {
+                block["type"] == "image"
+                    && block["data"] == "AQID"
+                    && block["mimeType"] == "image/png"
+            }));
+        }
+        other => panic!("expected native goal image control, got {other:?}"),
+    }
+    assert!(app.agents[&id].prompt.text().is_empty());
+    assert!(app.agents[&id].prompt.images.is_empty());
+    assert_eq!(app.agents[&id].session.prompt_history[0], command);
+    assert!(app.agents[&id].session.pending_prompts.is_empty());
+    assert!(app.agents[&id].session.state.is_turn_running());
+}
+
+#[test]
+fn literal_goal_and_auto_text_remain_ordinary_queued_prompts() {
+    for text in ["/goal pause", "/auto"] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.enqueue_prompt("earlier".into());
+        agent.prompt.set_text("keep draft");
+        let effects = super::super::prompt::dispatch_send_prompt_inner(
+            &mut app,
+            text.into(),
+            false,
+            true,
+            false,
+        );
+        assert!(effects.is_empty());
+        assert_eq!(app.agents[&id].session.pending_prompts[1].text, text);
+        assert_eq!(app.agents[&id].prompt.text(), "keep draft");
+        assert!(!scrollback_has_system_text(&app, id, "unsupported"));
+    }
+}
+
+#[test]
+fn native_goal_submit_respects_paste_reconnect_and_session_guards() {
+    for guard in ["paste", "reconnect", "unbound"] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.prompt.set_text("/goal pause");
+        match guard {
+            "paste" => agent.paste_probe_in_flight = 1,
+            "unbound" => agent.session.session_id = None,
+            _ => app.reconnect_pending = true,
+        }
+        let effects = dispatch(Action::SendPrompt("/goal pause".into()), &mut app);
+        assert!(effects.is_empty());
+        assert_eq!(app.agents[&id].prompt.text(), "/goal pause");
+        assert!(app.agents[&id].session.pending_prompts.is_empty());
+        if guard == "paste" {
+            assert!(app.agents[&id].deferred_send.is_some());
+        }
+    }
+}
+
+#[test]
+fn unsupported_auto_refuses_immediately_while_busy_without_permission_change() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.state = AgentState::TurnRunning;
+    agent.session.current_prompt_id = Some("held-round".into());
+    agent.session.enqueue_prompt("earlier".into());
+    agent.prompt.set_text("/auto");
+    let effects = dispatch(Action::SendPrompt("/auto".into()), &mut app);
+    assert!(effects.is_empty());
+    let agent = &app.agents[&id];
+    assert!(agent.session.state.is_turn_running());
+    assert_eq!(
+        agent.session.current_prompt_id.as_deref(),
+        Some("held-round")
+    );
+    assert_eq!(agent.session.pending_prompts.len(), 1);
+    assert!(!agent.session.is_auto());
+    assert!(!agent.session.is_yolo());
+    assert!(scrollback_has_system_text(&app, id, "/auto is unsupported"));
 }
 
 #[test]

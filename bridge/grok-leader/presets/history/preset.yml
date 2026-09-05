@@ -1,0 +1,3 @@
+name: History mode
+description: Standard coding agent with workspace-scoped session search and trace tools.
+order: 5

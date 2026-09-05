@@ -485,7 +485,7 @@ mod tests {
         subagent(SubagentBlock::completed(
             "task",
             child_sid,
-            std::time::Duration::from_secs(3),
+            Some(std::time::Duration::from_secs(3)),
         ))
     }
 
@@ -821,13 +821,13 @@ mod tests {
             subagent(SubagentBlock::failed(
                 "task",
                 "child-A",
-                std::time::Duration::from_secs(3),
+                Some(std::time::Duration::from_secs(3)),
                 Some("boom".into()),
             )),
             subagent(SubagentBlock::cancelled(
                 "task",
                 "child-B",
-                std::time::Duration::from_secs(3),
+                Some(std::time::Duration::from_secs(3)),
             )),
         ];
         let l = label(&entries);

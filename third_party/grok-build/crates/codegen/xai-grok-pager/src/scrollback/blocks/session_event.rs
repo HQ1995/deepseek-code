@@ -147,8 +147,8 @@ pub enum SessionEvent {
     /// elapsed time across all its turns, distinct from the per-turn
     /// "Worked for" marker.
     GoalCompleted {
-        /// Goal end-to-end elapsed time (`GoalUpdated.elapsed_ms`).
-        elapsed: Duration,
+        /// Goal end-to-end elapsed time, absent when native accounting is unavailable.
+        elapsed: Option<Duration>,
     },
     /// A session recap — a short "where was I" summary of the session so far.
     /// Surfaced on demand via `/recap` (`auto = false`) or automatically when
@@ -278,12 +278,15 @@ impl SessionEvent {
                 let short_path = crate::util::abbreviate_path(path);
                 format!("Memory saved ({trigger}) \u{2192} {short_path}  \u{00b7}  /memory to view")
             }
-            SessionEvent::GoalCompleted { elapsed } => {
+            SessionEvent::GoalCompleted {
+                elapsed: Some(elapsed),
+            } => {
                 format!(
                     "Goal complete \u{2014} {} end-to-end.",
                     format_duration(*elapsed)
                 )
             }
+            SessionEvent::GoalCompleted { elapsed: None } => "Goal complete.".into(),
             SessionEvent::Recap { summary, auto: _ } => {
                 // Always "Recap —" (manual `/recap` and auto return-from-away).
                 format!("Recap \u{2014} {summary}")
@@ -711,9 +714,17 @@ mod tests {
     #[test]
     fn goal_completed_message_shows_end_to_end_time() {
         let event = SessionEvent::GoalCompleted {
-            elapsed: Duration::from_secs(619),
+            elapsed: Some(Duration::from_secs(619)),
         };
         assert_eq!(event.message(), "Goal complete \u{2014} 10m19s end-to-end.");
+    }
+
+    #[test]
+    fn goal_completed_without_elapsed_does_not_invent_duration() {
+        assert_eq!(
+            SessionEvent::GoalCompleted { elapsed: None }.message(),
+            "Goal complete."
+        );
     }
 
     #[test]

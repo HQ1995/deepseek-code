@@ -60,6 +60,9 @@ The bridge also implements the `x.ai/*` surfaces required by this TUI:
 - multiline dsh question headers/details and free-form answers
 - preset-scoped manual `/compact` dispatch through dsh's command registry;
   presets without a compaction command fail closed
+- `x.ai/goal` executes the preset-scoped native `/goal` command outside ordinary
+  prompt admission, without fabricating model calls or prompt-complete events
+- native goal, permission, and task state/control from the owning dsh services
 
 Extension notifications use the `_x.ai/*` wire spelling expected by the ACP
 decoder. `session/update` remains the normal unprefixed ACP notification.
@@ -76,6 +79,19 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
 - Interactive loads replay persisted updates with `isReplay`. Headless loads
   set `_meta.noReplay` so old assistant text does not contaminate the new JSON
   result; projection state and sequence high-water marks are still rebuilt.
+- Goal hydration replays durable ID, revision, phase, and round counters and reads
+  process-local activation; restore neither rearms continuation nor repeats
+  completion celebration.
+- On the pinned published DSH `0.1.2-rc.1` runtime, cancelling an underway armed
+  goal leaves it paused/disarmed with exactly one revision increment. The bridge
+  explicitly pauses active/armed goals before cancellation because native idle
+  cancellation is a no-op; a dormant active/disarmed goal is not changed or revised.
+  `/goal pause` stops future rounds without aborting the current turn. Ctrl+C
+  still cancels actual native running activity after that pause.
+- Activity updates carry `_meta.sessionRunning` from native agent status,
+  independently of foreground prompt IDs; native goal rounds need no synthetic
+  foreground prompt. `/auto` remains unsupported and cannot change permissions
+  or invoke the model.
 - A fresh profile may advertise no providers or models. Provider mutations
   broadcast the refreshed catalog, and model/effort selections persist both as
   the default for new sessions and as session-local durable events.
@@ -102,12 +118,22 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
 - Model modalities fail closed: only an affirmative `acceptsImages: true` or
   `inputModalities` containing `image` enables image paste and model prompts.
   Text-only and unknown routes reject images before attachment storage.
-- Cache input buckets remain disjoint in the bridge, while context totals count
-  uncached input, cache reads, cache writes, and output. Only a true full hit is
-  displayed as `100%`; near-full ratios retain enough decimal precision to stay
-  below 100.
+- Cumulative token accounting keeps uncached input, cache reads, cache writes,
+  and output disjoint; it is not current context pressure. Context `used` and
+  `total` come from native projected next-request tokens and context-window
+  capacity. Native breakdowns are approximate; missing pressure, capacity,
+  breakdown, and auto-compaction threshold data remain explicitly unavailable.
+  Only a true full cache hit displays `100%`; near-full ratios stay below 100.
 - `x.ai/session/info.context.compactionCount` advances on each durable
   `compaction/end`, including replayed events after a session resume.
+- Permission controls use native permission/plan services; an explicit mode
+  takes precedence over the legacy YOLO bit. Task rows and terminal status come
+  from native jobs/subagents, and cancellation goes through their owning services,
+  not a fabricated shell exit code or success result.
+- Only the `history` preset adds the five official history tools to `standard`:
+  `session_search`, `session_event_search`, `session_trace`, `session_event_trace`,
+  and `session_event_read`. They remain workspace-scoped even with explicit
+  foreign session IDs; ordinary presets do not gain these tools globally.
 - Unknown JSON-RPC methods return `-32601`; invalid parameters return `-32602`.
 - Disconnect and plugin disposal cancel and flush only the sessions owned by
   that client.

@@ -1671,6 +1671,26 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::RunGoalCommand { agent_id, session_id, prompt } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "sessionId": session_id.0.to_string(),
+                    "prompt": prompt,
+                });
+                let request = acp::ExtRequest::new(
+                    "x.ai/goal",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize goal params")
+                        .into(),
+                );
+                let result = match acp_send(request, &tx).await {
+                    Ok(response) => parse_goal_command_result(response.0.get()),
+                    Err(error) => Err(sanitize_user_error(&error.to_string())),
+                };
+                TaskResult::GoalCommandComplete { agent_id, session_id, result }
+            });
+        }
         Effect::KillBgTask { session_id, task_id, source } => {
             let tx = acp_tx.clone();
             let sid = session_id.0.to_string();
@@ -4199,12 +4219,15 @@ pub(crate) fn execute(
                         + std::time::Duration::from_secs(30);
                     let retry_interval = std::time::Duration::from_secs(3);
                     let mut results = Vec::new();
+                    let mut cursor: Option<String> = None;
+                    let mut seen_cursors = std::collections::HashSet::new();
                     loop {
                         let params = serde_json::json!({
-                        "query": query,
-                        "limit": 20,
-                        "includeContent": true,
-                    });
+                            "query": query,
+                            "limit": 20,
+                            "includeContent": true,
+                            "cursor": cursor,
+                        });
                         let request = acp::ExtRequest::new(
                             "x.ai/session/search",
                             serde_json::value::to_raw_value(&params)
@@ -4228,20 +4251,36 @@ pub(crate) fn execute(
                                     )
                                     .unwrap_or_default();
                                 let payload = wrapper.get("result").unwrap_or(&wrapper);
-                                if let Some(hits) = payload.get("results") {
-                                    results = serde_json::from_value::<
-                                        Vec<
-                                            xai_grok_shell::extensions::session_search::SearchSessionHit,
-                                        >,
-                                    >(hits.clone())
-                                        .unwrap_or_default();
-                                }
+                                let page_results = payload
+                                    .get("results")
+                                    .and_then(|hits| serde_json::from_value::<
+                                        Vec<xai_grok_shell::extensions::session_search::SearchSessionHit>,
+                                    >(hits.clone()).ok())
+                                    .unwrap_or_default();
                                 let bootstrapping = payload
                                     .get("bootstrapping")
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or(false);
-                                if !bootstrapping {
-                                    break;
+                                if bootstrapping {
+                                    results.clear();
+                                    cursor = None;
+                                } else {
+                                    results.extend(page_results);
+                                    let next = payload
+                                        .get("nextCursor")
+                                        .and_then(|value| value.as_str())
+                                        .map(str::to_owned);
+                                    if next.is_none() || results.len() >= 100 {
+                                        results.truncate(100);
+                                        break;
+                                    }
+                                    let next = next.expect("checked above");
+                                    if !seen_cursors.insert(next.clone()) {
+                                        tracing::warn!("deep search repeated continuation cursor");
+                                        break;
+                                    }
+                                    cursor = Some(next);
+                                    continue;
                                 }
                             }
                             Ok(Err(e)) => {
@@ -4646,6 +4685,25 @@ pub(crate) fn execute(
     }
     (false, meta)
 }
+fn parse_goal_command_result(raw: &str) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct GoalResult {
+        kind: String,
+        text: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct GoalResponse {
+        result: GoalResult,
+    }
+    let response: GoalResponse = serde_json::from_str(raw)
+        .map_err(|_| "invalid goal command response".to_string())?;
+    if response.result.kind == "error" {
+        Err(response.result.text)
+    } else {
+        Ok(response.result.text)
+    }
+}
+
 /// Fetch session info from ACP via `x.ai/session/info`.
 async fn fetch_session_info(
     session_id: &acp::SessionId,
@@ -4829,7 +4887,13 @@ fn session_info_fields(
     let ctx = &info.data.context;
     push(
         "Context",
-        format!("{} / {} tokens ({}%)", ctx.used, ctx.total, ctx.usage_pct),
+        if ctx.available == Some(false) {
+            "unavailable".to_string()
+        } else if ctx.capacity_available == Some(false) {
+            format!("{} tokens (capacity unavailable)", ctx.used)
+        } else {
+            format!("{} / {} tokens ({}%)", ctx.used, ctx.total, ctx.usage_pct)
+        },
         true,
     );
     fields

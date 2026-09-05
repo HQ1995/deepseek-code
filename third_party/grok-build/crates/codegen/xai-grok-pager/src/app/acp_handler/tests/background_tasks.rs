@@ -852,3 +852,121 @@
         assert!(agent.session.bg_tasks["task-replay"].restored_from_replay);
     }
 
+    #[test]
+    fn native_task_completion_preserves_status_without_exit_or_output() {
+        for existing in [false, true] {
+            for (native_status, expected) in [
+                ("completed", BgTaskStatus::Done),
+                ("killed", BgTaskStatus::Failed),
+                ("failed", BgTaskStatus::Failed),
+            ] {
+                let mut app = make_app_with_agent("sess-1");
+                if existing {
+                    let started = make_task_backgrounded_notif("sess-1", "call-native", "native-1", "native job");
+                    assert!(handle_task_backgrounded(&started, &mut app));
+                }
+                let mut snapshot = race_snapshot("native-1", "native job", None);
+                snapshot.start_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(10);
+                snapshot.end_time = Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(12));
+                let start_time = snapshot.start_time;
+                let end_time = snapshot.end_time;
+                let mut snapshot_wire = serde_json::to_value(snapshot).unwrap();
+                for field in ["output", "output_file", "truncated", "output_total_bytes", "kind"] {
+                    snapshot_wire.as_object_mut().unwrap().remove(field);
+                }
+                let wire = serde_json::json!({
+                    "sessionId": "sess-1",
+                    "update": {"sessionUpdate": "task_completed", "task_snapshot": snapshot_wire},
+                    "_meta": {"nativeTask": {
+                        "status": native_status,
+                        "kind": "workflow",
+                        "detail": "Native service detail",
+                        "outputAvailable": false
+                    }}
+                });
+                let raw = serde_json::value::to_raw_value(&wire).unwrap();
+                let done = acp::ExtNotification::new("x.ai/task_completed", std::sync::Arc::from(raw));
+                assert!(handle_task_completed(&done, &mut app));
+                let agent = &app.agents[&AgentId(0)];
+                let task = &agent.session.bg_tasks["native-1"];
+                assert_eq!(task.status, expected);
+                assert_eq!(task.exit_code, None);
+                assert_eq!(task.signal, None);
+                assert_eq!(task.start_time, start_time);
+                assert_eq!(task.end_time, end_time);
+                assert!(task.stdout.is_empty());
+                assert_eq!(task.stdout_line_count, 0);
+                assert!(!task.truncated);
+                let native = task.native_task.as_ref().unwrap();
+                assert_eq!(native.status, native_status);
+                assert_eq!(native.display_detail(), format!("workflow: {native_status}\nNative service detail\nOutput unavailable"));
+                let RenderBlock::BgTask(block) = &agent.scrollback.get(agent.scrollback.len() - 1).unwrap().block else {
+                    panic!("missing terminal task notification");
+                };
+                assert_eq!(block.explicitly_killed, native_status == "killed");
+                assert!(block.duration_known);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_explicit_kill_without_signal_is_not_success() {
+        let mut app = make_app_with_agent("sess-1");
+        let mut snapshot = race_snapshot("killed-1", "sleep 5", None);
+        snapshot.explicitly_killed = true;
+        let done = completed_notif_from_snapshot("sess-1", snapshot, false);
+        assert!(handle_task_completed(&done, &mut app));
+        let agent = &app.agents[&AgentId(0)];
+        let task = &agent.session.bg_tasks["killed-1"];
+        assert_eq!(task.status, BgTaskStatus::Failed);
+        assert_eq!(task.signal, None);
+        assert_eq!(task.exit_code, None);
+        let RenderBlock::BgTask(block) = &agent.scrollback.get(0).unwrap().block else {
+            panic!("missing killed notification");
+        };
+        assert!(block.explicitly_killed);
+    }
+
+    #[test]
+    fn legacy_completion_keeps_real_output_and_exit_status() {
+        for (exit_code, expected) in [(0, BgTaskStatus::Done), (1, BgTaskStatus::Failed)] {
+            let mut app = make_app_with_agent("sess-1");
+            let started = make_task_backgrounded_notif("sess-1", "call-legacy", "legacy-1", "echo result");
+            assert!(handle_task_backgrounded(&started, &mut app));
+            let mut snapshot = race_snapshot("legacy-1", "echo result", Some(exit_code));
+            snapshot.output = "real output\n".into();
+            snapshot.truncated = true;
+            let done = completed_notif_from_snapshot("sess-1", snapshot, false);
+            assert!(handle_task_completed(&done, &mut app));
+            let task = &app.agents[&AgentId(0)].session.bg_tasks["legacy-1"];
+            assert_eq!(task.status, expected);
+            assert_eq!(task.exit_code, Some(exit_code));
+            assert_eq!(task.stdout, "real output\n");
+            assert!(task.truncated);
+            assert!(task.native_task.is_none());
+        }
+    }
+
+    #[test]
+    fn native_completion_does_not_invent_end_time() {
+        let mut app = make_app_with_agent("sess-1");
+        let mut snapshot = race_snapshot("unknown-time", "native job", None);
+        snapshot.end_time = None;
+        let notif = SessionNotification {
+            session_id: acp::SessionId::new("sess-1"),
+            update: XaiSessionUpdate::TaskCompleted { task_snapshot: snapshot, will_wake: false },
+            meta: Some(serde_json::json!({"nativeTask": {
+                "status": "completed", "kind": "workflow", "outputAvailable": false
+            }})),
+        };
+        let raw = serde_json::value::to_raw_value(&notif).unwrap();
+        let done = acp::ExtNotification::new("x.ai/task_completed", std::sync::Arc::from(raw));
+        assert!(handle_task_completed(&done, &mut app));
+        let agent = &app.agents[&AgentId(0)];
+        assert_eq!(agent.session.bg_tasks["unknown-time"].end_time, None);
+        let RenderBlock::BgTask(block) = &agent.scrollback.get(0).unwrap().block else {
+            panic!("missing completion notification");
+        };
+        assert!(!block.duration_known);
+    }
+

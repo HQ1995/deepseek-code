@@ -997,6 +997,9 @@ pub struct CliConfig {
     pub npm_registry: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    /// Version of channel semantics; absent/zero preserves the legacy preview lane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_format: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_leader: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

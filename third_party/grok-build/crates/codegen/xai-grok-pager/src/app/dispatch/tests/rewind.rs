@@ -213,7 +213,39 @@ fn rewind_success(target: usize, prompt_text: &str) -> crate::views::rewind::Rew
         error: None,
         mode: Some("conversation_only".into()),
         prompt_text: Some(prompt_text.into()),
+        new_session_id: None,
     }
+}
+
+#[test]
+fn rewind_success_adopts_forked_session_id() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .scrollback
+        .push_block(user_block("alpha", Some(0)));
+    let mut response = rewind_success(0, "alpha");
+    response.new_session_id = Some("forked-session".into());
+
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindExecuteComplete {
+            agent_id: id,
+            response,
+        }),
+        &mut app,
+    );
+
+    assert_eq!(
+        app.agents[&id]
+            .session
+            .session_id
+            .as_ref()
+            .map(|sid| sid.0.as_ref()),
+        Some("forked-session"),
+    );
+    assert!(!app.agents[&id].attached_as_viewer);
 }
 
 /// Drive an idle inline-edit submit through to execute: points fetch →
@@ -1286,6 +1318,7 @@ fn rewind_success_truncation_releases_retained_memory() {
         error: None,
         mode: Some("conversation_only".into()),
         prompt_text: Some("alpha".into()),
+        new_session_id: None,
     };
 
     let mut app = test_app_with_agent();
@@ -1327,6 +1360,7 @@ fn rewind_success_toasts_in_full_tui_and_commits_system_block_in_minimal() {
         error: None,
         mode: Some("conversation_only".into()),
         prompt_text: None,
+        new_session_id: None,
     };
 
     let mut app = test_app_with_agent();

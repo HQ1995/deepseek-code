@@ -3,6 +3,126 @@
 use super::*;
 
 #[test]
+fn idle_armed_native_goal_cancels_without_creating_a_foreground_turn() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.state = AgentState::Idle;
+    agent.session.current_prompt_id = None;
+    let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+    goal.status = crate::app::agent::GoalDisplayStatus::parse("armed");
+    goal.native_goal = Some(
+        serde_json::from_value(serde_json::json!({
+            "revision": 2, "phase": "active", "activation": "armed",
+            "rounds_started": 1, "max_goal_rounds": 4
+        }))
+        .unwrap(),
+    );
+    agent.goal_state = Some(goal);
+    assert!(
+        agent.stoppable_activity_running(),
+        "Ctrl+C must reach cancellation between rounds"
+    );
+    for _ in 0..2 {
+        let effects = dispatch(Action::CancelTurn, &mut app);
+        assert!(matches!(effects.as_slice(), [Effect::CancelTurn {
+            session_id, rewind_prompt_id: None, ..
+        }] if session_id.0.as_ref() == "test-session"));
+        let agent = &app.agents[&id];
+        assert!(agent.session.state.is_idle());
+        assert!(agent.session.current_prompt_id.is_none());
+        assert!(agent.pending_cancel_resend.is_none());
+    }
+}
+
+#[test]
+fn running_native_round_remains_cancellable_after_goal_pause_or_clear() {
+    for cleared in [false, true] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::Idle;
+        agent.session.current_prompt_id = None;
+        agent.native_session_running = true;
+        if !cleared {
+            let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+            goal.native_goal = Some(
+                serde_json::from_value(serde_json::json!({
+                    "revision": 2, "phase": "paused", "activation": "disarmed",
+                    "rounds_started": 1, "max_goal_rounds": 4
+                }))
+                .unwrap(),
+            );
+            agent.goal_state = Some(goal);
+        }
+        assert!(agent.stoppable_activity_running());
+        let effects = dispatch(Action::CancelTurn, &mut app);
+        assert!(matches!(effects.as_slice(), [Effect::CancelTurn {
+            session_id, rewind_prompt_id: None, ..
+        }] if session_id.0.as_ref() == "test-session"));
+        let agent = app.agents.get_mut(&id).unwrap();
+        assert!(agent.session.state.is_idle());
+        assert!(agent.session.current_prompt_id.is_none());
+        assert!(agent.pending_cancel_resend.is_none());
+        assert!(
+            agent.native_session_running,
+            "cancel is not proof of retirement"
+        );
+        if let Some(goal) = &agent.goal_state {
+            let native = goal.native_goal.as_ref().unwrap();
+            assert_eq!(native.revision, 2);
+            assert!(!goal.native_rounds_armed());
+        }
+        agent.native_session_running = false;
+        assert!(!agent.stoppable_activity_running());
+        assert!(dispatch(Action::CancelTurn, &mut app).is_empty());
+    }
+}
+
+#[test]
+fn idle_native_goal_without_future_rounds_is_not_cancellable() {
+    for (phase, activation) in [
+        ("active", "disarmed"),
+        ("paused", "armed"),
+        ("complete", "disarmed"),
+    ] {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = AgentState::Idle;
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.native_goal = Some(
+            serde_json::from_value(serde_json::json!({
+                "revision": 2, "phase": phase, "activation": activation,
+                "rounds_started": 1, "max_goal_rounds": 4
+            }))
+            .unwrap(),
+        );
+        agent.goal_state = Some(goal);
+        assert!(!agent.stoppable_activity_running());
+        assert!(dispatch(Action::CancelTurn, &mut app).is_empty());
+    }
+}
+
+#[test]
+fn idle_native_goal_without_session_has_no_cancel_target() {
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.session.state = AgentState::Idle;
+    agent.session.session_id = None;
+    let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+    goal.native_goal = Some(
+        serde_json::from_value(serde_json::json!({
+            "revision": 1, "phase": "active", "activation": "armed",
+            "rounds_started": 0, "max_goal_rounds": 4
+        }))
+        .unwrap(),
+    );
+    agent.goal_state = Some(goal);
+    assert!(dispatch(Action::CancelTurn, &mut app).is_empty());
+    assert!(app.agents[&AgentId(0)].session.state.is_idle());
+}
+
+#[test]
 fn demote_dispatch_keeps_turn_session_and_execute_guards() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);

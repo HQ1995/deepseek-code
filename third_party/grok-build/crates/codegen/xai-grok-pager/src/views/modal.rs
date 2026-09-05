@@ -426,6 +426,11 @@ pub(crate) fn default_palette_entries(
             shortcut: "/session-info".into(),
             command: PaletteCommand::SlashCommand("/session-info".into()),
         },
+        PaletteEntry {
+            label: "Goal".into(),
+            shortcut: "/goal".into(),
+            command: PaletteCommand::SlashCommand("/goal".into()),
+        },
         // ── Context ──
         PaletteEntry {
             label: "Context".into(),
@@ -568,7 +573,7 @@ pub(crate) fn default_palette_entries(
     entries.retain(|entry| {
         if let PaletteCommand::SlashCommand(text) = &entry.command
             && let Some(invocation) = crate::slash::parse_invocation(text.trim())
-            && ((invocation.token == "compact"
+            && ((matches!(invocation.token, "compact" | "goal")
                 && slash.registry().get(invocation.token).is_none())
                 || !slash
                     .registry()
@@ -1376,6 +1381,41 @@ mod palette_tests {
             ),
         ]);
         assert!(slash_rows_with(&controller).contains(&"/compact".to_string()));
+    }
+    #[test]
+    fn palette_goal_tracks_acp_command_presence() {
+        for mode in [
+            crate::app::ScreenMode::Minimal,
+            crate::app::ScreenMode::Fullscreen,
+        ] {
+            let mut controller = slash(mode);
+            assert!(!slash_rows_with(&controller).contains(&"/goal".to_string()));
+            controller.registry_mut().set_acp_commands(&[
+                agent_client_protocol::AvailableCommand::new(
+                    "goal".to_string(),
+                    "Manage the current goal".to_string(),
+                ),
+            ]);
+            let entries = default_palette_entries(true, &controller);
+            let goals: Vec<_> = entries
+                .iter()
+                .filter(|entry| entry.label == "Goal")
+                .collect();
+            assert_eq!(goals.len(), 1);
+            assert_eq!(goals[0].shortcut, "/goal");
+            assert!(
+                matches!(&goals[0].command, PaletteCommand::SlashCommand(text) if text == "/goal")
+            );
+            assert_eq!(
+                slash_rows_with(&controller)
+                    .iter()
+                    .filter(|text| *text == "/goal")
+                    .count(),
+                1
+            );
+            controller.registry_mut().set_acp_commands(&[]);
+            assert!(!slash_rows_with(&controller).contains(&"/goal".to_string()));
+        }
     }
     #[test]
     fn every_palette_slash_row_resolves_to_a_registered_command() {

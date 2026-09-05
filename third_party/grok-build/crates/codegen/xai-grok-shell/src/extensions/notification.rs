@@ -5,6 +5,24 @@ use crate::session::feedback::FeedbackRequest as FeedbackRequestData;
 
 pub use crate::session::goal_tracker::GoalClassifierVerdict;
 
+/// Durable native goal state; runtime accounting is not part of this projection.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NativeGoalState {
+    pub revision: u64,
+    pub phase: String,
+    pub activation: String,
+    pub rounds_started: u64,
+    pub max_goal_rounds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<NativeGoalReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NativeGoalReason {
+    pub code: String,
+    pub message: String,
+}
+
 /// Retained for wire backwards compatibility; always empty in the
 /// simplified goal model (no deliverables).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -751,10 +769,13 @@ pub enum SessionUpdate {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
         /// Number of tool calls made by the subagent.
+        #[serde(default)]
         tool_calls: u32,
         /// Number of conversation turns taken by the subagent.
+        #[serde(default)]
         turns: u32,
         /// Total wall-clock duration in milliseconds.
+        #[serde(default)]
         duration_ms: u64,
         /// Total tokens consumed by the subagent's context window.
         #[serde(default)]
@@ -781,6 +802,7 @@ pub enum SessionUpdate {
         /// Absolute path of the working directory.
         cwd: String,
         /// Absolute path to the output log file on disk.
+        #[serde(default)]
         output_file: String,
         /// For monitor tasks: the monitor's human-readable description.
         /// `None` for ordinary backgrounded bash commands. Lets the pager
@@ -931,7 +953,12 @@ pub enum SessionUpdate {
     GoalUpdated {
         goal_id: String,
         objective: String,
-        /// `"active"`, `"user_paused"`, `"back_off_paused"`,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_goal: Option<NativeGoalState>,
+        /// Initial new/load/fork hydration, not a live transition.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_snapshot: Option<bool>,
+        /// `"active"`, `"armed"`, `"disarmed"`, `"user_paused"`, `"back_off_paused"`,
         /// `"no_progress_paused"`, `"infra_paused"`, `"blocked"`,
         /// `"budget_limited"`, `"complete"`, `"cleared"`.
         /// Legacy `"doom_loop_paused"` is accepted by pagers as user-paused.
@@ -942,8 +969,11 @@ pub enum SessionUpdate {
         token_budget: Option<i64>,
         #[serde(default)]
         tokens_used: i64,
+        #[serde(default)]
         elapsed_ms: u64,
+        #[serde(default)]
         total_deliverables: u32,
+        #[serde(default)]
         completed_deliverables: u32,
         /// Wire compat: always `None` in the simplified goal model.
         /// Retained for cross-version compatibility with older pagers.
@@ -956,7 +986,9 @@ pub enum SessionUpdate {
         current_deliverable_title: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         current_subagent_role: Option<String>,
+        #[serde(default)]
         total_worker_rounds: u32,
+        #[serde(default)]
         total_verify_rounds: u32,
         #[serde(default)]
         token_baseline: i64,
@@ -1711,6 +1743,35 @@ mod tests {
     }
 
     #[test]
+    fn subagent_finished_omitted_metrics_preserves_terminal_output() {
+        for status in ["completed", "cancelled"] {
+            let update: SessionUpdate = serde_json::from_value(serde_json::json!({
+                "sessionUpdate": "subagent_finished",
+                "subagent_id": "native",
+                "child_session_id": "child-native",
+                "status": status,
+                "output": "real result"
+            }))
+            .unwrap();
+            let SessionUpdate::SubagentFinished {
+                status: actual,
+                tool_calls,
+                turns,
+                duration_ms,
+                tokens_used,
+                output,
+                ..
+            } = update
+            else {
+                panic!("terminal update")
+            };
+            assert_eq!(actual, status);
+            assert_eq!((tool_calls, turns, duration_ms, tokens_used), (0, 0, 0, 0));
+            assert_eq!(output.as_deref(), Some("real result"));
+        }
+    }
+
+    #[test]
     fn subagent_finished_with_tokens_used_roundtrips() {
         let update = SessionUpdate::SubagentFinished {
             subagent_id: "sa-rt".into(),
@@ -1992,6 +2053,8 @@ mod tests {
     fn make_goal_updated_full() -> SessionUpdate {
         SessionUpdate::GoalUpdated {
             goal_id: "g-1".into(),
+            native_goal: None,
+            is_snapshot: None,
             objective: "Build widget".into(),
             status: "active".into(),
             phase: "executing".into(),
@@ -2030,6 +2093,8 @@ mod tests {
     fn make_goal_updated_minimal() -> SessionUpdate {
         SessionUpdate::GoalUpdated {
             goal_id: "g-min".into(),
+            native_goal: None,
+            is_snapshot: None,
             objective: "Test".into(),
             status: "active".into(),
             phase: "idle".into(),

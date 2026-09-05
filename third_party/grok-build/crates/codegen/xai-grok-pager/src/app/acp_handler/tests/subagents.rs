@@ -1,6 +1,121 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
+    #[test]
+    fn native_subagent_terminal_unknown_metrics_and_output_enrichment() {
+        use crate::scrollback::block::BlockContent;
+        use crate::scrollback::types::{BlockContext, DisplayMode};
+
+        for status in ["completed", "cancelled", "failed"] {
+            for available in [Some(false), Some(true), None] {
+                let mut app = make_app_with_agent("sess-parent");
+                handle(make_ext_session_notification_with_method(
+                    "sess-parent", "x.ai/session/update",
+                    test_subagent_spawned("sess-parent", "child-native"),
+                ), &mut app);
+                {
+                    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+                    let info = agent.subagent_sessions.get_mut("child-native").unwrap();
+                    info.pending_kill = true;
+                    info.kill_requested_at = Some(std::time::Instant::now());
+                    if available == Some(false) {
+                        info.duration_ms = Some(123);
+                        info.turn_count = Some(2);
+                        info.tool_call_count = Some(3);
+                        info.tokens_used = Some(42);
+                    }
+                }
+                let mut payload = serde_json::json!({
+                    "sessionId": "sess-parent",
+                    "update": {
+                        "sessionUpdate": "subagent_finished",
+                        "subagent_id": "sa-native",
+                        "child_session_id": "child-native",
+                        "status": status
+                    }
+                });
+                if let Some(available) = available {
+                    payload["_meta"] = serde_json::json!({"subagentMetricsAvailable": available});
+                }
+                if available != Some(false) {
+                    for key in ["tool_calls", "turns", "duration_ms", "tokens_used"] {
+                        payload["update"][key] = serde_json::json!(0);
+                    }
+                }
+                // First finish has no output; a later native snapshot enriches it.
+                let expected = (available != Some(false)).then_some(0);
+                for (delivery, output) in [None, Some("actual final answer"), Some("actual final answer")].into_iter().enumerate() {
+                    if let Some(output) = output {
+                        payload["update"]["output"] = serde_json::json!(output);
+                        // Late snapshots can carry stale metrics or change availability;
+                        // output enrichment must leave the first terminal metrics intact.
+                        payload["_meta"] = serde_json::json!({"subagentMetricsAvailable": delivery == 1});
+                        for key in ["tool_calls", "turns", "duration_ms", "tokens_used"] {
+                            payload["update"][key] = serde_json::json!(999);
+                        }
+                    }
+                    let notification = acp::ExtNotification::new("x.ai/session/update",
+                        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()));
+                    let changed = handle_ext_notification(&notification, &mut app);
+                    if delivery == 2 {
+                        assert!(!changed, "identical terminal output must be a no-op");
+                    }
+                    let agent = app.agents.get(&AgentId(0)).unwrap();
+                    let info = agent.subagent_sessions.get("child-native").unwrap();
+                    assert_eq!(info.duration_ms, expected);
+                    assert_eq!(info.tool_calls, expected.map(|n| n as u32));
+                    assert_eq!(info.turns, expected.map(|n| n as u32));
+                    assert_eq!(info.tokens_used, expected);
+                }
+                payload["update"]["status"] = serde_json::json!(if status == "completed" { "failed" } else { "completed" });
+                payload["update"]["output"] = serde_json::json!("conflicting terminal output");
+                let conflicting = acp::ExtNotification::new("x.ai/session/update",
+                    std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()));
+                assert!(!handle_ext_notification(&conflicting, &mut app),
+                    "a conflicting terminal status must not enrich output");
+                let agent = app.agents.get(&AgentId(0)).unwrap();
+                let info = agent.subagent_sessions.get("child-native").unwrap();
+                assert!(info.finished);
+                assert_eq!(info.status.as_deref(), Some(status));
+                assert!(!info.pending_kill);
+                assert!(info.kill_requested_at.is_none());
+                assert_eq!(info.duration_ms, expected);
+                assert_eq!(info.tool_calls, expected.map(|n| n as u32));
+                assert_eq!(info.turns, expected.map(|n| n as u32));
+                assert_eq!(info.tokens_used, expected);
+                if available == Some(false) {
+                    assert_eq!(info.turn_count, None);
+                    assert_eq!(info.tool_call_count, None);
+                }
+                let entry = agent.scrollback.get_by_id(info.scrollback_entry_id.unwrap()).unwrap();
+                assert!(!entry.is_running);
+                let RenderBlock::Subagent(block) = &entry.block else { panic!("subagent block") };
+                let ctx = BlockContext {
+                    mode: DisplayMode::Collapsed, is_running: false, width: 120,
+                    raw: false, max_lines: None, appearance: Default::default(),
+                    is_selected: false, cwd: None,
+                };
+                let rendered = block.output(&ctx).lines[0].content.to_string();
+                assert!(rendered.contains(status));
+                if available == Some(false) {
+                    assert!(!rendered.contains(" in "), "{rendered}");
+                }
+                let child = agent.subagent_views.get("child-native").unwrap();
+                assert!(matches!(child.session.state, AgentState::Idle));
+                assert_eq!(agent_message_text(child), "actual final answer");
+                assert_eq!(crate::app::agent_view::test_fixtures::count_turn_markers(child), 1);
+                let RenderBlock::SessionEvent(footer) = &child.scrollback.last().unwrap().block else {
+                    panic!("completion footer")
+                };
+                assert!(matches!(footer.event, crate::scrollback::blocks::SessionEvent::TurnCompleted { elapsed }
+                    if elapsed == expected.map(std::time::Duration::from_millis)));
+                if available == Some(false) {
+                    assert_eq!(footer.event.message(), "Turn completed.");
+                }
+            }
+        }
+    }
+
     /// On resume, a replayed spawn+finish pair leaves the subagent terminal.
     #[test]
     fn replayed_subagent_finished_marks_orphan_terminal() {
@@ -377,14 +492,14 @@
                 1,
                 "precondition: one earlier-turn footer exists"
             );
-            finalize_finished_child_view(child, std::time::Duration::from_secs(2));
+            finalize_finished_child_view(child, Some(std::time::Duration::from_secs(2)));
             assert_eq!(
                 count_turn_markers(child),
                 2,
                 "second-turn finalize must append its own trailing footer"
             );
             // Re-finalize with no new content must stay idempotent on the tail.
-            finalize_finished_child_view(child, std::time::Duration::from_secs(3));
+            finalize_finished_child_view(child, Some(std::time::Duration::from_secs(3)));
             assert_eq!(
                 count_turn_markers(child),
                 2,
@@ -515,7 +630,7 @@
         };
         match &sb.kind {
             SubagentBlockKind::Completed { elapsed } => {
-                assert_eq!(*elapsed, std::time::Duration::from_millis(500));
+                assert_eq!(*elapsed, Some(std::time::Duration::from_millis(500)));
             }
             other => {
                 panic!("blocking subagent must mutate started block to Completed, got {other:?}")

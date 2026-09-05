@@ -116,7 +116,14 @@ command -v tmux >/dev/null 2>&1 || fail "tmux is required"
 DSH_VERSION="$("$NODE_BIN" -p "require('$ROOT/bridge/grok-leader/package.json').dsh.testedVersion")"
 
 mkdir -p "$OUT" "$SCRATCH" "$SCRATCH/e2e-bin" "$SCRATCH/fixture-plugin"
-export PATH="$(dirname "$NODE_BIN"):$SCRATCH/e2e-bin:$PATH"
+mkdir -p "$SCRATCH/observer-plugin" "$OUT/observer-$RUN_ID"
+export DSCODE_E2E_OBSERVER_DIR="$OUT/observer-$RUN_ID"
+cp "$ROOT/scripts/e2e-observer.mjs" "$SCRATCH/observer-plugin/index.mjs"
+printf '%s\n' '{"name":"dscode-e2e-observer","version":"1.0.0","type":"module","main":"index.mjs","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}' >"$SCRATCH/observer-plugin/package.json"
+printf '%s\n' '- insert:' '    - id: dscode-e2e-observer' '      name: dscode-e2e-observer' >"$SCRATCH/observer-plugin/cordis.patch.yml"
+printf '#!/bin/sh\nexec "%s" "$@"\n' "$NODE_BIN" >"$SCRATCH/e2e-bin/node"
+chmod +x "$SCRATCH/e2e-bin/node"
+export PATH="$SCRATCH/e2e-bin:$(dirname "$NODE_BIN"):$PATH"
 
 if command -v pnpm >/dev/null 2>&1; then
   :
@@ -131,8 +138,28 @@ else
   fail "pnpm or corepack is required to create the isolated dsh profile"
 fi
 
+SOURCE_COMMIT="$("$NODE_BIN" -p "require('$ROOT/bridge/grok-leader/package.json').dsh?.sourceCommit || ''")"
+RELEASE_DIR="${DSCODE_RELEASE_DIR:-$SCRATCH/release-assets}"
+if [[ -n "$SOURCE_COMMIT" && ( -z "${DSCODE_E2E_DSH_BIN:-}" || -z "${DSCODE_E2E_PLUGIN_TGZ:-}" ) ]]; then
+  if [[ -z "${DSCODE_RELEASE_DIR:-}" ]]; then
+    BUILD_ARGS=(--out "$RELEASE_DIR" --version "$(cat "$ROOT/VERSION")")
+    [[ -z "${DSCODE_SOURCE_DIR:-}" ]] || BUILD_ARGS+=(--source "$DSCODE_SOURCE_DIR")
+    [[ -z "${DSCODE_RUNTIME_CONSUMER:-}" ]] || BUILD_ARGS+=(--consumer "$DSCODE_RUNTIME_CONSUMER")
+    [[ -z "${DSCODE_E2E_DSH_BIN:-}" ]] || BUILD_ARGS+=(--plugin-only)
+    [[ -z "${DSCODE_E2E_PLUGIN_TGZ:-}" ]] || BUILD_ARGS+=(--runtime-only)
+    "$NODE_BIN" "$ROOT/scripts/build-release-payload.mjs" "${BUILD_ARGS[@]}" \
+      >"$OUT/payload-build-$RUN_ID.log" 2>&1 || fail "could not build the source release payload"
+  fi
+fi
 if [[ -n "${DSCODE_E2E_DSH_BIN:-}" ]]; then
   DSH_BIN="$DSCODE_E2E_DSH_BIN"
+elif [[ -n "$SOURCE_COMMIT" ]]; then
+  PLATFORM="$("$NODE_BIN" -p "({'linux/x64':'linux-x86_64','darwin/arm64':'macos-aarch64'})[process.platform+'/'+process.arch] || ''")"
+  [[ -n "$PLATFORM" ]] || fail "unsupported runtime platform"
+  mkdir -p "$SCRATCH/dsh-cli"
+  tar -xzf "$RELEASE_DIR/dscode-runtime-$PLATFORM.tar.gz" -C "$SCRATCH/dsh-cli" \
+    || fail "could not extract the source runtime"
+  DSH_BIN="$SCRATCH/dsh-cli/bin/dsh"
 elif command -v dsh >/dev/null 2>&1 \
   && [[ "$(dsh --version 2>/dev/null | head -1 || true)" == "$DSH_VERSION" ]]; then
   DSH_BIN="$(command -v dsh)"
@@ -145,25 +172,35 @@ else
 fi
 [[ -x "$DSH_BIN" ]] || fail "dsh executable is invalid: $DSH_BIN"
 
+# Source tarballs must override ordinary parent>dependency edges only: global
+# file: overrides promote SDK peers into copies that break native scope identity.
+if [[ -n "${DSCODE_E2E_PNPM_CONFIG:-}" ]]; then
+  mkdir -p "$SCRATCH/profiles/dscode"
+  cp "$DSCODE_E2E_PNPM_CONFIG" "$SCRATCH/profiles/dscode/pnpm-workspace.yaml"
+fi
+
 # Install the bridge as the tarball users receive, not as a live file: link.
 # A later `dsh add` must not make pnpm resolve runtime peers from the checkout.
-BRIDGE_ARCHIVE_NAME="$(npm pack --silent --pack-destination "$SCRATCH" "$ROOT/bridge/grok-leader")" \
-  || fail "could not pack the local bridge"
-BRIDGE_ARCHIVE_NAME="${BRIDGE_ARCHIVE_NAME##*$'\n'}"
-BRIDGE_ARCHIVE="$SCRATCH/$BRIDGE_ARCHIVE_NAME"
+BRIDGE_ARCHIVE="${DSCODE_E2E_PLUGIN_TGZ:-}"
+if [[ -z "$BRIDGE_ARCHIVE" && -n "$SOURCE_COMMIT" ]]; then
+  BRIDGE_ARCHIVE="$RELEASE_DIR/dscode-plugin.tgz"
+elif [[ -z "$BRIDGE_ARCHIVE" ]]; then
+  BRIDGE_ARCHIVE_NAME="$(npm pack --silent --pack-destination "$SCRATCH" "$ROOT/bridge/grok-leader")" \
+    || fail "could not pack the local bridge"
+  BRIDGE_ARCHIVE_NAME="${BRIDGE_ARCHIVE_NAME##*$'\n'}"
+  BRIDGE_ARCHIVE="$SCRATCH/$BRIDGE_ARCHIVE_NAME"
+fi
 [[ -f "$BRIDGE_ARCHIVE" ]] || fail "packed bridge archive is missing: $BRIDGE_ARCHIVE"
+BRIDGE_ARCHIVE="$("$NODE_BIN" -p 'require("node:path").resolve(process.argv[1])' "$BRIDGE_ARCHIVE")"
 
-DSH_BIN_DIR="$(cd "$(dirname "$DSH_BIN")" && pwd)"
-SHIPPED_MINIMAL=""
-for candidate in \
-  "$DSH_BIN_DIR/../lib/node_modules/@deepseek-ai/dsh/config/agent-presets/minimal/agent.cordis.yml" \
-  "$DSH_BIN_DIR/../@deepseek-ai/dsh/config/agent-presets/minimal/agent.cordis.yml"; do
-  if [[ -f "$candidate" ]]; then
-    SHIPPED_MINIMAL="$candidate"
-    break
-  fi
-done
-[[ -n "$SHIPPED_MINIMAL" ]] || fail "could not locate the pinned dsh minimal preset"
+SHIPPED_MINIMAL="$("$NODE_BIN" -e '
+  const { createRequire } = require("node:module")
+  const { realpathSync } = require("node:fs")
+  const { dirname, join } = require("node:path")
+  const runtime = createRequire(realpathSync(process.argv[1]))
+  console.log(join(dirname(runtime.resolve("@deepseek-ai/dsh-agent-presets/package.json")), "presets/minimal/agent.cordis.yml"))
+' "$DSH_BIN")" || fail "could not resolve the released dsh preset package"
+[[ -f "$SHIPPED_MINIMAL" ]] || fail "could not locate the pinned dsh minimal preset"
 
 install_fixture_custom_preset() {
 CUSTOM_PRESET="$SCRATCH/.agent-presets/fixture-custom"
@@ -220,6 +257,7 @@ llm-pi-ai:
       baseURL: $GATEWAY
       models:
         - id: fake-model
+          contextWindow: 32768
           input: [text, image]
         - id: fake-text-model
           input: [text]
@@ -247,6 +285,8 @@ printf 'export default function () {}\n' >"$SCRATCH/fixture-plugin/index.js"
 
 cat >"$SCRATCH/mock-gateway.mjs" <<'EOF'
 import { appendFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
+const { contractReply } = await import(pathToFileURL(process.env.DSCODE_E2E_MODEL_FIXTURE).href)
 import http from 'node:http'
 
 const [portText, logPath] = process.argv.slice(2)
@@ -304,6 +344,29 @@ http.createServer((request, response) => {
     }
     if (request.method === 'POST' && path.endsWith('/chat/completions')) {
       const titleRequest = body.includes('Create a concise title')
+      const parsed = JSON.parse(body)
+      const fixture = titleRequest ? undefined : contractReply(parsed)
+      if (fixture) {
+        response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+        if (fixture.hold) {
+          if (fixture.text) response.write('data: ' + chunk(fixture.text) + '\n\n')
+          response.write(': controlled model wait\n\n')
+          const deadline = setTimeout(() => response.destroy(), 90000)
+          response.on('close', () => clearTimeout(deadline))
+          return
+        }
+        if (fixture.name) {
+          const call = JSON.parse(toolCallChunk(fixture.name, JSON.stringify(fixture.arguments)))
+          call.choices[0].delta.tool_calls[0].id = `contract-${parsed.messages.filter(m => m.role === 'tool').length}`
+          response.write('data: ' + JSON.stringify(call) + '\n\n')
+          response.write('data: ' + chunk('', 'tool_calls') + '\n\n')
+        } else {
+          response.write('data: ' + chunk(fixture.text) + '\n\n')
+          response.write('data: ' + chunk('', 'stop', { prompt_tokens: 2400, completion_tokens: 17 }) + '\n\n')
+        }
+        response.end('data: [DONE]\n\n')
+        return
+      }
       const askRequest = body.includes('exercise the ask_user_question bridge')
       const answeredAsk = body.includes('"tool_call_id":"ask-user-e2e"')
       response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
@@ -407,6 +470,7 @@ http.createServer((request, response) => {
 }).listen(port, '127.0.0.1', () => appendFileSync(logPath, 'READY\n'))
 EOF
 
+export DSCODE_E2E_MODEL_FIXTURE="$ROOT/scripts/e2e-contract-model.mjs"
 "$NODE_BIN" "$SCRATCH/mock-gateway.mjs" "$PORT" "$MOCK_LOG" &
 MOCK_PID=$!
 for _ in $(seq 1 80); do
@@ -418,6 +482,12 @@ grep -q '^READY$' "$MOCK_LOG" 2>/dev/null || fail "mock gateway did not start"
 DSH_HOME="$SCRATCH" "$DSH_BIN" plugin --profile dscode add \
   "file:$BRIDGE_ARCHIVE" >"$PLUGIN_LOG" 2>&1 \
   || fail "could not install the bridge into the isolated dsh profile"
+OBSERVER_ARCHIVE_NAME="$(npm pack --silent --pack-destination "$SCRATCH" "$SCRATCH/observer-plugin")" \
+  || fail "could not pack the read-only runtime observer"
+OBSERVER_ARCHIVE_NAME="${OBSERVER_ARCHIVE_NAME##*$'\n'}"
+DSH_HOME="$SCRATCH" "$DSH_BIN" plugin --profile dscode add \
+  "file:$SCRATCH/$OBSERVER_ARCHIVE_NAME" >>"$PLUGIN_LOG" 2>&1 \
+  || fail "could not install the read-only runtime observer"
 # From here onward the product runs as the isolated user. Without HOME,
 # Claude/Cursor compatibility discovery can import the developer's MCP config
 # and invalidate the bridge fixture before the mock-model turn starts.
@@ -455,7 +525,7 @@ completion_count_after="$(grep -c 'POST /v1/chat/completions' "$MOCK_LOG" 2>/dev
     "get_goal", "glob", "grep", "interrupt_agent", "job_kill", "job_list",
     "job_output", "list_agents", "ralph", "read", "read_image", "send_message",
     "skill", "subagent", "subagent_fork", "todo_write", "update_goal",
-    "web_search", "workflow", "write",
+    "web_fetch", "web_search", "workflow", "write",
   ].sort()
   if (JSON.stringify(names) !== JSON.stringify(expected)) {
     throw new Error(`default standard tool roster drifted: ${JSON.stringify(names)}`)
@@ -511,12 +581,13 @@ audit_responses_preset() {
       "get_goal", "glob", "grep", "interrupt_agent", "job_kill", "job_list",
       "job_output", "list_agents", "ralph", "read", "read_image", "send_message",
       "skill", "subagent", "subagent_fork", "todo_write", "update_goal",
-      "web_search", "workflow", "write",
+      "web_fetch", "web_search", "workflow", "write",
     ].sort()
     const expected = {
       minimal: ["bash", "str_replace_editor"],
       standard,
-      code: ["run_code"],
+      history: [...standard, "session_search", "session_event_search", "session_trace", "session_event_trace", "session_event_read"].sort(),
+      ptc: ["run_code"],
       cordis: [
         ...standard,
         "cordis_define", "cordis_inspect_list", "cordis_inspect_query",
@@ -556,7 +627,7 @@ audit_all_responses_presets() {
   if (!source.includes(current)) throw new Error("fake default model block was not found")
   fs.writeFileSync(path, source.replace(current, replacement))
   ' "$SCRATCH/settings.yaml" "$GATEWAY" || fail "could not switch the isolated profile to the Responses API provider"
-  for preset in minimal standard code cordis fixture-custom; do
+  for preset in minimal standard history ptc cordis fixture-custom; do
     audit_responses_preset "$preset"
   done
   cat "$PRESET_ROSTER_LOG"
@@ -642,7 +713,7 @@ env PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-headless-image" \
     .map(line => JSON.parse(line.slice(prefix.length)))
   const request = requests.find(body => {
     const wire = JSON.stringify(body.messages)
-    return wire.includes("image test marker") && wire.includes("data:image/png;base64,")
+    return wire.includes("image test marker") && wire.includes("data:image/") && wire.includes(";base64,")
   })
   if (!request) throw new Error("image bytes did not reach the provider request")
 ' "$HEADLESS_IMAGE_OUT" "$MOCK_LOG" || fail "multimodal prompt did not cross the complete product path"
@@ -890,6 +961,13 @@ completion_count_after_text_image="$(grep -c 'POST /v1/chat/completions' "$MOCK_
 [[ "$completion_count_after_text_image" -eq "$completion_count_before_text_image" ]] \
   || fail "text-only image rejection still reached the provider"
 wait_leader_exit "$HEADLESS_TEXT_IMAGE_SOCKET"
+
+echo "[contracts] exact runtime state, native goals, tasks and durable history"
+env DSCODE_E2E_SCRATCH="$SCRATCH" DSCODE_E2E_ARTIFACTS="$OUT" \
+  DSCODE_E2E_RUN_ID="$RUN_ID" DSCODE_E2E_MOCK_LOG="$MOCK_LOG" \
+  DSCODE_TUI_BIN="$TUI_BIN" DSH_BIN="$DSH_BIN" \
+  "$NODE_BIN" "$ROOT/scripts/e2e-contracts.mjs" \
+  || fail "runtime contract acceptance failed"
 
 echo "PASS real TUI + dsh + bridge E2E run $RUN_ID"
 echo "  artifacts: $OUT (*-$RUN_ID.*)"

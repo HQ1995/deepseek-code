@@ -7,6 +7,138 @@ use super::super::task_result::{
 use super::*;
 use xai_grok_shell::session::unified_list::ListScope;
 
+#[test]
+fn native_goal_result_is_separate_from_live_assistant_and_never_settles_turn() {
+    for mode in [
+        crate::app::ScreenMode::Minimal,
+        crate::app::ScreenMode::Fullscreen,
+    ] {
+        for result in [
+            Ok("Goal paused.".to_string()),
+            Err("native refusal".to_string()),
+        ] {
+            let mut app = test_app_with_agent();
+            app.screen_mode = mode;
+            let id = AgentId(0);
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("held-round".into());
+            agent
+                .session
+                .enqueue_prompt("queued ordinary prompt".into());
+            agent.prompt.set_text("draft survives");
+            let session_id = agent.session.session_id.clone().unwrap();
+            let _ = agent.session.tracker.handle_update(
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                    acp::ContentBlock::Text(acp::TextContent::new("live assistant")),
+                )),
+                &crate::acp::meta::NotificationMeta::default(),
+                &mut agent.scrollback,
+            );
+            let live_entry = agent
+                .scrollback
+                .entry(agent.scrollback.len() - 1)
+                .unwrap()
+                .id;
+            let before = agent.scrollback.len();
+            let expected = match &result {
+                Ok(text) => text.clone(),
+                Err(error) => format!("Goal command failed: {error}"),
+            };
+            let effects = dispatch(
+                Action::TaskComplete(TaskResult::GoalCommandComplete {
+                    agent_id: id,
+                    session_id,
+                    result,
+                }),
+                &mut app,
+            );
+            assert!(effects.is_empty());
+            let agent = app.agents.get_mut(&id).unwrap();
+            assert_eq!(agent.scrollback.len(), before + 1);
+            assert!(matches!(&agent.scrollback.entry(before).unwrap().block,
+                RenderBlock::System(block) if block.text == expected));
+            let entry = agent.scrollback.get_by_id(live_entry).unwrap();
+            assert!(entry.is_running);
+            assert!(
+                matches!(&entry.block, RenderBlock::AgentMessage(message) if message.text() == "live assistant")
+            );
+            assert!(agent.session.state.is_turn_running());
+            assert_eq!(
+                agent.session.current_prompt_id.as_deref(),
+                Some("held-round")
+            );
+            assert_eq!(agent.session.pending_prompts.len(), 1);
+            assert_eq!(
+                agent.session.pending_prompts[0].text,
+                "queued ordinary prompt"
+            );
+            assert!(agent.shared_queue.is_empty());
+            assert_eq!(agent.prompt.text(), "draft survives");
+            // Continuation must reuse the original assistant block, not append
+            // to the control output or allocate a replacement message.
+            let _ = agent.session.tracker.handle_update(
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                    acp::ContentBlock::Text(acp::TextContent::new(" continues")),
+                )),
+                &crate::acp::meta::NotificationMeta::default(),
+                &mut agent.scrollback,
+            );
+            assert_eq!(agent.scrollback.len(), before + 1);
+            assert!(
+                matches!(&agent.scrollback.get_by_id(live_entry).unwrap().block,
+                RenderBlock::AgentMessage(message) if message.text() == "live assistant continues")
+            );
+            assert!(matches!(&agent.scrollback.entry(before).unwrap().block,
+                RenderBlock::System(block) if block.text == expected));
+        }
+    }
+}
+
+#[test]
+fn native_goal_result_ignores_missing_agent_and_stale_or_unbound_session() {
+    for target in ["missing-agent", "other-session", "unbound"] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("held-round".into());
+        let old_session = agent.session.session_id.clone().unwrap();
+        if target == "other-session" {
+            agent.session.session_id = Some("replacement-session".into());
+        } else if target == "unbound" {
+            agent.session.session_id = None;
+        }
+        let before = agent.scrollback.len();
+        for result in [
+            Ok("stale success".to_string()),
+            Err("stale error".to_string()),
+        ] {
+            assert!(
+                dispatch(
+                    Action::TaskComplete(TaskResult::GoalCommandComplete {
+                        agent_id: if target == "missing-agent" {
+                            AgentId(999)
+                        } else {
+                            id
+                        },
+                        session_id: old_session.clone(),
+                        result,
+                    }),
+                    &mut app
+                )
+                .is_empty()
+            );
+            assert_eq!(app.agents[&id].scrollback.len(), before);
+            assert_eq!(
+                app.agents[&id].session.current_prompt_id.as_deref(),
+                Some("held-round")
+            );
+            assert!(app.agents[&id].session.state.is_turn_running());
+        }
+    }
+}
+
 fn doctor_target(app: &AppView, id: AgentId) -> crate::app::actions::DoctorFixTarget {
     let agent = &app.agents[&id];
     crate::app::actions::DoctorFixTarget {

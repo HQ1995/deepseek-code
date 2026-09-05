@@ -17,11 +17,12 @@ use std::time::Duration;
 use serial_test::serial;
 
 use common::{reset_home, test_home};
+use xai_grok_update::version::is_version_cache_fresh as cache_is_fresh;
 use xai_grok_update::write_version_cache;
 
 /// Path to the version cache file inside the test home.
 fn version_cache_path() -> PathBuf {
-    test_home().join("version.json")
+    test_home().join("dscode-version.json")
 }
 
 /// Local alias kept so existing test bodies don't need to change.
@@ -44,8 +45,12 @@ async fn write_version_cache_creates_file_at_grok_home() {
     let path = version_cache_path();
     assert!(
         path.exists(),
-        "version.json should exist at {}",
+        "dscode-version.json should exist at {}",
         path.display()
+    );
+    assert!(
+        !test_home().join("version.json").exists(),
+        "product cache must not overwrite the upstream cache path"
     );
 
     let body = std::fs::read_to_string(&path).unwrap();
@@ -82,7 +87,7 @@ async fn write_version_cache_does_not_leave_tmp_file_behind() {
 
     write_version_cache("0.1.180", None).await;
 
-    let tmp = test_home().join("version.json.tmp");
+    let tmp = test_home().join("dscode-version.json.tmp");
     assert!(
         !tmp.exists(),
         "atomic rename must clean up tmp file: {}",
@@ -151,32 +156,6 @@ fn write_cache_with_timestamp(version: &str, ts: time::OffsetDateTime) {
     .unwrap();
 }
 
-/// Re-implement the cache-freshness check using the public API. We can't
-/// import the private `is_version_cache_fresh` directly, but we can verify
-/// its on-disk contract: file shape + freshness logic via the public
-/// `GrokVersion` JSON layout.
-async fn cache_is_fresh() -> bool {
-    // Mirror the implementation: look at version.json under GROK_HOME,
-    // parse, and check the TTL.
-    let path = version_cache_path();
-    let Ok(body) = tokio::fs::read_to_string(&path).await else {
-        return false;
-    };
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) else {
-        return false;
-    };
-    let Some(ts_str) = parsed["checked_at"].as_str() else {
-        return false;
-    };
-    let Ok(ts) =
-        time::OffsetDateTime::parse(ts_str, &time::format_description::well_known::Rfc3339)
-    else {
-        return false;
-    };
-    let now = time::OffsetDateTime::now_utc();
-    now - ts < Duration::from_secs(60 * 30)
-}
-
 #[tokio::test]
 #[serial]
 async fn version_cache_is_fresh_after_write() {
@@ -217,8 +196,36 @@ async fn version_cache_missing_file_is_not_fresh() {
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn version_cache_future_timestamp_is_not_fresh() {
+    let _ = test_home();
+    reset();
+    write_cache_with_timestamp(
+        "0.1.180",
+        time::OffsetDateTime::now_utc() + Duration::from_secs(600),
+    );
+    assert!(
+        !cache_is_fresh().await,
+        "clock skew must not indefinitely suppress updates"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn upstream_version_cache_does_not_suppress_product_checks() {
+    let _ = test_home();
+    reset();
+    write_cache_with_timestamp("0.1.180", time::OffsetDateTime::now_utc());
+    std::fs::rename(version_cache_path(), test_home().join("version.json")).unwrap();
+    assert!(
+        !cache_is_fresh().await,
+        "upstream cache must not satisfy product freshness"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// version.json wire format — the on-disk file is read by every grok launch.
+// dscode-version.json wire format — the on-disk file is read by every launch.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]

@@ -60,6 +60,44 @@ fn make_update_config() -> UpdateConfig {
     }
 }
 
+#[tokio::test]
+#[serial]
+async fn check_and_failed_install_preserve_saved_channel() {
+    use xai_grok_update::auto_update::{CliUpdateTrigger, apply_channel_switch, run_update};
+    let g = setup();
+    let config_path = test_home().join("config.toml");
+    let original = "[cli]\nchannel = 'alpha'\nchannel_format = 0\n[ui]\ncolor = 'blue'\n";
+    std::fs::write(&config_path, original).unwrap();
+    let mut cfg = make_update_config();
+    apply_channel_switch(Some("alpha"), &mut cfg).await.unwrap();
+    g.set_stdout("\"0.1.182\"");
+    g.set_alpha_stdout("\"0.1.183-alpha.1\"");
+    let status = check_update_status(&cfg).await;
+    assert!(
+        status.error.is_none(),
+        "unexpected check error: {:?}",
+        status.error
+    );
+    assert_eq!(status.channel, "alpha");
+    assert_eq!(status.latest_version.as_deref(), Some("0.1.183-alpha.1"));
+    assert!(status.update_available);
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+    assert!(!test_home().join("dscode-version.json").exists());
+    g.set_exit_code(1);
+    assert!(
+        run_update(
+            false,
+            Some("0.1.183-alpha.1"),
+            Some("alpha"),
+            &mut cfg,
+            CliUpdateTrigger::UserCommand
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Scenario A: corporate registry 403.
 // ─────────────────────────────────────────────────────────────────────────────

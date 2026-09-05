@@ -403,15 +403,10 @@ pub(crate) fn ensure_subagent_child_replayed(
     let parent_turn_running =
         parent.session.state.is_turn_running() || parent.session.state.is_cancelling();
     if let Some(child_view) = parent.subagent_views.get_mut(child_sid) {
-        match finished_elapsed {
-            Some(elapsed) if outcome.is_ok() && !restored => {
-                finalize_finished_child_view(child_view, elapsed)
-            }
-            Some(_) => {}
-            None if !parent_turn_running => {
-                child_view.scrollback.finish_all_running();
-            }
-            None => {}
+        if finished && outcome.is_ok() && !restored {
+            finalize_finished_child_view(child_view, finished_elapsed);
+        } else if !parent_turn_running {
+            child_view.scrollback.finish_all_running();
         }
     }
 }
@@ -549,7 +544,7 @@ pub(crate) fn evict_finished_child_view(
 /// must not suppress a later turn's footer.
 pub(crate) fn finalize_finished_child_view(
     child_view: &mut crate::app::agent_view::AgentView,
-    elapsed: std::time::Duration,
+    elapsed: Option<std::time::Duration>,
 ) {
     child_view
         .session
@@ -572,9 +567,7 @@ pub(crate) fn finalize_finished_child_view(
     child_view
         .scrollback
         .push_block(crate::scrollback::block::RenderBlock::session_event(
-            crate::scrollback::blocks::SessionEvent::TurnCompleted {
-                elapsed: Some(elapsed),
-            },
+            crate::scrollback::blocks::SessionEvent::TurnCompleted { elapsed },
         ));
 }
 fn join_meta_parts(parts: &[Option<&str>]) -> String {

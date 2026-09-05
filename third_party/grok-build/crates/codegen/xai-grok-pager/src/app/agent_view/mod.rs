@@ -907,6 +907,8 @@ pub struct AgentView {
     pub(crate) finished_wake_prompts: std::collections::HashSet<String>,
     /// The wake turn currently streaming, if any. See [`RunningWakeTurn`].
     pub(crate) running_wake_turn: Option<RunningWakeTurn>,
+    /// Latest live backend activity; never owns a foreground prompt or queue slot.
+    pub(crate) native_session_running: bool,
     pub active_pane: AgentPane,
     /// Current mode of the prompt widget (normal vs editing a queued prompt).
     pub prompt_mode: PromptMode,
@@ -2577,6 +2579,7 @@ pub(crate) mod test_fixtures {
         agent.session.bg_tasks.insert(
             "task-1".into(),
             crate::app::agent::BgTaskState {
+                native_task: None,
                 task_id: "task-1".into(),
                 tool_call_id: "tool-1".into(),
                 command: "sleep 5".into(),

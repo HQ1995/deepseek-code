@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 use xai_acp_lib::AcpAgentTx;
-use xai_grok_shell::extensions::notification::GoalClassifierVerdict;
+use xai_grok_shell::extensions::notification::{GoalClassifierVerdict, NativeGoalState};
 use xai_grok_shell::sampling::types::ReasoningEffort;
 /// Unique local identifier for an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -180,6 +180,30 @@ pub enum BgTaskStatus {
     /// Failed (non-zero exit, signal, timeout, OOM, etc.).
     Failed,
 }
+/// Nonconsuming native job facts attached to task notifications.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTaskInfo {
+    pub status: String,
+    pub kind: String,
+    pub detail: Option<String>,
+    pub output_available: bool,
+}
+
+impl NativeTaskInfo {
+    pub fn display_detail(&self) -> String {
+        let mut text = format!("{}: {}", self.kind, self.status);
+        if let Some(detail) = &self.detail {
+            text.push('\n');
+            text.push_str(detail);
+        }
+        if !self.output_available {
+            text.push_str("\nOutput unavailable");
+        }
+        text
+    }
+}
+
 /// Central state for a single background task.
 ///
 /// Stored in `AgentSession::bg_tasks` keyed by `task_id`.
@@ -197,6 +221,7 @@ pub struct BgTaskState {
     pub end_time: Option<SystemTime>,
     pub exit_code: Option<i32>,
     pub signal: Option<String>,
+    pub native_task: Option<NativeTaskInfo>,
     /// Accumulated stdout (full cumulative buffer from shell, max BG_TASK_MAX_STDOUT).
     ///
     /// Mutate via [`BgTaskState::set_stdout`] / [`BgTaskState::append_stdout`]
@@ -235,6 +260,18 @@ pub struct BgTaskState {
     pub restored_from_replay: bool,
 }
 impl BgTaskState {
+    /// Native status is authoritative; legacy tasks retain their coarse status label.
+    pub fn status_label(&self) -> &str {
+        if let Some(native) = &self.native_task {
+            return &native.status;
+        }
+        match self.status {
+            BgTaskStatus::Running => "running",
+            BgTaskStatus::Done => "done",
+            BgTaskStatus::Failed => "failed",
+        }
+    }
+
     /// Elapsed duration (from start to end, or start to now if running).
     pub fn elapsed(&self) -> Duration {
         let end = self.end_time.unwrap_or_else(SystemTime::now);
@@ -311,6 +348,7 @@ impl BgTaskState {
             end_time: Some(snapshot.end_time.unwrap_or_else(SystemTime::now)),
             exit_code: snapshot.exit_code,
             signal: snapshot.signal.clone(),
+            native_task: None,
             stdout: String::new(),
             stdout_line_count: 0,
             truncated: snapshot.truncated,
@@ -379,6 +417,8 @@ pub struct ScheduledTaskInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalDisplayStatus {
     Active,
+    Armed,
+    Disarmed,
     /// User-initiated pause (Ctrl+C, `/goal pause`).
     UserPaused,
     /// Classifier run cap reached; paused the goal automatically.
@@ -414,6 +454,8 @@ impl GoalDisplayStatus {
     pub fn parse(s: &str) -> Self {
         match s {
             "active" => Self::Active,
+            "armed" => Self::Armed,
+            "disarmed" => Self::Disarmed,
             "user_paused" => Self::UserPaused,
             "back_off_paused" => Self::BackOffPaused,
             "no_progress_paused" => Self::NoProgressPaused,
@@ -441,6 +483,8 @@ impl GoalDisplayStatus {
             Self::InfraPaused => "Paused (error)",
             Self::Blocked => "Paused (verification blocked)",
             Self::Active
+            | Self::Armed
+            | Self::Disarmed
             | Self::Failed
             | Self::Interrupted
             | Self::BudgetLimited
@@ -457,6 +501,8 @@ impl GoalDisplayStatus {
             | Self::InfraPaused
             | Self::Blocked => true,
             Self::Active
+            | Self::Armed
+            | Self::Disarmed
             | Self::Failed
             | Self::Interrupted
             | Self::BudgetLimited
@@ -487,6 +533,7 @@ impl GoalDisplayPhase {
 pub struct GoalDisplayState {
     pub goal_id: String,
     pub objective: String,
+    pub native_goal: Option<NativeGoalState>,
     pub status: GoalDisplayStatus,
     pub phase: GoalDisplayPhase,
     pub token_budget: Option<i64>,
@@ -562,12 +609,20 @@ pub struct GoalDisplayState {
     pub elapsed_floor_ms: u64,
 }
 impl GoalDisplayState {
+    /// Armed native rounds can be cancelled even between prompt turns.
+    pub fn native_rounds_armed(&self) -> bool {
+        self.native_goal
+            .as_ref()
+            .is_some_and(|g| g.phase == "active" && g.activation == "armed")
+    }
+
     /// Minimal state for tests that only need a present goal (e.g. occluder
     /// gating); field values are representative, not load-bearing.
     #[cfg(test)]
     pub(crate) fn test_stub() -> Self {
         Self {
             goal_id: "g-test".into(),
+            native_goal: None,
             objective: "test goal".into(),
             status: GoalDisplayStatus::Active,
             phase: GoalDisplayPhase::Executing,
@@ -605,7 +660,7 @@ impl GoalDisplayState {
         }
     }
     pub fn live_tokens_used(&self, context_used: Option<u64>, active_subagent_tokens: u64) -> i64 {
-        if self.status == GoalDisplayStatus::Active {
+        if self.native_goal.is_none() && self.status == GoalDisplayStatus::Active {
             let parent_delta = context_used
                 .map(|u| (u as i64).saturating_sub(self.token_baseline).max(0))
                 .unwrap_or(self.tokens_used);
@@ -621,7 +676,7 @@ impl GoalDisplayState {
     /// GoalUpdated notification. This makes the timer tick smoothly at render
     /// frequency without requiring the shell to emit notifications every second.
     pub fn live_elapsed_ms(&self) -> u64 {
-        let live = if self.status == GoalDisplayStatus::Active {
+        let live = if self.native_goal.is_none() && self.status == GoalDisplayStatus::Active {
             self.elapsed_ms
                 .saturating_add(self.received_at.elapsed().as_millis() as u64)
         } else {

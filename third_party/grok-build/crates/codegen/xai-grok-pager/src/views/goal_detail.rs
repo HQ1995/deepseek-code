@@ -81,6 +81,8 @@ fn status_label(goal: &GoalDisplayState) -> (&'static str, Color, String) {
     let theme = Theme::current();
     match goal.status {
         GoalDisplayStatus::Active => ("Active", theme.accent_success, active_phase_label(goal)),
+        GoalDisplayStatus::Armed => ("Armed", theme.accent_plan, String::new()),
+        GoalDisplayStatus::Disarmed => ("Disarmed", theme.gray, String::new()),
         GoalDisplayStatus::UserPaused
         | GoalDisplayStatus::BackOffPaused
         | GoalDisplayStatus::NoProgressPaused
@@ -352,6 +354,33 @@ fn humanize_event_timestamp(ts: &str) -> String {
     }
 }
 
+/// One native content projection for both measurement and painting.
+fn native_goal_lines(
+    native: &xai_grok_shell::extensions::notification::NativeGoalState,
+    width: u16,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for field in [
+        format!("Phase: {}", native.phase),
+        format!("Activation: {}", native.activation),
+        format!(
+            "Rounds: {}/{}",
+            native.rounds_started, native.max_goal_rounds
+        ),
+        format!("Revision: {}", native.revision),
+    ] {
+        lines.extend(wrap_pause_message_lines(&field, width));
+    }
+    if let Some(reason) = &native.reason {
+        lines.extend(wrap_pause_message_lines(
+            &format!("Reason: {}: {}", reason.code, reason.message),
+            width,
+        ));
+    }
+    lines.extend(wrap_pause_message_lines("Esc: close", width));
+    lines
+}
+
 /// Compute the overlay area (centered, sized to content, clamped to screen).
 pub fn goal_detail_area(screen: Rect, goal: &GoalDisplayState, todos: &[TodoItem]) -> Rect {
     let width_pct = 0.90f32;
@@ -367,6 +396,16 @@ pub fn goal_detail_area(screen: Rect, goal: &GoalDisplayState, todos: &[TodoItem
     // Mirror that here so pause-message wrapping computes the same row
     // count the renderer will produce.
     let inner_w = w.saturating_sub(4);
+    if let Some(native) = &goal.native_goal {
+        let content_h = native_goal_lines(native, inner_w).len().saturating_add(2);
+        let h = content_h.min(screen.height.saturating_sub(4) as usize) as u16;
+        return Rect::new(
+            screen.x + screen.width.saturating_sub(w) / 2,
+            screen.y + screen.height.saturating_sub(h) / 2,
+            w,
+            h,
+        );
+    }
 
     // Compute content height based on what will actually be rendered. Each
     // optional section OWNS its leading blank separator (rendered only when
@@ -545,7 +584,7 @@ pub fn render_goal_detail(
     // truncated by DISPLAY WIDTH (CJK / emoji safe) to the columns between
     // the left inset and the close button, so a long objective can never
     // collide with `[✗]` or overflow the right border.
-    let is_active = matches!(goal.status, GoalDisplayStatus::Active);
+    let is_active = goal.native_goal.is_none() && matches!(goal.status, GoalDisplayStatus::Active);
     let spinner_prefix = if is_active {
         let frames = crate::glyphs::dot_spinner_frames();
         let frame = frames[(tick / 4) % frames.len()];
@@ -596,6 +635,21 @@ pub fn render_goal_detail(
     let mut y = inner.y;
     let x = inner.x + 1;
     let w = inner.width.saturating_sub(2);
+    if let Some(native) = &goal.native_goal {
+        for line in native_goal_lines(native, w) {
+            if y >= inner.y + inner.height {
+                break;
+            }
+            buf.set_line_safe(
+                x,
+                y,
+                &Line::from(Span::styled(line, Style::default().fg(theme.text_primary))),
+                w,
+            );
+            y += 1;
+        }
+        return Some(close_rect);
+    }
 
     // ── Status line ──
     let (status_text, status_color, phase_text) = status_label(goal);
@@ -1068,9 +1122,102 @@ mod tests {
     use crate::app::agent::{GoalDisplayPhase, GoalDisplayState, GoalDisplayStatus};
     use ratatui::layout::Rect;
 
+    #[test]
+    fn native_modal_renders_only_durable_state_and_matches_measured_height() {
+        use xai_grok_shell::extensions::notification::{NativeGoalReason, NativeGoalState};
+        let mut goal = make_goal();
+        goal.planning = true;
+        goal.verifying_completion = true;
+        goal.classifier_runs_attempted = Some(2);
+        for (phase, activation) in [
+            ("active", "armed"),
+            ("active", "disarmed"),
+            ("paused", "disarmed"),
+            ("blocked", "disarmed"),
+            ("complete", "disarmed"),
+        ] {
+            goal.native_goal = Some(NativeGoalState {
+                revision: 11,
+                phase: phase.into(),
+                activation: activation.into(),
+                rounds_started: 3,
+                max_goal_rounds: 4,
+                reason: Some(NativeGoalReason {
+                    code: "round_limit".into(),
+                    message: "The admitted native rounds reached their configured limit; start a new goal to continue.".into(),
+                }),
+            });
+            let screen = Rect::new(0, 0, 80, 40);
+            let area = goal_detail_area(screen, &goal, &[]);
+            let expected = native_goal_lines(goal.native_goal.as_ref().unwrap(), area.width - 4);
+            assert_eq!(area.height as usize, expected.len() + 2);
+            let mut first = None;
+            for tick in [0, 100] {
+                let mut buf = Buffer::empty(screen);
+                assert!(
+                    render_goal_detail(
+                        &mut buf,
+                        area,
+                        &goal,
+                        &[],
+                        tick,
+                        Some(999_999),
+                        999_999,
+                        false
+                    )
+                    .is_some()
+                );
+                let rows: Vec<String> = (area.y..area.bottom())
+                    .map(|y| {
+                        (area.x..area.right())
+                            .map(|x| buf.cell((x, y)).unwrap().symbol())
+                            .collect()
+                    })
+                    .collect();
+                for (index, line) in expected.iter().enumerate() {
+                    assert!(
+                        rows[index + 1].contains(line),
+                        "missing measured row {line:?}"
+                    );
+                }
+                let rendered = rows.join("\n");
+                assert!(rendered.contains(&format!("Phase: {phase}")));
+                assert!(rendered.contains(&format!("Activation: {activation}")));
+                assert!(rendered.contains("Rounds: 3/4"));
+                assert!(rendered.contains("Revision: 11"));
+                assert!(rendered.contains("Reason: round_limit:"));
+                for fabricated in [
+                    "tokens",
+                    "Elapsed",
+                    "Worker",
+                    "verifier",
+                    "Completion review",
+                    "Verifying",
+                    "Planning",
+                    "0s",
+                    "3m",
+                ] {
+                    assert!(
+                        !rendered.contains(fabricated),
+                        "native modal leaked {fabricated}"
+                    );
+                }
+                if let Some(prior) = &first {
+                    assert_eq!(
+                        &rendered, prior,
+                        "native armed state must not animate a spinner"
+                    );
+                } else {
+                    first = Some(rendered);
+                }
+            }
+        }
+    }
+
     fn make_goal() -> GoalDisplayState {
         GoalDisplayState {
             goal_id: "g-1".into(),
+            native_goal: None,
             objective: "Implement dark mode".into(),
             status: GoalDisplayStatus::Active,
             phase: GoalDisplayPhase::Executing,

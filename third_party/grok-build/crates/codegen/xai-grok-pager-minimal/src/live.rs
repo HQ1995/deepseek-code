@@ -652,8 +652,7 @@ fn render_prompt_info(
         let total = agent
             .context_state
             .as_ref()
-            .and_then(|c| (c.total > 0).then_some(c.total))
-            .or_else(|| agent.session.models.get_context_window());
+            .and_then(|c| (c.capacity_available != Some(false)).then_some(c.total));
         if let (Some(used), Some(total)) = (used, total)
             && total > 0
         {

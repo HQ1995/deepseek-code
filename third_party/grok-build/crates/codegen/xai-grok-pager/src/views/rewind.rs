@@ -44,6 +44,8 @@ pub struct RewindResponse {
     pub mode: Option<String>,
     #[serde(default, alias = "promptText")]
     pub prompt_text: Option<String>,
+    #[serde(default, alias = "newSessionId")]
+    pub new_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

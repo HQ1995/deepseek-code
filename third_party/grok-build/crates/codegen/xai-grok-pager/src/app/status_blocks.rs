@@ -70,7 +70,7 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
             .map(|phase| format!(" · {phase}"))
             .unwrap_or_default();
         rows.push(format!(
-            "  {:<9}Workflow · {}{phase}{agents}  ({})",
+            "  {:<9} Workflow · {}{phase}{agents}  ({})",
             if run.is_active() {
                 "running".to_string()
             } else {
@@ -108,7 +108,7 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
             format!("{type_label} · {desc}")
         };
         rows.push(format!(
-            "  {status:<9}{label}  ({})",
+            "  {status:<9} {label}  ({})",
             format_duration(info.display_elapsed())
         ));
     }
@@ -135,14 +135,10 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
         let status = if task.pending_kill {
             "stopping"
         } else {
-            match task.status {
-                BgTaskStatus::Running => "running",
-                BgTaskStatus::Done => "done",
-                BgTaskStatus::Failed => "failed",
-            }
+            task.status_label()
         };
         rows.push(format!(
-            "  {status:<9}{kind} · {one_line}  ({})",
+            "  {status:<9} {kind} · {one_line}  ({})",
             format_duration(task.elapsed())
         ));
     }
@@ -157,7 +153,7 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
     });
     for info in sched {
         rows.push(format!(
-            "  {:<9}{} · {} · {}",
+            "  {:<9} {} · {} · {}",
             "scheduled",
             info.tag,
             info.human_schedule,

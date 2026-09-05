@@ -458,6 +458,10 @@ pub(super) fn dispatch_rewind_success(
     }
 
     let target = response.target_prompt_index;
+    if let Some(new_session_id) = response.new_session_id.as_deref() {
+        agent.bind_session_id(agent_client_protocol::SessionId::new(new_session_id));
+        agent.attached_as_viewer = false;
+    }
     let stashed_draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
 
     // The summary describes turns the rewind just removed (the shell

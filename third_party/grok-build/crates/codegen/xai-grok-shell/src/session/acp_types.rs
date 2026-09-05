@@ -442,6 +442,18 @@ pub fn count_detail(count: u64, noun: &str) -> String {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ContextInfo {
+    /// Explicit false marks unknown; absent flags retain legacy known semantics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity_available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub breakdown_available: Option<bool>,
+    /// Heuristic composition is not additive with provider-anchored occupancy.
+    #[serde(default)]
+    pub breakdown_approximate: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_compact_threshold_available: Option<bool>,
     pub used: u64,
     pub total: u64,
     pub system_prompt_tokens: u64,
@@ -648,6 +660,25 @@ impl StartupHints {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn context_info_availability_is_explicit_and_legacy_zero_stays_known() {
+        let legacy: ContextInfo =
+            serde_json::from_value(serde_json::json!({"used": 0, "total": 1000})).unwrap();
+        assert_eq!(legacy.used, 0);
+        assert_eq!(legacy.available, None);
+        assert_eq!(legacy.capacity_available, None);
+        assert_eq!(legacy.breakdown_available, None);
+        assert_eq!(legacy.auto_compact_threshold_percent, 85);
+        let unknown: ContextInfo = serde_json::from_value(serde_json::json!({
+            "available": false, "capacityAvailable": false,
+            "breakdownAvailable": false, "autoCompactThresholdAvailable": false
+        }))
+        .unwrap();
+        assert_eq!(unknown.available, Some(false));
+        assert_eq!(unknown.capacity_available, Some(false));
+        assert_eq!(unknown.breakdown_available, Some(false));
+        assert_eq!(unknown.auto_compact_threshold_available, Some(false));
+    }
 
     #[test]
     fn should_show_model_fingerprint_truth_table() {

@@ -1063,16 +1063,11 @@ pub struct ActionResultNotice {
 /// How long a result notice stays on screen, in animation ticks (~2.5s at 30fps).
 pub const RESULT_NOTICE_TICKS: u16 = 75;
 
-/// Single source of truth for the McpServers tab action keys. Consumed by
-/// the renderer (hint bar), the picker (`PickerConfig::action_keys`), and
-/// `resolve_key` (must have a matching arm for every entry).
-pub const MCP_SERVERS_ACTION_KEYS: &[(char, &str)] = &[
-    ('r', "refresh"),
-    ('a', "add"),
-    ('i', "auth"),
-    (' ', "toggle"),
-    ('x', "remove"),
-];
+/// Dscode MCP sessions are configured by the TUI before `session/new`; the
+/// external dsh leader exposes live status and refresh but does not own those
+/// config files. Keep this modal read-only instead of offering mutations that
+/// cannot survive a session restart.
+pub const MCP_SERVERS_ACTION_KEYS: &[(char, &str)] = &[('r', "refresh")];
 
 /// Footer label for the MCP tab Ctrl+O shortcut (not in [`MCP_SERVERS_ACTION_KEYS`]).
 pub const MCP_SERVERS_OPEN_CONNECTORS_FOOTER: &str = "ctrl-o open";
@@ -1126,7 +1121,7 @@ pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
             ('d', "uninstall"),
             ('x', "remove source"),
         ],
-        ExtensionsTab::Skills => vec![(' ', "toggle"), ('f', "filter"), ('r', "reload")],
+        ExtensionsTab::Skills => vec![('f', "filter"), ('r', "reload")],
         ExtensionsTab::McpServers => MCP_SERVERS_ACTION_KEYS.to_vec(),
     }
 }
@@ -1349,7 +1344,6 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
             }],
         }),
         (ExtensionsTab::Marketplace, 'x') => Some(ButtonAction::RemoveSelectedMarketplaceSource),
-        (ExtensionsTab::Skills, ' ') => Some(ButtonAction::ToggleSelectedSkill),
         (ExtensionsTab::Skills, 'r') => Some(ButtonAction::ReloadSkills),
         (ExtensionsTab::Skills, 'f') => Some(ButtonAction::CycleFilter),
         (ExtensionsTab::McpServers, 'a') => Some(ButtonAction::StartInput {
@@ -4231,20 +4225,8 @@ mod tests {
                     ('x', "remove_source"),
                 ],
             ),
-            (
-                ExtensionsTab::Skills,
-                &[(' ', "toggle"), ('f', "filter"), ('r', "reload")],
-            ),
-            (
-                ExtensionsTab::McpServers,
-                &[
-                    ('r', "refresh"),
-                    ('a', "add"),
-                    ('i', "auth"),
-                    (' ', "toggle"),
-                    ('x', "remove"),
-                ],
-            ),
+            (ExtensionsTab::Skills, &[('f', "filter"), ('r', "reload")]),
+            (ExtensionsTab::McpServers, &[('r', "refresh")]),
         ];
         assert_eq!(expected.len(), ExtensionsTab::ALL.len());
         for &(tab, pairs) in expected {

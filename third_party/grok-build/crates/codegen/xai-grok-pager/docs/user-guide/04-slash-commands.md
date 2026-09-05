@@ -127,14 +127,9 @@ Set reasoning effort on the **current** model without reselecting it. Levels are
 
 ### `/always-approve` and `/auto`
 
-Both are real toggles for the permission mode: they stay in the menu, and running the mode you're already in turns it back off.
+`/always-approve` toggles permission prompts: enable it to skip ordinary prompts, or run it again to return to ask mode. You can also change mode with `Shift+Tab` (cycles Normal / Plan / Always-approve), `Ctrl+O`, or `/settings`.
 
-| Command | When off | When already on |
-|---|---|---|
-| `/always-approve` | Skip all permission prompts | Back to ask |
-| `/auto` | Classifier approves safe tools (dangerous ones may still prompt) | Back to ask |
-
-Running one while the other is active switches modes — for example, `/auto` while always-approve is on switches to auto. `/auto` only appears when the auto permission-mode feature is enabled. You can also change mode with `Shift+Tab` (cycles Normal / Plan / Always-approve), `Ctrl+O`, or `/settings`.
+`/auto` is an unsupported permission-classifier mode in dscode. It is not a goal command and does not enable autonomous goals or always-approve.
 
 ### `/multiline`
 
@@ -270,17 +265,18 @@ Intervals are `Ns` (seconds, minimum 60), `Nm` (minutes), `Nh` (hours), or `Nd` 
 
 ### `/goal`
 
-Set, manage, or check an autonomous goal. Grok works across rounds and only marks the goal complete after an independent evidence review confirms the claim; if that review can't reproduce the result or has no usable evidence, the goal stays active or pauses with concrete gaps.
+Set, manage, or check the native DSH goal for the current session. Availability follows the selected agent preset: `/goal` appears in autocomplete and the command palette only when that preset advertises it.
 
 ```
+/goal
 /goal Migrate the auth module to the new API
-/goal status
+/goal edit Migrate the auth module and update its callers
 /goal pause
 /goal resume
 /goal clear
 ```
 
-Arguments are `<objective> [--budget <tokens>]`, or one of `status`, `pause`, `resume`, `clear`. The `--budget` here is a **token** budget for the goal run, separate from the agent-count budgets that workflows use. `/goal` appears when goal mode is enabled for the session. Which driver runs it depends on background workflows: with them on, the host evaluates each model round and runs adversarial verification on completion candidates; with them off, the legacy model-facing `update_goal` path reports progress and triggers verification.
+Bare `/goal` displays status. Use `<objective>` to set a goal, `edit <objective>` to change it, or `pause`, `resume`, and `clear` to control it. `status` and `--budget` are ordinary objective text, not subcommands or options. Goal execution is owned by native DSH, not Grok workflow settings.
 
 ### `/deep-research <query>`
 

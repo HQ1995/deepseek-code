@@ -701,6 +701,7 @@ fn set_forked_from(app: &mut AppView, child: AgentId, parent: AgentId) {
 }
 fn make_bg_task(task_id: &str) -> crate::app::agent::BgTaskState {
     crate::app::agent::BgTaskState {
+        native_task: None,
         task_id: task_id.into(),
         tool_call_id: String::new(),
         command: "sleep 99".into(),

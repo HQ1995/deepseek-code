@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 pub struct NotificationMeta {
     /// Accumulated token count across the session (`totalTokens`).
     pub total_tokens: Option<u64>,
+    /// Current projected context snapshot, independent of cumulative token spend.
+    pub context_info: Option<xai_grok_shell::session::ContextInfo>,
+    /// Authoritative live backend activity, independent of prompt ownership or goal activation.
+    pub session_running: Option<bool>,
     /// Display-ready cumulative prompt cache hit percentage (`cacheHitPercent`).
     pub cache_hit_percent: Option<String>,
     /// UTC ms when this notification was sent (`agentTimestampMs`).
@@ -117,9 +121,16 @@ impl NotificationMeta {
             .get("eventId")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let event_seq = event_id.as_deref().and_then(event_id_counter);
+        let event_seq = m
+            .get("eventSeq")
+            .and_then(|v| v.as_u64())
+            .or_else(|| event_id.as_deref().and_then(event_id_counter));
         Self {
             total_tokens: m.get("totalTokens").and_then(|v| v.as_u64()),
+            session_running: m.get("sessionRunning").and_then(|v| v.as_bool()),
+            context_info: m
+                .get("contextInfo")
+                .and_then(|value| serde_json::from_value(value.clone()).ok()),
             cache_hit_percent: m
                 .get("cacheHitPercent")
                 .and_then(|v| v.as_str())
@@ -142,6 +153,18 @@ impl NotificationMeta {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn current_context_metadata_is_distinct_from_cumulative_spend() {
+        let value = json!({"totalTokens": 999999, "eventSeq": 7,
+            "contextInfo": {"available": true, "used": 0, "capacityAvailable": false}});
+        let meta = NotificationMeta::from_json(value.as_object());
+        assert_eq!(meta.total_tokens, Some(999999));
+        assert_eq!(meta.event_seq, Some(7));
+        let context = meta.context_info.unwrap();
+        assert_eq!(context.used, 0);
+        assert_eq!(context.available, Some(true));
+        assert_eq!(context.capacity_available, Some(false));
+    }
 
     #[test]
     fn parse_full_meta() {

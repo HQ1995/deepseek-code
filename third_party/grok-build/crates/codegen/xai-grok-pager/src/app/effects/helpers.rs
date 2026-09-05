@@ -1520,6 +1520,7 @@ pub(crate) async fn persist_permission_mode_and_notify(
     if should_send_yolo_acp_notification(&disk_outcome, persist) && session_id.is_some()
     {
         let params = serde_json::json!({
+            "sessionId": session_id,
             "yolo_mode": enabled,
             "auto_mode": auto_mode,
             "permission_mode": config_str,

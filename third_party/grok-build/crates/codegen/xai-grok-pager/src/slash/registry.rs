@@ -179,12 +179,9 @@ impl CommandRegistry {
         hidden.insert("voice".to_string());
         // `/auto` is fail-closed: hidden until `set_auto_mode_available(true)`.
         hidden.insert("auto".to_string());
-        // DIVERGENCE(deepseek): /hooks, /plugins, /marketplace, /skills open
-        // grok-build's OWN pager-plugin surfaces — a second plugin system that
-        // dscode does not use and whose names collide head-on with the real
-        // one (dsh plugins, managed by /dsh). Fail-closed hidden to kill the
-        // confusion; un-hide any of them only if the pager-plugin system ever
-        // becomes a supported dscode surface.
+        // DIVERGENCE(deepseek): /hooks, /plugins, and /marketplace open
+        // grok-build's pager-plugin surfaces, not dsh's plugin system.
+        // /skills and /mcps are supported as read-only dsh-backed browsers.
         hidden.insert("hooks".to_string());
         hidden.insert("plugins".to_string());
         hidden.insert("marketplace".to_string());
@@ -193,19 +190,15 @@ impl CommandRegistry {
         // of advertising actions that end in method-not-found. `/compact` is
         // deliberately not hidden: its grok builtin is omitted and the
         // preset-scoped dsh command is discovered over ACP when available.
+        // `/mcps` is read-only in dscode: the bridge serves live status and
+        // refresh, while configuration remains in the TUI's normal MCP files.
         // If the others are typed explicitly they pass through, where the
         // bridge returns a precise unsupported message rather than sending
         // them to the model.
         hidden.insert("delete".to_string());
         hidden.insert("remember".to_string());
-        hidden.insert("mcps".to_string());
-        hidden.insert("skills".to_string());
-        // DIVERGENCE(deepseek): `/rewind` needs the x.ai/rewind/points and
-        // x.ai/rewind/execute RPCs, which the grok-leader bridge does not
-        // implement — the picker would die on method-not-found. Hidden (with
-        // its `undo` alias) until the bridge grows rewind support; typed
-        // `/rewind` falls through to the model as plain prompt text.
-        hidden.insert("rewind".to_string());
+        // DIVERGENCE(deepseek): rewind is conversation-only. The bridge
+        // forks at the selected prompt boundary, preserving the source log.
         // `/share` starts menu-hidden (still dispatchable) until
         // `set_share_visible(true)`. Menu-only so typed `/share` can
         // surface a client disable message rather than PassThrough.
@@ -970,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_dsh_extension_commands_are_hard_hidden_except_compact() {
+    fn unsupported_dsh_extension_commands_are_hard_hidden_except_supported_surfaces() {
         let builtins: Vec<Arc<dyn SlashCommand>> =
             ["compact", "delete", "remember", "mcps", "skills", "exit"]
                 .into_iter()
@@ -978,10 +971,10 @@ mod tests {
                 .collect();
         let registry = CommandRegistry::new(builtins);
 
-        // `/compact` is no longer globally suppressed; the real built-in roster
-        // omits it so only a preset-advertised ACP command appears.
         assert!(registry.get("compact").is_some());
-        for name in ["delete", "remember", "mcps", "skills"] {
+        assert!(registry.get("mcps").is_some());
+        assert!(registry.get("skills").is_some());
+        for name in ["delete", "remember"] {
             assert!(registry.get(name).is_none(), "{name} must not be offered");
             assert!(
                 registry.get_for_dispatch(name).is_none(),
@@ -991,10 +984,10 @@ mod tests {
                 !registry
                     .triggers()
                     .iter()
-                    .any(|trigger| trigger.canonical == name)
+                    .any(|trigger| trigger.canonical == name),
+                "{name} must not remain in completion"
             );
         }
-        assert!(registry.get("exit").is_some());
     }
 
     // ── Builtin/skill name collisions ───────────────────────────────

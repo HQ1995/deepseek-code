@@ -83,10 +83,12 @@ use workflow_ingest::ingest_workflow_update;
 pub(crate) use session_notification::apply_child_view_session_event;
 #[cfg(test)]
 pub(crate) use session_notification::apply_session_event_for_test;
+#[cfg(test)]
+use session_notification::confirm_context_used;
 pub(crate) use session_notification::drop_unexpected_replay;
 use session_notification::{
-    advance_reconnect_cursor, confirm_context_used, detect_plan_mode_change,
-    handle_session_notification, handle_session_notification_with_origin,
+    advance_reconnect_cursor, detect_plan_mode_change, handle_session_notification,
+    handle_session_notification_with_origin,
 };
 
 pub(crate) use queue::PendingRunningAdoption;
@@ -244,17 +246,19 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     // Gate on `!dedup_drop`: a deduped delta is an
                     // already-applied or stale out-of-order event (its
                     // `eventId` is `<=` the highwater). A fresher event has
-                    // already advanced the highwater and set newer `totalTokens`
-                    // / `turnStartMs`, so applying the stale values here would
-                    // REGRESS them. This is the replay/live-overlap case (leader
-                    // fan-out, reconnect, re-emit after the gate): a historical
-                    // replay delta carrying a LOWER `totalTokens` arriving after
-                    // a live one would otherwise drop the context bar below the
-                    // real usage. The dedup already drops the render; the
-                    // token/timing state must respect it too.
+                    // already advanced the highwater and set newer context /
+                    // turn timing. Applying stale metadata would regress them.
                     if !dedup_drop {
-                        if let Some(tokens) = meta.total_tokens {
-                            confirm_context_used(agent, tokens);
+                        if !meta.is_replay
+                            && let Some(running) = meta.session_running
+                        {
+                            agent.native_session_running = running;
+                        }
+                        if let Some(context) = meta.context_info.as_ref() {
+                            agent.apply_full_context_info(context.clone());
+                            if context.available != Some(false) {
+                                agent.session.note_context_used(context.used);
+                            }
                         }
                         if let Some(percent) = meta.cache_hit_percent.as_ref() {
                             agent.cache_hit_percent = Some(percent.clone());
@@ -280,6 +284,16 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         // Already-applied event delivered again — drop it (do not
                         // re-render). Not a mutation, so no redraw.
                         false
+                    } else if meta.session_running.is_some()
+                        && matches!(
+                            notif.request.update,
+                            acp::SessionUpdate::SessionInfoUpdate(_)
+                        )
+                    {
+                        // Ambient activity is not a prompt delta: no adoption, tracker,
+                        // turn lifecycle, or queue ownership changes.
+                        advance_reconnect_cursor(agent, &mut meta);
+                        !meta.is_replay && !agent.session.loading_replay
                     } else if let acp::SessionUpdate::Plan(plan) = notif.request.update {
                         let items: Vec<_> = plan
                             .entries
@@ -547,8 +561,22 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             .subagent_views
                             .get_mut(child_key)
                             .expect("find_session_match returned an existing subagent_views key");
-                        if let Some(tokens) = meta.total_tokens {
-                            confirm_context_used(child_view, tokens);
+                        let context_is_fresh = meta.is_replay
+                            || !meta.event_seq.is_some_and(|seq| {
+                                child_view
+                                    .last_applied_event_seq
+                                    .is_some_and(|last| seq <= last)
+                            });
+                        if context_is_fresh && let Some(context) = meta.context_info.as_ref() {
+                            if !meta.is_replay
+                                && let Some(seq) = meta.event_seq
+                            {
+                                child_view.last_applied_event_seq = Some(seq);
+                            }
+                            child_view.apply_full_context_info(context.clone());
+                            if context.available != Some(false) {
+                                child_view.session.note_context_used(context.used);
+                            }
                         }
                         if let Some(ts) = meta.turn_start_ms {
                             child_view.turn_start_ms = Some(ts);

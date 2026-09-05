@@ -1036,11 +1036,6 @@ fn native_fetch_effect_precedes_background_foreign_gate() {
 
     let effects = dispatch(Action::FetchSessionList, &mut app);
 
-    assert_eq!(
-        effects.len(),
-        1,
-        "leader startup must not launch a local foreign-session scan"
-    );
     assert!(matches!(
         effects.as_slice(),
         [

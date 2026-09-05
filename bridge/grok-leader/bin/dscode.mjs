@@ -33,6 +33,7 @@ import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { createGunzip } from 'node:zlib'
+import { compareVersions, installRelease, needsUpdateWithChannel, resolveRelease, updateOptions, validateRuntime } from './update.mjs'
 
 const RELEASE_REPO = 'HQ1995/deepseek-code'
 const here = dirname(fileURLToPath(import.meta.url))
@@ -57,7 +58,7 @@ const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 // The dsh profile the TUI spawns its leader with (xai-grok-pager
 // dsh_leader.rs hardcodes the same name) — internal, never user-typed.
 const PROFILE_NAME = 'dscode'
-export const profileDir = join(dshHome, 'profiles', PROFILE_NAME)
+export const profileDir = process.env.DSCODE_HOME ?? join(dshHome, 'profiles', PROFILE_NAME)
 /** DSCODE_HOME defaults to the profile dsh already owns. */
 export const tuiHome = profileDir
 const binDir = join(profileDir, 'bin')
@@ -69,7 +70,7 @@ export const dshRuntimeBin = join(runtimeDir, 'bin', process.platform === 'win32
 /** The exact dsh version this release was tested against. */
 const dshTestedVersion = pkg.dsh?.testedVersion
 
-/** Effective floor of the pinned dsh dependency tree (pi-ai 0.82.1). */
+/** Effective floor of the pinned dsh dependency tree (pi-ai 0.84.2). */
 export const nodeVersionSupported = (version) => {
   const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version)
   if (match === null) return false
@@ -131,19 +132,33 @@ const installOwnedDsh = async (spec) => {
     await runInstaller(argv)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    throw new Error(`dsh install failed (${message}); run manually: npm ${argv.join(' ')}`)
+    throw new Error(`dsh install failed (${message}); run manually: npm ${argv.join(' ')}; or set DSH_BIN to a source-built dsh executable reporting ${dshTestedVersion}`)
   }
 }
 
 /** Use an explicit override, a tested dsh on PATH, or the profile-owned pin. */
 export const ensureDshCli = async () => {
+  if (typeof dshTestedVersion !== 'string' || dshTestedVersion.trim() === '') {
+    throw new Error('missing dsh.testedVersion in the launcher package; refusing to install an unpinned dsh runtime')
+  }
   const envBin = process.env.DSH_BIN
-  if (envBin !== undefined && envBin !== '' && existsSync(envBin)) return envBin
+  if (envBin !== undefined && envBin !== '') {
+    const version = cliVersion(envBin)
+    if (version !== dshTestedVersion) {
+      throw new Error(`DSH_BIN reports ${version ?? 'no version'}, expected ${dshTestedVersion}; set DSH_BIN to a source-built dsh executable reporting ${dshTestedVersion}`)
+    }
+    return envBin
+  }
 
+  if (pkg.dsh?.sourceCommit) {
+    if (!existsSync(dshRuntimeBin)) throw new Error(`source runtime missing; run dscode update --version ${pinnedRelease() ?? pkg.version}`)
+    validateRuntime(runtimeDir, pkg)
+    return dshRuntimeBin
+  }
   const existing = commandV('dsh')
   if (existing !== undefined && cliVersion(existing) === dshTestedVersion) return existing
 
-  const spec = dshTestedVersion ? `@deepseek-ai/dsh@${dshTestedVersion}` : '@deepseek-ai/dsh'
+  const spec = `@deepseek-ai/dsh@${dshTestedVersion}`
   if (cliVersion(dshRuntimeBin) !== dshTestedVersion) await installOwnedDsh(spec)
   const installedVersion = cliVersion(dshRuntimeBin)
   if (installedVersion !== dshTestedVersion) {
@@ -237,12 +252,17 @@ export const ensureProfilePlugin = ({
 } = {}) => {
   scaffoldProfile()
   const before = installedProfileVersion()
-  if (!force && !packageNeedsInstall(before, pkg.version)) {
+  const installedDsh = readJsonFile(pluginManifestPath)?.dsh
+  const baselineChanged = installedDsh?.testedVersion !== dshTestedVersion
+    || installedDsh?.supportedRange !== pkg.dsh?.supportedRange
+  if (!force && !packageNeedsInstall(before, pkg.version) && !baselineChanged) {
     reconcileProfileManifest()
     return { changed: false, version: before }
   }
 
   console.error(`dscode: ${before === undefined ? 'installing' : `upgrading ${pkg.name} ${before}`} → ${spec} in the ${PROFILE_NAME} profile...`)
+  // npm otherwise treats the same product version as already installed.
+  if (baselineChanged) rmSync(pluginDir, { recursive: true, force: true })
   const argv = ['install', '--prefix', profileDir, spec, '--no-audit', '--no-fund', '--legacy-peer-deps']
   if (process.env.DSCODE_DEBUG !== undefined) console.error(`dscode: running: npm ${argv.join(' ')}`)
   const result = spawnSync('npm', argv, {
@@ -259,9 +279,14 @@ export const ensureProfilePlugin = ({
   if (expectedVersion !== null && installedVersion !== expectedVersion) {
     throw new Error(`plugin install resolved ${installedVersion}, expected ${expectedVersion}`)
   }
+  const resolvedDsh = readJsonFile(pluginManifestPath)?.dsh
+  if (expectedVersion === pkg.version && (resolvedDsh?.testedVersion !== dshTestedVersion
+    || resolvedDsh?.supportedRange !== pkg.dsh?.supportedRange)) {
+    throw new Error(`plugin install resolved an incompatible dsh baseline; expected ${dshTestedVersion}`)
+  }
 
   reconcileProfileManifest()
-  return { changed: before !== installedVersion, version: installedVersion }
+  return { changed: force || baselineChanged || before !== installedVersion, version: installedVersion }
 }
 
 /** Pinned release for this package build: X.Y.Z, no leading v. */
@@ -271,17 +296,6 @@ const pinnedRelease = () => {
   return undefined
 }
 
-const versionTriple = (version) => {
-  const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version)
-  return m === null ? undefined : [Number(m[1]), Number(m[2]), Number(m[3])]
-}
-
-const tripleLess = (a, b) => {
-  for (let i = 0; i < 3; i += 1) {
-    if (a[i] !== b[i]) return a[i] < b[i]
-  }
-  return false
-}
 
 /** The cached binary's actual version ("0.0.5" / "0.0.5-dev"), or undefined. */
 const cachedVersion = () => {
@@ -365,8 +379,9 @@ export const healLauncherLink = () => {
     if (!isLegacyHandoff && !(target.includes('node_modules') && target.endsWith('/bin/dscode.mjs'))) return
     rmSync(link)
     symlinkSync(preferred, link)
-  } catch {
-    // Best-effort: a broken ~/.local/bin never blocks a launch.
+  } catch (error) {
+    // The installed tuple is usable even when the convenience link cannot be repaired.
+    console.error(`dscode: warning: could not repair ${join(homedir(), '.local', 'bin', 'dscode')}: ${error instanceof Error ? error.message : String(error)}; launch with node ${JSON.stringify(profileLauncher)} instead`)
   }
 }
 
@@ -435,9 +450,7 @@ export const ensureBinary = async () => {
     // never replace one automatically.
     if (current.includes('-dev')) return binPath
     if (pinned === undefined) return binPath
-    const cur = versionTriple(current)
-    const want = versionTriple(pinned)
-    if (cur !== undefined && want !== undefined && !tripleLess(cur, want)) return binPath
+    if (current === pinned || compareVersions(current, pinned) > 0) return binPath
   } else if (pinned === undefined) {
     throw new Error('no cached TUI binary and this package carries no release pin; reinstall from a release tarball')
   }
@@ -445,53 +458,60 @@ export const ensureBinary = async () => {
   return binPath
 }
 
-const refreshPackageForUpdate = () => {
-  const argv = process.argv.slice(2)
-  const updateIndex = updateCommandIndex(argv)
-  if (!shouldReconcilePackageUpdate(argv) || process.env.DSCODE_PACKAGE_RECONCILED === '1') return false
-  const updateArgs = argv.slice(updateIndex + 1)
-  const updateRef = packageUpdateRef(updateArgs)
-  const installed = ensureProfilePlugin({
-    spec: `${pkg.name}@${updateRef}`,
-    expectedVersion: null,
-    force: true,
-  })
-  if (installed.version === pkg.version) return false
-  if (!existsSync(profileLauncher)) throw new Error('updated profile launcher is missing')
-  spawnAndExit(profileLauncher, process.argv.slice(2), {
-    ...process.env,
-    DSCODE_PACKAGE_RECONCILED: '1',
-  })
-  return true
-}
 
-const updateCommandIndex = (args) => {
+export const updateCommandIndex = (args) => {
   let index = 0
   while (args[index] === '--debug') index += 1
   return args[index] === 'update' ? index : -1
 }
 
-export const shouldReconcilePackageUpdate = (args) => {
-  const updateIndex = updateCommandIndex(args)
-  if (updateIndex === -1) return false
-  // `update --check` is observational. Do not mutate the npm profile before
-  // the TUI has reported whether an update exists.
-  return !args.slice(updateIndex + 1).includes('--check')
-}
-
-export const packageUpdateRef = (args, currentVersion = pkg.version) => {
-  const versionIndex = args.indexOf('--version')
-  const equalsVersion = args.find(arg => arg.startsWith('--version='))?.slice('--version='.length)
-  const version = equalsVersion ?? (versionIndex === -1 ? undefined : args[versionIndex + 1])
-  if (version !== undefined && version !== '') return version
-  if (args.includes('--alpha') || args.includes('--beta')) return 'beta'
-  if (args.includes('--stable')) return 'latest'
-  if (args.includes('--enterprise')) return 'enterprise'
-  if (/(?:^|-)enterprise(?:\.|$)/.test(currentVersion)) return 'enterprise'
-  return /-(?:alpha|beta)(?:\.|$)/.test(currentVersion) ? 'beta' : 'latest'
-}
 
 const main = async () => {
+  const args = process.argv.slice(2)
+  const updateIndex = updateCommandIndex(args)
+  if (updateIndex === -1 && (args.includes('--help') || args.includes('-h'))) {
+    if (existsSync(binPath)) spawnAndExit(binPath, args, process.env)
+    else console.log('Usage: dscode [OPTIONS] [PROMPT]\n       dscode update [--stable | --beta | --alpha] [--version VERSION] [--check] [--json] [--force-reinstall]\n       dscode uninstall')
+    return
+  }
+  if (updateIndex !== -1) {
+    const updateArgs = args.slice(updateIndex + 1)
+    if (updateArgs.includes('--help') || updateArgs.includes('-h')) {
+      console.log('Usage: dscode update [--stable | --beta | --alpha | --enterprise] [--version VERSION] [--check] [--json] [--force | --force-reinstall]')
+      return
+    }
+    const options = updateOptions(updateArgs, profileDir, pkg.version)
+    if (options.channel !== 'enterprise') {
+      const current = cachedVersion() ?? installedProfileVersion() ?? pkg.version
+      if (options.check) {
+        const result = { currentVersion: current, latestVersion: null, updateAvailable: false, installer: 'dscode', channel: options.channel, autoUpdate: options.autoUpdate, error: null }
+        try {
+          result.latestVersion = await resolveRelease(options)
+          result.updateAvailable = options.version !== undefined
+            ? compareVersions(result.latestVersion, current) !== 0
+            : needsUpdateWithChannel(current, result.latestVersion, options.channel)
+        } catch (error) {
+          result.error = error instanceof Error ? error.message : String(error)
+        }
+        if (options.json) console.log(JSON.stringify(result))
+        else if (result.error) console.error(`dscode: update check failed: ${result.error}`)
+        else console.log(`dscode ${current} [${options.channel}]: ${result.updateAvailable ? `update available: ${result.latestVersion}` : `latest release: ${result.latestVersion}`}`)
+        return
+      }
+      const version = await resolveRelease(options)
+      if (!nodeVersionSupported(process.versions.node)) throw new Error('dscode requires node >=22.19.0')
+      await installRelease({ profile: profileDir, packageName: pkg.name, version, channel: options.channel, asset: assetName() })
+      healLauncherLink()
+      console.log(`dscode updated to ${version} [${options.channel}]`)
+      return
+    }
+    // Enterprise remains on its existing TUI updater; checks cannot provision anything.
+    if (options.check) {
+      if (!existsSync(binPath)) throw new Error('enterprise check requires an installed TUI')
+      spawnAndExit(binPath, args, process.env)
+      return
+    }
+  }
   if (process.argv[2] === 'uninstall') {
     uninstallInstallation()
     return
@@ -500,7 +520,13 @@ const main = async () => {
     throw new Error(`the pinned dsh runtime requires node >=22.19.0; found ${process.versions.node}. dscode will not install or switch node for you`)
   }
   if (process.env.DSCODE_BIN === undefined || process.env.DSCODE_BIN === '') {
-    if (refreshPackageForUpdate()) return
+    if (pkg.dsh?.sourceCommit && pinnedRelease() && (!existsSync(pluginManifestPath) || (!process.env.DSH_BIN && !existsSync(dshRuntimeBin)))) {
+      const options = updateOptions([], profileDir, pkg.version)
+      await installRelease({ profile: profileDir, packageName: pkg.name, version: pinnedRelease(), channel: options.channel, asset: assetName() })
+      healLauncherLink()
+      spawnAndExit(profileLauncher, args, process.env)
+      return
+    }
     ensureProfilePlugin()
     healLauncherLink()
     migrateLegacyTuiHome()

@@ -221,10 +221,8 @@ mod tests {
         assert!(reg.get("welcome").is_some());
         assert!(reg.get("show-plan").is_some());
         assert!(reg.get("plan-view").is_some());
-        // DIVERGENCE(deepseek): /rewind (alias undo) is fail-closed hidden —
-        // the bridge has no x.ai/rewind RPCs. See TUI-DIVERGENCE.md.
-        assert!(reg.get("undo").is_none());
-        assert!(reg.get("rewind").is_none());
+        assert!(reg.get("undo").is_some());
+        assert!(reg.get("rewind").is_some());
     }
     #[test]
     fn aliases_resolve_to_same_command() {
@@ -238,10 +236,9 @@ mod tests {
             assert_eq!(reg.get(alias).unwrap().name(), doctor.name());
             assert_eq!(reg.get(alias).unwrap().usage(), doctor.usage());
         }
-        // DIVERGENCE(deepseek): /rewind is fail-closed hidden (no bridge
-        // rewind RPCs), so its alias no longer resolves either.
-        assert!(reg.get("rewind").is_none());
-        assert!(reg.get("undo").is_none());
+        let rewind = reg.get("rewind").unwrap();
+        let undo = reg.get("undo").unwrap();
+        assert_eq!(rewind.name(), undo.name());
     }
     #[test]
     fn exit_returns_quit_action() {

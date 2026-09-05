@@ -285,6 +285,68 @@ impl ContextInfoBlock {
         let snapshot = &self.snapshot;
         let model = &self.model;
 
+        if snapshot.available == Some(false)
+            || snapshot.capacity_available == Some(false)
+            || snapshot.breakdown_available == Some(false)
+            || snapshot.breakdown_approximate
+        {
+            let mut lines = vec![Line::from("Context"), Line::from(model.clone())];
+            if snapshot.available == Some(false) {
+                lines.push(Line::from("Context usage unavailable"));
+            } else if snapshot.capacity_available == Some(false) {
+                lines.push(Line::from(format!(
+                    "{} tokens used · capacity unavailable",
+                    fmt_tok_big(snapshot.used)
+                )));
+            } else {
+                lines.push(Line::from(format!(
+                    "{} / {} tokens ({:.2}%)",
+                    fmt_tok_big(snapshot.used),
+                    fmt_tok_big(snapshot.total),
+                    precise_usage_percent(snapshot.used, snapshot.total),
+                )));
+                lines.push(Line::from(format!(
+                    "Free: {} tokens",
+                    fmt_tok_big(snapshot.free_tokens)
+                )));
+            }
+            if snapshot.available == Some(false) || snapshot.breakdown_available == Some(false) {
+                lines.push(Line::from("Context breakdown unavailable"));
+            } else {
+                if snapshot.breakdown_approximate {
+                    lines.push(Line::from(
+                        "Approximate context composition (not additive with usage)",
+                    ));
+                }
+                lines.push(Line::from(format!(
+                    "System prompt: {} tokens",
+                    snapshot.system_prompt_tokens
+                )));
+                lines.push(Line::from(format!(
+                    "Messages: {} tokens",
+                    snapshot.message_tokens
+                )));
+                lines.push(Line::from(format!(
+                    "Tool definitions: {} tokens",
+                    snapshot.tool_definitions_tokens
+                )));
+                for category in &snapshot.usage_categories {
+                    lines.push(Line::from(format!(
+                        "{}: {} tokens",
+                        category.label, category.tokens
+                    )));
+                }
+            }
+            if snapshot.auto_compact_threshold_available == Some(false) {
+                lines.push(Line::from("Auto-compact threshold unavailable"));
+            } else {
+                lines.push(Line::from(format!(
+                    "Auto-compact at {}%",
+                    snapshot.auto_compact_threshold_percent
+                )));
+            }
+            return lines;
+        }
         let used = snapshot.used;
         let total = snapshot.total;
         let usage_pct = snapshot.usage_pct;
@@ -483,7 +545,9 @@ impl ContextInfoBlock {
         // produce `remaining == 0` while `usage_pct < threshold_percent`,
         // showing `~0 tokens remaining` for a context window that isn't
         // actually at the threshold.
-        if total > 0 {
+        if snapshot.auto_compact_threshold_available == Some(false) {
+            lines.push(Line::from("Auto-compact threshold unavailable"));
+        } else if total > 0 {
             let threshold_percent = snapshot.auto_compact_threshold_percent;
             let threshold_tokens = total.saturating_mul(threshold_percent as u64).div_ceil(100);
             let remaining = threshold_tokens.saturating_sub(used);
@@ -523,7 +587,9 @@ impl ContextInfoBlock {
         // already surfaces in warning style, so a second warning-styled tip
         // suggesting a manual `/compact` would just stack visually and
         // contradict itself (auto-compact is about to fire on its own).
-        if (80..snapshot.auto_compact_threshold_percent).contains(&usage_pct) {
+        if snapshot.auto_compact_threshold_available != Some(false)
+            && (80..snapshot.auto_compact_threshold_percent).contains(&usage_pct)
+        {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Tip: run /compact to free up context space.".to_string(),
@@ -666,6 +732,17 @@ impl BlockContent for ContextInfoBlock {
 mod tests {
     use super::*;
     use xai_grok_shell::session::TokenUsageCategory;
+    #[test]
+    fn approximate_breakdown_does_not_invent_additive_overhead_or_tool_counts() {
+        let mut snap = snapshot();
+        snap.breakdown_approximate = true;
+        let text =
+            all_text(&ContextInfoBlock::new(snap, "route").lines_for_width(&test_theme(), 100));
+        assert!(text.contains("Approximate context composition"));
+        assert!(text.contains("not additive with usage"));
+        assert!(!text.contains("Reasoning/overhead"));
+        assert!(!text.contains("12 tools"));
+    }
 
     fn snapshot() -> ContextInfo {
         ContextInfo {
@@ -683,6 +760,7 @@ mod tests {
             usage_pct: 4,
             auto_compact_threshold_percent: 85,
             usage_categories: vec![],
+            ..ContextInfo::default()
         }
     }
 
@@ -709,6 +787,42 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()).chain(["\n"]))
             .collect()
+    }
+    #[test]
+    fn unavailable_context_hides_stale_numbers_in_shared_layouts() {
+        let mut snap = snapshot();
+        snap.available = Some(false);
+        snap.capacity_available = Some(false);
+        snap.breakdown_available = Some(false);
+        snap.auto_compact_threshold_available = Some(false);
+        let block = ContextInfoBlock::new(snap, "route");
+        for width in [40, 100] {
+            let text = all_text(&block.lines_for_width(&test_theme(), width));
+            assert!(text.contains("Context usage unavailable"));
+            assert!(text.contains("Context breakdown unavailable"));
+            assert!(text.contains("Auto-compact threshold unavailable"));
+            for invented in ["%", "Free:", "36.7k", "System prompt:", "remaining"] {
+                assert!(!text.contains(invented), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn known_zero_without_breakdown_keeps_usage_but_not_invented_categories() {
+        let mut snap = snapshot();
+        snap.used = 0;
+        snap.free_tokens = snap.total;
+        snap.breakdown_available = Some(false);
+        snap.auto_compact_threshold_available = Some(false);
+        let text =
+            all_text(&ContextInfoBlock::new(snap, "route").lines_for_width(&test_theme(), 100));
+        assert!(
+            text.contains("0 / ") && text.contains("tokens (0.00%)"),
+            "{text}"
+        );
+        assert!(text.contains("Context breakdown unavailable"));
+        assert!(!text.contains("Reasoning/overhead"));
+        assert!(!text.contains("85%"));
     }
 
     #[test]
@@ -1034,6 +1148,7 @@ mod tests {
             usage_pct: 20,
             auto_compact_threshold_percent: 65,
             usage_categories: vec![],
+            ..ContextInfo::default()
         };
         let block = ContextInfoBlock::new(snap, "grok-build");
         let theme = test_theme();
