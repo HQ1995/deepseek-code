@@ -1,6 +1,5 @@
-# Dual-platform PR checks. Compile the TUI only on tagged releases
-# (.github/workflows/release.yml); this job is the cheap gate that catches
-# Linux vs macOS script/launcher drift without bouncing machines.
+# Dual-platform PR checks. Bridge validation consumes the same pinned source
+# SDK/runtime as releases; the unpublished SDK family is never resolved from npm.
 name: ci
 on:
   push:
@@ -20,19 +19,28 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Enable pnpm
-        run: corepack enable
+      - name: Install source runtime toolchains
+        run: |
+          npm install --global corepack
+          corepack enable
+          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update && sudo apt-get install -y musl-tools; fi
       - name: Scripts (bash 3.2-safe on macOS)
         run: bash scripts/check.sh
+      - name: Build pinned source SDK and runtime
+        run: |
+          node scripts/build-release-payload.mjs --out "$RUNNER_TEMP/dscode-payload"
+          mkdir -p "$RUNNER_TEMP/dscode-runtime"
+          tar -xzf "$RUNNER_TEMP"/dscode-payload/dscode-runtime-*.tar.gz -C "$RUNNER_TEMP/dscode-runtime"
+          ln -s "$RUNNER_TEMP/dscode-runtime/node_modules" bridge/grok-leader/node_modules
       - name: Bridge tests
         working-directory: bridge/grok-leader
+        env:
+          DSCODE_E2E_DSH_BIN: ${{ runner.temp }}/dscode-runtime/bin/dsh
+          DSCODE_E2E_PLUGIN_TGZ: ${{ runner.temp }}/dscode-payload/dscode-plugin.tgz
         run: |
-          pnpm install --frozen-lockfile
-          # vitest transpiles without type-checking, so a PR can ship type
-          # errors that only surface at publish. Compile the bridge here too;
-          # this is the same `tsc -b` scripts/release.sh runs before publish.
-          pnpm exec tsc -b tsconfig.json
-          pnpm exec vitest run
+          # Use the exact source-built SDK, including its compiler and test runner.
+          node node_modules/typescript/bin/tsc -b tsconfig.json
+          node node_modules/vitest/vitest.mjs run
   rust-check:
     strategy:
       fail-fast: false
