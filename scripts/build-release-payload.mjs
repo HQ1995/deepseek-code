@@ -89,7 +89,8 @@ function sourceConsumer(source, consumer, manifest, reuse) {
   Object.assign(dependencies, Object.fromEntries(Object.entries(manifest.dependencies || {}).filter(([name]) => !name.startsWith('@deepseek-ai/'))));
   mkdirSync(consumer, { recursive: true });
   save(join(consumer, 'package.json'), { private: true, dependencies, devDependencies: Object.fromEntries(Object.entries(manifest.devDependencies).filter(([name]) => !name.startsWith('@deepseek-ai/'))) });
-  run('npm', ['install', '--no-audit', '--no-fund', '--package-lock=false'], consumer);
+  // npm 10 crashes while resolving the cyclic peer graph of source SDK tarballs.
+  run('npx', ['--yes', 'npm@11.19.1', 'install', '--no-audit', '--no-fund', '--package-lock=false'], consumer);
 }
 function buildRuntime(consumer, source, manifest, out, work) {
   const platform = { 'linux/x64': 'linux-x86_64', 'darwin/arm64': 'macos-aarch64' }[`${process.platform}/${process.arch}`];
