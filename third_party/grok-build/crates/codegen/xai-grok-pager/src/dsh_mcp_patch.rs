@@ -60,7 +60,11 @@ pub fn list_servers(text: &str) -> Vec<ServerInfo> {
             j += 1;
         }
         i = j;
-        let display_name = if server_name.is_empty() { name } else { server_name };
+        let display_name = if server_name.is_empty() {
+            name
+        } else {
+            server_name
+        };
         let target = match transport.as_str() {
             "stdio" => match (command, args) {
                 (Some(cmd), Some(a)) if !a.is_empty() => format!("{cmd} {}", a.join(" ")),
@@ -91,7 +95,17 @@ pub fn as_document(text: &str) -> String {
     if trimmed.is_empty() || trimmed == "[]" {
         empty_patch().to_string()
     } else {
-        text.to_string()
+        let mut document = text.to_string();
+        if text
+            .lines()
+            .all(|line| blank(line) || line.trim_start().starts_with('#'))
+        {
+            if !document.ends_with('\n') {
+                document.push('\n');
+            }
+            document.push_str(empty_patch());
+        }
+        document
     }
 }
 /// Remove the `- insert:` block holding `mcp-client-<name>`. Returns the new
@@ -124,11 +138,29 @@ pub fn remove_server(text: &str, name: &str) -> (String, bool) {
 /// Add or update a server: drop any existing `mcp-client-<name>` block, then
 /// append a freshly rendered one.
 pub fn upsert_server(text: &str, name: &str, block: &str) -> String {
-    // A bare `[]` is the empty-state placeholder, not a document prefix to
-    // keep: appending after it would yield a two-document stream dsh refuses.
+    // The first non-comment line may be the empty-state placeholder. Remove
+    // its line (or only `[]` when followed by an inline comment), preserving
+    // comments without touching nested arrays or round-tripping `!!js` tags.
     let (mut stripped, _) = remove_server(text, name);
-    if stripped.trim() == "[]" {
-        stripped.clear();
+    let mut offset = 0;
+    let mut placeholder = None;
+    for line in stripped.split_inclusive('\n') {
+        let content = line.trim_start();
+        if !content.is_empty() && !content.starts_with('#') {
+            if let Some(rest) = content.strip_prefix("[]") {
+                if rest.trim().is_empty() {
+                    placeholder = Some(offset..offset + line.len());
+                } else if rest.trim_start().starts_with('#') {
+                    let start = offset + line.len() - content.len();
+                    placeholder = Some(start..start + 2);
+                }
+            }
+            break;
+        }
+        offset += line.len();
+    }
+    if let Some(range) = placeholder {
+        stripped.replace_range(range, "");
     }
     let trimmed_end = stripped.trim_end();
     if !trimmed_end.is_empty() {
@@ -340,6 +372,64 @@ mod tests {
         assert!(text.starts_with("- insert:\n"));
         assert!(!text.contains("[]"));
         assert_eq!(list_servers(&text).len(), 1);
+    }
+
+    #[test]
+    fn upsert_commented_empty_array_preserves_comments_and_round_trips() {
+        let comments = "# User patch layer\n# Keep existing configuration\n# MCP servers\n";
+        let block = render_block_stdio("x", "py", &[], None);
+        let text = as_document(&upsert_server(&format!("{comments}[]\n"), "x", &block));
+        // Exact document equality rejects a leftover flow array before the
+        // block sequence, which list_servers alone would fail to detect.
+        assert_eq!(text, format!("{comments}{block}"));
+        assert_eq!(list_servers(&text).len(), 1);
+        assert_eq!(list_servers(&text)[0].name, "x");
+
+        let updated_block = render_block_stdio("x", "newpy", &[], None);
+        let updated = as_document(&upsert_server(&text, "x", &updated_block));
+        assert_eq!(updated, format!("{comments}{updated_block}"));
+        assert_eq!(upsert_server(&updated, "x", &updated_block), updated);
+        assert_eq!(list_servers(&updated).len(), 1);
+        assert_eq!(list_servers(&updated)[0].target, "newpy");
+
+        let (removed, found) = remove_server(&updated, "x");
+        assert!(found);
+        let empty = as_document(&removed);
+        assert_eq!(empty, format!("{comments}[]\n"));
+        assert!(list_servers(&empty).is_empty());
+        assert_eq!(as_document(&empty), empty);
+        assert_eq!(upsert_server(&empty, "x", &block), text);
+    }
+
+    #[test]
+    fn upsert_empty_documents_preserves_inline_and_trailing_comments() {
+        let block = render_block_stdio("x", "py", &[], None);
+        for (input, prefix) in [
+            (" \n\n", " \n\n"),
+            ("# comment only", "# comment only\n"),
+            (
+                "# before\n[] # inline\n# after\n",
+                "# before\n # inline\n# after\n",
+            ),
+        ] {
+            let text = as_document(&upsert_server(input, "x", &block));
+            assert_eq!(text, format!("{prefix}{block}"));
+            assert_eq!(list_servers(&text).len(), 1);
+        }
+        assert_eq!(as_document("# comment only"), "# comment only\n[]\n");
+    }
+
+    #[test]
+    fn upsert_preserves_populated_document_and_other_servers() {
+        let block = render_block_stdio("x", "py", &[], None);
+        let added = upsert_server(TWO, "x", &block);
+        assert_eq!(added, format!("{TWO}{block}"));
+        assert_eq!(list_servers(&added).len(), 3);
+        assert_eq!(upsert_server(&added, "x", &block), added);
+        let (removed, found) = remove_server(&added, "x");
+        assert!(found);
+        assert_eq!(as_document(&removed), TWO);
+        assert_eq!(list_servers(&removed), list_servers(TWO));
     }
 
     #[test]

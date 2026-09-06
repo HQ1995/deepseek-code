@@ -485,3 +485,11 @@ Grok catalog; dscode admits arbitrary provider models, where missing metadata
 cannot prove multimodal support. `app/agent_view/paste.rs` refuses image chips
 for those models and cleans temporary paste files. The bridge independently
 rejects direct/headless image prompts before writing an attachment.
+
+### MCP edits preserve valid empty patch documents
+
+`dsh_mcp_patch.rs` removes an empty `[]` document before appending the first
+MCP entry, including when the empty document has comments. Removing the last
+entry from a comment-bearing patch restores `[]` instead of leaving a
+comment-only document that the dsh loader rejects. Existing comments and
+unrelated `!!js` expressions remain intact.

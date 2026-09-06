@@ -79,6 +79,22 @@ CI runs script, bridge, and Rust checks on Ubuntu and macOS. Tagged releases
 build `dscode-linux-x86_64` and `dscode-macos-aarch64` in
 `.github/workflows/release.yml`.
 
+The product matrix above uses simulated model replies; it is not live-model
+certification. Run `node scripts/e2e-live-models.mjs --help` for the separate,
+billable live-model acceptance runner. Supply the built TUI, pinned DSH binary,
+an already provisioned disposable `--home` and its `--profile` at
+`HOME/profiles/dscode`, the exact `--provider`/`--model`, and a fresh `--out`
+directory outside the repository. The runner forwards `OCX_API_KEY` by default;
+`DSCODE_LIVE_AUTH_ENV` selects alternative credential environment-variable names.
+Use a direct model route, not an alias that can fail over to a different model.
+
+Live results include native tool/child/goal evidence, filesystem assertions,
+TUI captures and per-scenario pass/fail/skip records in `results.json`.
+`--scenario` selects a focused rerun. Images are capability-reported, not a
+vision-understanding test; headless cases are not visual TUI coverage. Neither
+a passing finite matrix nor the absence of a credentialed run establishes
+exhaustive model compatibility.
+
 ## Release
 
 1. Keep `VERSION` and `bridge/grok-leader/package.json` versions equal.
