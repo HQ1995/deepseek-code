@@ -77,7 +77,9 @@ function sourceConsumer(source, consumer, manifest, reuse) {
   if (process.platform === 'linux') run('corepack', ['pnpm', 'run', 'build:native'], native);
   const packed = join(source, 'dist/npm-landlock');
   mkdirSync(packed, { recursive: true });
-  for (const name of ['entry', ...(process.platform === 'linux' ? [`linux-${process.arch}`] : [])]) run('corepack', ['pnpm', '--dir', join(native, 'packages', name), 'pack', '--pack-destination', packed], source);
+  run('corepack', ['pnpm', '--dir', join(native, 'packages/entry'), 'pack', '--pack-destination', packed], source);
+  // pnpm rewrites entry workspace dependencies, but strips platform binary modes.
+  if (process.platform === 'linux') run('npm', ['pack', '--pack-destination', packed], join(native, 'packages', `linux-${process.arch}`));
   const dependencies = {};
   for (const dir of ['dist/npm', 'dist/npm-vendor', 'dist/npm-landlock']) {
     for (const file of readdirSync(join(source, dir)).filter(file => file.endsWith('.tgz'))) {
@@ -88,7 +90,20 @@ function sourceConsumer(source, consumer, manifest, reuse) {
   }
   Object.assign(dependencies, Object.fromEntries(Object.entries(manifest.dependencies || {}).filter(([name]) => !name.startsWith('@deepseek-ai/'))));
   mkdirSync(consumer, { recursive: true });
-  save(join(consumer, 'package.json'), { private: true, dependencies, devDependencies: Object.fromEntries(Object.entries(manifest.devDependencies).filter(([name]) => !name.startsWith('@deepseek-ai/'))) });
+  save(join(consumer, 'package.json'), {
+    private: true,
+    dependencies,
+    // Approve the SDK's required build hooks, not arbitrary dependency scripts.
+    allowScripts: {
+      [dependencies['@deepseek-ai/dsh-subprocess-local']]: true,
+      esbuild: true,
+      'fs-ext': true,
+      koffi: true,
+      'node-pty': true,
+      protobufjs: true,
+    },
+    devDependencies: Object.fromEntries(Object.entries(manifest.devDependencies).filter(([name]) => !name.startsWith('@deepseek-ai/'))),
+  });
   // npm 10 crashes while resolving the cyclic peer graph of source SDK tarballs.
   run('npx', ['--yes', 'npm@11.19.1', 'install', '--no-audit', '--no-fund', '--package-lock=false'], consumer);
 }
