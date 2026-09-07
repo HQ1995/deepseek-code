@@ -20,12 +20,12 @@ exclusively on `experimental/dsh-sea` was rescued into `main` first (see §0).
 ## §0 Rescue (performed first, so the delete is zero-loss)
 
 `docs/experimental-dsh-sea.md` (the experiment's "recipe + pitfalls" notes,
-3231 bytes, blob 1d5eed83a9ebf147d3dcb383e8ab1579e022e6a6) existed **only** on
+3231 bytes, blob 0d31dc6cba6bceb108256ab8cfc083d77a6eb18b) existed **only** on
 `experimental/dsh-sea`. To keep deletion truly zero-loss, its exact content was
 committed to `main` as commit `9e5ad89dff` ("docs: preserve abandoned
 single-file dsh experiment record…") before any branch was deleted.
 It is preserved on `main` at `docs/experimental-dsh-sea.md` (blob
-1d5eed83a9eb, verbatim); the path carries the `docs/` prefix in main today
+0d31dc6cba6b, verbatim); the path carries the `docs/` prefix in main today
 because docs live under the repo's `docs/` convention — nothing but the
 location prefix differs from the branch, so no content moved or was lost.
 
