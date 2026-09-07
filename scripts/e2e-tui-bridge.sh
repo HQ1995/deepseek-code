@@ -325,12 +325,23 @@ const responsesEvent = (type, sequenceNumber, response) => JSON.stringify({
   ...response,
 })
 
+let finishPresetProbe
 http.createServer((request, response) => {
   let body = ''
   request.on('data', part => { body += part })
   request.on('end', () => {
     appendFileSync(logPath, request.method + ' ' + request.url + ' ' + body + '\n')
     const path = request.url?.split('?')[0] ?? ''
+    if (request.method === 'POST' && path.endsWith('/preset-probe/release')) {
+      if (!finishPresetProbe) {
+        response.writeHead(409)
+        response.end('No active preset probe')
+        return
+      }
+      finishPresetProbe()
+      response.end('released')
+      return
+    }
     if (request.method === 'GET' && path.endsWith('/models')) {
       response.writeHead(200, { 'content-type': 'application/json' })
       const models = path.includes('/responses-api/')
@@ -353,6 +364,15 @@ http.createServer((request, response) => {
           response.write(': controlled model wait\n\n')
           const deadline = setTimeout(() => response.destroy(), 90000)
           response.on('close', () => clearTimeout(deadline))
+          if (fixture.releaseText) {
+            finishPresetProbe = () => {
+              response.write('data: ' + chunk(fixture.releaseText) + '\n\n')
+              response.write('data: ' + chunk('', 'stop') + '\n\n')
+              response.end('data: [DONE]\n\n')
+              finishPresetProbe = undefined
+            }
+            response.on('close', () => { finishPresetProbe = undefined })
+          }
           return
         }
         if (fixture.name) {
@@ -900,6 +920,27 @@ wait_frame "plugin remove" 'Removed dscode-e2e-plugin' 600
 if grep -q 'dscode-e2e-plugin' "$SCRATCH/profiles/dscode/package.json"; then
   fail "plugin remove left the dependency in the profile manifest"
 fi
+
+echo "[tui] preset selection preserves the active turn"
+clear_prompt
+send_line "exercise active preset selection"
+wait_frame "active preset probe" 'PRESET_SWITCH_RUNNING' 300
+send_line "/preset"
+wait_frame "busy preset picker" 'Presets'
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Home Down Enter
+wait_frame "busy preset refusal" 'Cannot change preset while the session is busy'
+grep -q 'preset: standard' "$FRAME" || fail "busy preset selection changed the active preset"
+grep -q 'PRESET_SWITCH_RUNNING' "$FRAME" || fail "busy preset selection discarded the active transcript"
+if grep -Eq "Couldn't load session|Turn failed" "$FRAME"; then
+  fail "busy preset selection failed the active turn"
+fi
+cp "$FRAME" "$OUT/preset-busy-$RUN_ID.txt"
+"$NODE_BIN" -e 'fetch(process.argv[1], { method: "POST" }).then(response => { if (!response.ok) throw new Error("active preset probe was lost") })' \
+  "$GATEWAY/preset-probe/release" || fail "busy preset selection lost the model stream"
+wait_frame "preserved turn completion" 'PRESET_SWITCH_COMPLETE' 300
+wait_frame "preserved turn settlement" 'Worked for' 100
+wait_frame_absent "preserved turn idle" '\[stop\]' 100
+cp "$FRAME" "$OUT/preset-completed-$RUN_ID.txt"
 
 echo "[tui] streamed prompt through the real bridge"
 clear_prompt

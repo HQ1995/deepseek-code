@@ -2635,6 +2635,38 @@ describe('grok leader over a unix socket', () => {
     expect(registry.resumed.map(entry => entry.sessionId)).toContain(sessionId)
   })
 
+  it.each(['minimal', 'ptc'])('preserves an active turn when preset %s is selected', async (preset) => {
+    const mutations: unknown[] = []
+    const settings = { mutate: async (_ns: string, ops: unknown) => { mutations.push(ops) } }
+    const { registry, presets, pluginCtx, client: c } = await start({ presets: true, manualIdle: true, settings })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'ptc' } })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'keep working' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+
+    const loaded = await c.request(3, 'session/load', {
+      sessionId, cwd: process.cwd(), mcpServers: [],
+      _meta: { agentProfile: preset, rememberAgentPreset: true },
+    })
+    expect(loaded.error).toEqual({ code: -32602, message: 'agent-preset-locked: cannot change preset while a turn is running' })
+    expect(registry.byId.get(sessionId)).toBe(agent)
+    expect(agent.internals.cancelCalls).toBe(0)
+    expect(agent.internals.disposed).toBe(false)
+    expect(presets?.recomposed).toEqual([])
+    expect(mutations).toEqual([])
+    expect(c.completes).toEqual([])
+
+    pluginCtx.emit('agent/inbox/claimed', { agent, message: agent.internals.messages[0] as UserMessage, turn: 0 })
+    pluginCtx.emit('session/event', agent.session, {
+      type: 'turn/end', seq: SessionSeq(0), time: Date.now(), data: { turn: 0, reason: { kind: 'completed' } },
+    })
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'end_turn' })
+    agent.internals.idleWaiters.shift()!()
+  })
+
   it('keeps the live session owned when its reload flush fails', async () => {
     const sessionsStore = { flush: async () => { throw new Error('flush failed') } }
     const { registry, client: c } = await start({ presets: true, sessionsStore })

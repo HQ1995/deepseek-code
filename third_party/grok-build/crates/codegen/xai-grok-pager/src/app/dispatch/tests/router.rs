@@ -1,5 +1,6 @@
 //! Tests for the action router, model switching, slash commands, and other cross-cutting dispatch behavior.
 use super::*;
+use crate::app::agent::AgentCommand;
 #[test]
 fn auth_copy_dispatch_preserves_all_delivery_states() {
     for delivery in [
@@ -1820,6 +1821,62 @@ fn view_catalog_entry_emits_fetch_effect() {
         Effect::FetchCatalogEntry { kind, name }
         if kind == "persona" && name == "researcher"
     ));
+}
+#[test]
+fn preset_selection_preserves_busy_session() {
+    for name in ["minimal", "standard"] {
+        for (state, loading, native_running) in [
+            (AgentState::TurnRunning, false, false),
+            (AgentState::TurnCancelling, false, false),
+            (
+                AgentState::CommandRunning {
+                    command: AgentCommand::Compact,
+                    started_at: std::time::Instant::now(),
+                },
+                false,
+                false,
+            ),
+            (AgentState::Idle, true, false),
+            (AgentState::Idle, false, true),
+        ] {
+            let mut app = test_app_with_agent();
+            let id = AgentId(0);
+            app.persona_override = Some("standard".into());
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = state.clone();
+            agent.session.loading_replay = loading;
+            agent.native_session_running = native_running;
+            agent.prompt.set_text("unsent draft");
+            let session_id = agent.session.session_id.clone();
+
+            let effects = dispatch(Action::SelectPersona(name.into()), &mut app);
+
+            assert!(effects.is_empty());
+            assert_eq!(app.persona_override.as_deref(), Some("standard"));
+            assert!(matches!(app.active_view, ActiveView::Agent(AgentId(0))));
+            assert_eq!(app.agents.len(), 1);
+            let agent = &app.agents[&id];
+            assert_eq!(agent.session.session_id, session_id);
+            assert_eq!(
+                std::mem::discriminant(&agent.session.state),
+                std::mem::discriminant(&state)
+            );
+            assert_eq!(agent.session.loading_replay, loading);
+            assert_eq!(agent.native_session_running, native_running);
+            assert_eq!(agent.prompt.text(), "unsent draft");
+            assert_eq!(
+                read_toast(&app),
+                "Cannot change preset while the session is busy"
+            );
+        }
+    }
+}
+#[test]
+fn preset_selection_still_loads_an_idle_session() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SelectPersona("minimal".into()), &mut app);
+    assert_eq!(app.persona_override.as_deref(), Some("minimal"));
+    assert!(matches!(effects.as_slice(), [Effect::LoadSession { .. }]));
 }
 /// End-to-end regression test for the "always re-asks" requirement.
 ///

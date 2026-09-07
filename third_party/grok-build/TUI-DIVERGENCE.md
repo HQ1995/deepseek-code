@@ -74,6 +74,10 @@ branding (our identity). Keep this list current on every sync.
   fork retain their durable session preset. There is no TUI-side allowlist, so
   user-installed dsh presets appear without a Rust change. The four shipped
   presets are only the E2E baseline.
+  Selection is refused before local state changes while a turn, command, replay,
+  or native wake is active. The bridge also rejects in-flight preset reloads,
+  including reselecting the current preset, before flushing or disposing the
+  agent; the existing prompt and transcript remain intact.
 - /provider command (crates/codegen/xai-grok-pager/src/slash/commands/provider.rs):
   lists providers from the bridge's initialize _meta.modelState.providers and
   switches through the existing SetDefaultModel pipeline. It keeps the same

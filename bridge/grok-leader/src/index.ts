@@ -3097,6 +3097,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       : roster?.composedPreset?.(existing.agent.ctx)
         ?? sessionPresetFromLog(existing.agent.session.header, existing.agent.session.snapshotEvents())
     const currentPreset = livePreset ?? persistedPreset
+    // Even reselecting the current preset reloads and disposes the live agent.
+    // Guard the admitted prompt too: it may not have produced durable history yet.
+    if (explicitPreset !== undefined && existing !== undefined
+      && (existing.inflight !== undefined || existing.runningPromptId !== undefined || existing.agent.status === 'running')) {
+      throw invalidParams('agent-preset-locked: cannot change preset while a turn is running')
+    }
     const switchingPreset = explicitPreset !== undefined && explicitPreset !== currentPreset
     if (switchingPreset) {
       const events = existing?.agent.session.snapshotEvents() ?? inspection.events

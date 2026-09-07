@@ -1014,6 +1014,14 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![Effect::FetchCatalogEntry { kind, name }]
         }
         Action::SelectPersona(name) => {
+            if get_active_agent(app).is_some_and(|agent| {
+                agent.session.state.is_busy()
+                    || agent.session.loading_replay
+                    || agent.wake_display_state().is_some()
+            }) {
+                app.show_toast("Cannot change preset while the session is busy");
+                return vec![];
+            }
             app.persona_override = Some(name);
             // Apply immediately: reload a live session so the transcript
             // replays under the picked preset. The leader overrides the

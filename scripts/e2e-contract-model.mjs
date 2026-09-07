@@ -14,6 +14,7 @@ export function contractReply(body) {
   const start = messages.findLastIndex(message => message.role === 'user')
   const prompt = JSON.stringify(messages[start]?.content ?? '')
   const results = messages.slice(start + 1).filter(message => message.role === 'tool')
+  if (prompt.includes('exercise active preset selection')) return { text: 'PRESET_SWITCH_RUNNING', hold: true, releaseText: ' PRESET_SWITCH_COMPLETE' }
   if (prompt.includes('DSCODE_CHILD_HOLD')) return { text: '', hold: true }
   const match = prompt.match(/DSCODE_PERMISSION_(PROBE|ESCALATED):([A-Za-z0-9_-]+)/)
   if (match) {
