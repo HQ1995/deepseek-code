@@ -1,6 +1,10 @@
 # Secrets
 .env
 
+# Session / subagent byte-for-byte logs
+.subagent-session.jsonl
+*.subagent-session.jsonl
+
 # Node / bridge build artifacts
 node_modules/
 lib/

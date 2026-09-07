@@ -191,6 +191,20 @@ pnpm exec vitest run
 
 The current 0.1.3-alpha.1 target is not yet published on npm, so ordinary registry installation and regeneration of the registry lockfile are blocked. Source acceptance uses the matching upstream build and official tarballs installed into an isolated runtime; the bridge is compiled and tested against those actual SDKs, not an older family or edited version strings.
 
+To reproduce the CI "Bridge tests" job locally (build-or-select the pinned source payload, link its `node_modules`, compile with `tsc -b`, and run vitest against that same SDK), use:
+
+```sh
+scripts/dev-bridge-tests.sh            # build a fresh payload (needs the upstream source)
+scripts/dev-bridge-tests.sh --reuse   # reuse ./dist when it looks current
+DSCODE_E2E_RELEASE_DIR=... scripts/dev-bridge-tests.sh   # point at an existing payload
+```
+
+The script runs both `tsc -b` and `vitest run` with `bridge/grok-leader` as the
+working directory — exactly like the CI job — so the test root stays at the
+bridge and top-level `scripts/` test files are not swept in. It temporarily
+links the source runtime's `node_modules` into the bridge and restores any
+pre-existing install on exit.
+
 For source-built end-to-end runs, `DSCODE_E2E_DSH_BIN` selects the installed CLI and `DSCODE_E2E_PNPM_CONFIG` supplies its tarball dependency policy. Override only ordinary `parent>dependency` edges and leave SDK peers on native runtime resolution. Global `file:` peer overrides are unsafe: pnpm promotes them to dependencies, creating independent `dsh-scope` instances whose private scope identities do not match.
 
 Source-aware E2Es build or consume the same release payloads by default.
