@@ -70,14 +70,17 @@ function sourceConsumer(source, consumer, manifest, reuse) {
     if (!existsSync(join(consumer, 'node_modules/@deepseek-ai/dsh/package.json'))) throw new Error('Missing installed source consumer');
     return;
   }
-  run('corepack', ['pnpm', 'install', '--frozen-lockfile'], source);
-  run('corepack', ['pnpm', 'run', 'build:official'], source, { ...process.env, DSH_CLIENT_COMMIT_HASH: commit });
-  for (const [family, out] of [['dsh', 'dist/npm'], ['vendor', 'dist/npm-vendor']]) run('corepack', ['pnpm', 'run', 'release:pack', '--family', family, '--out', out], source);
+  // The 0.1.3-alpha.1 source SDK pins packageManager/devEngines to pnpm 11.7.0;
+  // under corepack, pnpm refuses to switch versions, so pin the invocation itself.
+  const pnpm = 'pnpm@11.7.0'; // ponytail: bump when the pinned source SDK drifts
+  run('corepack', [pnpm, 'install', '--frozen-lockfile'], source);
+  run('corepack', [pnpm, 'run', 'build:official'], source, { ...process.env, DSH_CLIENT_COMMIT_HASH: commit });
+  for (const [family, out] of [['dsh', 'dist/npm'], ['vendor', 'dist/npm-vendor']]) run('corepack', [pnpm, 'run', 'release:pack', '--family', family, '--out', out], source);
   const native = join(source, 'native/landlock-run');
-  if (process.platform === 'linux') run('corepack', ['pnpm', 'run', 'build:native'], native);
+  if (process.platform === 'linux') run('corepack', [pnpm, 'run', 'build:native'], native);
   const packed = join(source, 'dist/npm-landlock');
   mkdirSync(packed, { recursive: true });
-  run('corepack', ['pnpm', '--dir', join(native, 'packages/entry'), 'pack', '--pack-destination', packed], source);
+  run('corepack', [pnpm, '--dir', join(native, 'packages/entry'), 'pack', '--pack-destination', packed], source);
   // pnpm rewrites entry workspace dependencies, but strips platform binary modes.
   if (process.platform === 'linux') run('npm', ['pack', '--pack-destination', packed], join(native, 'packages', `linux-${process.arch}`));
   const dependencies = {};
