@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -57,6 +57,12 @@ export function copyClosure(name, from, modules, seen = new Map()) {
     if ((!optional.os || optional.os.includes(process.platform)) && (!optional.cpu || optional.cpu.includes(process.arch))) copyClosure(dep, source, modules, seen);
   }
 }
+export function sourceBuildEnvironment(bin, env = process.env) {
+  mkdirSync(bin, { recursive: true });
+  // Nested pnpm commands must use the source packageManager too, not a global pnpm.
+  run('corepack', ['enable', '--install-directory', bin, 'pnpm']);
+  return { ...env, PATH: `${bin}${delimiter}${env.PATH}` };
+}
 function sourceConsumer(source, consumer, manifest, reuse) {
   const commit = manifest.dsh.sourceCommit;
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('dsh.sourceCommit must be a full revision');
@@ -70,17 +76,15 @@ function sourceConsumer(source, consumer, manifest, reuse) {
     if (!existsSync(join(consumer, 'node_modules/@deepseek-ai/dsh/package.json'))) throw new Error('Missing installed source consumer');
     return;
   }
-  // The 0.1.3-alpha.1 source SDK pins packageManager/devEngines to pnpm 11.7.0;
-  // under corepack, pnpm refuses to switch versions, so pin the invocation itself.
-  const pnpm = 'pnpm@11.7.0'; // ponytail: bump when the pinned source SDK drifts
-  run('corepack', [pnpm, 'install', '--frozen-lockfile'], source);
-  run('corepack', [pnpm, 'run', 'build:official'], source, { ...process.env, DSH_CLIENT_COMMIT_HASH: commit });
-  for (const [family, out] of [['dsh', 'dist/npm'], ['vendor', 'dist/npm-vendor']]) run('corepack', [pnpm, 'run', 'release:pack', '--family', family, '--out', out], source);
+  const env = sourceBuildEnvironment(join(consumer, '.bin'));
+  run('pnpm', ['install', '--frozen-lockfile'], source, env);
+  run('pnpm', ['run', 'build:official'], source, { ...env, DSH_CLIENT_COMMIT_HASH: commit });
+  for (const [family, out] of [['dsh', 'dist/npm'], ['vendor', 'dist/npm-vendor']]) run('pnpm', ['run', 'release:pack', '--family', family, '--out', out], source, env);
   const native = join(source, 'native/landlock-run');
-  if (process.platform === 'linux') run('corepack', [pnpm, 'run', 'build:native'], native);
+  if (process.platform === 'linux') run('pnpm', ['run', 'build:native'], native, env);
   const packed = join(source, 'dist/npm-landlock');
   mkdirSync(packed, { recursive: true });
-  run('corepack', [pnpm, '--dir', join(native, 'packages/entry'), 'pack', '--pack-destination', packed], source);
+  run('pnpm', ['--dir', join(native, 'packages/entry'), 'pack', '--pack-destination', packed], source, env);
   // pnpm rewrites entry workspace dependencies, but strips platform binary modes.
   if (process.platform === 'linux') run('npm', ['pack', '--pack-destination', packed], join(native, 'packages', `linux-${process.arch}`));
   const dependencies = {};

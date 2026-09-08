@@ -1,12 +1,29 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { copyClosure, releaseAssets, releaseChannel } from './build-release-payload.mjs';
+import { copyClosure, releaseAssets, releaseChannel, sourceBuildEnvironment } from './build-release-payload.mjs';
+
+test('nested source scripts use the pinned pnpm even with a conflicting global pnpm', () => {
+  const work = mkdtempSync(join(tmpdir(), 'dscode-pnpm-test-'));
+  try {
+    const globalBin = join(work, 'global-bin');
+    mkdirSync(globalBin);
+    writeFileSync(join(globalBin, 'pnpm'), '#!/bin/sh\nexit 97\n', { mode: 0o755 });
+    writeFileSync(join(work, 'package.json'), JSON.stringify({
+      private: true, packageManager: 'pnpm@11.7.0',
+      devEngines: { packageManager: { name: 'pnpm', version: '11.7.0', onFail: 'error' } },
+      scripts: { nested: 'pnpm --version' },
+    }));
+    const env = sourceBuildEnvironment(join(work, 'bin'), { ...process.env, PATH: `${globalBin}${delimiter}${process.env.PATH}` });
+    const output = execFileSync('pnpm', ['--silent', 'run', 'nested'], { cwd: work, env, encoding: 'utf8' });
+    assert.equal(output.trim(), '11.7.0');
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
 
 test('release lanes and source asset completeness are explicit', () => {
   assert.equal(releaseChannel('1.2.3'), 'stable');
