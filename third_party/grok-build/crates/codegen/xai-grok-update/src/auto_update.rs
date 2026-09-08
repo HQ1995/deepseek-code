@@ -2653,15 +2653,15 @@ fn dscode_update_command(version: &str, channel: &str) -> Result<tokio::process:
         "Unsupported release channel: {channel}"
     );
     let launcher = grok_home().join("node_modules/@hqzhao95/dscode/bin/dscode.mjs");
-    let mut command = if launcher.is_file() {
+    // Legacy launchers hand updates back to this binary and can recurse forever.
+    let mut command = if launcher.is_file() && launcher.with_file_name("update.mjs").is_file() {
         let mut command = tokio::process::Command::new("node");
         command.arg(launcher);
         command
     } else {
         let mut command = tokio::process::Command::new("npx");
-        command
-            .arg("--yes")
-            .arg(format!("@hqzhao95/dscode@{version}"));
+        // ponytail: pin the legacy bootstrap updater; bump when its install protocol changes.
+        command.arg("--yes").arg("@hqzhao95/dscode@0.0.14-alpha.2");
         command
     };
     command

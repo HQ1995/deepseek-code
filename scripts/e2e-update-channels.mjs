@@ -12,7 +12,7 @@ import { promisify, parseArgs } from 'node:util'
 import { pathToFileURL } from 'node:url'
 
 const execute = promisify(execFile)
-const { values } = parseArgs({ options: { plugin: { type: 'string' }, runtime: { type: 'string' }, tui: { type: 'string' }, keep: { type: 'boolean' } } })
+const { values } = parseArgs({ options: { plugin: { type: 'string' }, runtime: { type: 'string' }, tui: { type: 'string' }, 'legacy-plugin': { type: 'string' }, keep: { type: 'boolean' } } })
 assert.ok(values.plugin && values.runtime && values.tui, 'Use --plugin <built dscode-plugin.tgz> --runtime <built runtime.tar.gz> --tui <matching compiled TUI>')
 const root = await mkdtemp(join(tmpdir(), 'dscode-channel-e2e-'))
 const home = join(root, 'home'), profile = join(home, '.dsh/profiles/dscode')
@@ -118,6 +118,39 @@ const checks = []
 async function check(label, action) { await action(); checks.push(label); console.log(`PASS ${label}`) }
 let passed = false
 try {
+  // Supply the actual beta.13 release archive to exercise the old launcher/new TUI boundary.
+  if (values['legacy-plugin']) await check('native update bypasses a legacy launcher without re-entering the TUI', async () => {
+    const legacyHome = join(root, 'legacy-home'), legacyProfile = join(legacyHome, '.dsh/profiles/dscode')
+    const legacyPlugin = join(legacyProfile, 'node_modules', packageName), fakeBin = join(legacyHome, 'fake-bin')
+    await mkdir(legacyPlugin, { recursive: true })
+    await execute('tar', ['-xzf', resolve(values['legacy-plugin']), '--strip-components=1', '-C', legacyPlugin])
+    const legacy = JSON.parse(await readFile(join(legacyPlugin, 'package.json'), 'utf8'))
+    assert.equal(legacy.version, '0.0.13-beta.13')
+    await mkdir(join(legacyProfile, 'bin'))
+    await cp(resolve(values.tui), join(legacyProfile, 'bin/dscode'))
+    await writeFile(join(legacyProfile, 'config.toml'), '[cli]\ninstaller = "dscode"\nchannel = "alpha"\nchannel_format = 1\nauto_update = false\n')
+    await mkdir(fakeBin)
+    await writeFile(join(fakeBin, 'dsh'), `#!/bin/sh\necho '${legacy.dsh.testedVersion}'\n`, { mode: 0o755 })
+    // Fail immediately if the legacy launcher tries npm, instead of allowing an unbounded loop.
+    await writeFile(join(fakeBin, 'npm'), '#!/bin/sh\necho "legacy launcher re-entered during product update" >&2\nexit 91\n', { mode: 0o755 })
+    const delegated = join(legacyHome, 'delegated.json')
+    await writeFile(join(fakeBin, 'npx'), `#!${process.execPath}
+const fs = require('node:fs'), { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+if (fs.existsSync(${JSON.stringify(delegated)})) throw new Error('Repeated updater delegation');
+fs.writeFileSync(${JSON.stringify(delegated)}, JSON.stringify(args));
+if (args[0] !== '--yes' || args[1] !== '@hqzhao95/dscode@0.0.14-alpha.2') throw new Error('Not the compatible bootstrap updater');
+const result = spawnSync(process.execPath, [${JSON.stringify(join(source, 'package/bin/dscode.mjs'))}, ...args.slice(2)], { stdio: 'inherit' });
+process.exit(result.status ?? 1);
+`, { mode: 0o755 })
+    const legacyEnv = { ...env, HOME: legacyHome, DSH_HOME: join(legacyHome, '.dsh'), DSC_HOME: legacyProfile, DSCODE_HOME: legacyProfile, DSH_BIN: join(fakeBin, 'dsh'), PATH: `${fakeBin}:${env.PATH}` }
+    await execute(join(legacyProfile, 'bin/dscode'), ['update', '--version', beta, '--beta'], { env: legacyEnv, timeout: 180000, maxBuffer: 4 * 1024 * 1024 })
+    assert.deepEqual(JSON.parse(await readFile(delegated, 'utf8')).slice(2), ['update', '--version', beta, '--beta'])
+    assert.equal(JSON.parse(await readFile(join(legacyPlugin, 'package.json'), 'utf8')).version, beta)
+    assert.equal(parse(await readFile(join(legacyProfile, 'config.toml'), 'utf8')).cli.channel, 'beta')
+    assert.equal(JSON.parse(await readFile(join(legacyProfile, 'runtime/dscode-runtime.json'), 'utf8')).sourceCommit, original.dsh.sourceCommit)
+    assert.match((await execute(join(legacyProfile, 'bin/dscode'), ['--version'])).stdout, new RegExp(beta.replaceAll('.', '\\.')))
+  })
   await mkdir(dirname(plugin), { recursive: true })
   await cp(join(source, 'package'), plugin, { recursive: true })
   const bootstrapVersion = '0.0.13-beta.1'

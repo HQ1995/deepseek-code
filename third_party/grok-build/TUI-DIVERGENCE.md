@@ -53,6 +53,9 @@ branding (our identity). Keep this list current on every sync.
   the previous Rust binary-only dscode installer is removed. Direct updates,
   background updates, and leader convergence share this whole-product path.
   Source-runtime profile identity includes the pinned DSH revision/version.
+  Missing or historical launchers bootstrap a known whole-product updater
+  separately from the target version, preventing old beta launchers from
+  delegating back into a newer cached TUI indefinitely.
 - Environment namespace isolation: pager-bin maps DSCODE_CONFIG,
   DSCODE_CONFIG_PATH, and DSCODE_CONNECT_UI_TIMEOUT_SECS onto the upstream
   GROK_* implementation names before configuration loads. When a DSCODE alias
