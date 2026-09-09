@@ -84,17 +84,15 @@ fn iterm_escape_preserves_requested_geometry() {
 }
 
 #[test]
-fn low_level_overlay_separates_transmit_from_placement() {
+fn low_level_overlay_deletes_then_transmits() {
     let png = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
-    let protocol = GraphicsProtocol::Kitty;
-    let first =
-        build_overlay_image_escapes_for_protocol(protocol, &png, 20, 10, 0, 0, true).unwrap();
-    let subsequent =
-        build_overlay_image_escapes_for_protocol(protocol, &png, 20, 10, 0, 0, false).unwrap();
-    assert!(first.contains("a=t") && first.contains("a=p"));
-    assert!(!first.contains("a=T"));
-    assert!(subsequent.contains("a=p"));
-    assert!(!subsequent.contains("a=t"));
+    let escape =
+        build_overlay_image_escapes_for_protocol(GraphicsProtocol::Kitty, &png, 20, 10, 0, 0)
+            .unwrap();
+    assert!(escape.contains("a=d,d=i"));
+    assert!(escape.contains("a=T"));
+    assert!(!escape.contains("a=t,"));
+    assert!(!escape.contains("a=p"));
 }
 
 #[test]
@@ -107,15 +105,36 @@ fn iterm_place_can_skip_inline_data() {
 }
 
 #[test]
-fn placement_only_steady_state_removes_payload_cost() {
+fn unchanged_static_overlay_skips_payload() {
+    let _guard = set_protocol_for_test(GraphicsProtocol::Kitty);
+    crate::terminal::overlay::reset_owner();
     let mut png = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
     png.extend(std::iter::repeat_n(0u8, 200_000));
-    let protocol = GraphicsProtocol::Kitty;
-    let first =
-        build_overlay_image_escapes_for_protocol(protocol, &png, 40, 20, 0, 0, true).unwrap();
-    let subsequent =
-        build_overlay_image_escapes_for_protocol(protocol, &png, 40, 20, 0, 0, false).unwrap();
-    assert!(first.len() > 200_000);
-    assert!(subsequent.len() < 200);
-    assert!(!subsequent.contains("a=t"));
+    let first = crate::terminal::overlay::static_image(&png, 40, 20, 0, 0, 9).unwrap();
+    assert!(first.as_str().len() > 200_000);
+    let _ = first.commit();
+    let subsequent = crate::terminal::overlay::static_image(&png, 40, 20, 0, 0, 9).unwrap();
+    assert!(subsequent.as_str().is_empty());
+}
+
+#[test]
+fn cell_aspect_from_measures_and_rejects_bogus_reports() {
+    use crossterm::terminal::WindowSize;
+    let ws = |columns, rows, width, height| WindowSize {
+        columns,
+        rows,
+        width,
+        height,
+    };
+    // 10x20 px cells give a 0.5 ratio; 9x20 give 0.45
+    assert_eq!(cell_aspect_from(&ws(100, 50, 1000, 1000)), 0.5);
+    assert_eq!(cell_aspect_from(&ws(100, 50, 900, 1000)), 0.45);
+    // Unreported pixels (zeroes) and out-of-band ratios fall back.
+    assert_eq!(cell_aspect_from(&ws(100, 50, 0, 0)), DEFAULT_CELL_ASPECT);
+    assert_eq!(cell_aspect_from(&ws(0, 0, 1000, 1000)), DEFAULT_CELL_ASPECT);
+    assert_eq!(
+        cell_aspect_from(&ws(100, 50, 5000, 1000)),
+        DEFAULT_CELL_ASPECT,
+        "square-or-wider cells are a bogus report"
+    );
 }

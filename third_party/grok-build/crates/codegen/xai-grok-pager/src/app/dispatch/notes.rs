@@ -169,6 +169,8 @@ pub(super) fn dispatch_send_remember_note(app: &mut AppView, text: String) -> Ve
         return vec![];
     }
 
+    agent.note_draft_consumed();
+
     let cwd = agent.session.cwd.clone();
 
     let Some(session_id) = agent.session.session_id.clone() else {

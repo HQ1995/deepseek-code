@@ -158,7 +158,19 @@ pub fn truncate(s: &str, max_chars: usize) -> &str {
         .unwrap_or(s.len());
     &s[..end]
 }
-/// Check if a process is still alive.
+/// A process PID must never become Unix's process-group or broadcast selector.
+#[cfg(unix)]
+fn unix_process_id(pid: u32) -> std::io::Result<nix::unistd::Pid> {
+    match i32::try_from(pid) {
+        Ok(pid) if pid > 0 => Ok(nix::unistd::Pid::from_raw(pid)),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "PID must be a positive signed 32-bit process identifier",
+        )),
+    }
+}
+
+/// Check if a process is still alive. Invalid process IDs return false.
 ///
 /// - Unix: `kill(pid, 0)` via `nix`. True if the process exists (even
 ///   under a different UID); false only on ESRCH.
@@ -168,8 +180,10 @@ pub fn truncate(s: &str, max_chars: usize) -> &str {
 pub fn is_process_alive(pid: u32) -> bool {
     use nix::errno::Errno;
     use nix::sys::signal::kill;
-    use nix::unistd::Pid;
-    match kill(Pid::from_raw(pid as i32), None) {
+    let Ok(pid) = unix_process_id(pid) else {
+        return false;
+    };
+    match kill(pid, None) {
         Ok(()) => true,
         Err(Errno::ESRCH) => false,
         Err(_) => true,
@@ -211,12 +225,12 @@ pub fn kill_process_with_signal(pid: u32, signal: KillSignal) -> std::io::Result
     {
         use nix::errno::Errno;
         use nix::sys::signal::{Signal, kill};
-        use nix::unistd::Pid;
+        let pid = unix_process_id(pid)?;
         let sig = match signal {
             KillSignal::Term => Signal::SIGTERM,
             KillSignal::Kill => Signal::SIGKILL,
         };
-        match kill(Pid::from_raw(pid as i32), sig) {
+        match kill(pid, sig) {
             Ok(()) | Err(Errno::ESRCH) => Ok(()),
             Err(e) => Err(std::io::Error::from_raw_os_error(e as i32)),
         }
@@ -405,7 +419,22 @@ mod tests {
     }
     #[test]
     fn kill_process_by_pid_already_dead_is_ok() {
-        assert!(kill_process_by_pid(4_000_000_000).is_ok());
+        assert!(kill_process_by_pid(i32::MAX as u32).is_ok());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn process_ids_reject_group_and_broadcast_targets() {
+        for pid in [0, i32::MAX as u32 + 1, 4_000_000_000, u32::MAX] {
+            assert!(!is_process_alive(pid));
+            // Exercise the shared conversion without risking a broadcast if it regresses.
+            assert_eq!(
+                unix_process_id(pid).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+        for pid in [1, std::process::id(), i32::MAX as u32] {
+            assert_eq!(unix_process_id(pid).unwrap().as_raw() as u32, pid);
+        }
     }
     #[cfg(unix)]
     #[test]

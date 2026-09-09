@@ -2,6 +2,61 @@
 
 use super::*;
 
+#[test]
+fn zip_export_uses_native_session_without_creating_a_local_file_or_model_turn() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id = acp::SessionId::new("archive-root");
+    app.agents.get_mut(&id).unwrap().session.session_id = Some(session_id.clone());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("conversation.ZIP");
+    let effects = dispatch(
+        Action::ExportConversation {
+            file_path: Some(path.clone()),
+        },
+        &mut app,
+    );
+    assert!(matches!(&effects[..], [Effect::RunSessionCommand {
+        agent_id, session_id: sid, method: "x.ai/session/export", prompt,
+    }] if *agent_id == id && *sid == session_id && matches!(&prompt[..], [acp::ContentBlock::Text(text)] if text.text == path.to_string_lossy())));
+    assert!(!path.exists());
+}
+
+#[test]
+fn copy_assistant_message_preserves_markdown_for_parent_and_child() {
+    let markdown =
+        "# Heading\n\n- item\n\n```rust\nfn main() {}\n```\n\n[link](https://example.com)\n";
+    let directory = tempfile::tempdir().unwrap();
+    for child_active in [false, true] {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent
+            .scrollback
+            .push_block(RenderBlock::agent_message(markdown));
+        let expected = if child_active {
+            let child_markdown = format!("## Child\n\n{markdown}");
+            let mut child = crate::test_util::make_agent_view(Some("child"), "/tmp");
+            child
+                .scrollback
+                .push_block(RenderBlock::agent_message(child_markdown.clone()));
+            agent.insert_subagent_view("child".into(), Box::new(child));
+            agent.active_subagent = Some("child".into());
+            child_markdown
+        } else {
+            markdown.to_owned()
+        };
+        let path = directory.path().join(format!("copy-{child_active}.md"));
+        dispatch(
+            Action::CopyAssistantMessage {
+                n: 1,
+                file_path: Some(path.clone()),
+            },
+            &mut app,
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
+    }
+}
+
 fn make_test_png(width: u32, height: u32) -> Vec<u8> {
     use image::{ImageBuffer, Rgba};
     let img: ImageBuffer<Rgba<u8>, Vec<u8>> =

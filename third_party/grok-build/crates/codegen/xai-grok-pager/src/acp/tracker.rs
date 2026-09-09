@@ -1790,6 +1790,33 @@ fn execute_command_from_tool_call(tc: &acp::ToolCall) -> String {
 /// execute `header_display` when a leading `cd <cwd>` is redundant.
 fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderBlock {
     let success = !matches!(tc.status, acp::ToolCallStatus::Failed);
+    // DIVERGENCE(dscode): verified native attachment paths share the existing
+    // media viewer for every tool kind, including read_image and MCP results.
+    if let Some(images) = tc
+        .raw_output
+        .as_ref()
+        .and_then(|v| v.get("dscodeImages"))
+        .and_then(|v| v.as_array())
+    {
+        let mut block = OtherToolCallBlock::new(tool_call_title(tc), String::new());
+        block.output = Some(content_text(tc));
+        block.media_notes = tc
+            .raw_output
+            .as_ref()
+            .and_then(|v| v.get("dscodeImageErrors"))
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        for path in images.iter().filter_map(|v| v.as_str()) {
+            block = block.with_media_ref(std::path::PathBuf::from(path), false);
+        }
+        if !success {
+            block.error = Some("Tool failed".into());
+        }
+        return RenderBlock::ToolCall(ToolCallBlock::Other(block));
+    }
     match tc.kind {
         acp::ToolKind::Execute => {
             let command = execute_command_from_tool_call(tc);

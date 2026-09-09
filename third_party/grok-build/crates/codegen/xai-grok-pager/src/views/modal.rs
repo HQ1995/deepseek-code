@@ -171,6 +171,9 @@ pub fn howto_list_modal(previous_palette: Option<PaletteSnapshot>) -> ActiveModa
 /// Each variant wraps a `ModalConfirmation<R>` with its concrete result
 /// type plus any context needed for resolution (e.g., pending focus target).
 pub enum ActiveModal {
+    NativeControls {
+        state: Box<crate::views::native_controls::NativeControls>,
+    },
     /// Confirmation for leaving a dirty queued-prompt edit.
     EditConfirm {
         modal: ModalConfirmation<EditConfirmResult>,
@@ -431,11 +434,31 @@ pub(crate) fn default_palette_entries(
             shortcut: "/goal".into(),
             command: PaletteCommand::SlashCommand("/goal".into()),
         },
+        PaletteEntry {
+            label: "Workflow Runs".into(),
+            shortcut: "/workflows".into(),
+            command: PaletteCommand::SlashCommand("/workflows".into()),
+        },
+        PaletteEntry {
+            label: "Child Inbox".into(),
+            shortcut: "/inbox".into(),
+            command: PaletteCommand::SlashCommand("/inbox".into()),
+        },
+        PaletteEntry {
+            label: "Session Reminders".into(),
+            shortcut: "/reminders".into(),
+            command: PaletteCommand::SlashCommand("/reminders".into()),
+        },
         // ── Context ──
         PaletteEntry {
             label: "Context".into(),
             shortcut: String::new(),
             command: PaletteCommand::SectionHeader("Context".into()),
+        },
+        PaletteEntry {
+            label: "Reference Session".into(),
+            shortcut: "/reference".into(),
+            command: PaletteCommand::SlashCommand("/reference".into()),
         },
         PaletteEntry {
             label: "Compact History".into(),
@@ -582,8 +605,15 @@ pub(crate) fn default_palette_entries(
         {
             return false;
         }
-        screen_mode.is_minimal() || !matches!(entry.command, PaletteCommand::EditPromptExternal)
+        true
     });
+    if !screen_mode.is_minimal()
+        && let Some(entry) = entries
+            .iter_mut()
+            .find(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
+    {
+        entry.shortcut = "/edit-prompt".into();
+    }
     entries
 }
 #[allow(clippy::collapsible_if)]
@@ -651,6 +681,7 @@ impl ActiveModal {
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
+            | ActiveModal::NativeControls { .. }
             | ActiveModal::AddProvider { .. }
             | ActiveModal::RememberNoteReview { .. } => vec![],
         }
@@ -685,6 +716,7 @@ impl ActiveModal {
             ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
             ActiveModal::RememberNoteReview { .. } => "Memory Note",
             ActiveModal::UsageInfo { .. } => "Usage",
+            ActiveModal::NativeControls { state } => &state.title,
             ActiveModal::AddProvider { state } => {
                 if state.editing.is_some() {
                     crate::views::add_provider_modal::EDIT_MODAL_TITLE
@@ -1354,6 +1386,19 @@ mod palette_tests {
         slash_rows_with(&slash(mode))
     }
     #[test]
+    fn native_session_surfaces_are_searchable_in_command_palette() {
+        let controller = slash(crate::app::ScreenMode::Fullscreen);
+        for (query, command) in [
+            ("reference", "/reference"),
+            ("workflow", "/workflows"),
+            ("inbox", "/inbox"),
+            ("reminders", "/reminders"),
+        ] {
+            assert!(filter_palette_entries(query, false, &controller).iter().any(|entry|
+                matches!(&entry.command, PaletteCommand::SlashCommand(text) if text == command)));
+        }
+    }
+    #[test]
     fn palette_drops_slash_rows_the_mode_cannot_run() {
         let minimal = slash_rows(crate::app::ScreenMode::Minimal);
         for gated in ["/theme", "/dashboard", "/tutorial"] {
@@ -1433,19 +1478,16 @@ mod palette_tests {
         }
     }
     #[test]
-    fn edit_prompt_palette_entry_is_minimal_only() {
-        let minimal = default_palette_entries(true, &slash(crate::app::ScreenMode::Minimal));
-        assert!(
-            minimal
-                .iter()
-                .any(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
-        );
-        let fullscreen = default_palette_entries(true, &slash(crate::app::ScreenMode::Fullscreen));
-        assert!(
-            !fullscreen
-                .iter()
-                .any(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
-        );
+    fn edit_prompt_palette_entry_shows_mode_correct_hint() {
+        let hint = |mode| {
+            default_palette_entries(true, &slash(mode))
+                .into_iter()
+                .find(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
+                .expect("palette offers the external editor in every mode")
+                .shortcut
+        };
+        assert_eq!(hint(crate::app::ScreenMode::Minimal), "Ctrl+G");
+        assert_eq!(hint(crate::app::ScreenMode::Fullscreen), "/edit-prompt");
     }
     #[test]
     fn palette_tools_section_routes_each_tab_to_itself() {

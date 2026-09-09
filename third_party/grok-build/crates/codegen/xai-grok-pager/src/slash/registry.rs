@@ -169,10 +169,6 @@ impl CommandRegistry {
         // DIVERGENCE(deepseek): dsh has no Agent Dashboard; /cd is a
         // dashboard-only command, so keep it hidden too.
         hidden.insert("cd".to_string());
-        // DIVERGENCE(deepseek): dsh workflow has no list/run-history API yet,
-        // so /workflows would only show an empty list. Hide it until the
-        // bridge can surface real workflow runs.
-        hidden.insert("workflows".to_string());
         hidden.insert("recap".to_string());
         // Voice is fail-closed in the registry until `set_voice_visible` after
         // the runtime gate resolves (GA default on; remote kill switch may hide).

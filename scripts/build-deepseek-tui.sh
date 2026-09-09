@@ -29,7 +29,7 @@ export GROK_VERSION="${GROK_VERSION:-$(tr -d '[:space:]' < "$ROOT/VERSION")-dev}
 
 cd "$VENDOR"
 # NUMA pinning is a this-host policy; CI runners and other machines build plain.
-if command -v numactl >/dev/null 2>&1; then
+if command -v numactl >/dev/null 2>&1 && [[ -d /sys/devices/system/node/node1 ]]; then
   numactl --cpunodebind=1 --membind=1 "$CARGO_BIN" build --release -p xai-grok-pager-bin
 else
   "$CARGO_BIN" build --release -p xai-grok-pager-bin

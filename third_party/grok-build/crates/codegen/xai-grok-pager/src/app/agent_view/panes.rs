@@ -324,6 +324,11 @@ impl AgentView {
             }
             return InputOutcome::Changed;
         }
+        if key!('t').matches(key) && self.tasks.list_state.input_mode().is_none() {
+            return InputOutcome::Action(Action::OpenNativeControls(
+                crate::views::native_controls::NativeControlTarget::Terminals,
+            ));
+        }
         if self.tasks.list_state.input_mode().is_none()
             && let Some(group) = self.tasks.selected_header_group()
         {
@@ -346,19 +351,7 @@ impl AgentView {
             match self.tasks.selected_entry() {
                 Some(TaskEntry::BgTask { task_id, .. }) => {
                     let task_id = task_id.clone();
-                    if let Some(task) = self.session.bg_tasks.get(&task_id) {
-                        let entry_id = task
-                            .scrollback_entry_id
-                            .unwrap_or_else(|| crate::scrollback::entry::EntryId::new(0));
-                        let is_running = task.status == crate::app::agent::BgTaskStatus::Running;
-                        self.block_viewer =
-                            Some(crate::views::block_viewer::BlockViewerPane::for_bg_task(
-                                entry_id,
-                                &task_id,
-                                &task.stdout,
-                                is_running,
-                            ));
-                        self.set_active_pane(AgentPane::Scrollback, true);
+                    if self.show_bg_task_viewer(&task_id) {
                         return InputOutcome::Changed;
                     }
                 }
@@ -371,15 +364,31 @@ impl AgentView {
                         return InputOutcome::Changed;
                     }
                 }
-                Some(TaskEntry::Scheduled { .. }) => {}
-                Some(TaskEntry::Workflow { name, .. }) => {
-                    let name = name.clone();
-                    self.open_workflow_detail(&name);
+                Some(TaskEntry::Scheduled { .. }) => {
+                    return InputOutcome::Action(Action::OpenNativeControls(
+                        crate::views::native_controls::NativeControlTarget::Reminders,
+                    ));
+                }
+                Some(TaskEntry::Workflow { run_id, .. }) => {
+                    let run_id = run_id.clone();
+                    self.open_workflow_detail_by_run_id(&run_id);
                     return InputOutcome::Changed;
                 }
                 Some(TaskEntry::Header { .. }) => {}
                 None => {}
             }
+        }
+        if key!('q').matches(key)
+            && self.tasks.list_state.input_mode().is_none()
+            && let Some(TaskEntry::Agent {
+                child_session_id, ..
+            }) = self.tasks.selected_entry()
+        {
+            return InputOutcome::Action(Action::OpenNativeControls(
+                crate::views::native_controls::NativeControlTarget::Inbox {
+                    child_id: Some(child_session_id.clone()),
+                },
+            ));
         }
         if key!('x').matches(key) && self.tasks.list_state.input_mode().is_none() {
             match self.tasks.selected_entry() {
@@ -481,6 +490,11 @@ impl AgentView {
             return InputOutcome::Changed;
         }
         let has_input = self.catalog.list_state.input_mode().is_some();
+        if !has_input && key!('m').matches(key) {
+            return InputOutcome::Action(Action::OpenNativeControls(
+                crate::views::native_controls::NativeControlTarget::Presets,
+            ));
+        }
         let action = handle_overlay_key(&mut self.catalog.overlay, key).or_else(|| {
             if !has_input {
                 handle_overlay_nav_key(&mut self.catalog.overlay, key)

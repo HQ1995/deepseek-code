@@ -228,8 +228,15 @@ impl MarkdownContent {
         f(state.renderer.view().hyperlinks)
     }
 
-    /// Pre-wrap line ranges of the ` ```mermaid ` blocks in the current
-    /// rendered output, reflecting the current render width.
+    pub fn with_table_copy_meta<R>(
+        &self,
+        f: impl FnOnce(&[xai_grok_markdown::TableCopyMeta]) -> R,
+    ) -> R {
+        let state = self.state.borrow();
+        f(state.renderer.view().tables)
+    }
+
+    /// Pre-wrap line ranges of the ` ```mermaid ` blocks in the current rendered output, reflecting the current render width.
     ///
     /// Allocation-light (no source rebuild) for the per-frame caption path; the
     /// detection skeleton with the diagram source lives in

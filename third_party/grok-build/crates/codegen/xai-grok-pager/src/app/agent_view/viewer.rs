@@ -1,20 +1,27 @@
 //! Line and block viewer popups plus the /btw panel: open/confirm/dismiss
 //! and their key/mouse handlers.
 
-use super::{AgentView, render_char_buttons};
+use super::{AgentPane, AgentView, BlockViewerResume, render_char_buttons};
 use crate::app::app_view::InputOutcome;
 use crate::key;
 use crate::scrollback::selection::SelectionBox;
 use crate::scrollback::types::DisplayMode;
 use crate::theme::Theme;
+use crate::views::block_viewer::{BlockViewerPane, format_blockquote};
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crate::views::file_search::line_viewer::{LineViewerState, PlanViewerItem};
 use crate::views::list_pane::ListItem;
 use crate::views::plan_approval_view::PlanApprovalFocus;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
+
+pub(crate) enum IdleEnterQuote {
+    NotHandled,
+    ConsumedEmpty,
+    Quoted(String),
+}
 
 impl AgentView {
     // ── Line viewer methods ────────────────────────────────────────────
@@ -956,21 +963,150 @@ impl AgentView {
 
     // -- Block viewer input handling ------------------------------------------
 
+    pub(crate) fn dismiss_block_viewer(&mut self) {
+        if let Some(viewer) = self.block_viewer.take() {
+            self.block_viewer_resume = Some(BlockViewerResume {
+                entry_id: viewer.entry_id,
+                kind: viewer.kind,
+                source: viewer.resume_source().map(str::to_owned),
+                selected_id: viewer.resume_selected_id(),
+                scroll_offset: viewer.list_state.scroll_offset(),
+                follow_mode: viewer.list_state.follow_mode,
+            });
+        }
+    }
+
+    pub(crate) fn clear_block_viewer(&mut self) {
+        self.block_viewer = None;
+        self.block_viewer_resume = None;
+    }
+
+    pub(crate) fn show_bg_task_viewer(&mut self, task_id: &str) -> bool {
+        let Some(task) = self.session.bg_tasks.get(task_id) else {
+            return false;
+        };
+        // A task can lack a scrollback anchor: the completed-early race never
+        // pushes a block, and a scrollback swap can drop it. The viewer renders
+        // from the task's own stdout, so open it on the sentinel anchor instead
+        // of dead-clicking the [↗] button.
+        let entry_id = task
+            .scrollback_entry_id
+            .unwrap_or_else(|| crate::scrollback::entry::EntryId::new(0));
+        let is_running = task.status == crate::app::agent::BgTaskStatus::Running;
+        let pane = crate::views::block_viewer::BlockViewerPane::for_bg_task(
+            entry_id,
+            task_id,
+            &task.stdout,
+            is_running,
+        );
+        self.install_block_viewer(pane);
+        self.set_active_pane(AgentPane::Scrollback, true);
+        true
+    }
+
+    pub(crate) fn install_block_viewer(&mut self, mut pane: BlockViewerPane) {
+        if let Some(resume) = self.block_viewer_resume.as_ref()
+            && resume.entry_id == pane.entry_id
+            && resume.kind == pane.kind
+            && resume.source.as_deref() == pane.resume_source()
+            && !(resume.follow_mode && pane.list_state.follow_mode)
+        {
+            if resume.follow_mode {
+                pane.pin_to_tail();
+            } else {
+                pane.list_state.follow_mode = false;
+                if let Some(id) = resume
+                    .selected_id
+                    .filter(|id| pane.contains_item_id(*id) || *id > u64::MAX / 2)
+                {
+                    pane.list_state.select_by_id(id);
+                }
+                pane.list_state.set_scroll_offset(resume.scroll_offset);
+                pane.request_reveal_selection();
+            }
+        }
+        self.block_viewer = Some(pane);
+    }
+
+    pub(crate) fn try_take_idle_enter_quote(&mut self, key: &KeyEvent) -> IdleEnterQuote {
+        let Some(viewer) = self.block_viewer.as_ref() else {
+            return IdleEnterQuote::NotHandled;
+        };
+        if viewer.list_state.input_mode().is_some()
+            || key.code != KeyCode::Enter
+            || key.modifiers != KeyModifiers::NONE
+            || key.kind != KeyEventKind::Press
+        {
+            return IdleEnterQuote::NotHandled;
+        }
+        let quoted = format_blockquote(&viewer.selected_plain_text());
+        if quoted.is_empty() {
+            return IdleEnterQuote::ConsumedEmpty;
+        }
+        self.dismiss_block_viewer();
+        IdleEnterQuote::Quoted(quoted)
+    }
+
+    pub(crate) fn insert_quoted_reply(&mut self, quoted: &str) {
+        self.prompt_input_mode = super::PromptInputMode::Normal;
+        let delim_at = self
+            .prompt
+            .textarea
+            .selection_range()
+            .map(|range| range.start)
+            .unwrap_or_else(|| self.prompt.cursor());
+        let at_line_start = delim_at == 0
+            || self
+                .prompt
+                .text()
+                .as_bytes()
+                .get(delim_at - 1)
+                .is_some_and(|b| *b == b'\n');
+        self.prompt.textarea.begin_undo_group();
+        if !at_line_start {
+            self.prompt.insert_replacing_selection("\n");
+        } else if self.prompt.textarea.selection_range().is_some() {
+            self.prompt.insert_replacing_selection("");
+        }
+        self.prompt.handle_paste(quoted);
+        self.prompt.insert_replacing_selection("\n\n");
+        self.prompt.textarea.end_undo_group();
+        self.prompt.refresh_slash(&self.session.models);
+        if let Some(eff) = self.notify_suggestion_text_changed() {
+            self.pending_effects.push(eff);
+        }
+        if let Some(eff) = self.notify_plugin_cta_text_changed() {
+            self.pending_effects.push(eff);
+        }
+        self.set_active_pane(AgentPane::Prompt, true);
+    }
+
     /// Handle a key event when the block viewer is open.
     ///
     /// Returns `Changed` if consumed, `Unchanged` if the key should bubble up.
     pub(super) fn handle_block_viewer_key(&mut self, key: &KeyEvent) -> InputOutcome {
+        let Some(viewer) = self.block_viewer.as_ref() else {
+            return InputOutcome::Unchanged;
+        };
+
+        if viewer.is_close_key(key) {
+            self.dismiss_block_viewer();
+            return InputOutcome::Changed;
+        }
+
+        match self.try_take_idle_enter_quote(key) {
+            IdleEnterQuote::NotHandled => {}
+            IdleEnterQuote::ConsumedEmpty => return InputOutcome::Changed,
+            IdleEnterQuote::Quoted(quoted) => {
+                self.insert_quoted_reply(&quoted);
+                return InputOutcome::Changed;
+            }
+        }
+
         let Some(ref mut viewer) = self.block_viewer else {
             return InputOutcome::Unchanged;
         };
 
-        // Check for close signals first (Esc/q/Ctrl-F)
-        if viewer.is_close_key(key) {
-            self.block_viewer = None;
-            return InputOutcome::Changed;
-        }
-
-        // Route to viewer — returns whether the key was consumed
         if !viewer.handle_key(key) {
             return InputOutcome::Unchanged;
         }
@@ -1032,7 +1168,7 @@ impl AgentView {
             handle_modal_mouse(&mut viewer.modal, mouse.kind, mouse.column, mouse.row);
         match modal_outcome {
             ModalWindowOutcome::CloseRequested => {
-                self.block_viewer = None;
+                self.dismiss_block_viewer();
                 return InputOutcome::Changed;
             }
             ModalWindowOutcome::Handled => return InputOutcome::Changed,

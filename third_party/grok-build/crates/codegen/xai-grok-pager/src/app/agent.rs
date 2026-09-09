@@ -17,6 +17,17 @@ use xai_grok_shell::sampling::types::ReasoningEffort;
 /// Unique local identifier for an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AgentId(pub usize);
+
+/// Keep nonempty history entries unique and newest first.
+pub fn remember_prompt(list: &mut Vec<String>, text: &str) {
+    let key = text.trim();
+    if key.is_empty() {
+        return;
+    }
+    list.retain(|p| p.trim() != key);
+    list.insert(0, text.to_owned());
+    list.truncate(200);
+}
 /// Whether a queue entry is a regular prompt or a slash command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueEntryKind {

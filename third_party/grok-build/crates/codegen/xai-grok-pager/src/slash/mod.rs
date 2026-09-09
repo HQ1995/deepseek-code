@@ -999,10 +999,23 @@ impl SlashController {
                     row.tag = command_tags.get(*canonical).cloned();
                 }
             }
-            // Surface tagged commands (curated new/beta) at the top of the bare "/" menu;
-            // stable so registry order is preserved within the tagged and untagged groups.
-            rows.sort_by_key(|r| r.tag.is_none());
-            return rows;
+            // Reuse the same MRU as typed queries. Tags stay first; equal scores
+            // keep registry order, including commands that have never been used.
+            let mut ranked: Vec<_> = {
+                let mut mru = self.mru.borrow_mut();
+                rows.into_iter()
+                    .zip(canonicals)
+                    .map(|(row, name)| {
+                        let rank = (
+                            row.tag.is_none(),
+                            std::cmp::Reverse(mru.rank_score("", name)),
+                        );
+                        (rank, row)
+                    })
+                    .collect()
+            };
+            ranked.sort_by_key(|(rank, _)| *rank);
+            return ranked.into_iter().map(|(_, row)| row).collect();
         }
 
         // Reject double-slash sequences.
@@ -1716,7 +1729,7 @@ mod tests {
     fn is_complete_builtin_invocation_accepts_complete_builtin() {
         let reg = test_registry();
         assert!(is_complete_builtin_invocation("/btw why is it slow", &reg));
-        assert!(is_complete_builtin_invocation("  /compact  ", &reg));
+        assert!(is_complete_builtin_invocation("  /copy  ", &reg));
     }
 
     #[test]
@@ -1727,7 +1740,7 @@ mod tests {
         // Unknown command: reserved for the agent's own pass-through.
         assert!(!is_complete_builtin_invocation("/nope x", &reg));
         // Not an invocation at position 0.
-        assert!(!is_complete_builtin_invocation("great /compact go", &reg));
+        assert!(!is_complete_builtin_invocation("great /copy go", &reg));
         assert!(!is_complete_builtin_invocation("plain prompt", &reg));
         assert!(!is_complete_builtin_invocation("/", &reg));
     }
@@ -2213,7 +2226,7 @@ mod tests {
             .iter()
             .map(|r| r.display.clone())
             .collect();
-        assert!(names.iter().any(|d| d == "/compact"));
+        assert!(names.iter().any(|d| d == "/copy"));
         assert!(names.iter().any(|d| d == "/fork"));
         assert!(names.iter().any(|d| d == "/doctor"));
     }
@@ -2868,7 +2881,7 @@ mod tests {
     }
 
     /// The bare "/" picker surfaces tagged commands first, preserving registry
-    /// order within the tagged and untagged groups (stable; not alphabetized).
+    /// order within equally recent tagged and untagged groups.
     #[test]
     fn empty_query_sorts_tagged_commands_first_stably() {
         // Registry order: alpha, bravo, charlie, delta. Tag the 2nd and 4th.
@@ -2888,6 +2901,33 @@ mod tests {
             order,
             vec!["/bravo", "/delta", "/alpha", "/charlie"],
             "tagged-first, stable registry order within each group"
+        );
+    }
+
+    #[test]
+    fn empty_query_orders_commands_by_recency_then_registry_order() {
+        let mut ctrl = tie_controller(
+            &["alpha", "bravo", "charlie", "delta"],
+            &[("charlie", 1_700_000_999), ("bravo", 1_700_000_010)],
+        );
+        let state = SlashState::default();
+        let models = ModelState::default();
+        ctrl.refresh(&state, "/", 1, &models);
+        let names = || {
+            state
+                .snapshot()
+                .matches
+                .iter()
+                .map(|r| r.display.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(), vec!["/charlie", "/bravo", "/alpha", "/delta"]);
+        set_tags(&mut ctrl, &[("alpha", "new")]);
+        ctrl.refresh(&state, "/", 1, &models);
+        assert_eq!(
+            names(),
+            vec!["/alpha", "/charlie", "/bravo", "/delta"],
+            "curated tags must still outrank recency"
         );
     }
 

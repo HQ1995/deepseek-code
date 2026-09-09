@@ -2,6 +2,149 @@
     use super::*;
 
     #[test]
+    fn native_attempts_reject_late_and_unidentified_finishes() {
+        for mode in ["continuable", "one-shot"] {
+            let mut app = make_app_with_agent("sess-parent");
+            let notify = |update: serde_json::Value, seq: u64, attempt: Option<&str>, app: &mut AppView| {
+                let payload = serde_json::json!({"sessionId": "sess-parent", "update": update,
+                    "_meta": {"eventSeq": seq, "nativeChildHistory": true, "nativeAttemptId": attempt}});
+                handle_ext_notification(&acp::ExtNotification::new("x.ai/session_notification",
+                    std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap())), app)
+            };
+            let mut spawn = serde_json::to_value(test_subagent_spawned("sess-parent", "native-child")).unwrap();
+            spawn["subagent_type"] = serde_json::json!(mode);
+            assert!(notify(spawn.clone(), 1, Some("native-child:pending"), &mut app));
+            spawn["resumed_from"] = serde_json::json!("native-child");
+            assert!(notify(spawn.clone(), 2, Some("native-child:0"), &mut app));
+            assert!(!notify(spawn.clone(), 2, Some("native-child:0"), &mut app));
+            let finish = serde_json::to_value(test_subagent_finished("native-child")).unwrap();
+            assert!(!notify(finish.clone(), 3, Some("native-child:pending"), &mut app));
+            assert!(!notify(finish.clone(), 4, None, &mut app));
+            assert!(!app.agents[&AgentId(0)].subagent_sessions["native-child"].finished);
+            assert!(notify(finish, 5, Some("native-child:0"), &mut app));
+            assert!(app.agents[&AgentId(0)].subagent_sessions["native-child"].finished);
+        }
+    }
+
+    #[test]
+    fn native_child_todo_opened_during_history_load_stays_visible_and_refreshes() {
+        use crate::app::subagent::native::{self, HistoryBatch, NativeChild};
+        let mut app = make_app_with_agent("sess-parent");
+        let id = "native-todo";
+        handle(make_ext_session_notification_with_method("sess-parent", "x.ai/session/update",
+            test_subagent_spawned("sess-parent", id)), &mut app);
+        let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+        parent.subagent_sessions.get_mut(id).unwrap().native = Some(NativeChild::default());
+        parent.open_subagent_fullscreen(id.into());
+        parent.subagent_views.get_mut(id).unwrap().todo.overlay.toggle();
+        let batch = |next, entries| -> HistoryBatch {
+            serde_json::from_value(serde_json::json!({"nextSeq": next, "totalSeq": next, "durable": false, "entries": entries})).unwrap()
+        };
+        let nonce = parent.subagent_sessions[id].native.as_ref().unwrap().nonce;
+        native::apply_history(parent, id, 0, nonce, Ok(batch(1, serde_json::json!([
+            {"update": {"sessionUpdate": "plan", "entries": []}}
+        ]))));
+        assert!(parent.subagent_views[id].todo.overlay.visible);
+        assert!(parent.subagent_views[id].todo.overlay.focused);
+        let changed = serde_json::json!({"sessionId": "sess-parent", "childSessionId": id, "nextSeq": 2});
+        handle_ext_notification(&acp::ExtNotification::new("x.ai/subagent/history_changed",
+            std::sync::Arc::from(serde_json::value::to_raw_value(&changed).unwrap())), &mut app);
+        let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let nonce = parent.subagent_sessions[id].native.as_ref().unwrap().nonce;
+        assert!(parent.subagent_sessions[id].native.as_ref().unwrap().loading);
+        native::apply_history(parent, id, 1, nonce, Ok(batch(2, serde_json::json!([
+            {"update": {"sessionUpdate": "plan", "entries": [
+                {"content": "Native child checklist", "status": "completed", "priority": "medium"}
+            ]}}, {"turnEnded": true}
+        ]))));
+        let child = &parent.subagent_views[id];
+        assert!(child.todo.overlay.visible);
+        assert_eq!(child.todo.todos()[0].content, "Native child checklist");
+        assert_eq!(child.todo.todos()[0].status, xai_grok_shell::tools::todo::TodoStatus::Completed);
+    }
+
+    #[test]
+    fn native_history_pages_retry_without_loss_and_evict_only_after_durability() {
+        use crate::app::subagent::native::{self, HistoryBatch, NativeChild};
+        let mut app = make_app_with_agent("sess-parent");
+        let id = "native-history";
+        handle(make_ext_session_notification_with_method("sess-parent", "x.ai/session/update",
+            test_subagent_spawned("sess-parent", id)), &mut app);
+        let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+        parent.subagent_sessions.get_mut(id).unwrap().native = Some(NativeChild::default());
+        parent.open_subagent_fullscreen(id.into());
+        let nonce = |parent: &AgentView| parent.subagent_sessions[id].native.as_ref().unwrap().nonce;
+        let batch = |next: usize, total: usize, text: &str, durable: bool| -> HistoryBatch {
+            serde_json::from_value(serde_json::json!({"nextSeq": next, "totalSeq": total, "durable": durable,
+                "entries": [{"turnEnded": true}, {"update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}, "meta": {"isReplay": true}}]})).unwrap()
+        };
+        native::apply_history(parent, id, 0, nonce(parent), Ok(batch(1, 2, "first page", false)));
+        assert!(parent.subagent_sessions[id].native.as_ref().unwrap().loading);
+        assert!(parent.subagent_views[id].session.state.is_turn_running(), "replaying an old end cannot idle the current attempt");
+        native::apply_history(parent, id, 1, nonce(parent), Err("read unavailable".into()));
+        assert_eq!(agent_message_text(&parent.subagent_views[id]), "first page");
+        parent.subagent_sessions.get_mut(id).unwrap().finished = true;
+        parent.close_subagent_fullscreen();
+        assert_eq!(agent_message_text(&parent.subagent_views[id]), "first page", "failed reads cannot evict the only history");
+        parent.open_subagent_fullscreen(id.into());
+        native::apply_history(parent, id, 1, nonce(parent), Ok(batch(2, 2, " second page", true)));
+        assert_eq!(agent_message_text(&parent.subagent_views[id]), "first page second page");
+        parent.close_subagent_fullscreen();
+        assert_eq!(agent_message_text(&parent.subagent_views[id]), "");
+        parent.open_subagent_fullscreen(id.into());
+        let stale = nonce(parent).wrapping_sub(1);
+        native::apply_history(parent, id, 0, stale, Ok(batch(2, 2, "stale", true)));
+        assert_eq!(agent_message_text(&parent.subagent_views[id]), "");
+        native::apply_history(parent, id, 0, nonce(parent), Ok(batch(2, 2, "first page second page", true)));
+        assert_eq!(agent_message_text(&parent.subagent_views[id]), "first page second page");
+        native::request_history(parent, id);
+        native::apply_history(parent, id, 2, nonce(parent), Ok(batch(2, 3, "non-progress", false)));
+        assert!(!parent.subagent_sessions[id].native.as_ref().unwrap().loading, "invalid cursor cannot spin");
+        assert_eq!(agent_message_text(&parent.subagent_views[id]), "first page second page");
+    }
+
+    #[test]
+    fn native_continuation_reopens_once_and_keeps_child_history() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child = "child-native";
+        let notify = |update: serde_json::Value, seq: u64, app: &mut AppView| {
+            let payload = serde_json::json!({"sessionId": "sess-parent", "update": update,
+                "_meta": {"eventSeq": seq}});
+            let notification = acp::ExtNotification::new("x.ai/session/update",
+                std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()));
+            handle_ext_notification(&notification, app)
+        };
+        let mut spawn = serde_json::to_value(test_subagent_spawned("sess-parent", child)).unwrap();
+        spawn["subagent_type"] = serde_json::json!("continuable");
+        assert!(notify(spawn.clone(), 1, &mut app));
+        let mut finish = serde_json::to_value(test_subagent_finished(child)).unwrap();
+        finish["output"] = serde_json::json!("first turn output");
+        assert!(notify(finish.clone(), 2, &mut app));
+        let first_view = app.agents[&AgentId(0)].subagent_views[child].as_ref() as *const AgentView;
+        assert!(!notify(spawn.clone(), 3, &mut app), "a plain duplicate cannot reopen a child");
+        spawn["resumed_from"] = serde_json::json!(child);
+        spawn["effective_context_source"] = serde_json::json!("resumed");
+        assert!(!notify(spawn.clone(), 1, &mut app), "a stale resume cannot reopen a child");
+        assert!(notify(spawn.clone(), 4, &mut app));
+        assert!(!notify(spawn.clone(), 4, &mut app));
+        let parent = &app.agents[&AgentId(0)];
+        assert!(!parent.subagent_sessions[child].finished);
+        assert_eq!(parent.subagent_views[child].as_ref() as *const AgentView, first_view);
+        assert!(parent.subagent_views[child].session.state.is_turn_running());
+        assert_eq!(agent_message_text(&parent.subagent_views[child]), "first turn output");
+        assert!(parent.scrollback.needs_animation());
+        finish["output"] = serde_json::json!("second turn output");
+        assert!(notify(finish, 5, &mut app));
+        assert!(!notify(spawn, 4, &mut app), "late delivery must not reopen the finished second turn");
+        let parent = &app.agents[&AgentId(0)];
+        assert!(parent.subagent_sessions[child].finished);
+        assert!(matches!(parent.subagent_views[child].session.state, AgentState::Idle));
+        let text = agent_message_text(&parent.subagent_views[child]);
+        assert!(text.contains("first turn output") && text.contains("second turn output"), "{text}");
+        assert!(!parent.scrollback.needs_animation());
+    }
+
+    #[test]
     fn native_subagent_terminal_unknown_metrics_and_output_enrichment() {
         use crate::scrollback::block::BlockContent;
         use crate::scrollback::types::{BlockContext, DisplayMode};
@@ -2733,4 +2876,3 @@
             "ext notification routed to a non-active agent must not request a redraw"
         );
     }
-

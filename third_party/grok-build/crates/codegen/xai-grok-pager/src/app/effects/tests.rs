@@ -3,8 +3,8 @@ use super::*;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
 #[test]
 fn native_goal_response_requires_native_kind_and_text() {
-    assert_eq!(parse_goal_command_result(r#"{"result":{"kind":"success","text":"Goal paused."}}"#), Ok("Goal paused.".into()));
-    assert_eq!(parse_goal_command_result(r#"{"result":{"kind":"error","text":"Images require an objective."}}"#), Err("Images require an objective.".into()));
+    assert_eq!(parse_session_command_result(r#"{"result":{"kind":"success","text":"Goal paused."}}"#), Ok("Goal paused.".into()));
+    assert_eq!(parse_session_command_result(r#"{"result":{"kind":"error","text":"Images require an objective."}}"#), Err("Images require an objective.".into()));
     for raw in [
         "not json", "null", "{}", r#"{"result":null}"#,
         r#"{"result":{"kind":"success"}}"#,
@@ -12,30 +12,33 @@ fn native_goal_response_requires_native_kind_and_text() {
         r#"{"result":{"kind":"success","text":42}}"#,
         r#"{"result":{"text":"Goal paused."}}"#,
         r#"{"result":{"kind":42,"text":"Goal paused."}}"#,
+        r#"{"result":{"kind":"unknown","text":"not a command result"}}"#,
         r#"{"error":"unavailable"}"#,
     ] {
-        assert!(parse_goal_command_result(raw).is_err(), "accepted malformed goal result: {raw}");
+        assert!(parse_session_command_result(raw).is_err(), "accepted malformed goal result: {raw}");
     }
 }
 
 #[tokio::test]
-async fn native_goal_effect_uses_control_wire_and_dedicated_result() {
+async fn native_session_effect_uses_control_wire_and_dedicated_result() {
     use std::sync::Arc;
     use xai_acp_lib::AcpAgentMessage;
+    for (method, command) in [("x.ai/goal", "/goal pause"), ("x.ai/subagents", "/subagents stop child")] {
     for (raw, expected) in [
         (r#"{"result":{"kind":"success","text":"Goal paused."}}"#, Ok("Goal paused.".to_string())),
         (r#"{"result":{"kind":"error","text":"native refusal"}}"#, Err("native refusal".to_string())),
-        (r#"{"result":{"kind":"success"}}"#, Err("invalid goal command response".to_string())),
+        (r#"{"result":{"kind":"success"}}"#, Err("invalid session command response".to_string())),
     ] {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut tasks = JoinSet::new();
         let session_id = acp::SessionId::new("goal-session");
         execute(
-            Effect::RunGoalCommand {
+            Effect::RunSessionCommand {
                 agent_id: AgentId(7),
                 session_id: session_id.clone(),
-                prompt: vec![acp::ContentBlock::Text(acp::TextContent::new("/goal pause"))],
+                method,
+                prompt: vec![acp::ContentBlock::Text(acp::TextContent::new(command))],
             },
             &mut tasks,
             &tx,
@@ -46,13 +49,13 @@ async fn native_goal_effect_uses_control_wire_and_dedicated_result() {
         let Some(AcpAgentMessage::ExtMethod(args)) = rx.recv().await else {
             panic!("goal must use ExtMethod, never a model prompt");
         };
-        assert_eq!(args.request.method.as_ref(), "x.ai/goal");
+        assert_eq!(args.request.method.as_ref(), method);
         assert_eq!(serde_json::from_str::<serde_json::Value>(args.request.params.get()).unwrap(),
-            serde_json::json!({ "sessionId": "goal-session", "prompt": [{ "type": "text", "text": "/goal pause" }] }));
+            serde_json::json!({ "sessionId": "goal-session", "prompt": [{ "type": "text", "text": command }] }));
         let body = serde_json::value::RawValue::from_string(raw.to_string()).unwrap();
         args.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(body)))).unwrap();
         match tasks.join_next().await.unwrap().unwrap() {
-            TaskResult::GoalCommandComplete { agent_id, session_id: receiving_session, result } => {
+            TaskResult::SessionCommandComplete { agent_id, session_id: receiving_session, result } => {
                 assert_eq!(agent_id, AgentId(7));
                 assert_eq!(receiving_session, session_id);
                 assert_eq!(result, expected);
@@ -61,6 +64,7 @@ async fn native_goal_effect_uses_control_wire_and_dedicated_result() {
         }
         assert!(tasks.is_empty());
         assert!(rx.try_recv().is_err());
+    }
     }
 }
 
@@ -2589,7 +2593,7 @@ fn format_session_info_api_key_without_env() {
     assert!(!text.contains("XAI_API_KEY"), "{text}");
     assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(
-            text.contains("Run `grok login` to use your SuperGrok subscription instead."),
+            text.contains("Run `dscode login` to use your SuperGrok subscription instead."),
             "{text}"
         );
     assert!(!text.contains("grok.com"), "{text}");
@@ -2601,7 +2605,7 @@ fn format_session_info_api_key_auth_suggests_grok_login() {
     assert!(text.contains("Auth method: API key (XAI_API_KEY)"), "{text}");
     assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(
-            text.contains("Run `grok login` to use your SuperGrok subscription instead."),
+            text.contains("Run `dscode login` to use your SuperGrok subscription instead."),
             "{text}"
         );
     assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");

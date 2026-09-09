@@ -1715,9 +1715,9 @@ fn collapse_strip_seam(text: &mut String, start: usize, end: usize) {
 // Scrollback image references
 // -------------------------------------------------------------------------
 
-/// An image file referenced in scrollback content via `![alt](path)` markdown
-/// or a bare absolute path. Validated on construction: path must exist, have a
-/// recognized image extension, and decode successfully.
+/// An image file referenced by markdown, a bare path, or a typed tool result.
+/// The file must exist and decode successfully. References extracted from prose
+/// also require an image extension.
 #[derive(Debug, Clone)]
 pub struct ScrollbackImageRef {
     /// Absolute path to the image file on disk.
@@ -1743,6 +1743,14 @@ impl ScrollbackImageRef {
         if !IMAGE_EXTENSIONS.contains(&ext.as_str()) {
             return None;
         }
+        let mut image = Self::from_image_file(path)?;
+        image.alt_text = alt_text;
+        Some(image)
+    }
+
+    /// Decode a typed image path, including extensionless attachment-store objects.
+    pub fn from_image_file(path: impl Into<PathBuf>) -> Option<Self> {
+        let path = strip_verbatim_prefix(&path.into());
         if !path.is_file() {
             return None;
         }
@@ -1754,7 +1762,7 @@ impl ScrollbackImageRef {
         Some(Self {
             path,
             dimensions,
-            alt_text,
+            alt_text: String::new(),
         })
     }
 }

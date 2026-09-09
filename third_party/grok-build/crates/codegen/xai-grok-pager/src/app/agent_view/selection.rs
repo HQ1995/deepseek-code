@@ -13,7 +13,7 @@ use crate::scrollback::text_selection::{
     block_drag_threshold_exceeded, compute_autoscroll, configured_word_separators,
     drag_threshold_exceeded, reconstruct_full_selection_text_with_boundaries,
     reconstruct_selection_text, reconstruct_selection_text_with_boundaries,
-    reconstruct_table_selection_text, resolve_table_drag_kind, semantic_selection_at,
+    reconstruct_table_selection_text_with_meta, resolve_table_drag_kind, semantic_selection_at,
 };
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crossterm::event::MouseEvent;
@@ -25,6 +25,22 @@ use std::time::{Duration, Instant};
 /// [`MULTI_CLICK_TIMEOUT_MS`] so it measures separate gestures, and short
 /// enough that the second gesture plausibly continues the first intent.
 const WORD_SELECT_REPEAT_WINDOW: Duration = Duration::from_secs(10);
+
+fn prewrap_line_index(
+    lines: &[crate::scrollback::types::BlockLine],
+    block_line: usize,
+) -> Option<usize> {
+    if block_line >= lines.len() {
+        return None;
+    }
+    Some(
+        lines[..=block_line]
+            .iter()
+            .filter(|line| line.joiner.is_none())
+            .count()
+            .saturating_sub(1),
+    )
+}
 
 impl AgentView {
     /// Tick the selection highlight timer. Returns true if the selection
@@ -97,6 +113,55 @@ impl AgentView {
             Some(crate::scrollback::types::derive_selection_text(line))
         };
         Some(f(&source))
+    }
+
+    fn with_entry_table_copy_source<R>(
+        &self,
+        entry_idx: usize,
+        range_id: u16,
+        width_override: Option<u16>,
+        geom: &TableGeometry,
+        f: impl FnOnce(&dyn Fn(usize) -> Option<String>, Option<&xai_grok_markdown::TableCopyMeta>) -> R,
+    ) -> Option<R> {
+        let scrollback = if let Some(ref child_id) = self.active_subagent
+            && let Some(child) = self.subagent_views.get(child_id)
+        {
+            &child.scrollback
+        } else {
+            &self.scrollback
+        };
+        let visible_start = scrollback.visible_entry_range().start;
+        let abs_idx = entry_idx + visible_start;
+        let content_width = width_override.or_else(|| {
+            self.last_scrollback_selection_model
+                .visible_block_content_width(entry_idx)
+        })?;
+        let entry = scrollback.get(abs_idx)?;
+        let appearance = scrollback.appearance();
+        let mode = entry.display_mode();
+        let offset = entry.block.markdown_body_line_offset(mode, appearance);
+        let effective = entry.effective_output(content_width, appearance, false, scrollback.cwd());
+        let lines = &effective.output().lines;
+        let source = |i: usize| -> Option<String> {
+            let line = lines.get(i)?;
+            if line.selection_range != Some(range_id) {
+                return None;
+            }
+            Some(crate::scrollback::types::derive_selection_text(line))
+        };
+        Some(entry.block.with_table_copy_meta(|tables| {
+            let meta = prewrap_line_index(lines, geom.line_range().start)
+                .and_then(|pre| pre.checked_sub(offset))
+                .and_then(|idx| {
+                    tables.iter().find(|t| {
+                        t.line_index == idx
+                            && t.n_cols == geom.n_cols()
+                            && t.line_count == geom.line_range().len()
+                            && t.cells.len() == geom.n_rows() * t.n_cols
+                    })
+                });
+            f(&source, meta)
+        }))
     }
 
     /// Detect the table grid under a drag anchor (btw drags stay linear).
@@ -640,22 +705,22 @@ impl AgentView {
             && let Some(geom) =
                 self.table_geometry_for_selection(drag.anchor.entry_idx, drag.anchor.range_id)
             && let Some(text) = self
-                .with_entry_output_text_source(
+                .with_entry_table_copy_source(
                     drag.anchor.entry_idx,
                     drag.anchor.range_id,
                     // Snapshot keeps the table copy alive after the block
                     // autoscrolls fully out of the viewport.
                     drag.anchor_content_width,
-                    |src| {
-                        // Geometry was frozen at promote; a streaming re-wrap
-                        // since then shifts every block_line_idx, so re-detect
-                        // and require an exact match before slicing.
+                    geom,
+                    |src, meta| {
+                        // Geometry was frozen at promote; a streaming re-wrap since then shifts every block_line_idx
+                        // Re-detect and require an exact match before slicing
                         if TableGeometry::detect(src, drag.anchor.block_line_idx).as_ref()
                             != Some(geom)
                         {
                             return None;
                         }
-                        reconstruct_table_selection_text(geom, drag, src)
+                        reconstruct_table_selection_text_with_meta(geom, drag, src, meta)
                     },
                 )
                 .flatten()
@@ -1040,19 +1105,9 @@ impl AgentView {
                 // Double-click bg task: open block viewer (same as Enter).
                 if let Some(entry) = self.scrollback.entry(idx)
                     && let crate::scrollback::block::RenderBlock::BgTask(ref bt) = entry.block
-                    && let Some(task) = self.session.bg_tasks.get(&bt.task_id)
                 {
-                    let eid = task
-                        .scrollback_entry_id
-                        .unwrap_or_else(|| crate::scrollback::entry::EntryId::new(0));
-                    let is_running = task.status == crate::app::agent::BgTaskStatus::Running;
-                    self.block_viewer =
-                        Some(crate::views::block_viewer::BlockViewerPane::for_bg_task(
-                            eid,
-                            &bt.task_id,
-                            &task.stdout,
-                            is_running,
-                        ));
+                    let task_id = bt.task_id.clone();
+                    self.show_bg_task_viewer(&task_id);
                 }
             }
             2 if is_subagent => {
@@ -1361,11 +1416,13 @@ impl AgentView {
         let Some(cell) = geometry.cell_at(hit.block_line_idx, hit.col_within_range) else {
             return self.select_whole_table_at(hit, geometry);
         };
-        let Some(clipboard_text) =
-            self.with_entry_output_text_source(hit.entry_idx, hit.range_id, None, |src| {
-                geometry.cell_text(cell, src)
-            })
-        else {
+        let Some(clipboard_text) = self.with_entry_table_copy_source(
+            hit.entry_idx,
+            hit.range_id,
+            None,
+            &geometry,
+            |src, meta| geometry.cell_text_with_meta(cell, src, meta),
+        ) else {
             return false;
         };
 
@@ -1407,11 +1464,13 @@ impl AgentView {
             row: geometry.n_rows() - 1,
             col: geometry.n_cols() - 1,
         };
-        let Some(clipboard_text) =
-            self.with_entry_output_text_source(hit.entry_idx, hit.range_id, None, |src| {
-                geometry.grid_tsv(anchor_cell, head_cell, src)
-            })
-        else {
+        let Some(clipboard_text) = self.with_entry_table_copy_source(
+            hit.entry_idx,
+            hit.range_id,
+            None,
+            &geometry,
+            |src, meta| geometry.grid_tsv_with_meta(anchor_cell, head_cell, src, meta),
+        ) else {
             return false;
         };
 
@@ -2522,6 +2581,71 @@ mod tests {
             ..drag
         };
         assert!(agent.reconstruct_drag_copy(&no_snapshot).is_none());
+    }
+
+    #[test]
+    fn wrapped_markdown_table_copy_preserves_source_in_parent_and_child() {
+        const WIDTH: u16 = 24;
+        for child in [false, true] {
+            for expected in [
+                "https://example.com/a_long_identifier/路径/item",
+                "中文连续文本abcdefghijklmnop",
+                "alpha  beta   gamma / delta",
+            ] {
+                let mut leaf = make_agent();
+                leaf.scrollback.push_block(crate::scrollback::block::RenderBlock::agent_message(
+                    format!("A long introduction wraps before the table.\n\n| Value |\n| --- |\n| {expected} |\n"),
+                ));
+                let agent = if child {
+                    let mut parent = make_agent();
+                    parent.subagent_views.insert("child".into(), Box::new(leaf));
+                    parent.active_subagent = Some("child".into());
+                    parent
+                } else {
+                    leaf
+                };
+                let geom = (0..40)
+                    .find_map(|probe| {
+                        agent
+                            .with_entry_output_text_source(0, 0, Some(WIDTH), |src| {
+                                TableGeometry::detect(src, probe)
+                            })
+                            .flatten()
+                    })
+                    .expect("wrapped table");
+                agent
+                    .with_entry_table_copy_source(0, 0, Some(WIDTH), &geom, |src, meta| {
+                        assert!(
+                            meta.is_some(),
+                            "copy must use source metadata after pre-table wrapping"
+                        );
+                        let cell = CellRef { row: 1, col: 0 };
+                        assert_eq!(geom.cell_text_with_meta(cell, src, meta), expected);
+                        let anchor = RangeHit {
+                            entry_idx: 0,
+                            range_id: 0,
+                            block_line_idx: geom.row_lines(1).start,
+                            col_within_range: geom.band(0).start,
+                        };
+                        let drag = ActiveTextDrag {
+                            anchor,
+                            head: RangeHit {
+                                block_line_idx: geom.row_lines(1).end - 1,
+                                col_within_range: geom.band(0).end - 1,
+                                ..anchor
+                            },
+                            kind: SelectionKind::TableCell,
+                            anchor_content_width: Some(WIDTH),
+                        };
+                        assert_eq!(
+                            reconstruct_table_selection_text_with_meta(&geom, &drag, src, meta)
+                                .as_deref(),
+                            Some(expected),
+                        );
+                    })
+                    .expect("copy source");
+            }
+        }
     }
 
     /// The btw copy prefers the drag-start width snapshot; the current

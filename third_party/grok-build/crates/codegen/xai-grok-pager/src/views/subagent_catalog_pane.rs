@@ -149,9 +149,12 @@ impl SubagentCatalogPane {
                 let display = detail
                     .map(|d| d.name.clone())
                     .unwrap_or_else(|| item.clone());
-                let desc = detail
-                    .and_then(|d| d.description.as_deref())
-                    .filter(|d| !d.is_empty());
+                let desc = match *kind {
+                    "persona" => detail.and_then(|d| d.description.as_deref()),
+                    "role" => state.role_details.get(idx).map(|d| d.description.as_str()),
+                    _ => None,
+                }
+                .filter(|d| !d.is_empty());
                 let value = if *kind == "persona" {
                     Some(item.clone())
                 } else {
@@ -476,6 +479,7 @@ mod tests {
         assert_eq!(pane.entries[1].styled.spans.len(), 2);
         // reviewer entry should have 2 spans
         assert_eq!(pane.entries[3].styled.spans.len(), 2);
+        assert_eq!(pane.entries[3].styled.spans[1].content, " — code reviewer");
     }
 
     #[test]

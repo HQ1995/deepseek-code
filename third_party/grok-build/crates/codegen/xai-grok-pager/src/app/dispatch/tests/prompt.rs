@@ -2889,14 +2889,14 @@ fn switch_model_holds_prompt_until_complete() {
 }
 
 #[test]
-fn slash_compact_enqueues_command() {
+fn slash_compact_is_forwarded_to_the_harness() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
 
     let effects = dispatch(Action::SendPrompt("/compact".into()), &mut app);
-    // /compact enqueues as Command and drains immediately (agent was idle).
+    // dscode delegates compaction to the harness instead of the upstream shell.
     assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::Compact { .. }));
+    assert!(matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "/compact"));
     // Prompt should be cleared.
     assert!(app.agents[&id].prompt.text().is_empty());
 }
@@ -3033,7 +3033,7 @@ fn slash_compact_with_context_enqueues_command() {
 }
 
 #[test]
-fn native_goal_controls_bypass_busy_queue_without_starting_a_turn() {
+fn native_session_controls_bypass_busy_queue_without_starting_a_turn() {
     for command in [
         "/goal",
         "/goal pause",
@@ -3041,6 +3041,15 @@ fn native_goal_controls_bypass_busy_queue_without_starting_a_turn() {
         "/goal clear",
         "/goal edit  keep\n raw --budget 42  ",
         "/goal status",
+        "/subagents",
+        "/subagents queue child raw\n message",
+        "/subagents steer child follow up",
+        "/subagents stop child",
+        "/subagents pending child",
+        "/subagents edit child message replacement",
+        "/subagents remove child message",
+        "/subagents steer-queued child all",
+        "/subagents clear child",
     ] {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
@@ -3055,14 +3064,16 @@ fn native_goal_controls_bypass_busy_queue_without_starting_a_turn() {
         let effects = dispatch(Action::SendPrompt(command.into()), &mut app);
         match effects.as_slice() {
             [
-                Effect::RunGoalCommand {
+                Effect::RunSessionCommand {
                     agent_id,
                     session_id: receiving_session,
+                    method,
                     prompt,
                 },
             ] => {
                 assert_eq!(*agent_id, id);
                 assert_eq!(*receiving_session, session_id);
+                assert_eq!(*method, if command.starts_with("/goal") { "x.ai/goal" } else { "x.ai/subagents" });
                 assert_eq!(
                     serde_json::to_value(prompt).unwrap(),
                     serde_json::json!([
@@ -3115,7 +3126,7 @@ fn native_goal_palette_preserves_draft_and_attachments_while_busy() {
         &mut app,
     );
     match effects.as_slice() {
-        [Effect::RunGoalCommand { prompt, .. }] => assert_eq!(
+        [Effect::RunSessionCommand { prompt, .. }] => assert_eq!(
             serde_json::to_value(prompt).unwrap(),
             serde_json::json!([{ "type": "text", "text": "/goal" }]),
         ),
@@ -3131,7 +3142,7 @@ fn native_goal_palette_preserves_draft_and_attachments_while_busy() {
     let command = "/goal edit  exact\n objective --budget 42  ";
     let effects = dispatch(Action::SendPrompt(command.into()), &mut app);
     match effects.as_slice() {
-        [Effect::RunGoalCommand { prompt, .. }] => {
+        [Effect::RunSessionCommand { prompt, .. }] => {
             let blocks = serde_json::to_value(prompt).unwrap();
             assert_eq!(blocks[0]["text"], command);
             assert!(blocks.as_array().unwrap().iter().any(|block| {
@@ -5063,4 +5074,211 @@ fn prompt_response_finalize_drains_local_queue() {
     let agent = app.agents.get(&id).unwrap();
     assert_eq!(agent.session.pending_prompts.len(), 1);
     assert_eq!(agent.session.pending_prompts[0].text, "two");
+}
+
+mod prompt_stash_dispatch_tests {
+    use super::test_app_with_agent;
+    use crate::app::actions::Action;
+    use crate::app::agent::AgentId;
+    use crate::app::agent_view::StashCause;
+    use crate::app::dispatch::router::dispatch;
+
+    /// Esc-Esc clear hands the draft to the stash rather than dropping it. Ranking and restore semantics belong to `agent_view::prompt_stash`.
+    #[test]
+    fn clear_prompt_stashes_the_cleared_draft() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .prompt
+            .set_text("cleared draft");
+
+        let effects = dispatch(Action::ClearPrompt, &mut app);
+
+        assert!(effects.is_empty());
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.prompt.text(), "", "composer must be cleared");
+        let stash = agent.prompt_stash.as_ref().expect("draft was stashed");
+        assert_eq!(stash.prompt.text, "cleared draft");
+        assert_eq!(stash.cause, StashCause::ClearedDraft);
+    }
+
+    /// The clear records history and the stash contributes its own entry, so a `!` draft has to
+    /// be recorded with the same `! ` prefix or the Up browse lists it twice.
+    #[test]
+    fn clearing_a_shell_draft_leaves_one_history_entry() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt_input_mode = crate::app::agent_view::PromptInputMode::Bash;
+            agent.prompt.set_text("git status");
+        }
+
+        dispatch(Action::ClearPrompt, &mut app);
+
+        let history = app.agents[&id].combined_prompt_history();
+        let texts: Vec<&str> = history.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, ["! git status"]);
+    }
+
+    #[test]
+    fn clear_prompt_on_empty_composer_stashes_nothing() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+
+        dispatch(Action::ClearPrompt, &mut app);
+
+        assert!(app.agents.get(&id).unwrap().prompt_stash.is_none());
+    }
+
+    #[test]
+    fn chord_stashed_draft_auto_restores_after_next_send() {
+        // Both sends consume the composer, so both hand the draft back.
+        let sends = [
+            Action::SendPrompt("quick side question".into()),
+            Action::SendBashCommand("git status".into()),
+        ];
+
+        for send in sends {
+            let label = format!("{send:?}");
+            let mut app = test_app_with_agent();
+            let id = AgentId(0);
+            {
+                let agent = app.agents.get_mut(&id).unwrap();
+                agent.prompt.set_text("stashed thought");
+                agent.stash_prompt_draft(StashCause::Chord);
+            }
+
+            dispatch(send, &mut app);
+
+            let agent = app.agents.get(&id).unwrap();
+            assert_eq!(
+                agent.prompt.text(),
+                "stashed thought",
+                "{label} must restore the stash"
+            );
+            assert!(agent.prompt_stash.is_none(), "{label} left the slot full");
+        }
+    }
+
+    /// `SendPromptNow` also force-sends a queued row, which never touched the composer.
+    /// Only the caller that consumed the draft reports it, so the queued-row case must leave the stash alone.
+    #[test]
+    fn a_queued_row_send_now_leaves_the_stash_alone() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt.set_text("stashed thought");
+            agent.stash_prompt_draft(StashCause::Chord);
+        }
+
+        dispatch(
+            Action::SendPromptNow {
+                text: "a queued row".into(),
+                images: vec![],
+            },
+            &mut app,
+        );
+
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.prompt.text(), "", "the composer was never the source");
+        assert!(agent.prompt_stash.is_some(), "the stash must stay put");
+    }
+
+    /// A `#` note with no text is refused, so it never consumed a draft and must not hand the
+    /// stash back. The marker has to sit after the guard, not before it.
+    #[test]
+    fn a_rejected_remember_note_does_not_restore_the_stash() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt.set_text("stashed thought");
+            agent.stash_prompt_draft(StashCause::Chord);
+        }
+
+        dispatch(Action::SendRememberNote("   ".into()), &mut app);
+
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.prompt.text(), "", "the refused note restores nothing");
+        assert!(agent.prompt_stash.is_some(), "the stash must stay put");
+    }
+
+    /// A handler that rejects the action never consumed the draft, so the stash must stay put.
+    #[test]
+    fn a_rejected_send_does_not_restore_the_stash() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt.set_text("stashed thought");
+            agent.stash_prompt_draft(StashCause::Chord);
+            agent.prompt.set_text("never sent");
+        }
+        app.reconnect_pending = true;
+
+        dispatch(Action::SendPrompt("never sent".into()), &mut app);
+
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(
+            agent.prompt.text(),
+            "never sent",
+            "the draft is still unsent"
+        );
+        assert!(
+            agent.prompt_stash.is_some(),
+            "a refused send must not hand the stash back"
+        );
+    }
+
+    /// An Esc-Esc-cleared draft is a discard: it must NOT bounce back after the next send. Chord pop and history browse remain its recovery paths.
+    #[test]
+    fn esc_cleared_draft_does_not_auto_restore_after_send() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .prompt
+            .set_text("discarded draft");
+
+        dispatch(Action::ClearPrompt, &mut app);
+        dispatch(Action::SendPrompt("next prompt".into()), &mut app);
+
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.prompt.text(), "", "discarded draft must stay stashed");
+        assert!(agent.prompt_stash.is_some());
+    }
+
+    /// Auto-restore never overwrites composer state the user already touched.
+    #[test]
+    fn auto_restore_declines_on_a_non_empty_or_moded_composer() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.prompt.set_text("stashed thought");
+        agent.stash_prompt_draft(StashCause::Chord);
+
+        agent.prompt.set_text("already typing");
+
+        agent.auto_restore_stash_after_send();
+
+        assert_eq!(agent.prompt.text(), "already typing");
+        assert!(agent.prompt_stash.is_some());
+
+        agent.prompt.set_text("");
+        agent.prompt_input_mode = crate::app::agent_view::PromptInputMode::Bash;
+
+        agent.auto_restore_stash_after_send();
+
+        assert_eq!(
+            agent.prompt.text(),
+            "",
+            "moded composer must not be overwritten"
+        );
+        assert!(agent.prompt_stash.is_some());
+    }
 }

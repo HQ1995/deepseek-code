@@ -1,4 +1,4 @@
-//! `/minimal` and `/fullscreen` — session-scoped re-exec of the active session.
+//! `/minimal` and `/fullscreen` — switch the active session in place.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
@@ -44,9 +44,9 @@ impl SlashCommand for ScreenModeSwitchCommand {
 
     fn description(&self) -> &str {
         if self.to_minimal {
-            "Reopen this session in minimal (scrollback-native) mode — switch back with /fullscreen"
+            "Switch this session to minimal (scrollback-native) mode, back with /fullscreen"
         } else {
-            "Reopen this session in fullscreen mode — switch back with /minimal"
+            "Switch this session to fullscreen mode, back with /minimal"
         }
     }
 
@@ -73,7 +73,7 @@ impl SlashCommand for ScreenModeSwitchCommand {
     fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
         if ctx.session_id.is_none() {
             return CommandResult::Error(format!(
-                "No active session to reopen in {} mode",
+                "No active session to switch to {} mode",
                 self.target_label(),
             ));
         }

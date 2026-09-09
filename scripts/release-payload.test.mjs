@@ -1,12 +1,117 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { cpSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readlinkSync, symlinkSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { copyClosure, releaseAssets, releaseChannel, sourceBuildEnvironment } from './build-release-payload.mjs';
+import { assertReleaseRun, verifyReleaseAssets } from './verify-release-assets.mjs';
+
+test('local bridge runner preserves absent, linked, and installed dependencies on success and failure', () => {
+  const work = mkdtempSync(join(tmpdir(), 'dscode-dev-runner-'));
+  const bridge = join(work, 'bridge/grok-leader');
+  const modules = join(bridge, 'node_modules');
+  const payload = join(work, 'payload');
+  const runtime = join(work, 'runtime');
+  const manifest = { version: '1.2.3', dsh: { testedVersion: '0.1.5-alpha.1', sourceCommit: 'a'.repeat(40) } };
+  try {
+    for (const path of ['scripts', 'tmp', 'existing', 'payload/package', 'runtime/bin',
+      'runtime/node_modules/typescript/bin', 'runtime/node_modules/vitest',
+      ...['src', 'bin', 'tests', 'presets'].map(name => `bridge/grok-leader/${name}`)]) mkdirSync(join(work, path), { recursive: true });
+    for (const name of ['dev-bridge-tests.sh', 'platform.sh']) cpSync(fileURLToPath(new URL(name, import.meta.url)), join(work, 'scripts', name));
+    writeFileSync(join(work, 'VERSION'), manifest.version);
+    writeFileSync(join(bridge, 'package.json'), JSON.stringify(manifest));
+    writeFileSync(join(bridge, 'tsconfig.json'), '{}');
+    writeFileSync(join(bridge, 'cordis.patch.yml'), '[]');
+    writeFileSync(join(payload, 'package/package.json'), JSON.stringify(manifest));
+    execFileSync('tar', ['-czf', join(payload, 'dscode-plugin.tgz'), '-C', payload, 'package']);
+    writeFileSync(join(runtime, 'bin/dsh'), 'fixture');
+    writeFileSync(join(runtime, 'dscode-runtime.json'), JSON.stringify({ schema: 1, dshVersion: manifest.dsh.testedVersion, sourceCommit: manifest.dsh.sourceCommit, platform: process.platform, arch: process.arch }));
+    writeFileSync(join(runtime, 'node_modules/typescript/bin/tsc'), 'process.exit(Number(process.env.DSCODE_TEST_EXIT));');
+    writeFileSync(join(runtime, 'node_modules/vitest/vitest.mjs'), "import {writeFileSync} from 'node:fs'; writeFileSync(process.env.DSCODE_TEST_RAN, 'ran');");
+    const platform = process.platform === 'darwin' ? 'macos-aarch64' : 'linux-x86_64';
+    execFileSync('tar', ['-czf', join(payload, `dscode-runtime-${platform}.tar.gz`), '-C', runtime, '.']);
+    const sentinel = join(work, 'existing/sentinel');
+    writeFileSync(sentinel, 'keep');
+    for (const kind of ['absent', 'symlink', 'directory']) {
+      if (kind === 'symlink') symlinkSync('../../existing', modules);
+      if (kind === 'directory') cpSync(join(work, 'existing'), modules, { recursive: true });
+      const before = lstatSync(modules, { throwIfNoEntry: false })?.ino;
+      for (const code of [0, 17]) {
+        const ran = join(work, 'ran');
+        rmSync(ran, { force: true });
+        const result = spawnSync('bash', [join(work, 'scripts/dev-bridge-tests.sh')], {
+          cwd: work, encoding: 'utf8', timeout: 30000,
+          env: { ...process.env, DSCODE_E2E_NODE_BIN: process.execPath, DSCODE_E2E_RELEASE_DIR: 'payload', DSCODE_DEV_TMPDIR: join(work, 'tmp'), DSCODE_TEST_EXIT: String(code), DSCODE_TEST_RAN: ran },
+        });
+        assert.ifError(result.error);
+        assert.equal(result.status, code, result.stderr);
+        assert.equal(existsSync(ran), code === 0);
+        assert.equal(lstatSync(modules, { throwIfNoEntry: false })?.ino, before);
+        if (kind === 'symlink') assert.equal(readlinkSync(modules), '../../existing');
+        if (kind !== 'absent') assert.equal(readFileSync(join(modules, 'sentinel'), 'utf8'), 'keep');
+        assert.deepEqual(readdirSync(join(work, 'tmp')), []);
+      }
+      rmSync(modules, { recursive: true, force: true });
+    }
+    assert.equal(readFileSync(sentinel, 'utf8'), 'keep');
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
+
+test('release gate requires successful checks for the exact commit and tag', () => {
+  const run = { headSha: 'a'.repeat(40), headBranch: 'v1.2.3', status: 'completed', conclusion: 'success' };
+  assertReleaseRun(run, run.headSha, run.headBranch);
+  assert.throws(() => assertReleaseRun(null, run.headSha, run.headBranch), /have not succeeded/);
+  for (const change of [{ headSha: 'b'.repeat(40) }, { headBranch: 'main' }, { status: 'in_progress' }, { conclusion: 'failure' }, { conclusion: 'cancelled' }]) {
+    assert.throws(() => assertReleaseRun({ ...run, ...change }, run.headSha, run.headBranch), /have not succeeded/);
+  }
+});
+
+test('draft validation detects missing, corrupted, mixed-version and mismatched compressed assets', async () => {
+  const work = mkdtempSync(join(tmpdir(), 'dscode-release-verify-'));
+  const manifest = { name: '@hqzhao95/dscode', version: '1.2.3', dsh: { sourceCommit: 'a'.repeat(40), testedVersion: '0.1.5-alpha.1' } };
+  const writeAsset = (name, bytes) => {
+    writeFileSync(join(work, name), bytes);
+    writeFileSync(join(work, name + '.sha256'), createHash('sha256').update(bytes).digest('hex') + '  ' + name + '\n');
+  };
+  const archive = (name, path, value) => {
+    const source = join(work, 'source');
+    mkdirSync(join(source, 'package'), { recursive: true });
+    writeFileSync(join(source, path), JSON.stringify(value));
+    execFileSync('tar', ['-czf', join(work, name), '-C', source, path]);
+    writeAsset(name, readFileSync(join(work, name)));
+  };
+  try {
+    for (const name of ['dscode-linux-x86_64', 'dscode-macos-aarch64']) {
+      writeAsset(name, 'fixture TUI');
+      writeFileSync(join(work, name + '.gz'), gzipSync('fixture TUI'));
+    }
+    writeFileSync(join(work, 'dscode-licenses.tar.gz'), 'license fixture');
+    const plugin = { ...manifest, dscode: { release: manifest.version } };
+    archive('dscode-plugin.tgz', 'package/package.json', plugin);
+    const descriptor = { schema: 1, sourceCommit: manifest.dsh.sourceCommit, dshVersion: manifest.dsh.testedVersion };
+    for (const [asset, platform, arch] of [['linux-x86_64', 'linux', 'x64'], ['macos-aarch64', 'darwin', 'arm64']]) {
+      archive(`dscode-runtime-${asset}.tar.gz`, './dscode-runtime.json', { ...descriptor, platform, arch });
+    }
+    await verifyReleaseAssets(work, manifest);
+    writeFileSync(join(work, 'dscode-linux-x86_64'), 'corrupt');
+    await assert.rejects(verifyReleaseAssets(work, manifest), /checksum mismatch/);
+    writeAsset('dscode-linux-x86_64', 'fixture TUI');
+    writeFileSync(join(work, 'dscode-linux-x86_64.gz'), gzipSync('another TUI'));
+    await assert.rejects(verifyReleaseAssets(work, manifest), /compressed binary mismatch/);
+    writeFileSync(join(work, 'dscode-linux-x86_64.gz'), gzipSync('fixture TUI'));
+    archive('dscode-plugin.tgz', 'package/package.json', { ...plugin, version: '1.2.2' });
+    await assert.rejects(verifyReleaseAssets(work, manifest), /plugin release provenance/);
+    archive('dscode-plugin.tgz', 'package/package.json', plugin);
+    archive('dscode-runtime-macos-aarch64.tar.gz', './dscode-runtime.json', { ...descriptor, platform: 'linux', arch: 'x64' });
+    await assert.rejects(verifyReleaseAssets(work, manifest), /runtime release provenance/);
+    rmSync(join(work, 'dscode-macos-aarch64.gz'));
+    await assert.rejects(verifyReleaseAssets(work, manifest), /ENOENT/);
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
 
 test('nested source scripts use the pinned pnpm even with a conflicting global pnpm', () => {
   const work = mkdtempSync(join(tmpdir(), 'dscode-pnpm-test-'));
@@ -45,6 +150,7 @@ test('packed ordinary closure installs offline without unpublished host peers', 
     const stage = join(work, 'stage');
     const installed = join(work, 'installed');
     for (const dir of [consumer, stage, installed]) mkdirSync(dir);
+    save(join(installed, 'package.json'), { private: true });
     for (const [name, extra] of [['ordinary-tool', { dependencies: { helper: '1.0.0' }, peerDependencies: { 'unpublished-host-sdk': '99.0.0-alpha.1' } }], ['helper', {}], ['unpublished-host-sdk', {}]]) {
       const dir = join(consumer, 'node_modules', name);
       mkdirSync(dir, { recursive: true });

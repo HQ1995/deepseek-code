@@ -247,6 +247,7 @@ pub enum TaskEntry {
     },
     Workflow {
         id: u64,
+        run_id: String,
         name: String,
         label: String,
         styled: Line<'static>,
@@ -524,6 +525,7 @@ impl TaskEntry {
 
         TaskEntry::Workflow {
             id,
+            run_id: run.run_id.clone(),
             name: run.name.clone(),
             label,
             styled: Line::from(spans),
@@ -1314,7 +1316,7 @@ impl TasksPane {
                 let theme = Theme::current();
                 if self.show_done {
                     let span = Span::styled(
-                        "No tasks or agents.",
+                        "No tasks or agents. Press t for terminals.",
                         Style::default().fg(theme.gray_bright),
                     );
                     buf.set_span(inner.x, inner.y, &span, inner.width);
@@ -1326,7 +1328,7 @@ impl TasksPane {
                     let line = Line::from(vec![
                         Span::styled("No running tasks. Press ", muted),
                         Span::styled("h", key_style),
-                        Span::styled(" to show all.", muted),
+                        Span::styled(" to show all, t for terminals.", muted),
                     ]);
                     buf.set_line(inner.x, inner.y, &line, inner.width);
                 }
@@ -1456,7 +1458,9 @@ impl TasksPane {
                         linked_subagent,
                         ..
                     } => OverlayEntryData::Scheduled(task_id.clone(), linked_subagent.clone()),
-                    TaskEntry::Workflow { name, .. } => OverlayEntryData::Workflow(name.clone()),
+                    TaskEntry::Workflow { run_id, .. } => {
+                        OverlayEntryData::Workflow(run_id.clone())
+                    }
                     // Group headers have no kill/view buttons; they still
                     // occupy a row (vis_row is enumerated before this filter),
                     // so the y offsets for following items stay correct.
@@ -1490,8 +1494,12 @@ impl TasksPane {
                         &theme,
                     );
                 }
-                OverlayEntryData::Workflow(ref name) => {
-                    let Some(run) = self.workflow_runs.iter().find(|r| r.name == *name).cloned()
+                OverlayEntryData::Workflow(ref run_id) => {
+                    let Some(run) = self
+                        .workflow_runs
+                        .iter()
+                        .find(|r| r.run_id == *run_id)
+                        .cloned()
                     else {
                         continue;
                     };
@@ -1533,16 +1541,16 @@ impl TasksPane {
         buf.set_span(area.x, y, &Span::styled(icon, icon_style), 2);
 
         let right_text_w = right_text.width() as u16;
-        let kill_w: u16 = if running { 3 } else { 0 };
+        let kill_w: u16 = if run.can_stop() { 3 } else { 0 };
         let overlay_w = kill_w + right_text_w + 1;
         clear_overlay_area(buf, area, y, overlay_w);
 
         let mut rx = area.x + area.width;
-        if running {
+        if run.can_stop() {
             rx = rx.saturating_sub(3);
             let is_hovered = matches!(
                 &self.hovered_kill,
-                Some(TaskEntryId::Workflow(n)) if n == &run.name
+                Some(TaskEntryId::Workflow(n)) if n == &run.run_id
             );
             let kill_style = if is_hovered {
                 Style::default().fg(theme.accent_error)
@@ -1556,7 +1564,7 @@ impl TasksPane {
                 3,
             );
             self.kill_button_rects.push((
-                TaskEntryId::Workflow(run.name.clone()),
+                TaskEntryId::Workflow(run.run_id.clone()),
                 Rect::new(rx, y, 3, 1),
             ));
         }
@@ -2004,6 +2012,7 @@ mod tests {
             child_cwd: None,
             worktree_path: None,
             transcript: Default::default(),
+            native: None,
         }
     }
 

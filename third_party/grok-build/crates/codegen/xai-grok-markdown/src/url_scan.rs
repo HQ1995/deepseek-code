@@ -1,5 +1,7 @@
 //! Plain-URL detection over rendered display ratatui Lines.
 
+use std::ops::Range;
+
 use linkify::{LinkFinder, LinkKind};
 use ratatui::text::Line;
 
@@ -37,66 +39,66 @@ pub(crate) fn detect_plain_urls_with_offset(
 ) -> (Vec<HyperlinkTarget>, u32) {
     let mut result = Vec::new();
     let mut current_id = next_id;
-    let mut finder = LinkFinder::new();
-    finder.kinds(&[LinkKind::Url, LinkKind::Email]);
 
     for (i, line) in lines.iter().enumerate() {
         let line_index = line_index_offset + i;
-        let mut display_col: usize = 0;
+        // Scan the joined line so a URL split across style spans
+        // (pretty-mode link coloring) is one target, not a truncated prefix.
+        let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
 
-        for span in &line.spans {
-            let span_text: &str = span.content.as_ref();
+        for_each_plain_link(&line_text, |range, url| {
+            let col_start = unicode_display_width(&line_text[..range.start]);
+            let col_end = col_start + unicode_display_width(&line_text[range]);
 
-            for link in finder.links(span_text) {
-                let start = link.start();
-                let end = link.end();
-                if start > end
-                    || end > span_text.len()
-                    || !span_text.is_char_boundary(start)
-                    || !span_text.is_char_boundary(end)
-                {
-                    continue;
-                }
-                let before = &span_text[..start];
-                let matched = &span_text[start..end];
+            // Dedup: skip if any existing or already-added target overlaps on the same line
+            let overlaps = existing.iter().chain(result.iter()).any(|h| {
+                h.line_index == line_index
+                    && col_start < h.column_range.end
+                    && h.column_range.start < col_end
+            });
 
-                let col_start = display_col + unicode_display_width(before);
-                let col_end = col_start + unicode_display_width(matched);
-                let url = match link.kind() {
-                    LinkKind::Email => {
-                        // `git@github.com:org/repo` is an scp remote, not mail.
-                        if matches!(span_text.as_bytes().get(end), Some(b':' | b'/')) {
-                            continue;
-                        }
-                        format!("mailto:{}", link.as_str())
-                    }
-                    _ => link.as_str().to_string(),
-                };
-
-                // Dedup: skip if any existing or already-added target overlaps
-                // on the same line. Overlap: cand.start < ex.end && ex.start < cand.end.
-                let overlaps = existing.iter().chain(result.iter()).any(|h| {
-                    h.line_index == line_index
-                        && col_start < h.column_range.end
-                        && h.column_range.start < col_end
+            if !overlaps {
+                result.push(HyperlinkTarget {
+                    line_index,
+                    column_range: col_start..col_end,
+                    url,
+                    id: current_id,
                 });
-
-                if !overlaps {
-                    result.push(HyperlinkTarget {
-                        line_index,
-                        column_range: col_start..col_end,
-                        url,
-                        id: current_id,
-                    });
-                    current_id += 1;
-                }
+                current_id += 1;
             }
-
-            display_col += unicode_display_width(span_text);
-        }
+        });
     }
 
     (result, current_id)
+}
+
+/// Call `f` with the byte range and destination of every plain URL or email
+/// in `text`. Emails become `mailto:`; scp remotes (`git@host:path`) are skipped.
+pub(crate) fn for_each_plain_link(text: &str, mut f: impl FnMut(Range<usize>, String)) {
+    let mut finder = LinkFinder::new();
+    finder.kinds(&[LinkKind::Url, LinkKind::Email]);
+
+    for link in finder.links(text) {
+        let start = link.start();
+        let end = link.end();
+        if start > end
+            || end > text.len()
+            || !text.is_char_boundary(start)
+            || !text.is_char_boundary(end)
+        {
+            continue;
+        }
+        let url = match link.kind() {
+            LinkKind::Email => {
+                if matches!(text.as_bytes().get(end), Some(b':' | b'/')) {
+                    continue;
+                }
+                format!("mailto:{}", link.as_str())
+            }
+            _ => link.as_str().to_string(),
+        };
+        f(start..end, url);
+    }
 }
 
 #[cfg(test)]

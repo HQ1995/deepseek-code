@@ -1671,7 +1671,59 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::RunGoalCommand { agent_id, session_id, prompt } => {
+        Effect::FetchChildHistory { agent_id, session_id, child_id, after, nonce } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({ "sessionId": session_id.0, "childSessionId": child_id, "after": after });
+                let request = acp::ExtRequest::new("x.ai/subagent/history", serde_json::value::to_raw_value(&params).expect("serialize child history request").into());
+                let result = match acp_send(request, &tx).await {
+                    Ok(response) => serde_json::from_str(response.0.get()).map_err(|error| format!("Invalid child history: {error}")),
+                    Err(error) => Err(sanitize_user_error(&error.to_string())),
+                };
+                TaskResult::ChildHistoryLoaded { agent_id, session_id, child_id, after, nonce, result }
+            });
+        }
+        Effect::FetchNativeControls { agent_id, session_id, nonce, method, params } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let request = acp::ExtRequest::new(method, serde_json::value::to_raw_value(&params).expect("serialize native controls").into());
+                let result = match tokio::time::timeout(std::time::Duration::from_secs(15), acp_send(request, &tx)).await {
+                    Ok(Ok(response)) => serde_json::from_str(response.0.get()).map_err(|error| format!("Invalid response: {error}")),
+                    Ok(Err(error)) => Err(sanitize_user_error(&error.to_string())),
+                    Err(_) => Err("Request timed out. Refresh before retrying a change.".into()),
+                };
+                TaskResult::NativeControlsLoaded { agent_id, session_id, nonce, result }
+            });
+        }
+        Effect::WaitNativeControls { agent_id, session_id, nonce } => {
+            tasks.spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                TaskResult::NativeControlsPoll { agent_id, session_id, nonce }
+            });
+        }
+        Effect::FetchSessionReferences { agent_id, session_id, query, nonce } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Candidate { session_id: String, label: String, cwd: Option<String>, mention: String }
+                #[derive(serde::Deserialize)]
+                struct Candidates { candidates: Vec<Candidate> }
+                let params = serde_json::json!({ "sessionId": session_id.0, "query": query });
+                let request = acp::ExtRequest::new("x.ai/session/references", serde_json::value::to_raw_value(&params).expect("serialize reference query").into());
+                let result = match acp_send(request, &tx).await {
+                    Ok(response) => serde_json::from_str::<Candidates>(response.0.get())
+                        .map(|response| response.candidates.into_iter().map(|candidate| crate::slash::command::ArgItem {
+                            display: candidate.label, match_text: candidate.session_id,
+                            insert_text: candidate.mention, description: candidate.cwd.unwrap_or_default(),
+                        }).collect())
+                        .map_err(|error| format!("Invalid session references: {error}")),
+                    Err(error) => Err(sanitize_user_error(&error.to_string())),
+                };
+                TaskResult::SessionReferencesLoaded { agent_id, session_id, nonce, result }
+            });
+        }
+        Effect::RunSessionCommand { agent_id, session_id, method, prompt } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {
                 let params = serde_json::json!({
@@ -1679,16 +1731,16 @@ pub(crate) fn execute(
                     "prompt": prompt,
                 });
                 let request = acp::ExtRequest::new(
-                    "x.ai/goal",
+                    method,
                     serde_json::value::to_raw_value(&params)
-                        .expect("serialize goal params")
+                        .expect("serialize session command params")
                         .into(),
                 );
                 let result = match acp_send(request, &tx).await {
-                    Ok(response) => parse_goal_command_result(response.0.get()),
+                    Ok(response) => parse_session_command_result(response.0.get()),
                     Err(error) => Err(sanitize_user_error(&error.to_string())),
                 };
-                TaskResult::GoalCommandComplete { agent_id, session_id, result }
+                TaskResult::SessionCommandComplete { agent_id, session_id, result }
             });
         }
         Effect::KillBgTask { session_id, task_id, source } => {
@@ -1768,10 +1820,12 @@ pub(crate) fn execute(
                             .expect("serialize scheduler delete params")
                             .into(),
                     );
-                    if let Err(e) = acp_send(req, &tx).await {
-                        tracing::warn!(task_id, "Failed to delete scheduled task: {e}");
-                    }
-                    TaskResult::CancelComplete
+                    let result = match tokio::time::timeout(std::time::Duration::from_secs(15), acp_send(req, &tx)).await {
+                        Ok(Ok(_)) => Ok(()),
+                        Ok(Err(error)) => Err(sanitize_user_error(&error.to_string())),
+                        Err(_) => Err("Request timed out; refresh before retrying.".into()),
+                    };
+                    TaskResult::ScheduledTaskDeleted { session_id, task_id, result }
                 });
         }
         Effect::DemoteToBackground { session_id, tool_call_id } => {
@@ -1945,6 +1999,20 @@ pub(crate) fn execute(
                     }
                     TaskResult::PromptImagePreviewPrepared
                 });
+        }
+        Effect::FetchRuntimeDoctor { target } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({"sessionId": target.session_id, "tuiVersion": crate::client_identity::PAGER_CLIENT_VERSION});
+                let request = acp::ExtRequest::new("x.ai/doctor", serde_json::value::to_raw_value(&params).expect("serialize doctor request").into());
+                let text = match tokio::time::timeout(std::time::Duration::from_secs(30), acp_send(request, &tx)).await {
+                    Ok(Ok(response)) => serde_json::from_str::<serde_json::Value>(response.0.get()).ok()
+                        .and_then(|value| value["text"].as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "Invalid runtime diagnostics response. Run dscode doctor --runtime.".into()),
+                    _ => "Runtime diagnostics unavailable. Run dscode doctor --runtime in a shell.".into(),
+                };
+                TaskResult::RuntimeDoctorLoaded { target, text }
+            });
         }
         Effect::PlanDoctorFix { target, report, terminal, request } => {
             tasks
@@ -2682,12 +2750,12 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchSkillsList { agent_id, session_id: _ } => {
+        Effect::FetchSkillsList { agent_id, session_id } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
                     let params = serde_json::json!({
-                    "cwd": "."
+                    "sessionId": session_id.0.to_string()
                 });
                     let req = acp::ExtRequest::new(
                         "x.ai/skills/list",
@@ -2717,6 +2785,7 @@ pub(crate) fn execute(
                     };
                     TaskResult::SkillsListLoaded {
                         agent_id,
+                        session_id,
                         result,
                     }
                 });
@@ -4685,22 +4754,22 @@ pub(crate) fn execute(
     }
     (false, meta)
 }
-fn parse_goal_command_result(raw: &str) -> Result<String, String> {
+fn parse_session_command_result(raw: &str) -> Result<String, String> {
     #[derive(serde::Deserialize)]
-    struct GoalResult {
+    struct CommandResult {
         kind: String,
         text: String,
     }
     #[derive(serde::Deserialize)]
-    struct GoalResponse {
-        result: GoalResult,
+    struct CommandResponse {
+        result: CommandResult,
     }
-    let response: GoalResponse = serde_json::from_str(raw)
-        .map_err(|_| "invalid goal command response".to_string())?;
-    if response.result.kind == "error" {
-        Err(response.result.text)
-    } else {
-        Ok(response.result.text)
+    let response: CommandResponse = serde_json::from_str(raw)
+        .map_err(|_| "invalid session command response".to_string())?;
+    match response.result.kind.as_str() {
+        "error" => Err(response.result.text),
+        "success" => Ok(response.result.text),
+        _ => Err("invalid session command response".to_string()),
     }
 }
 

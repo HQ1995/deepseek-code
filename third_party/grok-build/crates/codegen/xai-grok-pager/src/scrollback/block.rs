@@ -1215,6 +1215,35 @@ impl RenderBlock {
         }
     }
 
+    pub fn with_table_copy_meta<R>(
+        &self,
+        f: impl FnOnce(&[xai_grok_markdown::TableCopyMeta]) -> R,
+    ) -> R {
+        match self {
+            RenderBlock::AgentMessage(b) => b.content().with_table_copy_meta(f),
+            RenderBlock::Thinking(b) => b.content().with_table_copy_meta(f),
+            RenderBlock::Btw(b) => b.content().with_table_copy_meta(f),
+            _ => f(&[]),
+        }
+    }
+
+    pub fn markdown_body_line_offset(
+        &self,
+        mode: DisplayMode,
+        appearance: &AppearanceConfig,
+    ) -> usize {
+        match self {
+            RenderBlock::Btw(_) if mode != DisplayMode::Collapsed => 2,
+            RenderBlock::Thinking(_)
+                if mode != DisplayMode::Collapsed
+                    && appearance.scrollback.blocks.thinking.header =>
+            {
+                2
+            }
+            _ => 0,
+        }
+    }
+
     /// Set the raw mode for blocks that support it.
     ///
     /// This should be called before `output()` when the raw mode might have changed.

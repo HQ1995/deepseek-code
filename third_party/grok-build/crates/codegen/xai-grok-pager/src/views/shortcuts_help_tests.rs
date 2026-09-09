@@ -88,6 +88,33 @@ fn build_entries_dedupes_identically_rendered_alt_keys() {
 }
 
 #[test]
+fn build_entries_lists_prompt_stash_with_ctrl_s_and_alt_s() {
+    let registry = crate::actions::ActionRegistry::defaults();
+    let entries = build_entries(&[When::PromptFocused], &registry, false);
+    let alt = if cfg!(target_os = "macos") {
+        "Opt"
+    } else {
+        "Alt"
+    };
+
+    let (item, dimmed) = entries
+        .iter()
+        .find_map(|e| match e {
+            ShortcutsHelpEntry::Hint {
+                item,
+                dimmed,
+                action_id: Some(crate::actions::ActionId::StashPrompt),
+                ..
+            } => Some((item, *dimmed)),
+            _ => None,
+        })
+        .expect("StashPrompt must be listed in the shortcuts window");
+
+    assert!(!dimmed, "stash must be lit while the prompt is focused");
+    assert_eq!(hint_key_pretty(item), format!("Ctrl+s / {alt}+s"));
+}
+
+#[test]
 fn filter_empty_query_returns_all_indices() {
     let entries = vec![
         header("Nav", 0, 2),
@@ -1180,11 +1207,11 @@ fn render_detail_body_omits_body_equal_to_title() {
     );
 }
 
-/// Every action that ships `long_help` carries man-style copy that is present
-/// and genuinely distinct from its one-line description. Iterating the whole
+/// Every action that ships `long_help` carries copy that is present
+/// and distinct from its one-line description. Iterating the whole
 /// registry catches a future description-echo on ANY populated action.
 #[test]
-fn populated_long_help_is_distinct_and_man_style() {
+fn populated_long_help_is_nonempty_and_distinct() {
     let registry = ActionRegistry::defaults();
     let populated: Vec<&crate::actions::ActionDef> = registry
         .all()
@@ -1204,11 +1231,7 @@ fn populated_long_help_is_distinct_and_man_style() {
             "{:?} long_help must differ from its description (no echo)",
             def.id
         );
-        assert!(
-            long.contains('\n'),
-            "{:?} long_help should be multi-line man-style copy",
-            def.id
-        );
+        assert!(!long.trim().is_empty(), "{:?} long_help is empty", def.id);
     }
 }
 

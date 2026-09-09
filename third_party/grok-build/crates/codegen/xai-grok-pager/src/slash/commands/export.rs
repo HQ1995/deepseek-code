@@ -21,7 +21,7 @@ impl SlashCommand for ExportCommand {
     }
 
     fn description(&self) -> &str {
-        "Export the current conversation to a file or clipboard"
+        "Export Markdown, a native session .zip archive, or copy to clipboard"
     }
 
     fn session_scoped(&self) -> bool {
@@ -29,7 +29,7 @@ impl SlashCommand for ExportCommand {
     }
 
     fn usage(&self) -> &str {
-        "/export [filename]"
+        "/export [filename.md | filename.zip]"
     }
 
     fn takes_args(&self) -> bool {

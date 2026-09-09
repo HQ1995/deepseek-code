@@ -731,8 +731,7 @@ pub(super) fn dispatch_cancel_scheduled_task(app: &mut AppView, task_id: String)
         return vec![];
     };
 
-    // Remove from local state immediately (optimistic).
-    agent.session.scheduled_tasks.remove(&task_id);
+    // Keep the row until the backend acknowledges deletion.
 
     vec![Effect::DeleteScheduledTask {
         session_id,

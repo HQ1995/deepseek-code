@@ -78,6 +78,42 @@ fn user_message(text: &str) -> acp::SessionUpdate {
     )))
 }
 #[test]
+fn native_tool_images_use_all_verified_attachments_for_read_and_mcp() {
+    use crate::scrollback::BlockContent;
+    use base64::Engine;
+    let directory = tempfile::tempdir().unwrap();
+    let one = directory.path().join("sha256-object-without-extension");
+    let two = directory.path().join("two.png");
+    let prose_only = directory.path().join("mutable.png");
+    let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap();
+    for path in [&one, &two, &prose_only] {
+        std::fs::write(path, &png).unwrap();
+    }
+    for kind in [acp::ToolKind::Read, acp::ToolKind::Other] {
+        let call = acp::ToolCall::new(acp::ToolCallId::new(Arc::from("images")), "read_image")
+            .kind(kind)
+            .status(acp::ToolCallStatus::Completed)
+            .content(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+                acp::TextContent::new(format!("![prose path]({})", prose_only.display())),
+            ))])
+            .raw_input(Some(serde_json::json!({"file_path": "/workspace/mutable.png"})))
+            .raw_output(Some(serde_json::json!({"dscodeImages": [one, two], "dscodeImageErrors": ["Image preview unavailable: missing"]})));
+        let RenderBlock::ToolCall(ToolCallBlock::Other(block)) = tool_call_to_block(&call, None)
+        else {
+            panic!("expected native media block");
+        };
+        let paths: Vec<_> = block
+            .image_references()
+            .iter()
+            .map(|image| image.path.as_path())
+            .collect();
+        assert_eq!(paths, [one.as_path(), two.as_path()]);
+        assert_eq!(block.media_ref_path().as_deref(), Some(one.as_path()));
+        assert_eq!(block.media_notes, ["Image preview unavailable: missing"]);
+        assert!(block.is_success());
+    }
+}
+#[test]
 fn streaming_agent_message() {
     let mut sb = ScrollbackState::new();
     let mut tracker = AcpUpdateTracker::new();
@@ -1830,6 +1866,8 @@ fn coalesce_repoints_pending_edit_hl_to_survivor() {
 fn scrollback_with_respect_manual_folds() -> ScrollbackState {
     use crate::appearance::AppearanceConfig;
     let mut sb = ScrollbackState::new();
+    // Pinning tests need a known sticky finish mode, independent of UI defaults.
+    sb.expand_all_thinking();
     let mut appearance = AppearanceConfig::default();
     appearance.scrollback.scroll.respect_manual_folds = true;
     sb.set_appearance(appearance);
@@ -1890,7 +1928,7 @@ fn pinned_thinking_keeps_user_mode_across_finish_triggers() {
     assert_eq!(
         entry.display_mode,
         DisplayMode::Collapsed,
-        "unpinned thinking still auto-collapses"
+        "unpinned thinking follows the configured collapsed mode"
     );
 }
 #[test]
@@ -4460,5 +4498,104 @@ fn tier_restricted_media_shows_upsell_text_not_error() {
             .contains("SuperGrok"),
         "upsell text must be shown in the card body, got: {:?}",
         block.output
+    );
+}
+
+#[test]
+fn execute_manual_expand_survives_progress_and_completion() {
+    use crate::scrollback::types::DisplayMode;
+    let mut tracker = AcpUpdateTracker::new();
+    let mut sb = ScrollbackState::new();
+    let tc_id = "toolu_exec_gesture";
+    tracker.handle_update(
+        tool_call(tc_id, acp::ToolKind::Other, "pending"),
+        &meta(),
+        &mut sb,
+    );
+    assert!(
+        matches!(
+            &sb.get(0).unwrap().block,
+            RenderBlock::ToolCall(ToolCallBlock::Other(_))
+        ),
+        "eager pending should land as Other"
+    );
+    sb.get_by_id_mut(sb.get(0).unwrap().id)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+    let refine = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from(tc_id)),
+        acp::ToolCallUpdateFields::new()
+            .kind(Some(acp::ToolKind::Execute))
+            .title(Some("Execute `cargo build`".to_string()))
+            .raw_input(Some(serde_json::json!({ "command": "cargo build" }))),
+    ));
+    tracker.handle_update(refine, &meta(), &mut sb);
+    let entry = sb.get(0).expect("entry exists");
+    assert!(
+        matches!(
+            &entry.block,
+            RenderBlock::ToolCall(ToolCallBlock::Execute(_))
+        ),
+        "Other→Execute must upgrade the block kind"
+    );
+    assert_eq!(
+        entry.display_mode,
+        DisplayMode::Collapsed,
+        "Other→Execute must reset even if the placeholder was expanded"
+    );
+    tracker.handle_update(
+        tool_update_in_progress(tc_id, b"Compiling\n"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(
+        sb.get(0).unwrap().display_mode,
+        DisplayMode::Collapsed,
+        "progress must not auto-open a collapsed Execute"
+    );
+    sb.get_by_id_mut(sb.get(0).unwrap().id)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+    assert!(
+        !sb.get(0).unwrap().display_mode_pinned,
+        "→ expand without respect_manual_folds must not pin"
+    );
+    tracker.handle_update(
+        tool_update_in_progress(tc_id, b"Compiling\n"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(
+        sb.get(0).unwrap().display_mode,
+        DisplayMode::Expanded,
+        "progress must not snap a user-expanded Execute shut"
+    );
+    match &sb.get(0).unwrap().block {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(exec)) => {
+            assert_eq!(exec.output.as_deref(), Some("Compiling\n"));
+        }
+        other => panic!("Expected Execute after progress, got {other:?}"),
+    }
+    tracker.handle_update(
+        tool_update_in_progress(tc_id, b"Compiling\nFinished\n"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(
+        sb.get(0).unwrap().display_mode,
+        DisplayMode::Expanded,
+        "later progress ticks must keep the expand"
+    );
+    tracker.handle_update(
+        tool_update_completed_bash(tc_id, b"Compiling\nFinished\n", 0),
+        &meta(),
+        &mut sb,
+    );
+    let entry = sb.get(0).unwrap();
+    assert!(!entry.is_running);
+    assert_eq!(
+        entry.display_mode,
+        DisplayMode::Expanded,
+        "completion must not snap a user-expanded Execute shut"
     );
 }

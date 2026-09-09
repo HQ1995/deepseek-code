@@ -1,0 +1,3 @@
+name: LSP mode
+description: Standard coding agent with TypeScript and JavaScript navigation. Requires typescript-language-server on PATH.
+order: 6

@@ -166,18 +166,7 @@ pub(super) fn dispatch_send_prompt_now(
 /// Shared by `dispatch_interject` and the edited-queued-interject arm — the
 /// user typed both, so both must be recallable.
 pub(super) fn record_interject_prompt_history(agent: &mut AgentView, text: &str) {
-    let trimmed_key = text.trim().to_string();
-    if trimmed_key.is_empty() {
-        return;
-    }
-    agent
-        .session
-        .prompt_history
-        .retain(|p| p.trim() != trimmed_key);
-    agent.session.prompt_history.insert(0, text.to_string());
-    if agent.session.prompt_history.len() > 200 {
-        agent.session.prompt_history.truncate(200);
-    }
+    crate::app::agent::remember_prompt(&mut agent.session.prompt_history, text);
 }
 
 #[cfg(test)]

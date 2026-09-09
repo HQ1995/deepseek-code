@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
-import { createAssistantMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-attachment'
 import { KNOWN_SESSION_EVENT_TYPES, SessionId, SessionLogOffset, SessionSeq, type SessionEvent, type UserMessage } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -117,6 +117,7 @@ function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry {
         id: sessionId,
         header: { id: sessionId, version: 0, isSeeded: false, createdAt: 0, ...cwd === undefined ? {} : { cwd }, ...agentPreset === undefined ? {} : { agentPreset } },
         snapshotEvents() { return [...events] },
+        ownEvents() { return [...events] },
         append(type: string, data: unknown) {
           const event = { type, data, seq: events.length, time: Date.now() }
           events.push(event)
@@ -250,7 +251,7 @@ function makeMockPersistence() {
         access,
         read: async () => {
           expect(isClosed).toBe(false)
-          return persistence.readEvents(id)
+          return { eventState: 'detached', events: await persistence.readEvents(id) }
         },
         append: async () => { throw new Error('read handle must not append') },
         flush: async () => { throw new Error('read handle must not flush') },
@@ -1453,6 +1454,46 @@ describe('grok leader over a unix socket', () => {
     })
   })
 
+  it('hydrates images before the single tool completion, later text and prompt settlement', async () => {
+    let finish!: () => void
+    const readImage = vi.fn((ref: unknown) => new Promise(resolve => {
+      finish = () => resolve({ ref, data: new Uint8Array([1]) })
+    }))
+    const { registry, pluginCtx, client: c } = await start({ manualIdle: true,
+      attachments: { readImage, imageHostPath: () => '/private/verified-object' },
+    })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const response = c.request(2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'inspect tool image' }] })
+    await waitFor(() => agent.internals.followups.length === 1)
+    pluginCtx.emit('session/event', agent.session, { type: 'tool/call', seq: 0, time: 1, data: {
+      turn: 0, step: 0, callId: 'image', name: 'read_image', arguments: '{}',
+    } } as never)
+    pluginCtx.emit('session/event', agent.session, { type: 'tool/result', seq: 1, time: 2, data: {
+      message: { content: [{ type: 'tool-result', toolCallId: 'image', content: [{ type: 'image', attachment: { attachmentId: 'stored' } }] }] },
+    } } as never)
+    pluginCtx.emit('session/event', agent.session, { type: 'assistant/message', seq: 2, time: 3, data: {
+      turn: 0, step: 0, stream: [], message: createAssistantMessage({ content: [{ type: 'text', text: 'final image answer' }], source: { provider: 'deepseek', model: 'chat' } }),
+    } } as never)
+    agent.internals.idleWaiters.shift()!()
+    await new Promise(resolve => setTimeout(resolve, 25))
+    expect(readImage).toHaveBeenCalledOnce()
+    expect(c.all.some(row => row.id === 2 || JSON.stringify(row).includes('final image answer'))).toBe(false)
+    finish()
+    expect((await response).error).toBeUndefined()
+    const completed = c.all.filter(row => JSON.stringify(row).includes('dscodeImages'))
+    expect(completed).toHaveLength(1)
+    expect(completed[0]).toMatchObject({ params: { update: {
+      sessionUpdate: 'tool_call_update', toolCallId: 'image', status: 'completed', rawOutput: { dscodeImages: ['/private/verified-object'] },
+    } } })
+    const imageIndex = c.all.indexOf(completed[0]!)
+    const textIndex = c.all.findIndex(row => JSON.stringify(row).includes('final image answer'))
+    expect(textIndex).toBeGreaterThan(imageIndex)
+    expect(c.all.findIndex(row => row.id === 2)).toBeGreaterThan(textIndex)
+  })
+
   it('rejects images for a model with no affirmative multimodal metadata', async () => {
     const saveImages = vi.fn(async () => [])
     const { client: c } = await start({ attachments: { saveImages } })
@@ -1726,6 +1767,117 @@ describe('grok leader over a unix socket', () => {
     expect(c.all.some(msg => msg.method === 'x.ai/task_completed')).toBe(false)
   })
 
+  it('routes human child controls through scoped native admission without touching the parent turn', async () => {
+    const rows = [
+      { kind: 'child', id: 'child-one', parentId: 'nested-parent', mode: 'continuable' },
+      { kind: 'child', id: 'child-two', mode: 'continuable' },
+      { kind: 'child', id: 'one-shot', mode: 'one-shot' },
+    ]
+    const prompt = vi.fn(async () => ({ messageId: 'admitted' }))
+    const interrupt = vi.fn()
+    const listDescendants = vi.fn(async () => rows)
+    const { registry, client: c } = await start({ subagents: { listDescendants, prompt, interrupt } })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const owner = registry.byId.get(sessionId)!
+    owner.internals.status = 'running'
+    await registry.create({ sessionId: SessionId('child-one'), meta: {} })
+    const child = registry.byId.get('child-one')!
+    child.internals.status = 'running'
+    const message = createUserMessage({ content: [{ type: 'text', text: 'original' }], source: { kind: 'user' } })
+    const remove = vi.fn(), replace = vi.fn(), clear = vi.fn()
+    Object.assign(child.inbox, { nextTurn: [message], nextStep: [], remove, replace, clear })
+    let requestId = 2
+    const command = (text: string, receivingSession = sessionId) => c.request(requestId++, 'x.ai/subagents', {
+      sessionId: receivingSession, prompt: [{ type: 'text', text: '/subagents ' + text }],
+    })
+    for (const text of ['queue foreign message', 'queue child message', 'queue one-shot message', 'queue child-one', 'remove child-one missing']) {
+      expect((await command(text)).result).toMatchObject({ result: { kind: 'error' } })
+    }
+    expect((await command('queue child-one message', 'foreign-owner')).error).toBeDefined()
+    expect(prompt).not.toHaveBeenCalled()
+    expect(remove).not.toHaveBeenCalled()
+    for (const delivery of ['queue', 'steer']) {
+      expect((await command(`${delivery} child-o exact\n message`)).result).toMatchObject({ result: { kind: 'success' } })
+      expect(prompt).toHaveBeenLastCalledWith(expect.objectContaining({
+        requestId: expect.any(String), parentSessionId: 'nested-parent', childSessionId: 'child-one',
+        mode: 'continuable', delivery, content: [{ type: 'text', text: 'exact\n message' }],
+      }), expect.any(AbortSignal))
+    }
+    const inbox = (params: Record<string, unknown>) => c.request(requestId++, 'x.ai/subagent/inbox', { sessionId, childId: 'child-one', ...params })
+    expect((await inbox({})).result).toMatchObject({ items: [{ id: message.id, text: 'original', editable: true }] })
+    expect((await inbox({ childId: 'one-shot' })).error).toBeDefined()
+    expect((await inbox({ sessionId: 'foreign-owner' })).error).toBeDefined()
+    expect((await inbox({ action: 'edit', messageId: message.id, expectedText: 'stale', text: 'new' })).error).toBeDefined()
+    expect(replace).not.toHaveBeenCalled()
+    listDescendants.mockImplementationOnce(async () => rows).mockImplementationOnce(async () => {
+      Object.assign(child.inbox, { nextTurn: [{ ...message, content: [{ type: 'text', text: 'concurrent edit' }] }] })
+      return rows
+    })
+    expect((await inbox({ action: 'edit', messageId: message.id, expectedText: 'original', text: 'new' })).error).toBeDefined()
+    expect(replace).not.toHaveBeenCalled()
+    Object.assign(child.inbox, { nextTurn: [message] })
+    expect((await inbox({ action: 'remove', messageId: 'already-consumed' })).error).toBeDefined()
+    expect((await command('pending child-one')).result).toMatchObject({ result: { text: expect.stringContaining(message.id) } })
+    expect((await command(`edit child-one ${message.id.slice(0, 8)} revised`)).result).toMatchObject({ result: { kind: 'success' } })
+    expect(replace).toHaveBeenCalledWith(message.id, { ...message, content: [{ type: 'text', text: 'revised' }] })
+    await command(`remove child-one ${message.id}`)
+    expect(remove).toHaveBeenCalledWith(message.id)
+    await command('steer-queued child-one all')
+    expect(child.internals.steered).toEqual(['original'])
+    await command('clear child-one')
+    expect(clear).toHaveBeenCalledOnce()
+    expect(owner.internals.status).toBe('running')
+    expect(owner.internals.followups).toEqual([])
+    expect(owner.internals.steered).toEqual([])
+    expect(owner.internals.cancelCalls).toBe(0)
+  })
+
+  it('paginates owned native child history and protects a newer attempt from late completion', async () => {
+    const rows: Array<{ kind: string; id: string; mode: string }> = []
+    const { registry, persistence, pluginCtx, client: c } = await start({ subagents: { listDescendants: async () => rows, interrupt() {} } })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const { agent } = await registry.create({ sessionId: SessionId('history-child'), meta: {} })
+    const child = registry.byId.get('history-child')!
+    child.internals.status = 'running'
+    child.session.append('turn/start', { turn: 0 })
+    for (let index = 0; index < 260; index++) child.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: `message-${index}` }], source: { kind: 'user' } }))
+    rows.push({ kind: 'child', id: child.session.id, mode: 'continuable' })
+    pluginCtx.emit('subagent/start', { id: child.session.id } as never)
+    await waitForNotification(() => c.all.find(msg => JSON.stringify(msg).includes('subagent_spawned')))
+    const request = (id: number, after: unknown = 0, childSessionId: string = child.session.id, parent: string = sessionId) => c.request(id, 'x.ai/subagent/history', { sessionId: parent, childSessionId, after })
+    expect((await request(2, -1)).error).toBeDefined()
+    expect((await request(3, 0, 'foreign-child')).error).toBeDefined()
+    expect((await request(4, 0, child.session.id, 'foreign-parent')).error).toBeDefined()
+    const first = (await request(5)).result as { entries: unknown[]; nextSeq: number; totalSeq: number; durable: boolean }
+    expect(first).toMatchObject({ nextSeq: 256, totalSeq: 261, durable: false })
+    expect(first.entries).toHaveLength(256) // includes native turn/start Todo reset
+    const second = (await request(6, first.nextSeq)).result as typeof first
+    expect(second).toMatchObject({ nextSeq: 261, totalSeq: 261 })
+    expect(second.entries).toHaveLength(5)
+    expect(JSON.stringify(second.entries)).toContain('message-259')
+    const nextTurn = child.session.append('turn/start', { turn: 1 })
+    pluginCtx.emit('session/event', child.session, nextTurn)
+    await waitForNotification(() => c.all.find(msg => JSON.stringify(msg).includes('history-child:1')))
+    pluginCtx.emit('session/event', child.session, { type: 'turn/end', seq: 0, time: 1, data: { turn: 0, reason: { kind: 'completed' } } } as unknown as SessionEvent)
+    pluginCtx.emit('subagent/end', { id: child.session.id, stopReason: 'completed' } as never)
+    await request(7, second.nextSeq)
+    expect(c.all.some(msg => JSON.stringify(msg).includes('subagent_finished'))).toBe(false)
+    child.internals.status = 'idle'
+    const end = child.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    persistence.events.push(...child.session.snapshotEvents())
+    pluginCtx.emit('session/event', child.session, end)
+    pluginCtx.emit('agent/status', { agent, status: 'idle' })
+    expect((await request(8, second.nextSeq)).result).toMatchObject({ durable: true, nextSeq: 263 })
+    registry.byId.delete(child.session.id)
+    expect((await request(9)).result).toMatchObject({ nextSeq: 256, totalSeq: 263, durable: true })
+    expect(c.all).toContainEqual(expect.objectContaining({ method: 'x.ai/subagent/history_changed' }))
+    expect((await request(10, 1000)).error).toBeDefined()
+  })
+
   it('authorizes descendant interrupts and acknowledges only the actual cancelled turn', async () => {
     const rows: Array<{ kind: string; id: string; mode: string; label: string }> = []
     const interrupt = vi.fn()
@@ -1736,6 +1888,7 @@ describe('grok leader over a unix socket', () => {
     const owner = registry.byId.get(sessionId)!
     const handle = await registry.create({ sessionId: SessionId('descendant'), meta: {} })
     const child = registry.byId.get('descendant')!
+    child.session.append('turn/start', { turn: 0 })
     child.internals.status = 'running'
     rows.push({ kind: 'child', id: 'descendant', mode: 'continuable', label: 'nested worker' }, { kind: 'child', id: 'cold', mode: 'continuable', label: 'cold worker' })
     expect((await c.request(2, 'x.ai/subagent/cancel', { sessionId, subagentId: 'foreign' })).result).toEqual({ result: { subagentId: 'foreign', cancelled: false, outcome: { kind: 'not_found' } } })
@@ -1813,7 +1966,7 @@ describe('grok leader over a unix socket', () => {
     expect((await c.request(2, 'x.ai/task/kill', { sessionId, taskId: row.id, source: 'clientUi' })).result).toEqual({ result: { taskId: row.id, outcome: 'already_exited' } })
   })
 
-  it('does not publish or pretend to interrupt a live one-shot child', async () => {
+  it('publishes one-shot history without pretending the native service can interrupt it', async () => {
     const rows: Array<{ kind: string; id: string; mode: string }> = []
     const interrupt = vi.fn()
     const { registry, pluginCtx, client: c } = await start({ subagents: { listDescendants: async () => rows, interrupt } })
@@ -1826,7 +1979,7 @@ describe('grok leader over a unix socket', () => {
     pluginCtx.emit('subagent/start', { id: 'one-shot', runId: 'run-one', provider: 'spawn', local: true })
     expect((await c.request(2, 'x.ai/subagent/cancel', { sessionId, subagentId: 'one-shot' })).error).toBeDefined()
     expect(interrupt).not.toHaveBeenCalled()
-    expect(c.all.some(msg => JSON.stringify(msg).includes('subagent_spawned'))).toBe(false)
+    expect(c.all.some(msg => JSON.stringify(msg).includes('subagent_spawned'))).toBe(true)
     await child.dispose()
   })
 
@@ -1842,6 +1995,7 @@ describe('grok leader over a unix socket', () => {
     expect(get).toHaveBeenCalledWith(agent)
     expect(c.all).toContainEqual(expect.objectContaining({ params: expect.objectContaining({ update: expect.objectContaining({ sessionUpdate: 'goal_updated', is_snapshot: true, status: 'armed' }) }) }))
     goal = { ...goal!, activation: 'disarmed', roundsStarted: 1 }
+    pluginCtx.emit('goal/activation-changed', { sessionId, activation: 'disarmed' } as never)
     await waitFor(() => c.all.some(msg => JSON.stringify(msg).includes('"rounds_started":1')))
     const dormant = { ...goal }
     c.notify('session/cancel', { sessionId })
@@ -1961,6 +2115,7 @@ describe('grok leader over a unix socket', () => {
     ;(child.agent.session.header as { parentSession?: string }).parentSession = sessionId
     registry.byId.set(childId, child.agent as MockAgent)
     registry.byId.get(childId)!.internals.status = 'running'
+    child.agent.session.append('turn/start', { turn: 0 })
     children.push({ kind: 'child', id: childId, mode: 'continuable', label: 'worker' })
     // Spawn: the child Agent is live, so the bridge records childId -> parent.
     pluginCtx.emit('subagent/start', { runId: 'run-' + childId, provider: 'spawn', id: childId, local: true })
@@ -1977,6 +2132,7 @@ describe('grok leader over a unix socket', () => {
     // end edge arrives (this is exactly the ready-snapshot case).
     registry.byId.delete(childId)
     await child.dispose().catch(() => undefined)
+    pluginCtx.emit('session/event', child.agent.session, child.agent.session.append('turn/end', { turn: 0, reason: { kind: 'completed' } }))
     pluginCtx.emit('subagent/end', { runId: 'run-' + childId, provider: 'spawn', id: childId, local: true, stopReason: 'completed' })
     const finished = await waitForNotification(() => c.all.find((msg) =>
       (msg as { params?: { update?: { sessionUpdate?: string; subagent_id?: string } } })
@@ -2090,7 +2246,7 @@ describe('grok leader over a unix socket', () => {
     expect(mockDefaultModel.saved).toEqual([{ provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'max' }])
     const agent = harness!.registry.byId.get(sessionId)!
     expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
-      type: 'dscode/model-selected',
+      type: 'model/selection',
       data: { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'max' },
     })
     expect(mockSessionsStore.flushed.at(-1)).toBe(agent.session)
@@ -2862,6 +3018,143 @@ describe('grok leader over a unix socket', () => {
       _meta: { sandbox: false },
     })
     expect(invalid.error).toEqual({ code: -32602, message: '_meta.sandbox must be a string' })
+  })
+
+  it('scopes skill discovery to each session and advertises only user-invocable skills', async () => {
+    const reads: Array<{ cwd?: string; scope: unknown }> = []
+    const { registry, client: c } = await start({
+      skills: {
+        list: async (lookup: { cwd?: string; scope: unknown }) => {
+          reads.push(lookup)
+          return [
+            { name: lookup.cwd?.endsWith('/alpha') ? 'alpha-skill' : 'beta-skill', description: 'Scoped skill' },
+            { name: 'manual-only', description: 'Explicit instructions', invocation: { userInvocable: true, modelInvocable: false } },
+            { name: 'model-only', description: 'Model instructions', invocation: { userInvocable: false, modelInvocable: true } },
+            { name: 'dsh', description: 'Must not shadow the host command' },
+          ]
+        },
+      },
+    })
+    register(c)
+    await c.next()
+    const alpha = await c.request(1, 'session/new', { cwd: '/tmp/alpha', mcpServers: [] })
+    const beta = await c.request(2, 'session/new', { cwd: '/tmp/beta', mcpServers: [] })
+    const ids = [alpha, beta].map(response => (response.result as { sessionId: string }).sessionId)
+    for (const [i, sessionId] of ids.entries()) {
+      const listed = await c.request(10 + i, 'x.ai/skills/list', { sessionId })
+      const skills = (listed.result as { skills: Array<{ name: string; description: string; user_invocable: boolean }> }).skills
+      expect(skills[0].name).toBe(i === 0 ? 'alpha-skill' : 'beta-skill')
+      expect(skills.find(skill => skill.name === 'manual-only')?.description).toContain('User only')
+      expect(skills.find(skill => skill.name === 'model-only')?.user_invocable).toBe(false)
+      expect(reads.some(read => read.scope === registry.byId.get(sessionId)
+        && read.cwd === (i === 0 ? '/tmp/alpha' : '/tmp/beta'))).toBe(true)
+      const catalog = await c.request(20 + i, 'x.ai/commands/list', { sessionId })
+      const commands = (catalog.result as { commands: Array<{ name: string; description: string; _meta?: Record<string, unknown> }> }).commands
+      expect(commands.find(command => command.name === skills[0].name)?._meta).toMatchObject({ scope: 'plugin', path: '', pluginName: 'dsh' })
+      expect(commands.some(command => command.name === 'manual-only')).toBe(true)
+      expect(commands.some(command => command.name === 'model-only')).toBe(false)
+      expect(commands.filter(command => command.name === 'dsh')).toHaveLength(1)
+      expect(commands.find(command => command.name === 'dsh')?.description).not.toContain('shadow')
+    }
+    const missing = await c.request(30, 'x.ai/skills/list', {})
+    expect(missing.error).toMatchObject({ code: -32602 })
+  })
+
+  it('reports missing optional dependencies without model work, and flags a selected LSP preset', async () => {
+    const { ctx, registry, client: c } = await start({ presets: true })
+    Object.assign(ctx.get('agentPresets') as object, { resolve: async (id = 'standard') => ({ id }) })
+    const resolved: string[] = []
+    Object.assign(new (class extends Service {})(ctx, 'subprocess'), {
+      resolveExecutable: async (command: string) => { resolved.push(command); throw new Error('missing executable') },
+      spawnTerminal: () => { throw new Error('doctor must not start a PTY') },
+    })
+    Object.assign(new (class extends Service {})(ctx, 'terminals'), { listBackends: () => ['shell'], list: () => [] })
+    register(c); await c.next()
+    expect((await c.request(1, 'x.ai/doctor', { tuiVersion: '0.0.14-alpha.3' })).error?.code).toBe(-32602)
+    for (const preset of ['standard', 'lsp']) {
+      const created = await c.request(2, 'session/new', { cwd: '/tmp/doctor', mcpServers: [], _meta: { agentProfile: preset } })
+      const sessionId = (created.result as { sessionId: string }).sessionId
+      const response = await c.request(3, 'x.ai/doctor', { sessionId, tuiVersion: '0.0.14-alpha.3' })
+      expect(response.error).toBeUndefined()
+      const text = (response.result as { text: string }).text
+      expect(text).toContain(`[${preset === 'lsp' ? 'ERROR' : 'INFO'}] Shipped LSP preset: Optional dependencies missing`)
+      expect(text).toContain('[OK] PTY backend: shell backend registered')
+      expect(registry.byId.get(sessionId)!.internals.messages).toEqual([])
+    }
+    expect(resolved).toEqual(['typescript-language-server', 'tsc', 'typescript-language-server', 'tsc'])
+  })
+
+  it('keeps terminal inspection and controls scoped to the exact owner and awaits close', async () => {
+    const { ctx, registry, client: c, socketPath } = await start({ presets: true })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: '/tmp/terminal', mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const owner = registry.byId.get(sessionId)
+    let live = true, failClose = true
+    const signals: string[] = []
+    const reads: object[] = []
+    Object.assign(new (class extends Service {})(ctx, 'terminals'), {
+      list: (agent: unknown) => agent === owner && live ? [{ sessionId: 'pty-1', name: 'retained', type: 'shell', status: { kind: 'running' } }] : [],
+      read: (agent: unknown, id: string, options: object) => {
+        expect(agent).toBe(owner); expect(id).toBe('pty-1'); reads.push(options)
+        return { text: 'retained output', lineBegin: 0, lineEnd: 1, totalLines: 1, truncated: false }
+      },
+      signal: async (agent: unknown, id: string, signal: string) => {
+        expect(agent).toBe(owner); expect(id).toBe('pty-1'); signals.push(signal)
+      },
+      kill: async (agent: unknown, id: string) => {
+        expect(agent).toBe(owner); expect(id).toBe('pty-1')
+        if (failClose) throw new Error('backend close failed')
+        await Promise.resolve(); live = false
+      },
+    })
+    const foreign = await makeClient(socketPath)
+    try {
+      register(foreign); await foreign.next()
+      for (const action of ['list', 'interrupt', 'close']) {
+        expect((await foreign.request(2, 'x.ai/terminals', { sessionId, action, terminalId: 'pty-1' })).error?.code).toBe(-32602)
+        const unknown = await c.request(3, 'x.ai/terminals', { sessionId, action, terminalId: 'foreign' })
+        if (action === 'list') expect(unknown.result).toMatchObject({ items: [{ id: 'pty-1', text: 'retained' }] })
+        else expect(unknown.error?.code).toBe(-32602)
+      }
+      expect(reads).toEqual([]); expect(signals).toEqual([])
+      const read = await c.request(4, 'x.ai/terminals', { sessionId, terminalId: 'pty-1' })
+      expect(read.result).toMatchObject({ items: [{ id: 'pty-1', detail: 'pty-1 · shell · shell alive' }] })
+      expect(reads).toEqual([{ count: 1000 }])
+      await c.request(5, 'x.ai/terminals', { sessionId, terminalId: 'pty-1', action: 'interrupt' })
+      expect(signals).toEqual(['SIGINT']); expect(live).toBe(true)
+      expect((await c.request(6, 'x.ai/terminals', { sessionId, terminalId: 'pty-1', action: 'close' })).error).toBeDefined()
+      expect(live).toBe(true)
+      failClose = false
+      expect((await c.request(7, 'x.ai/terminals', { sessionId, terminalId: 'pty-1', action: 'close' })).result).toMatchObject({ items: [] })
+      expect(live).toBe(false)
+      expect((await c.request(8, 'x.ai/terminals', { sessionId, terminalId: 'pty-1' })).result).toMatchObject({ items: [] })
+    } finally { foreign.socket.destroy() }
+  })
+
+  it('uses native preset authoring APIs and refuses unowned or shipped edit requests', async () => {
+    const { ctx, client: c, registry } = await start({ presets: true })
+    const copies: string[][] = []
+    const roster = ctx.get('agentPresets') as unknown as Record<string, unknown>
+    Object.assign(roster, {
+      resolve: async (id = 'standard') => ({ id, trust: id === 'custom' ? 'user' : 'system', path: '/presets/' + id + '/agent.cordis.yml' }),
+      read: async () => '- id: native-composition\n',
+      copy: async (from: string, id: string) => { copies.push([from, id]) },
+    })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: '/tmp/project', mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const original = registry.byId.get(sessionId)
+    expect((await c.request(2, 'x.ai/presets', { action: 'copy', from: 'standard', id: 'custom' })).error?.code).toBe(-32602)
+    expect((await c.request(3, 'x.ai/presets', { sessionId, action: 'copy', from: 'standard', id: '../escape' })).error?.code).toBe(-32602)
+    expect(copies).toEqual([])
+    expect((await c.request(4, 'x.ai/presets', { sessionId, action: 'copy', from: 'standard', id: 'custom' })).error).toBeUndefined()
+    expect(copies).toEqual([['standard', 'custom']])
+    expect((await c.request(5, 'x.ai/presets', { sessionId, action: 'edit', id: 'standard' })).error?.code).toBe(-32602)
+    expect((await c.request(6, 'x.ai/presets', { sessionId, action: 'read', id: 'standard' })).result).toMatchObject({ document: { id: 'standard', content: '- id: native-composition\n' } })
+    expect((await c.request(7, 'x.ai/presets', { sessionId, action: 'edit', id: 'custom' })).result).toMatchObject({ document: { id: 'custom', editPath: '/presets/custom/agent.cordis.yml' } })
+    expect(registry.byId.get(sessionId)).toBe(original)
   })
 
   it('drives the auxiliary dscode rails end to end for one owned session', async () => {
@@ -4246,6 +4539,7 @@ describe('grok leader over a unix socket', () => {
     expect(meta.cancelRewind).toBe(false)
     expect(meta.availableCommands).toEqual([
       { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | add [--trust] <package> | remove <name> | inspect <name>' } },
+      { name: 'subagents', description: 'Inspect and control child conversations', input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' } },
       { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | ptc | minimal | cordis' } },
     ])
 
@@ -4258,6 +4552,7 @@ describe('grok leader over a unix socket', () => {
     expect(commands.result).toEqual({
       commands: [
         { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | add [--trust] <package> | remove <name> | inspect <name>' } },
+        { name: 'subagents', description: 'Inspect and control child conversations', input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' } },
         { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | ptc | minimal | cordis' } },
       ],
     })
@@ -4522,6 +4817,7 @@ describe('grok leader over a unix socket', () => {
     persistence.readEvents = async () => events
     const loaded = await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [] })
     expect(loaded.error).toBeUndefined()
+    expect(await c.next()).toMatchObject({ method: 'session/update', params: { update: { sessionUpdate: 'plan', entries: [] }, _meta: { isReplay: true } } })
     for (const [sessionUpdate, text] of [
       ['agent_message_chunk', 'failed attempt'],
       ['agent_thought_chunk', 'replayed reasoning'],
@@ -4539,7 +4835,7 @@ describe('grok leader over a unix socket', () => {
       const meta = params._meta
       return meta !== null && typeof meta === 'object' && 'isReplay' in meta && meta.isReplay === true
     })
-    expect(replayUpdates).toHaveLength(4)
+    expect(replayUpdates).toHaveLength(5)
   })
 
   it('session/load noReplay rebuilds history without emitting prior transcript updates', async () => {
@@ -4807,11 +5103,11 @@ describe('x.ai/providers/add', () => {
     }])
   })
 
-  it('broadcasts the refreshed model catalog after adding a provider', async () => {
+  it.each([false, true])('broadcasts the refreshed model catalog after adding a provider (session exists: %s)', async (hasSession) => {
     mockDefaultModel.current = undefined
     const settings = makeSettings()
     const { client } = await startWithSettings(settings)
-    await client.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    if (hasSession) await client.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const res = await client.request(2, 'x.ai/providers/add', {
       id: 'acme-gateway',
       displayName: 'Acme Gateway',
@@ -5719,11 +6015,10 @@ describe('sessionEventToUpdates tool-result diff fallback', () => {
 describe('analyzeBundlePatch (static pre-install patch analysis)', () => {
   const analyze = GrokLeader.analyzeBundlePatch
 
-  it('keeps model-facing add-ons out of the preset-owned tool catalogs', () => {
+  it('mounts native session services before the preset catalog', () => {
     const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
     const analysis = analyze(patch)
-    expect(analysis.insertedRows).toEqual(['subagent-model-selection-settings', 'code-runtime', 'agent-presets', 'cordis-host-runner', 'grok-leader'])
-    expect(patch).not.toContain('@deepseek-ai/dsh-schedule')
+    expect(analysis.insertedRows).toEqual(['session-reference', 'schedule', 'terminals', 'terminal-bash', 'subagent-model-selection-settings', 'code-runtime', 'agent-presets', 'cordis-host-runner', 'grok-leader'])
   })
 
   it('classifies inserts, overrides, disables, and flags the security spine', () => {
@@ -5794,4 +6089,133 @@ describe('parseCommandLine', () => {
   it('rejects unterminated quoting instead of changing the package spec', () => {
     expect(() => parse('/dsh add "file:broken')).toThrow('unterminated quote')
   })
+})
+
+
+describe('lifecycle boundary regressions', () => {
+  it('disposes live agents when shutdown persistence flush fails', async () => {
+    let flushes = 0
+    const made = await makeHarness({ sessionsStore: { async flush() {
+      flushes += 1
+      throw new Error('storage unavailable')
+    } } })
+    const client = await makeClient(made.socketPath)
+    try {
+      register(client); await client.next()
+      const result = await client.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      const agent = made.registry.byId.get((result.result as { sessionId: string }).sessionId)!
+      await made.pluginCtx.fiber.dispose()
+      expect(flushes).toBe(1)
+      expect(agent.internals.disposed).toBe(true)
+    } finally { client.socket.destroy(); await made.ctx.fiber.dispose() }
+  })
+
+  it('keeps a new client connected while an old idle-exit waits for flush', async () => {
+    mockAppExit.calls.length = 0
+    let releaseFlush!: () => void
+    const gate = new Promise<void>(resolve => { releaseFlush = resolve })
+    let flushes = 0
+    const made = await makeHarness({ idleExitMs: 5, sessionsStore: { async flush() {
+      if (++flushes === 1) await gate
+      return true
+    } } })
+    const first = await makeClient(made.socketPath)
+    let second: ClientHandle | undefined
+    try {
+      register(first); await first.next()
+      const created = await first.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      const oldAgent = made.registry.byId.get((created.result as { sessionId: string }).sessionId)!
+      first.socket.destroy()
+      await waitFor(() => flushes === 1)
+      await new Promise(resolve => setTimeout(resolve, 30))
+      expect(mockAppExit.calls).toEqual([])
+      second = await makeClient(made.socketPath)
+      register(second); await second.next()
+      const reopened = await second.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      expect(reopened.error).toBeUndefined()
+      releaseFlush()
+      await waitFor(() => oldAgent.internals.disposed)
+      await new Promise(resolve => setTimeout(resolve, 30))
+
+      expect(mockAppExit.calls).toEqual([])
+      expect(second.socket.destroyed).toBe(false)
+    } finally {
+      releaseFlush(); first.socket.destroy(); second?.socket.destroy()
+      await made.ctx.fiber.dispose()
+    }
+  })
+
+
+})
+
+
+it('image upload accepted by TUI must not disconnect the session', async () => {
+  const made = await makeHarness({ llm: mockVisionLlm })
+  const c = await makeClient(made.socketPath)
+  try {
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'image', mimeType: 'image/png', data: Buffer.alloc(7 * 1024 * 1024).toString('base64') }] })
+    await waitFor(() => c.socket.destroyed || c.all.some(msg => msg.id === 2))
+
+    expect(c.socket.destroyed).toBe(false)
+  } finally {
+    c.socket.destroy(); await made.ctx.fiber.dispose()
+  }
+})
+
+
+it.each(['new', 'load', 'fork'])('disconnect during session %s must dispose the late agent', async operation => {
+  const made = await makeHarness({ idleExitMs: 10 })
+  const first = await makeClient(made.socketPath)
+  const keeper = await makeClient(made.socketPath)
+  let releaseCreate!: () => void
+  const gate = new Promise<void>(resolve => { releaseCreate = resolve })
+  let started = false
+  if (operation === 'load') {
+    const original = made.registry.resume
+    made.registry.resume = async options => { started = true; await gate; return original(options) }
+  } else {
+    const original = made.registry.create
+    made.registry.create = async options => { started = true; await gate; return original(options) }
+  }
+  try {
+    register(first); await first.next()
+    register(keeper); await keeper.next()
+    sendRequest(first, 1, operation === 'fork' ? 'x.ai/session/fork' : 'session/' + operation, { cwd: process.cwd(), mcpServers: [], sessionId: made.persistence.header.id, sourceSessionId: made.persistence.header.id })
+    await waitFor(() => started)
+    first.socket.destroy()
+    await new Promise(resolve => setTimeout(resolve, 30))
+    releaseCreate()
+    await waitFor(() => made.registry.created.length + made.registry.resumed.length === 1)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    const live = [...made.registry.byId.values()]
+
+    expect(live.length).toBe(0)
+  } finally {
+    releaseCreate(); first.socket.destroy(); keeper.socket.destroy(); await made.ctx.fiber.dispose()
+  }
+})
+
+it('cold session query must not lose first prompts above the 100-entry cache', async () => {
+  const made = await makeHarness()
+  const c = await makeClient(made.socketPath)
+  try {
+    made.persistence.list = async () => Array.from({ length: 105 }, (_, i) => ({
+      header: { ...made.persistence.header, id: SessionId('review-history-' + String(i)), createdAt: i },
+      revision: SessionPersistenceRevision('review'),
+    }))
+    made.persistence.readEvents = async id => [{
+      type: 'user/message', seq: 0, time: 1,
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: id === 'review-history-0' ? 'unique-review-needle' : 'ordinary first prompt' }] },
+    }] as unknown as SessionEvent[]
+    register(c); await c.next()
+    const response = await c.request(1, 'x.ai/session/list', { cwd: '/tmp/proj', query: 'unique-review-needle', limit: 1 })
+    const listed = (response.result as { sessions: Array<{ sessionId: string }> }).sessions
+
+    expect(listed.map(row => row.sessionId)).toEqual(['review-history-0'])
+  } finally {
+    c.socket.destroy(); await made.ctx.fiber.dispose()
+  }
 })

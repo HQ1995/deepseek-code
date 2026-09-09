@@ -328,12 +328,21 @@ pub(super) fn handle_scheduled_task_created(
         .scheduled_tasks
         .retain(|k, _| !k.starts_with("provisional-"));
 
+    let native = session_notif
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("nativeSchedule"))
+        .and_then(|v| v.as_bool())
+        == Some(true);
     match agent.session.scheduled_tasks.entry(task_id.clone()) {
         Entry::Occupied(mut e) => {
             let info = e.get_mut();
             info.prompt = prompt;
             info.human_schedule = human_schedule;
             info.next_fire_at = next_fire_at;
+            if native {
+                info.tag = "reminder".into();
+            }
         }
         Entry::Vacant(e) => {
             e.insert(crate::app::agent::ScheduledTaskInfo {
@@ -342,7 +351,7 @@ pub(super) fn handle_scheduled_task_created(
                 human_schedule,
                 created_at: std::time::Instant::now(),
                 next_fire_at,
-                tag: "loop".into(),
+                tag: if native { "reminder" } else { "loop" }.into(),
                 last_subagent_id: None,
             });
         }

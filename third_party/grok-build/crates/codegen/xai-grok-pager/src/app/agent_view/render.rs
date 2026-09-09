@@ -113,8 +113,8 @@ impl AgentView {
         if self.active_subagent.as_deref() != Some(child_sid.as_str()) {
             self.close_subagent_fullscreen();
         }
+        self.active_subagent = Some(child_sid.clone());
         crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
-        self.active_subagent = Some(child_sid);
     }
     /// Close the fullscreen subagent takeover (if any), evicting the closed
     /// child when finished (see [`crate::app::subagent::evict_finished_child_view`]
@@ -1059,10 +1059,7 @@ impl AgentView {
             },
             show_accent_line: false,
             show_borders: true,
-            title: self
-                .display_name
-                .as_deref()
-                .map(|s| crate::views::session_title::sanitize_display_text(s).into_owned()),
+            title: self.prompt_caption(),
             image_preview: true,
         };
         let next = crate::views::session_title::rename_source_title_raw(self)
@@ -3880,7 +3877,7 @@ impl AgentView {
                 self.scrollback.get_by_id(viewer.entry_id).cloned()
             };
             let Some(entry) = entry else {
-                self.block_viewer = None;
+                self.clear_block_viewer();
                 self.pane_areas = layout.pane_areas();
                 return (prompt_cursor_pos, prompt_post_flush);
             };
@@ -4781,10 +4778,10 @@ mod overlay_post_flush_tests {
         let post_flush = draw(&mut parent).expect("child clear propagates");
         assert!(post_flush.as_str().contains("a=d"));
         let before_emit = crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, 41).unwrap();
-        assert!(!before_emit.as_str().contains("a=t"));
+        assert!(before_emit.as_str().is_empty());
         post_flush.write_to(&mut Vec::new()).unwrap();
         let after_emit = crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, 41).unwrap();
-        assert!(after_emit.as_str().contains("a=t"));
+        assert!(after_emit.as_str().contains("a=T"));
     }
     #[test]
     fn active_modal_returns_clear_without_committing_discarded_state() {
@@ -4802,10 +4799,10 @@ mod overlay_post_flush_tests {
         let post_flush = draw(&mut agent).expect("modal clear returned");
         assert!(post_flush.as_str().contains("a=d"));
         let before_emit = crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, 42).unwrap();
-        assert!(!before_emit.as_str().contains("a=t"));
+        assert!(before_emit.as_str().is_empty());
         post_flush.write_to(&mut Vec::new()).unwrap();
         let after_emit = crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, 42).unwrap();
-        assert!(after_emit.as_str().contains("a=t"));
+        assert!(after_emit.as_str().contains("a=T"));
     }
 }
 #[cfg(test)]

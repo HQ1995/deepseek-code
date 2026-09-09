@@ -103,6 +103,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(plan::PlanCommand),
         Arc::new(view_plan::ViewPlanCommand),
         Arc::new(resume::ResumeCommand),
+        Arc::new(resume::ReferenceCommand),
         Arc::new(mcps::McpsCommand),
         Arc::new(workflows::WorkflowsCommand),
         Arc::new(btw::BtwCommand),
@@ -116,6 +117,8 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(usage::UsageCommand),
         Arc::new(queue::QueueCommand),
         Arc::new(tasks::TasksCommand),
+        Arc::new(tasks::NativeControlsCommand { reminders: false }),
+        Arc::new(tasks::NativeControlsCommand { reminders: true }),
         Arc::new(tutorial::TutorialCommand),
         Arc::new(preset::PresetCommand),
         // Hidden diagnostic: never listed, toggles the scroll-debug HUD.
@@ -179,7 +182,11 @@ mod tests {
         let mut reg = CommandRegistry::new(builtin_commands());
         assert!(reg.get("quit").is_some());
         assert!(reg.get("new").is_some());
-        assert!(reg.get("compact").is_some());
+        assert!(reg.get("copy").is_some());
+        assert!(
+            reg.get("compact").is_none(),
+            "DSH supplies /compact via ACP"
+        );
         assert!(reg.get("model").is_some());
         assert!(reg.get("provider").is_some());
         assert!(reg.get("home").is_some());
@@ -210,7 +217,7 @@ mod tests {
         ]));
         assert!(reg.get("loop").is_some(), "/loop should be visible");
         assert!(reg.get("quit").is_some());
-        assert!(reg.get("compact").is_some());
+        assert!(reg.get("copy").is_some());
     }
     #[test]
     fn builtin_registry_lookup_by_alias() {

@@ -186,6 +186,7 @@ pub struct BlockViewerPane {
     /// call `rebuild_unified_cache()` first, then reference
     /// `self.cached_unified` via a disjoint field borrow.
     cached_unified: Vec<ContentLine>,
+    reveal_selection_once: bool,
 }
 
 /// One end of a character-level text selection.
@@ -229,6 +230,23 @@ impl TextDrag {
         let (s, e) = self.ordered();
         s != e
     }
+}
+
+pub(crate) fn format_blockquote(text: &str) -> String {
+    let text = text.trim_end_matches('\n');
+    if text.is_empty() {
+        return String::new();
+    }
+    text.lines()
+        .map(|line| {
+            if line.is_empty() {
+                ">".to_string()
+            } else {
+                format!("> {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl BlockViewerPane {
@@ -277,6 +295,7 @@ impl BlockViewerPane {
             text_drag: None,
             drag_copy_text: None,
             cached_unified: Vec::new(),
+            reveal_selection_once: false,
         })
     }
 
@@ -331,6 +350,7 @@ impl BlockViewerPane {
             text_drag: None,
             drag_copy_text: None,
             cached_unified: Vec::new(),
+            reveal_selection_once: false,
         })
     }
 
@@ -384,6 +404,7 @@ impl BlockViewerPane {
             text_drag: None,
             drag_copy_text: None,
             cached_unified: Vec::new(),
+            reveal_selection_once: false,
         }
     }
 
@@ -705,6 +726,7 @@ impl BlockViewerPane {
             text_drag: None,
             drag_copy_text: None,
             cached_unified: Vec::new(),
+            reveal_selection_once: false,
         }
     }
 
@@ -774,6 +796,7 @@ impl BlockViewerPane {
             text_drag: None,
             drag_copy_text: None,
             cached_unified: Vec::new(),
+            reveal_selection_once: false,
         }
     }
 
@@ -873,6 +896,7 @@ impl BlockViewerPane {
             text_drag: None,
             drag_copy_text: None,
             cached_unified: Vec::new(),
+            reveal_selection_once: false,
         })
     }
 
@@ -1052,6 +1076,7 @@ impl BlockViewerPane {
     /// Build shortcuts bar hints for this viewer.
     pub fn shortcuts_hints(&self) -> Vec<HintItem> {
         let mut hints = vec![
+            HintItem::new(crate::key!(Enter), "quote"),
             HintItem::new(crate::key!(Esc), "close"),
             HintItem::new(crate::key!('/'), "search"),
             HintItem::new(crate::key!('f'), "filter"),
@@ -1086,6 +1111,142 @@ impl BlockViewerPane {
         hints
     }
 
+    pub fn selected_plain_text(&self) -> String {
+        if let Some(drag) = self.text_drag
+            && drag.is_non_empty()
+        {
+            let unified = self.unified_items_owned();
+            return self.text_for_drag(drag, &unified).unwrap_or_default();
+        }
+        if self.list_state.visual_mode {
+            return self.visual_plain_text().unwrap_or_default();
+        }
+        self.current_line_plain_text().unwrap_or_default()
+    }
+
+    fn unified_items_owned(&self) -> Vec<ContentLine> {
+        if self.cached_unified.len() == self.prepend_items.len() + self.items.len()
+            && !self.cached_unified.is_empty()
+        {
+            return self.cached_unified.clone();
+        }
+        let mut unified = self.prepend_items.clone();
+        unified.extend(self.items.iter().cloned());
+        unified
+    }
+
+    fn current_line_plain_text(&self) -> Option<String> {
+        if let Some(vi) = self.list_state.selected_index() {
+            return self.plain_text_at_physical(self.list_state.to_physical(vi));
+        }
+        if self.list_state.follow_mode {
+            self.follow_mode_plain_text()
+        } else {
+            None
+        }
+    }
+
+    fn follow_mode_plain_text(&self) -> Option<String> {
+        self.list_state.visible_range().rev().find_map(|vi| {
+            let text = self.body_plain_text_at_physical(self.list_state.to_physical(vi))?;
+            (!text.is_empty()).then_some(text)
+        })
+    }
+
+    fn plain_text_at_physical(&self, idx: usize) -> Option<String> {
+        let pre = self.prepend_items.len();
+        if idx < pre {
+            return self.prepend_items.get(idx).map(|item| item.copy_text());
+        }
+        self.items.get(idx - pre).map(|item| item.copy_text())
+    }
+
+    fn body_plain_text_at_physical(&self, idx: usize) -> Option<String> {
+        let pre = self.prepend_items.len();
+        if idx < pre {
+            return None;
+        }
+        self.items.get(idx - pre).map(|item| item.copy_text())
+    }
+
+    fn visual_plain_text(&self) -> Option<String> {
+        let range = self.list_state.copy_range()?;
+        let mut parts = Vec::new();
+        for vi in range {
+            let i = self.list_state.to_physical(vi);
+            if let Some(text) = self.plain_text_at_physical(i) {
+                parts.push(text);
+            }
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
+    }
+
+    pub(crate) fn resume_source(&self) -> Option<&str> {
+        if self.kind == ViewerKind::PlainText {
+            self.items.first().map(|item| item.plain_text.as_str())
+        } else {
+            self.bg_task_id.as_deref()
+        }
+    }
+
+    fn ensure_body_cursor(&mut self) {
+        if self.list_state.follow_mode {
+            return;
+        }
+        if let Some(id) = self.list_state.selected_id()
+            && self.contains_item_id(id)
+        {
+            return;
+        }
+        if let Some(first) = self.items.first() {
+            self.list_state.select_by_id(first.id);
+        }
+    }
+
+    pub(crate) fn contains_item_id(&self, id: u64) -> bool {
+        self.prepend_items.iter().any(|item| item.id == id)
+            || self.items.iter().any(|item| item.id == id)
+    }
+
+    pub(crate) fn request_reveal_selection(&mut self) {
+        self.reveal_selection_once = true;
+    }
+
+    fn maybe_reveal_selection(&mut self) {
+        if !self.reveal_selection_once {
+            return;
+        }
+        self.reveal_selection_once = false;
+        self.list_state.reveal_selection();
+    }
+
+    fn last_nonempty_body_id(&self) -> Option<u64> {
+        self.items
+            .iter()
+            .rev()
+            .find(|item| !item.plain_text.is_empty())
+            .or_else(|| self.items.last())
+            .map(|item| item.id)
+    }
+
+    pub(crate) fn resume_selected_id(&self) -> Option<u64> {
+        self.list_state
+            .selected_id()
+            .or_else(|| self.last_nonempty_body_id())
+    }
+
+    pub(crate) fn pin_to_tail(&mut self) {
+        self.list_state.follow_mode = false;
+        if let Some(id) = self.last_nonempty_body_id() {
+            self.list_state.select_by_id(id);
+        }
+        self.request_reveal_selection();
+    }
+
     // -- Input handling ------------------------------------------------------
 
     /// Check if a key is a close signal (Esc/q/Ctrl-F).
@@ -1100,6 +1261,10 @@ impl BlockViewerPane {
         // Esc / q: close viewer (when input bar and visual select are not active)
         self.list_state.input_mode().is_none()
             && !self.list_state.visual_mode
+            && !(key.code == KeyCode::Esc
+                && self
+                    .text_drag
+                    .is_some_and(|d| !d.active && d.is_non_empty()))
             && (matches!(key.code, KeyCode::Esc)
                 || (key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::NONE))
     }
@@ -1109,6 +1274,15 @@ impl BlockViewerPane {
     /// Returns `true` if the key was consumed, `false` if it should bubble up.
     /// Close keys should be checked via `is_close_key` before calling this.
     pub fn handle_key(&mut self, key: &KeyEvent) -> bool {
+        if key.code == KeyCode::Esc
+            && self
+                .text_drag
+                .is_some_and(|d| !d.active && d.is_non_empty())
+        {
+            self.text_drag = None;
+            self.drag_copy_text = None;
+            return true;
+        }
         // r: toggle raw mode (markdown blocks only) — handled by caller
         if self.kind == ViewerKind::Markdown
             && key.code == KeyCode::Char('r')
@@ -1283,6 +1457,48 @@ impl BlockViewerPane {
     /// frame avoid fresh heap allocations. Callers that hold `&mut self`
     /// call this first, then use `&self.cached_unified` via a disjoint
     /// field borrow alongside `&mut self.list_state` etc.
+    #[cfg(test)]
+    pub(crate) fn prepare_for_test(&mut self, area: Rect) {
+        self.last_content_area = area;
+        self.rebuild_unified_cache();
+        self.ensure_body_cursor();
+        self.list_state
+            .prepare_layout(&self.cached_unified, area.width, area.height);
+        self.maybe_reveal_selection();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_body_line_for_test(&mut self, body_idx: usize) {
+        let id = self.items[body_idx].id;
+        self.list_state.select_by_id(id);
+        self.rebuild_unified_cache();
+        let area = self.last_content_area;
+        if area.width > 0 {
+            self.list_state
+                .prepare_layout(&self.cached_unified, area.width, area.height);
+        }
+    }
+
+    pub(crate) fn install_prepend_lines(&mut self, prepend_lines: &[Line<'static>]) {
+        if !self.prepend_items.is_empty() && self.prepend_items.len() != prepend_lines.len() {
+            self.text_drag = None;
+        }
+        self.prepend_items = prepend_lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                ContentLine {
+                    content: line.clone(),
+                    plain_text: plain,
+                    id: u64::MAX - i as u64,
+                    bg: line.style.bg,
+                }
+            })
+            .collect();
+        self.rebuild_unified_cache();
+    }
+
     fn rebuild_unified_cache(&mut self) {
         self.cached_unified.clear();
         self.cached_unified
@@ -1392,8 +1608,11 @@ impl BlockViewerPane {
 
                     if final_drag.is_non_empty() {
                         self.drag_copy_text = self.text_for_drag(final_drag, &self.cached_unified);
+                        final_drag.active = false;
+                        self.text_drag = Some(final_drag);
+                    } else {
+                        self.text_drag = None;
                     }
-                    self.text_drag = None;
                     return true;
                 }
                 // Click without drag — just clear.
@@ -1435,9 +1654,10 @@ impl BlockViewerPane {
             return None;
         }
         let virtual_y = self.list_state.scroll_offset() + (row - pane.y) as usize;
-        let item_idx = self.list_state.layout().item_at_y(virtual_y)?;
+        let vis_idx = self.list_state.layout().item_at_y(virtual_y)?;
+        let item_idx = self.list_state.to_physical(vis_idx);
         let item = items.get(item_idx)?;
-        let item_top = self.list_state.layout().virtual_y(item_idx);
+        let item_top = self.list_state.layout().virtual_y(vis_idx);
         let sub_row = virtual_y.saturating_sub(item_top) as u16;
         let col_in_sub = col.saturating_sub(pane.x);
 
@@ -1542,6 +1762,9 @@ impl BlockViewerPane {
         let mut out = String::new();
         let mut wrote_any = false;
         for idx in start.item_idx..=end.item_idx {
+            if self.list_state.to_visible(idx).is_none() {
+                continue;
+            }
             let Some(item) = items.get(idx) else {
                 break;
             };
@@ -1624,8 +1847,11 @@ impl BlockViewerPane {
             let Some(item) = self.cached_unified.get(idx) else {
                 break;
             };
-            let item_top = self.list_state.layout().virtual_y(idx);
-            let item_h = self.list_state.layout().item_height(idx) as usize;
+            let Some(vi) = self.list_state.to_visible(idx) else {
+                continue;
+            };
+            let item_top = self.list_state.layout().virtual_y(vi);
+            let item_h = self.list_state.layout().item_height(vi) as usize;
             // Skip items entirely above / below the viewport.
             if item_top + item_h <= scroll {
                 continue;
@@ -1780,20 +2006,8 @@ impl BlockViewerPane {
         // panic when the cursor / scroll math points past its end.
         // Header IDs are placed in the high u64 range so they never collide
         // with content IDs (which start at 0 and grow upward).
-        self.prepend_items = prepend_lines
-            .iter()
-            .enumerate()
-            .map(|(i, line)| {
-                let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                ContentLine {
-                    content: line.clone(),
-                    plain_text: plain,
-                    id: u64::MAX - i as u64,
-                    bg: line.style.bg,
-                }
-            })
-            .collect();
-        self.rebuild_unified_cache();
+        self.install_prepend_lines(prepend_lines);
+        self.ensure_body_cursor();
 
         if content_area.height > 0 && content_area.width > 0 && !self.cached_unified.is_empty() {
             let likely_scrollbar = self.cached_unified.len() > content_area.height as usize;
@@ -1826,6 +2040,7 @@ impl BlockViewerPane {
                 render_area
             };
 
+            self.maybe_reveal_selection();
             ListPane::new(&self.cached_unified)
                 .focused(focused)
                 .style(self.list_style)

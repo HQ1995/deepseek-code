@@ -486,7 +486,7 @@ mod tests {
         };
         render_auth(&mut buf, area, &theme, &hint);
         let text = buffer_text(&buf, area);
-        assert!(text.contains("Sign in to Grok"), "header: {text:?}");
+        assert!(text.contains("Sign in to Dscode"), "header: {text:?}");
         assert!(text.contains("accounts.x.ai/device"), "url: {text:?}");
         assert!(text.contains("ABCD-EFGH"), "device code: {text:?}");
         assert!(

@@ -30,16 +30,10 @@ pub(crate) enum ExternalPromptEditorAccess {
     OwnedElsewhere,
 }
 impl AgentView {
-    /// Minimal's composer stays logically focused when Vim startup leaves the
-    /// legacy pane field on Scrollback; overlays and dropdowns still own input.
-    pub(crate) fn external_prompt_editor_access(
-        &self,
-        minimal_logical_prompt: bool,
-    ) -> ExternalPromptEditorAccess {
-        let pane_owns_prompt = minimal_logical_prompt || self.active_pane == AgentPane::Prompt;
+    /// Explicit editor actions target the composer; overlays still own input.
+    pub(crate) fn external_prompt_editor_access(&self) -> ExternalPromptEditorAccess {
         let owned_elsewhere = !matches!(self.prompt_mode, super::PromptMode::Normal)
             || self.active_subagent.is_some()
-            || !pane_owns_prompt
             || self.active_modal.is_some()
             || self.extensions_modal.is_some()
             || self.agents_modal.is_some()
@@ -488,6 +482,19 @@ impl AgentView {
             }
             if let Some(child_view) = self.subagent_views.get_mut(child_sid) {
                 child_view.mark_as_subagent_view();
+                if let Event::Key(key) = ev {
+                    match child_view.try_take_idle_enter_quote(key) {
+                        super::viewer::IdleEnterQuote::Quoted(quoted) => {
+                            self.close_subagent_fullscreen();
+                            self.insert_quoted_reply(&quoted);
+                            return InputOutcome::Changed;
+                        }
+                        super::viewer::IdleEnterQuote::ConsumedEmpty => {
+                            return InputOutcome::Changed;
+                        }
+                        super::viewer::IdleEnterQuote::NotHandled => {}
+                    }
+                }
                 return child_view.handle_input_inner(ev, registry, prompt_paging);
             }
             return InputOutcome::Unchanged;
@@ -1186,7 +1193,7 @@ impl AgentView {
         }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
-            && key!('s', CONTROL).matches(key)
+            && registry.matches_id(ActionId::OpenSessions, key)
         {
             self.active_modal = Some(ActiveModal::SessionPicker {
                 state: crate::views::picker::PickerState::default(),
@@ -1383,7 +1390,7 @@ impl AgentView {
                 }
             }
             ActionId::EditPromptExternal => {
-                if self.external_prompt_editor_access(true)
+                if self.external_prompt_editor_access()
                     == ExternalPromptEditorAccess::OwnedElsewhere
                 {
                     InputOutcome::Changed

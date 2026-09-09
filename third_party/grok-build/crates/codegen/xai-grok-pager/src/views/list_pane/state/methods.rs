@@ -140,6 +140,14 @@ impl ListPaneState {
         }
     }
 
+    /// Map physical index to visible index; hidden items have no visible index.
+    pub fn to_visible(&self, pi: usize) -> Option<usize> {
+        match &self.vis_map {
+            Some(v) => v.binary_search(&pi).ok(),
+            None => Some(pi),
+        }
+    }
+
     /// Resolve a visible index to an item.
     ///
     /// Returns `None` when layout/`vis_map` is stale relative to `items`
@@ -1454,6 +1462,10 @@ impl ListPaneState {
 
     /// Ensure the selected item is visible within the viewport,
     /// accounting for scroll margin.
+    pub(crate) fn reveal_selection(&mut self) {
+        self.ensure_selected_visible();
+    }
+
     fn ensure_selected_visible(&mut self) {
         let Some(vi) = self.selected_index else {
             return;

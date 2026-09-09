@@ -1,6 +1,45 @@
 //! Tests for the action router, model switching, slash commands, and other cross-cutting dispatch behavior.
 use super::*;
 use crate::app::agent::AgentCommand;
+
+#[test]
+fn native_reference_search_rejects_stale_and_reopened_picker_results() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id = acp::SessionId::new("reference-owner");
+    app.agents.get_mut(&id).unwrap().session.session_id = Some(session_id.clone());
+    let mut requests = Vec::new();
+    for query in [None, Some("new query".into()), None] {
+        let effects = dispatch(Action::SearchSessionReferences { query }, &mut app);
+        let Effect::FetchSessionReferences { nonce, .. } = &effects[0] else {
+            panic!("reference request")
+        };
+        requests.push(nonce.clone());
+    }
+    for (index, nonce) in requests.into_iter().enumerate() {
+        dispatch(
+            Action::TaskComplete(TaskResult::SessionReferencesLoaded {
+                agent_id: id,
+                session_id: session_id.clone(),
+                nonce,
+                result: Ok(vec![crate::slash::command::ArgItem {
+                    display: "result".into(),
+                    match_text: "id".into(),
+                    insert_text: "@[result](dsh-session:id)".into(),
+                    description: String::new(),
+                }]),
+            }),
+            &mut app,
+        );
+        let Some(crate::views::modal::ActiveModal::ArgPicker { items, .. }) =
+            &app.agents[&id].active_modal
+        else {
+            panic!("picker closed")
+        };
+        assert_eq!(items.len(), usize::from(index == 2));
+    }
+}
+
 #[test]
 fn auth_copy_dispatch_preserves_all_delivery_states() {
     for delivery in [
@@ -62,12 +101,18 @@ fn external_prompt_editor_arms_typed_request_and_preserves_composer_modes() {
     }
 }
 #[test]
-fn external_prompt_editor_refuses_nonminimal_and_owned_input() {
+fn external_prompt_editor_arms_in_fullscreen_and_refuses_owned_input() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().prompt.set_text("draft");
     let _ = dispatch(Action::EditPromptExternal, &mut app);
-    assert!(app.pending_editor.is_none(), "full TUI must refuse");
+    assert!(
+        matches!(
+            app.pending_editor.take(),
+            Some(crate::app::external_editor::PendingEditorRequest::PromptDraft { .. })
+        ),
+        "full TUI arms the request without requiring prompt-pane focus"
+    );
     app.screen_mode = crate::app::ScreenMode::Minimal;
     app.agents.get_mut(&id).unwrap().active_pane = ActivePane::Scrollback;
     let _ = dispatch(Action::EditPromptExternal, &mut app);
@@ -76,7 +121,7 @@ fn external_prompt_editor_refuses_nonminimal_and_owned_input() {
             app.pending_editor,
             Some(crate::app::external_editor::PendingEditorRequest::PromptDraft { .. })
         ),
-        "minimal's logical composer remains authoritative after Tab/Vim focus"
+        "the composer stays the editing surface with scrollback focused"
     );
     app.pending_editor = None;
     app.agents.get_mut(&id).unwrap().cancel_turn_view =
@@ -779,35 +824,19 @@ fn cta_impressions_cover_welcome_and_dashboard_surfaces() {
     assert_eq!(logged.len(), 3);
 }
 #[test]
-fn dispatch_send_prompt_announcements_via_registry() {
+fn unregistered_announcements_does_not_mutate_local_banner_state() {
     let mut app = test_app_with_agent();
     let agent_id = AgentId(0);
     switch_to_agent(&mut app, agent_id, SwitchCause::New);
     app.active_announcements = vec![critical_announcement("crit-a")];
     let effects = dispatch(Action::SendPrompt("/announcements hide".into()), &mut app);
     assert!(
-            effects.iter().any(
-                |e| matches!(e, Effect::PersistAnnouncementsHidden { hidden_ids } if hidden_ids.contains("crit-a"))
-            ),
-            "expected persist effect carrying the hidden id, got {effects:?}"
-        );
-    assert!(app.hidden_announcement_ids.contains("crit-a"));
-    assert_eq!(shown_banner_id(&app), None, "hidden critical closes banner");
-    assert!(app.agents[&agent_id].prompt.text().is_empty());
-    let initial_scrollback_len = app.agents[&agent_id].scrollback.len();
-    let initial_queue_len = app.agents[&agent_id].session.queue_len();
-    let effects = dispatch(Action::SendPrompt("/announcements foo".into()), &mut app);
-    assert!(effects.is_empty(), "expected no effects, got {effects:?}");
-    assert_eq!(app.agents[&agent_id].session.queue_len(), initial_queue_len);
-    assert_eq!(
-        app.agents[&agent_id].scrollback.len(),
-        initial_scrollback_len + 1,
-        "expected usage message in scrollback"
+        matches!(effects.as_slice(), [Effect::SendPrompt { text, .. }] if text == "/announcements hide")
     );
+    assert!(app.hidden_announcement_ids.is_empty());
+    assert!(app.agents[&agent_id].prompt.text().is_empty());
 }
-/// Hide records only the currently-SHOWN critical's id: with `[A, B]`,
-/// hiding A reveals B, hiding B closes the banner, and a later push with a
-/// new id (C) re-arms it without any user action.
+
 #[test]
 fn announcements_hide_is_per_id_so_new_critical_reappears() {
     let mut app = test_app();

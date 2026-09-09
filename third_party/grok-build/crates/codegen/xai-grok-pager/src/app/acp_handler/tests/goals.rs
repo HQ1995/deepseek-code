@@ -18,6 +18,8 @@
     fn native_activity_survives_goal_pause_and_clear_until_backend_idle() {
         let mut app = make_app_with_agent("sess-A");
         dispatch_goal_update(&mut app, native_goal_update("native", "active", "armed"));
+        assert!(!crate::minimal_api::is_turn_or_wake_running(&app.agents[&AgentId(0)]),
+            "an armed goal alone must not hold minimal output indefinitely");
         assert!(handle(native_activity("sess-A", true, 10, false), &mut app));
         dispatch_goal_update(&mut app, native_goal_update("native", "paused", "disarmed"));
         let agent = &app.agents[&AgentId(0)];
@@ -26,11 +28,36 @@
         assert!(matches!(agent.wake_display_state(), Some(AgentState::TurnRunning)));
         assert!(agent.session.state.is_idle());
         assert!(agent.session.current_prompt_id.is_none());
+        assert!(crate::minimal_api::is_turn_or_wake_running(agent),
+            "native output must stay live even while the foreground turn is idle");
         assert_eq!(agent.goal_state.as_ref().unwrap().native_goal.as_ref().unwrap().revision, 7);
         dispatch_goal_update(&mut app, native_goal_update("native", "cleared", "disarmed"));
         assert!(app.agents[&AgentId(0)].stoppable_activity_running());
+        assert!(crate::minimal_api::is_turn_or_wake_running(&app.agents[&AgentId(0)]));
         assert!(handle(native_activity("sess-A", false, 11, false), &mut app));
         assert!(!app.agents[&AgentId(0)].stoppable_activity_running());
+        assert!(!crate::minimal_api::is_turn_or_wake_running(&app.agents[&AgentId(0)]),
+            "backend idle must release the minimal commit frontier");
+    }
+
+    #[test]
+    fn native_activity_releases_finished_pin_only_when_following_background_output() {
+        for (foreground_running, following) in [(false, true), (true, true), (false, false)] {
+            let mut app = make_app_with_agent("sess-A");
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.scrollback.push_block(RenderBlock::user_prompt("previous turn"));
+            agent.scrollback.prepare_layout(80, 8);
+            agent.scrollback.follow_new_turn(Some(0), true);
+            agent.scrollback.note_pin_reserve_turn_finished();
+            if !following { agent.scrollback.goto_top(); }
+            if foreground_running { agent.session.state = AgentState::TurnRunning; }
+            assert!(agent.scrollback.is_pin_reserve_active());
+
+            assert!(handle(native_activity("sess-A", true, 10, false), &mut app));
+            let agent = &app.agents[&AgentId(0)];
+            assert_eq!(agent.scrollback.is_pin_reserve_active(), foreground_running || !following);
+            assert_eq!(agent.scrollback.is_follow_mode(), following);
+        }
     }
 
     #[test]
@@ -696,6 +723,23 @@
     }
 
     #[test]
+    fn native_workflow_member_identity_survives_either_notification_order() {
+        for workflow_first in [false, true] {
+            let mut app = make_app_with_agent("sess-A");
+            let mut workflow = workflow_update_value("wf", "review", "active", false);
+            workflow["agents"] = serde_json::json!([{ "agent_id": "child", "label": "Named reviewer", "state": "running" }]);
+            let mut child = serde_json::to_value(test_subagent_spawned("sess-A", "child")).unwrap();
+            child["description"] = serde_json::json!("");
+            if workflow_first { dispatch_goal_update(&mut app, workflow.clone()); }
+            dispatch_goal_update(&mut app, child);
+            if !workflow_first { dispatch_goal_update(&mut app, workflow); }
+            let info = &app.agents[&AgentId(0)].subagent_sessions["child"];
+            assert_eq!(info.workflow_run_id.as_deref(), Some("wf"));
+            assert_eq!(info.description.as_ref(), "Named reviewer");
+        }
+    }
+
+    #[test]
     fn workflow_updates_bypass_global_xai_highwater_and_use_run_revision() {
         let mut app = make_app_with_agent("sess-A");
         let id = AgentId(0);
@@ -767,8 +811,8 @@
         {
             let agent = app.agents.get(&AgentId(0)).unwrap();
             assert!(
-                agent.workflow_blocks.is_empty(),
-                "terminal status must drop the run's block id"
+                agent.workflow_blocks.contains_key("wf_bg"),
+                "keep the finished block identity for repeated durable snapshots"
             );
             let sb = &agent.scrollback;
             let entry = (0..sb.len())
@@ -887,7 +931,10 @@
             );
         }
         assert!(
-            !agent.workflow_blocks.contains_key("wf_done"),
-            "terminal status drops the live block id (kept only as history)"
+            agent.workflow_blocks.contains_key("wf_done"),
+            "terminal identity stays available for deduplication"
         );
+        send_workflow_update(&mut app, "wf_done", "deep-research", "complete", false);
+        assert_eq!(count_workflow_blocks(&app.agents[&AgentId(0)]), 1,
+            "a repeated terminal snapshot must update the same history block");
     }

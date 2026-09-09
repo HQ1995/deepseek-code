@@ -182,6 +182,14 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             super::dispatch_initial_prompt(app, prompt)
         }
         Action::RelaunchInScreenMode { minimal } => {
+            if !crate::app::screen_mode_relaunch::exec_switch_forced() {
+                app.pending_screen_mode_switch = Some(if minimal {
+                    crate::app::ScreenMode::Minimal
+                } else {
+                    crate::app::ScreenMode::Fullscreen
+                });
+                return vec![];
+            }
             if let Some(session_id) = app.active_session_id().map(str::to_owned) {
                 app.relaunch = Some(crate::app::app_view::ScreenModeRelaunch {
                     minimal,
@@ -273,6 +281,53 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::FetchSessionList => dispatch_fetch_session_list(app),
         Action::CycleSessionSourceFilter => dispatch_cycle_session_source_filter(app),
         Action::ShowSessionPicker => dispatch_show_session_picker(app),
+        Action::OpenNativeControls(target) => super::native_controls::open(app, target),
+        Action::RequestNativeControls { method, params } => {
+            super::native_controls::request(app, method, params)
+        }
+        Action::SearchSessionReferences { query } => {
+            let mut effects = vec![];
+            with_active_agent(app, |agent| {
+                let Some(session_id) = agent.session.session_id.clone() else {
+                    return;
+                };
+                let nonce = format!("loading:{}", uuid::Uuid::new_v4());
+                if query.is_none() {
+                    agent.active_modal = Some(crate::views::modal::ActiveModal::ArgPicker {
+                        command: "reference".into(),
+                        args_query: nonce.clone(),
+                        items: vec![],
+                        original_items: vec![],
+                        state: crate::views::picker::PickerState::input_active(),
+                        previous_palette: None,
+                        window: crate::views::modal_window::ModalWindowState::new(),
+                    });
+                }
+                let Some(crate::views::modal::ActiveModal::ArgPicker {
+                    command,
+                    args_query,
+                    items,
+                    original_items,
+                    ..
+                }) = agent.active_modal.as_mut()
+                else {
+                    return;
+                };
+                if command != "reference" {
+                    return;
+                }
+                *args_query = nonce.clone();
+                items.clear();
+                original_items.clear();
+                effects.push(Effect::FetchSessionReferences {
+                    agent_id: agent.session.id,
+                    session_id,
+                    query: query.unwrap_or_default(),
+                    nonce,
+                });
+            });
+            effects
+        }
         Action::SessionPickerClosed => dispatch_session_picker_closed(app),
         Action::PickSession(index) => dispatch_pick_session(app, index),
         Action::PickSessionInWorktree(index) => dispatch_pick_session_in_worktree(app, index),
@@ -492,13 +547,17 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::NextResponse => {
             with_scrollback(app, |s| {
-                s.next_response();
+                if let Some(t) = s.turn_below_viewport_top() {
+                    s.jump_to_turn(t);
+                }
             });
             vec![]
         }
         Action::PrevResponse => {
             with_scrollback(app, |s| {
-                s.prev_response();
+                if let Some(t) = s.turn_above_viewport_top() {
+                    s.jump_to_turn(t);
+                }
             });
             vec![]
         }
@@ -628,10 +687,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             dispatch_copy_assistant_message(app, n, file_path);
             vec![]
         }
-        Action::ExportConversation { file_path } => {
-            dispatch_export_conversation(app, file_path);
-            vec![]
-        }
+        Action::ExportConversation { file_path } => dispatch_export_conversation(app, file_path),
         Action::OpenTranscriptPager => {
             dispatch_open_transcript_pager(app);
             vec![]
@@ -1527,9 +1583,29 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::JumpPickerSelect(turn_idx) => dispatch_jump_picker_select(app, turn_idx),
         Action::JumpDismiss => dispatch_jump_dismiss(app),
     };
+    restore_stash_where_the_draft_was_consumed(app);
     app.reconcile_foreign_resume_launch();
     sync_sleep_inhibitor(app);
     effects
+}
+/// Drains the agent and its focused subagent: the paste drain reports on the parent while `with_active_agent` would pick the child,
+/// and a stranded flag restores on a later dispatch.
+fn restore_stash_where_the_draft_was_consumed(app: &mut AppView) {
+    let ActiveView::Agent(id) = app.active_view else {
+        return;
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return;
+    };
+    if let Some(child_sid) = agent.active_subagent.clone()
+        && let Some(child) = agent.subagent_views.get_mut(&child_sid)
+        && child.take_draft_consumed()
+    {
+        child.auto_restore_stash_after_send();
+    }
+    if agent.take_draft_consumed() {
+        agent.auto_restore_stash_after_send();
+    }
 }
 pub(super) fn dispatch_action_result(
     app: &mut AppView,

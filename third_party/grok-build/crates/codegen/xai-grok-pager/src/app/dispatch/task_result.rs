@@ -58,6 +58,7 @@ use crate::app::actions::{
     TaskResult,
 };
 use crate::app::agent::AgentId;
+use crate::app::agent_view::AgentDeferredSend;
 use crate::app::app_view::{ActiveView, AppView, AuthState};
 use crate::scrollback::block::RenderBlock;
 use agent_client_protocol as acp;
@@ -163,11 +164,9 @@ fn drain_clipboard_target(target: &ClipboardPasteTarget, app: &mut AppView) -> V
                 return vec![];
             };
             let resend = agent.take_deferred_send_after_paste();
-            let action = if is_active {
-                resend.and_then(|kind| agent.build_deferred_send_action(kind))
-            } else {
-                None
-            };
+            let action = resend
+                .filter(|kind| is_active || matches!(kind, AgentDeferredSend::Stash))
+                .and_then(|kind| agent.resume_deferred_send(kind));
             let mut effects = std::mem::take(&mut agent.pending_effects);
             if let Some(action) = action {
                 effects.extend(dispatch(action, app));
@@ -662,6 +661,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             effects
         }
         TaskResult::PromptImagePreviewPrepared => vec![],
+        TaskResult::RuntimeDoctorLoaded { target, text } => {
+            if let Some(target) = current_doctor_target(app, &target) {
+                deliver_doctor_message(app, target.agent_id, text);
+            }
+            vec![]
+        }
         TaskResult::DoctorFixPlanned { target, result } => {
             let Some(target) = current_doctor_target(app, &target) else {
                 deliver_doctor_message(
@@ -832,9 +837,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::PluginCtaCatalogLoaded { agent_id, result } => {
             handle_plugin_cta_catalog_loaded(app, agent_id, result)
         }
-        TaskResult::SkillsListLoaded { agent_id, result } => {
+        TaskResult::SkillsListLoaded {
+            agent_id,
+            session_id,
+            result,
+        } => {
             use crate::views::extensions_modal::TabDataState;
             if let Some(agent) = app.agents.get_mut(&agent_id)
+                && agent.session.session_id.as_ref() == Some(&session_id)
                 && let Some(ref mut modal) = agent.extensions_modal
             {
                 modal.skills_data = match result {
@@ -905,7 +915,74 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::GoalCommandComplete {
+        TaskResult::ChildHistoryLoaded {
+            agent_id,
+            session_id,
+            child_id,
+            after,
+            nonce,
+            result,
+        } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id)
+                && agent.session.session_id.as_ref() == Some(&session_id)
+            {
+                crate::app::subagent::native::apply_history(agent, &child_id, after, nonce, result);
+            }
+            vec![]
+        }
+        TaskResult::ScheduledTaskDeleted {
+            session_id,
+            task_id,
+            result,
+        } => {
+            if let Some(agent) = app
+                .agents
+                .values_mut()
+                .find(|agent| agent.session.session_id.as_ref() == Some(&session_id))
+            {
+                match result {
+                    Ok(()) => {
+                        agent.session.scheduled_tasks.remove(&task_id);
+                    }
+                    Err(error) => agent.show_toast(&format!("Could not cancel reminder: {error}")),
+                }
+            }
+            vec![]
+        }
+        result @ (TaskResult::NativeControlsLoaded { .. }
+        | TaskResult::NativeControlsPoll { .. }) => super::native_controls::result(app, result),
+        TaskResult::SessionReferencesLoaded {
+            agent_id,
+            session_id,
+            nonce,
+            result,
+        } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id)
+                && agent.session.session_id.as_ref() == Some(&session_id)
+                && let Some(crate::views::modal::ActiveModal::ArgPicker {
+                    command,
+                    args_query,
+                    items,
+                    original_items,
+                    state,
+                    ..
+                }) = agent.active_modal.as_mut()
+                && command == "reference"
+                && *args_query == nonce
+            {
+                *args_query = format!("ready:{nonce}");
+                match result {
+                    Ok(candidates) => {
+                        *items = candidates.clone();
+                        *original_items = candidates;
+                        state.selected = state.selected.min(items.len().saturating_sub(1));
+                    }
+                    Err(error) => agent.show_toast(&format!("Could not find sessions: {error}")),
+                }
+            }
+            vec![]
+        }
+        TaskResult::SessionCommandComplete {
             agent_id,
             session_id,
             result,
@@ -914,11 +991,15 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 if agent.session.session_id.as_ref() != Some(&session_id) {
                     return vec![];
                 }
-                let text = result.unwrap_or_else(|error| format!("Goal command failed: {error}"));
-                push_and_page_flip(
+                let text = result.unwrap_or_else(|error| format!("Command failed: {error}"));
+                // A native round may stream before its command acknowledgement.
+                // Keep the acknowledgement before the live tail, and follow it
+                // without pinning past a response that is already in progress.
+                crate::app::mode_switch::push_block_behind_live_stream(
                     &mut agent.scrollback,
                     crate::scrollback::block::RenderBlock::system(text),
                 );
+                agent.scrollback.enable_follow_mode();
             }
             vec![]
         }
@@ -1282,7 +1363,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 && let Some(agent) = app.agents.get_mut(&id)
             {
                 let title = format!("{kind}: {name}");
-                agent.block_viewer = Some(
+                agent.install_block_viewer(
                     crate::views::block_viewer::BlockViewerPane::for_plain_text(&title, &content),
                 );
             }

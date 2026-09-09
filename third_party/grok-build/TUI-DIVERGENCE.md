@@ -21,15 +21,54 @@ branding (our identity). Keep this list current on every sync.
 
 ## Branding
 
+- Repository-only cleanup: omit `xai-grok-shell/CHANGELOG.md` and its historical
+  `changelogs/` payloads, which no build or runtime reads. Embedded README,
+  user-guide, tutorial, prompt, and test fixtures remain. `VENDORING.md` points
+  here and to `UPSTREAM_REV` instead of duplicating stale integration notes.
+
 - Product name and visible strings changed grok -> dscode / "Deepseek Code"
   across the pager and shell crates (recovered from the squashed history; if
   a string resurfaces after an upstream sync, reapply here).
 - Privacy/telemetry vendor copy: "SpaceXAI" -> "DeepSeek" in
   crates/codegen/xai-grok-pager/src/views/privacy_banner.rs and
   .../settings/defs.rs (plus their test expectations).
+- Minimal auth rendering's header assertion matches the existing "Dscode"
+  branding in .../xai-grok-pager-minimal/src/auth.rs.
 
 ## Feature
 
+- Native DSH ZIP export: `/export file.zip` uses the existing session-command
+  effect with `x.ai/session/export` for the root session. The bridge streams
+  native logs, descendants and attachments to a private, non-overwriting file;
+  Markdown and clipboard export keep their existing paths.
+- Image overlay placement cache (ported from upstream `9684fa3cdb`): cache the
+  image owner and rectangle together, clear and retransmit after a move or
+  resize, and commit only successful writes. Identical frames avoid retransmit.
+  Cell aspect measurement (ported from `75810042ca`) uses terminal-reported
+  pixels/cells with a bounded fallback instead of assuming every cell is 1:2.
+  Existing Kitty-protocol capability and tmux/Byobu gates remain in force.
+- Bare `/` command recency (ported from upstream `07b2f7144f`): reuse the
+  existing MRU and persistence, keeping curated tags first and registry order
+  for ties. Skill provenance grouping is omitted because DSH's command catalog
+  does not supply the corresponding metadata.
+- Prompt draft stash (ported from upstream `07b2f7144f`): Ctrl+S / Alt+S
+  preserves the draft, images, cursor and input mode; the same chord restores
+  it on an empty composer, and a consumed side prompt restores it automatically.
+  Session pickers move to F3, with `/resume` retained. Queue edits and pending
+  paste probes keep ownership; keyboard and mouse history recall pop the slot.
+  dscode's Alt+Enter steer retains its no-cancel behavior after deferred paste.
+- In-process `/minimal` / `/fullscreen` (ported from upstream `07b2f7144f`):
+  park the input reader, drain terminal writes, rebuild the viewport and reseed
+  mode-dependent state without restarting the DSH session. Running streams and
+  composer state survive round trips. Panic, signal and normal teardown use
+  the actual screen mode; legacy exec relaunch remains the failure fallback.
+  Returning to fullscreen rebuilds heights and fold groups after minimal's
+  direct entry display-mode changes, including child views.
+- Fullscreen external prompt editing (ported from upstream `07b2f7144f`):
+  `/edit-prompt` and the command palette reuse the existing editor suspend and
+  restore path in both modes. Fullscreen Ctrl+G remains the tasks shortcut.
+  Existing overlay, child, queue-edit, attachment, pending-paste, and voice
+  ownership checks remain in place; returning from the editor does not send.
 - Managed product launcher and external leader bootstrap: the JS launcher
   provisions and verifies the exact TUI/bridge/runtime tuple before starting
   Rust and supplies the tested `DSH_BIN`. A plain TUI run defaults to leader
@@ -227,6 +266,44 @@ branding (our identity). Keep this list current on every sync.
   but are omitted from --help.
 ## Patch
 
+- `xai-grok-shell/src/leader/client.rs`: oversized outgoing ACP requests return
+  a local JSON-RPC error before any frame bytes are written. The connection
+  remains usable; a real socket test sends another request after the rejection.
+
+- Minimal native/wake streaming (ported from upstream `77cd7eb675`): the five
+  live/commit decisions share `is_turn_or_wake_running`. Reuse the local
+  `wake_display_state` so DSH `sessionRunning` activity holds the live tail
+  even when the foreground turn is idle; an armed-only goal does not hold it.
+  A newly running native round releases the finished foreground prompt's pin
+  when already following, without changing manual history browsing or an
+  owned foreground turn. Slash test expectations reflect ACP-owned `/compact`
+  and the shared fullscreen editor path.
+- External editor and pager terminal handoff (ported from upstream
+  `07b2f7144f`): suspend focus, paste, mouse and negotiated Kitty reports before
+  cooked mode; restore the actual keyboard flags and prior mouse choice after
+  child exit, including failure. Fullscreen children stay on the alternate
+  screen. Existing reader/writer quiescence and retry handling remain shared
+  by prompt/config editing and `/transcript`.
+- Table selection copy (ported from upstream `bc7f02eddd`): source-derived
+  `TableCopyMeta` travels through parsing, batch/streaming rendering and parent
+  or child selection. Wrapped URLs and CJK stay contiguous, while original
+  whitespace survives cell, grid and drag copy. Raw grids without source
+  metadata keep the upstream wrap-join fallback. The streaming path retains
+  frozen metadata and rebases the live tail after appends and width changes.
+- Selected upstream TUI fixes (2026-09-08; baseline remains `19d42e35c0`):
+  - `9684fa3cdb`: coalesce Enter + Ctrl+J as one pasted CRLF, including a
+    trailing newline, while preserving genuine Enter and standalone Ctrl+J.
+  - `77cd7eb675`: `ScrollbackState::replace_tool_block` preserves display mode
+    across same-kind progress/completion updates, including Execute/Search;
+    kind upgrades and Edit's untrusted-summary transition retain their policy.
+  - `07b2f7144f`: `/copy` uses the assistant's Markdown source through the
+    existing clipboard/file path, including the active child view.
+  - `bb7f39d585`: scanned wrap fragments share an OSC8 ID, scanner IDs avoid
+    Markdown IDs, and scanning fills uncovered continuation rows. Preserve
+    the local bounded cursor-position startup in `xai-ratatui-inline`.
+  Relevant upstream unit/ACP/terminal regressions are retained. Product PTY
+  checks in `scripts/e2e-tui-bridge.sh` exercise CRLF/manual submission,
+  fullscreen editor restoration, source-preserving copy and OSC8 output.
 - crates/codegen/xai-grok-shell/src/session/acp_session_tests/tool_layer_images_bridge_tests.rs:
   added the missing 'use base64::Engine as _;' (base64 0.22 trait import) so the
   shell test binary compiles. Generic bug fixes found here must go upstream as
@@ -500,3 +577,78 @@ MCP entry, including when the empty document has comments. Removing the last
 entry from a comment-bearing patch restores `[]` instead of leaving a
 comment-only document that the dsh loader rejects. Existing comments and
 unrelated `!!js` expressions remain intact.
+
+### DSH continuable-child controls
+
+`/subagents` uses the same immediate session-command effect as `/goal`, sending
+`x.ai/subagents` while preserving the parent's active turn and queued prompts.
+
+Native DSH child views fetch `x.ai/subagent/history` pages through the owning
+parent connection. Their committed-event notifications refresh open views;
+successful durable reads allow finished views to release memory and replay on
+reopen. Parent restart rediscovers completed children. Native session/turn attempt
+IDs reject late finishes from earlier executions. This path does not assume
+Grok `updates.jsonl` files exist for DSH child sessions.
+The bridge owns descendant authorization and uses DSH's native admission and
+Inbox operations. Same-ID continuations emit an explicit resumed spawn: only a
+fresh live event may reopen a terminal child. Its existing child view and
+transcript survive; ordinary duplicate spawns and stale resumes remain no-ops.
+Coverage includes scoped bridge controls, TUI dispatch/lifecycle regressions,
+and real TUI Queue/Edit/Remove/Steer/Clear/Stop/Resume with a held parent stream.
+
+### Native inbox, reminders, job logs and tool images
+
+`views/native_controls.rs` reuses the modal chrome and multiline TextArea for
+`/inbox` and `/reminders`. Child Tasks rows open their queue with `q`; reminder
+rows open the Schedule list. Responses are scoped to the owning session and
+modal request. Failed edits retain their draft; failed cancellation retains the
+reminder row. `/loop` requests native `schedule_create` with `every_seconds` and
+the official five-minute minimum, independent of Grok's detached-loop setting.
+
+The bridge feeds non-consuming collected subprocess snapshots into the existing
+Tasks stdout store and viewer. Completed output is not repeatedly rescanned.
+Tool image updates carry verified durable attachment paths in `dscodeImages`;
+the existing media block renders the first preview and lists additional paths.
+Typed images decode extensionless attachment objects. The bridge finishes image
+hydration before sending tool completion, later text and prompt settlement.
+Preview errors remain visible independently of tool success. Live output, root
+replay and child history use the same attachment projection. Acceptance drives
+these controls through the real TUI, including the image Open action with an
+isolated recorder in place of the operating system's GUI opener.
+
+### Viewer quotes, turn navigation, skills and preset authoring
+
+Selective ports from Grok snapshot `75810042ca2762aa0b0fa17864f3f68823ccbea5`
+add viewer selection-to-draft quoting, last-viewer position restoration, source
+cell URL/email annotations, and turn-boundary navigation. The existing monolithic
+viewer remains; resume identity also includes task id or standalone document title.
+Standalone documents survive streaming ticks without a transcript anchor.
+
+DSH skills use the native scoped registry and slash invocation. `/preset manage`
+reuses NativeControls and the existing external editor, with native copy/read
+operations and owned-session/nonced replies. LSP lives in the optional bridge
+preset and uses official packages rather than a second Rust language client.
+
+
+### Terminal management, runtime doctor and preset polish
+
+Tasks `t` and `/tasks terminals` reuse NativeControls for the exact-owner DSH
+terminal registry. Read-only previews poll bounded scrollback; interrupt and
+confirmed close call different native operations. Wrapped detail paging uses
+Ratatui's existing line-count API to clamp scrolling (rendered-line-info feature).
+Preset search is local; successful copy reveals its id and offers the existing
+editor. `/doctor` keeps terminal diagnostics and asynchronously adds a native
+bridge report, scoped to the same session binding. Runtime validation remains in
+the JS launcher/update layer, with a read-only pre-startup CLI fallback.
+
+### Process ID validation
+
+The shared shell-base Unix process helpers reject zero and unsigned IDs outside
+the positive signed PID range before probing or signalling. Previously an invalid
+external leader PID such as `u32::MAX` became `-1` and could broadcast SIGTERM
+to unrelated processes during failure cleanup. Boundary checks and real child
+termination tests run in the product Rust release gate.
+
+The catalog keeps role descriptions alongside localized preset names. Overlay
+ownership tests expect the current Kitty transmit-and-display command (`a=T`),
+and both child and modal post-flush cleanup cases run in the release gate.

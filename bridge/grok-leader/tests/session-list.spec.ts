@@ -11,6 +11,28 @@ import { describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionListIndex, firstUserPrompt, foldedSessionTitle } from '../src/session-list.ts'
 
+it('retains request snapshots past eviction, shares cold loads, and bounds open logs', async () => {
+  const index = new SessionListIndex(2)
+  let active = 0, peak = 0, loads = 0
+  const read = (id: string) => index.inspect(id, 0, async () => {
+    loads += 1
+    peak = Math.max(peak, ++active)
+    await new Promise(resolve => setTimeout(resolve, 1))
+    active -= 1
+    return [userMessage(1, id)]
+  })
+  const first = Promise.all(Array.from({ length: 105 }, (_, i) => read(String(i))))
+  const second = Promise.all(Array.from({ length: 105 }, (_, i) => read(String(i))))
+  const [a, b] = await Promise.all([first, second])
+  expect(a.map(row => row.firstPrompt)).toEqual(Array.from({ length: 105 }, (_, i) => String(i)))
+  expect(b).toEqual(a)
+  expect(loads).toBe(105)
+  expect(peak).toBe(4)
+  index.recordEvent('0', 0, userMessage(2, 'later prompt'))
+  expect(index.projection('0', 0).firstPrompt).toBe('')
+  expect((await read('0')).firstPrompt).toBe('0')
+})
+
 interface MessageLike {
   type: 'user/message'
   seq: number
@@ -108,27 +130,15 @@ describe('SessionListIndex recordEvent (live path)', () => {
   })
 })
 
-describe('SessionListIndex begin/finishInspection', () => {
-  it('dedups concurrent inspections on the same session', () => {
+describe('SessionListIndex inspect', () => {
+  it('retries failed and empty reads, then reuses a cached projection', async () => {
     const index = new SessionListIndex()
-    expect(index.beginInspection('s')).toBe(true)
-    expect(index.beginInspection('s')).toBe(false) // already in flight
-    index.finishInspection('s')
-    expect(index.beginInspection('s')).toBe(true) // released
-  })
-
-  it('skips a session once inspected and first prompt cached (dedup), but retries a miss', () => {
-    const index = new SessionListIndex()
-    // Miss: empty first prompt — not cached, must retry.
-    expect(index.beginInspection('s')).toBe(true)
-    index.recordInspection('s', 0, [titleEvent(1, 'a title')]) // first prompt == ''
-    index.finishInspection('s')
-    // Projection inspected but first prompt is a miss -> allowed to retry.
-    expect(index.beginInspection('s')).toBe(true)
-    index.recordInspection('s', 0, [userMessage(1, 'now prompted')])
-    index.finishInspection('s')
-    // Now cached and inspected -> skip.
-    expect(index.beginInspection('s')).toBe(false)
+    await expect(index.inspect('s', 0, async () => { throw new Error('read failed') })).rejects.toThrow('read failed')
+    expect((await index.inspect('s', 0, async () => undefined)).firstPrompt).toBe('')
+    expect((await index.inspect('s', 0, async () => [titleEvent(1, 'a title')])).firstPrompt).toBe('')
+    const row = await index.inspect('s', 0, async () => [userMessage(2, 'now prompted')])
+    expect(row.firstPrompt).toBe('now prompted')
+    expect(await index.inspect('s', 0, async () => { throw new Error('cached read') })).toEqual(row)
   })
 })
 

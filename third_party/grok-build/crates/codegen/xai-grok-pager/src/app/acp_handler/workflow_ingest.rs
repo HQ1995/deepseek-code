@@ -29,12 +29,6 @@ fn upsert_workflow_block(
         _ => WorkflowBlockStatus::Paused { elapsed },
     };
     let is_running = matches!(block_status, WorkflowBlockStatus::Running);
-    let terminal = matches!(
-        block_status,
-        WorkflowBlockStatus::Done { .. }
-            | WorkflowBlockStatus::Failed { .. }
-            | WorkflowBlockStatus::Cancelled { .. }
-    );
 
     let mapped_entry = agent
         .workflow_blocks
@@ -75,9 +69,6 @@ fn upsert_workflow_block(
         agent.scrollback.set_entry_running(entry_id, true);
     } else {
         agent.scrollback.finish_running(entry_id);
-        if terminal {
-            agent.workflow_blocks.remove(run_id);
-        }
     }
 }
 
@@ -133,6 +124,14 @@ pub(super) fn ingest_workflow_update(agent: &mut AgentView, update: XaiSessionUp
         .available_commands
         .iter()
         .any(|c| c.name == "workflow");
+    for member in &agents {
+        if let Some(child) = agent.subagent_sessions.get_mut(&member.agent_id) {
+            child.workflow_run_id = Some(std::sync::Arc::from(run_id.as_str()));
+            if child.description.is_empty() {
+                child.description = std::sync::Arc::from(member.label.as_str());
+            }
+        }
+    }
     let builtin = super::is_builtin_workflow_handle(&agent.session.available_commands, &name);
     if status == "cleared" {
         agent.workflow_runs.retain(|run| run.run_id != run_id);

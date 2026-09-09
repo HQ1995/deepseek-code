@@ -186,6 +186,27 @@ impl TableState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellJoin {
+    Tight,
+    /// Exact source substring omitted between fragments (usually `" "`).
+    Gap(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableCellCopy {
+    pub text: String,
+    pub joins: Vec<CellJoin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableCopyMeta {
+    pub line_index: usize,
+    pub line_count: usize,
+    pub n_cols: usize,
+    pub cells: Vec<TableCellCopy>,
+}
+
 /// One hyperlink target inside a formatted table.
 ///
 /// Coordinates are local to the table's `styled_lines`:
@@ -232,6 +253,8 @@ pub struct TableReplace {
     /// table-local coordinates; the renderer translates them to absolute
     /// `HyperlinkTarget`s.
     pub hyperlinks: Vec<TableHyperlink>,
+    pub cell_copies: Vec<TableCellCopy>,
+    pub n_cols: usize,
 }
 
 /// Rendered Mermaid diagram replacement for pretty mode rendering.

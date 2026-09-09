@@ -44,7 +44,7 @@ describe('launcher lifecycle', () => {
     expect(existsSync(rejected)).toBe(false)
   })
 
-  it('commits a prepared tuple and channel while preserving unrelated profile files', () => {
+  it('commits a prepared tuple and channel while preserving unrelated profile files', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dscode-commit-'))
     homes.push(home)
     const profile = join(home, 'active'), stage = join(home, 'stage')
@@ -54,7 +54,7 @@ describe('launcher lifecycle', () => {
     writeFileSync(join(profile, 'user-settings'), 'preserved')
     writeFileSync(join(stage, 'profile', 'binary'), 'new')
     writeFileSync(join(stage, 'profile', 'config.toml'), '[cli]\nchannel="alpha"\nchannel_format=1\n')
-    commitInstallation(profile, stage, ['binary', 'config.toml'])
+    await commitInstallation(profile, stage, ['binary', 'config.toml'])
     expect(readFileSync(join(profile, 'binary'), 'utf8')).toBe('new')
     expect(updateOptions([], profile, '1.0.0').channel).toBe('alpha')
     expect(readFileSync(join(profile, 'user-settings'), 'utf8')).toBe('preserved')
@@ -69,6 +69,7 @@ describe('launcher lifecycle', () => {
     mkdirSync(dirname(normalLauncher), { recursive: true })
     copyFileSync(launcher, normalLauncher)
     symlinkSync(fileURLToPath(new URL('../bin/update.mjs', import.meta.url)), join(dirname(normalLauncher), 'update.mjs'))
+    symlinkSync(fileURLToPath(new URL('../bin/doctor.mjs', import.meta.url)), join(dirname(normalLauncher), 'doctor.mjs'))
     writeFileSync(join(home, 'launcher', 'package.json'), JSON.stringify({ ...packageJson, dsh: { ...packageJson.dsh, sourceCommit: undefined } }))
     const profile = join(dshHome, 'profiles', 'dscode')
     const cachedTui = join(profile, 'bin', 'dscode')
@@ -187,7 +188,7 @@ esac
     expect(() => updateOptions([], profile, '1.0.0')).toThrow('invalid cli.channel_format')
   })
 
-  it('rolls back previously committed components when a later rename fails', () => {
+  it('rolls back previously committed components when a later rename fails', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dscode-rollback-'))
     homes.push(home)
     const profile = join(home, 'active'), stage = join(home, 'stage')
@@ -196,7 +197,7 @@ esac
     writeFileSync(join(profile, 'binary'), 'old')
     writeFileSync(join(profile, 'blocked'), 'not a directory')
     writeFileSync(join(stage, 'profile', 'binary'), 'new')
-    expect(() => commitInstallation(profile, stage, ['binary', 'blocked/config.toml'])).toThrow()
+    await expect(commitInstallation(profile, stage, ['binary', 'blocked/config.toml'])).rejects.toThrow()
     expect(readFileSync(join(profile, 'binary'), 'utf8')).toBe('old')
     expect(readFileSync(join(profile, 'blocked'), 'utf8')).toBe('not a directory')
   })
@@ -284,6 +285,7 @@ printf '%s' '${JSON.stringify(packageJson)}' > "$prefix/node_modules/@hqzhao95/d
     mkdirSync(dirname(copiedLauncher))
     copyFileSync(launcher, copiedLauncher)
     symlinkSync(fileURLToPath(new URL('../bin/update.mjs', import.meta.url)), join(dirname(copiedLauncher), 'update.mjs'))
+    symlinkSync(fileURLToPath(new URL('../bin/doctor.mjs', import.meta.url)), join(dirname(copiedLauncher), 'doctor.mjs'))
     writeFileSync(join(home, 'package.json'), JSON.stringify({ ...packageJson, dsh: {} }))
     const script = `import { ensureDshCli } from ${JSON.stringify(pathToFileURL(copiedLauncher).href)}; await ensureDshCli()`
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {

@@ -112,6 +112,7 @@ pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
         child_cwd: None,
         worktree_path: None,
         transcript: Default::default(),
+        native: None,
     }
 }
 #[test]

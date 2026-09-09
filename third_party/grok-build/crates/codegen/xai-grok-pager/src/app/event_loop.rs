@@ -378,7 +378,7 @@ pub(crate) fn seed_consent_state_from_gate(
 
 /// Pause terminal input and wait up to `timeout` for the reader to acknowledge.
 /// Returns with the pause still asserted; the handoff owner resumes the reader.
-fn park_input_reader(
+pub(super) fn park_input_reader(
     input_paused: &std::sync::atomic::AtomicBool,
     reader_parked: &std::sync::atomic::AtomicBool,
     timeout: Duration,
@@ -439,11 +439,24 @@ fn suspend_for_child(
         .is_minimal()
         .then(|| crossterm::cursor::position().ok())
         .flatten();
-    if screen_mode.is_fullscreen() {
-        xai_grok_shell::util::with_locked_stderr(|stderr| {
-            let _ = crossterm::execute!(stderr, crossterm::terminal::LeaveAlternateScreen);
-        });
-    }
+    // Fullscreen children draw over our alternate screen; keep the shell hidden.
+    // Pause reports before cooked mode can echo them, and restore the negotiated
+    // modes even when the child resets them or exits unsuccessfully.
+    let kitty_pushed = crate::app::kitty_flags_pushed();
+    let mouse_captured = crate::app::MOUSE_CAPTURE_ENABLED.load(Ordering::Acquire);
+    xai_grok_shell::util::with_locked_stderr(|stderr| {
+        if kitty_pushed {
+            let _ = crossterm::execute!(stderr, crossterm::event::PopKeyboardEnhancementFlags);
+        }
+        let _ = crossterm::execute!(
+            stderr,
+            crossterm::event::DisableFocusChange,
+            crossterm::event::DisableBracketedPaste,
+        );
+        if mouse_captured {
+            let _ = crossterm::execute!(stderr, crossterm::event::DisableMouseCapture);
+        }
+    });
     let _ = crossterm::terminal::disable_raw_mode();
     run_child();
     let _ = crossterm::terminal::enable_raw_mode();
@@ -452,6 +465,24 @@ fn suspend_for_child(
             let _ = crossterm::execute!(stderr, crossterm::terminal::EnterAlternateScreen);
         });
     }
+    xai_grok_shell::util::with_locked_stderr(|stderr| {
+        if kitty_pushed {
+            let _ = crossterm::execute!(
+                stderr,
+                crossterm::event::PushKeyboardEnhancementFlags(
+                    crate::terminal::pushed_kitty_flags()
+                )
+            );
+        }
+        let _ = crossterm::execute!(
+            stderr,
+            crossterm::event::EnableFocusChange,
+            crossterm::event::EnableBracketedPaste,
+        );
+        if mouse_captured {
+            let _ = crossterm::execute!(stderr, crossterm::event::EnableMouseCapture);
+        }
+    });
     // Discard child-exit ANSI query replies (DA/DSR/cursor reports) the terminal
     // buffered; reader is parked, so the main thread is the only crossterm caller.
     while crossterm::event::poll(Duration::from_millis(0)).unwrap_or(false) {
@@ -719,7 +750,7 @@ fn run_pending_suspends(
     }
     *suspend_retry_after = None;
 
-    // $EDITOR suspend: leave alt screen, disable raw mode, spawn
+    // $EDITOR suspend: pause input reporting, disable raw mode, spawn
     // editor, wait for exit, then restore. Preparation materializes prompt
     // drafts only immediately before this safe terminal handoff.
     if let Some(request) = app.pending_editor.take() {
@@ -861,6 +892,129 @@ fn run_pending_suspends(
         suspend_wait_reports.pager_reported = false;
     }
     Ok(())
+}
+
+/// Consume a pending in-process `/minimal` ⇄ `/fullscreen` switch; returns
+/// `true` when the caller must quit (exec fallback armed on `app.relaunch`).
+#[allow(clippy::too_many_arguments)]
+fn run_pending_mode_switch(
+    app: &mut AppView,
+    terminal: &mut PagerTerminal,
+    minimal_live_rows: u16,
+    input_paused: &std::sync::atomic::AtomicBool,
+    reader_parked: &std::sync::atomic::AtomicBool,
+    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TimedInputEvent>,
+    presenter: &mut Presenter,
+    tasks: &mut JoinSet<TaskResult>,
+    progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
+    status_line_refresh_interval: &mut Option<Duration>,
+    status_line_poll_at: &mut Option<Instant>,
+) -> bool {
+    let Some(target) = app.pending_screen_mode_switch.take() else {
+        return false;
+    };
+    let from = app.screen_mode;
+    if target == from {
+        return false;
+    }
+    match crate::app::mode_switch::transition_terminal(
+        terminal,
+        from,
+        target,
+        minimal_live_rows,
+        input_paused,
+        reader_parked,
+        input_rx,
+    ) {
+        crate::app::mode_switch::ModeSwitchOutcome::Switched => {
+            crate::app::mode_switch::reseed_screen_mode(app, target);
+            // Disarm in minimal or the command keeps running for an unpainted row.
+            *status_line_refresh_interval =
+                if super::status_line::draws_a_row(app.screen_mode, &app.current_ui.status_line) {
+                    app.status_line_refresh_interval()
+                } else {
+                    None
+                };
+            *status_line_poll_at = status_line_refresh_interval.map(|iv| Instant::now() + iv);
+            if target.is_minimal() {
+                crate::theme::reset_cursor_color();
+                crate::app::mode_switch::dismiss_fullscreen_only_surfaces(app);
+                super::MINIMAL_SHOW_SWITCH_BACK_TO_FULLSCREEN
+                    .store(true, std::sync::atomic::Ordering::Release);
+                // A committed block, not a toast: toasts never render in minimal.
+                if let ActiveView::Agent(id) = app.active_view
+                    && let Some(agent) = app.agents.get_mut(&id)
+                {
+                    crate::app::mode_switch::push_block_behind_live_stream(
+                        &mut agent.scrollback,
+                        crate::scrollback::block::RenderBlock::system(
+                            "Switched to minimal mode · /fullscreen to go back",
+                        ),
+                    );
+                }
+            } else {
+                crate::theme::apply_cursor_color();
+                super::MINIMAL_SHOW_SWITCH_BACK_TO_FULLSCREEN
+                    .store(false, std::sync::atomic::Ordering::Release);
+                // Capture is back on: clear the mouse-off banner like the toggle-on path.
+                for agent in app.agents.values_mut() {
+                    agent.set_sticky_toast_recursive(None);
+                }
+                // Not `screen_mode_switch_hint`: it only surfaces on switch_to_agent.
+                if let ActiveView::Agent(id) = app.active_view
+                    && let Some(agent) = app.agents.get_mut(&id)
+                {
+                    agent.show_toast("Switched to fullscreen mode · /minimal to go back");
+                }
+            }
+            tracing::info!(
+                from = from.meta_label(),
+                to = target.meta_label(),
+                "in-process screen-mode switch"
+            );
+            presenter.request_presentation(app, terminal, true);
+            false
+        }
+        crate::app::mode_switch::ModeSwitchOutcome::Aborted(reason) => {
+            tracing::warn!(%reason, "screen-mode switch aborted; staying in current mode");
+            if let ActiveView::Agent(id) = app.active_view
+                && let Some(agent) = app.agents.get_mut(&id)
+            {
+                // An abort can land mid-turn in minimal too; same stream hazard.
+                crate::app::mode_switch::push_block_behind_live_stream(
+                    &mut agent.scrollback,
+                    crate::scrollback::block::RenderBlock::system(format!(
+                        "Couldn't switch to {} mode: {reason}",
+                        target.meta_label()
+                    )),
+                );
+            }
+            presenter.request_presentation(app, terminal, true);
+            false
+        }
+        crate::app::mode_switch::ModeSwitchOutcome::NeedsExecFallback(reason) => {
+            tracing::error!(%reason, "screen-mode switch failed; falling back to exec relaunch");
+            if let Some(session_id) = app.active_session_id().map(str::to_owned) {
+                app.relaunch = Some(crate::app::app_view::ScreenModeRelaunch {
+                    minimal: target.is_minimal(),
+                    session_id,
+                });
+            }
+            let effs: Vec<super::actions::Effect> = app
+                .agents
+                .values()
+                .filter_map(|a| {
+                    a.session.session_id.as_ref().map(|sid| {
+                        super::actions::Effect::UnregisterActiveSession {
+                            session_id: sid.clone(),
+                        }
+                    })
+                })
+                .collect();
+            let _ = process_effects(effs, tasks, app, progress_tx);
+            true
+        }
+    }
 }
 
 /// Minimal mode opens an empty session after the welcome branch (now, or
@@ -1784,7 +1938,7 @@ pub(crate) async fn run(
     // Read once, like the section it comes from, so a future config reload
     // must run this arming again; unarmed where this process can never draw
     // the row.
-    let status_line_refresh_interval: Option<Duration> =
+    let mut status_line_refresh_interval: Option<Duration> =
         if super::status_line::draws_a_row(app.screen_mode, &app.current_ui.status_line) {
             app.status_line_refresh_interval()
         } else {
@@ -2151,6 +2305,23 @@ pub(crate) async fn run(
         ) {
             app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Error);
             return Err(e);
+        }
+
+        // In-process `/minimal` ⇄ `/fullscreen` switch, queued by dispatch.
+        if run_pending_mode_switch(
+            &mut app,
+            terminal,
+            config_watcher.current().minimal_live_rows,
+            &input_paused,
+            &reader_parked,
+            &mut input_rx,
+            &mut presenter,
+            &mut tasks,
+            &progress_tx,
+            &mut status_line_refresh_interval,
+            &mut status_line_poll_at,
+        ) {
+            break;
         }
 
         // Lazy voice pipeline: only after `/voice` or Ctrl+Space while gates
@@ -2543,8 +2714,9 @@ pub(crate) async fn run(
                     app.pending_update_version = Some(latest.clone());
                     // The full TUI surfaces this on the welcome screen, which
                     // minimal has none of — commit a one-line notice into
-                    // native scrollback instead (update notice).
-                    if term_state.screen_mode.is_minimal() {
+                    // native scrollback instead (update notice). `app`, not
+                    // `term_state`: the mode can switch at runtime.
+                    if app.screen_mode.is_minimal() {
                         dispatch::commit_minimal_update_notice(&mut app, &latest);
                     }
                     presenter.request(false);
@@ -3187,6 +3359,9 @@ pub(crate) async fn run(
 
         // Whatever the arm above queued, run it before painting. An arm may
         // still drain inline when it needs the effects applied sooner.
+        for agent in app.agents.values_mut() {
+            app.pending_effects.append(&mut agent.pending_effects);
+        }
         if !app.pending_effects.is_empty() {
             let effs = std::mem::take(&mut app.pending_effects);
             if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
@@ -3898,6 +4073,14 @@ fn is_voice_chord(ke: &KeyEvent) -> bool {
     }
 }
 
+/// Bare LF is parsed as Ctrl+J; after Enter it completes a pasted CRLF.
+fn is_paste_lf(ev: &Event) -> bool {
+    matches!(ev, Event::Key(ke)
+        if ke.kind == KeyEventKind::Press
+            && ke.code == KeyCode::Char('j')
+            && ke.modifiers == KeyModifiers::CONTROL)
+}
+
 /// Coalesce runs of rapid key events into synthetic `Event::Paste`
 /// events. On terminals without bracketed paste, pasted text arrives
 /// as individual key events; Enter keys mid-run would otherwise
@@ -3906,9 +4089,9 @@ fn is_voice_chord(ke: &KeyEvent) -> bool {
 /// A contiguous run of character/Enter/Tab events is replaced with a
 /// single `Event::Paste` when EITHER:
 ///
-/// 1. `>= PASTE_COALESCE_THRESHOLD` events AND at least one Enter is
-///    followed by more characters (distinguishes `type + submit` from
-///    `pasted multiline`).
+/// 1. `>= PASTE_COALESCE_THRESHOLD` events AND an Enter is followed by more
+///    characters, OR the run contains Enter + Ctrl+J (a pasted CRLF).
+///    A lone Enter still submits; each CRLF becomes one newline.
 /// 2. **Windows only:** `>= PATH_COALESCE_THRESHOLD` events AND the
 ///    assembled text starts with a drag-drop-style path anchor. Some
 ///    Windows Terminal versions deliver dropped paths as keystrokes
@@ -3957,34 +4140,53 @@ fn coalesce_rapid_keys(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
             let mut text = String::new();
             let mut seen_enter = false;
             let mut has_char_after_enter = false;
+            // An Enter (`\r`) immediately followed by a pasted LF (`\n`): the
+            // CRLF signature of a pasted Windows line break, never a submit.
+            let mut has_crlf = false;
+            let mut prev_was_enter = false;
 
-            while i < events.len() && is_pasteable_key_event(&events[i].event) {
-                if let Event::Key(ke) = &events[i].event {
-                    match ke.code {
-                        KeyCode::Char(c) => {
-                            text.push(c);
-                            if seen_enter {
-                                has_char_after_enter = true;
+            while i < events.len() {
+                if is_pasteable_key_event(&events[i].event) {
+                    if let Event::Key(ke) = &events[i].event {
+                        match ke.code {
+                            KeyCode::Char(c) => {
+                                text.push(c);
+                                if seen_enter {
+                                    has_char_after_enter = true;
+                                }
+                                prev_was_enter = false;
                             }
-                        }
-                        KeyCode::Enter => {
-                            text.push('\n');
-                            seen_enter = true;
-                        }
-                        KeyCode::Tab => {
-                            text.push('\t');
-                            if seen_enter {
-                                has_char_after_enter = true;
+                            KeyCode::Enter => {
+                                text.push('\n');
+                                seen_enter = true;
+                                prev_was_enter = true;
                             }
+                            KeyCode::Tab => {
+                                text.push('\t');
+                                if seen_enter {
+                                    has_char_after_enter = true;
+                                }
+                                prev_was_enter = false;
+                            }
+                            _ => unreachable!("is_pasteable_key_event guards this"),
                         }
-                        _ => unreachable!("is_pasteable_key_event guards this"),
                     }
+                    i += 1;
+                } else if prev_was_enter && is_paste_lf(&events[i].event) {
+                    // LF half of a pasted CRLF: the preceding Enter already
+                    // pushed '\n', so absorb this without a second newline and
+                    // without letting it reach its Ctrl+J binding.
+                    has_crlf = true;
+                    prev_was_enter = false;
+                    i += 1;
+                } else {
+                    break;
                 }
-                i += 1;
             }
 
             let run_len = i - run_start;
-            let multiline_paste = run_len >= PASTE_COALESCE_THRESHOLD && has_char_after_enter;
+            let multiline_paste =
+                (run_len >= PASTE_COALESCE_THRESHOLD && has_char_after_enter) || has_crlf;
             // Windows fallback for drag-drops that arrive as a key
             // burst instead of a bracketed paste — reuse the drop
             // classifier's anchor detector so the two layers can't
@@ -6119,5 +6321,51 @@ mod tests {
             app.active_view = view;
             assert!(finish_run(&mut app).exit_info.is_none());
         }
+    }
+    #[test]
+    fn coalesce_crlf_paste_ending_in_newline_is_paste() {
+        // Windows paste of "foo\r\n": Enter (`\r`) then Ctrl+J (`\n`). The
+        // CRLF pair marks a paste, so the trailing Enter inserts as text
+        // instead of submitting.
+        let events = vec![
+            press(KeyCode::Char('f')),
+            press(KeyCode::Char('o')),
+            press(KeyCode::Char('o')),
+            press(KeyCode::Enter),
+            press_ctrl(KeyCode::Char('j')),
+        ];
+        let result = coalesce_rapid_keys(events);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].event, Event::Paste("foo\n".to_string()));
+    }
+    #[test]
+    fn coalesce_crlf_multiline_collapses_pairs() {
+        // "a\r\nb\r\n" → each Enter+Ctrl+J is one newline; no doubled blanks.
+        let events = vec![
+            press(KeyCode::Char('a')),
+            press(KeyCode::Enter),
+            press_ctrl(KeyCode::Char('j')),
+            press(KeyCode::Char('b')),
+            press(KeyCode::Enter),
+            press_ctrl(KeyCode::Char('j')),
+        ];
+        let result = coalesce_rapid_keys(events);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].event, Event::Paste("a\nb\n".to_string()));
+    }
+    #[test]
+    fn coalesce_lone_ctrl_j_not_after_enter_preserved() {
+        // A deliberate Ctrl+J (file-search "down") is not part of a CRLF and
+        // must reach its binding: not absorbed, run does not coalesce.
+        let events = vec![
+            press(KeyCode::Char('a')),
+            press(KeyCode::Char('b')),
+            press_ctrl(KeyCode::Char('j')),
+        ];
+        let result = coalesce_rapid_keys(events);
+        assert_eq!(result.len(), 3);
+        assert!(matches!(&result[2].event,
+            Event::Key(ke) if ke.code == KeyCode::Char('j')
+                && ke.modifiers == KeyModifiers::CONTROL));
     }
 }

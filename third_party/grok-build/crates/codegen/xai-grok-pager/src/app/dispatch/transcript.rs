@@ -63,7 +63,7 @@ pub(super) fn dispatch_copy_assistant_message(
             if let Some(entry) = agent.scrollback.entry(i)
                 && let RenderBlock::AgentMessage(msg) = &entry.block
             {
-                agent_messages.push(msg.copy_text(false));
+                agent_messages.push(msg.copy_text(true));
             }
         }
 
@@ -149,7 +149,30 @@ pub(super) fn dispatch_copy_assistant_message(
 pub(super) fn dispatch_export_conversation(
     app: &mut AppView,
     file_path: Option<std::path::PathBuf>,
-) {
+) -> Vec<Effect> {
+    if let Some(path) = file_path.as_ref().filter(|path| {
+        path.extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    }) {
+        let ActiveView::Agent(agent_id) = app.active_view else {
+            return vec![];
+        };
+        let Some(agent) = app.agents.get_mut(&agent_id) else {
+            return vec![];
+        };
+        let Some(session_id) = agent.session.session_id.clone() else {
+            agent.show_toast("No active session to export");
+            return vec![];
+        };
+        return vec![Effect::RunSessionCommand {
+            agent_id,
+            session_id,
+            method: "x.ai/session/export",
+            prompt: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                path.to_string_lossy(),
+            ))],
+        }];
+    }
     with_active_agent(app, |agent| {
         let blocks: Vec<_> = (0..agent.scrollback.len())
             .filter_map(|i| agent.scrollback.entry(i).map(|e| &e.block))
@@ -218,6 +241,7 @@ pub(super) fn dispatch_export_conversation(
             agent.scrollback.push_block(RenderBlock::system(block_msg));
         }
     });
+    vec![]
 }
 
 /// Open the full transcript in `$PAGER`.
@@ -368,8 +392,8 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
             _ => None,
         };
 
-        if viewer.is_some() {
-            agent.block_viewer = viewer;
+        if let Some(viewer) = viewer {
+            agent.install_block_viewer(viewer);
             return;
         }
 

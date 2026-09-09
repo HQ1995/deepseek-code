@@ -1077,6 +1077,7 @@ mod tests {
             workflow_run_id: None,
             context_normalized: false,
             transcript: Default::default(),
+            native: None,
             parent_prompt_id: None,
             started_at: now,
             last_progress_at: now,

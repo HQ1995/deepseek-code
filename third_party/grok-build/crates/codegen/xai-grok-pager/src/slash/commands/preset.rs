@@ -16,14 +16,19 @@ impl SlashCommand for PresetCommand {
     }
 
     fn description(&self) -> &str {
-        "Pick and remember the agent preset"
+        "Pick a preset; /preset manage to copy, view or edit"
     }
 
     fn usage(&self) -> &str {
-        "/preset"
+        "/preset [manage]"
     }
 
-    fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
+    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+        if args.trim() == "manage" {
+            return CommandResult::Action(Action::OpenNativeControls(
+                crate::views::native_controls::NativeControlTarget::Presets,
+            ));
+        }
         CommandResult::Action(Action::ToggleCatalog)
     }
 }

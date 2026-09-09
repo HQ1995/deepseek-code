@@ -106,6 +106,9 @@ pub(super) fn dispatch_doctor(request: DoctorRequest, app: &mut AppView) -> Vec<
                 agent.scrollback.push_block(RenderBlock::system(
                     crate::diagnostics::format_doctor(&report),
                 ));
+                return vec![Effect::FetchRuntimeDoctor {
+                    target: doctor_fix_target(agent),
+                }];
             }
         }
         DoctorRequest::ListFixes | DoctorRequest::Fix(_) => {
@@ -187,11 +190,15 @@ pub(super) fn dispatch_send_prompt(app: &mut AppView, text: String) -> Vec<Effec
 /// Clear the active prompt and record non-empty text in prompt history (Esc Esc).
 pub(super) fn dispatch_clear_prompt(app: &mut AppView) -> Vec<Effect> {
     with_active_agent(app, |agent| {
-        let text = agent.prompt.text().to_string();
-        // Same move-to-front / cap as send / interject.
-        interject::record_interject_prompt_history(agent, &text);
-        // Clears chips/images via PromptWidget::set_text empty path.
-        agent.prompt.set_text("");
+        // Prefixed the way the stash entry is, or a `!` draft shows up twice in the Up browse.
+        let text = crate::app::agent_view::prompt_history_text(
+            agent.prompt.text(),
+            agent.prompt_input_mode,
+        );
+        crate::app::agent::remember_prompt(&mut agent.session.prompt_history, &text);
+
+        // Recoverable with the stash chord, but Esc-Esc is a discard: it never comes back on its own.
+        agent.stash_prompt_draft(crate::app::agent_view::StashCause::ClearedDraft);
     });
     vec![]
 }
@@ -524,7 +531,7 @@ pub(super) fn dispatch_send_prompt_inner(
         return vec![];
     }
 
-    // Native goal controls are session RPCs, never model turns or queued prompts.
+    // Native controls remain available while the parent model turn is running.
     if !literal && let Some(invocation) = crate::slash::parse_invocation(trimmed) {
         if invocation.token.eq_ignore_ascii_case("auto") {
             if consume_input {
@@ -538,7 +545,14 @@ pub(super) fn dispatch_send_prompt_inner(
             );
             return vec![];
         }
-        if invocation.token.eq_ignore_ascii_case("goal") {
+        let method = if invocation.token.eq_ignore_ascii_case("goal") {
+            Some("x.ai/goal")
+        } else if invocation.token.eq_ignore_ascii_case("subagents") {
+            Some("x.ai/subagents")
+        } else {
+            None
+        };
+        if let Some(method) = method {
             let Some(session_id) = agent.session.session_id.clone() else {
                 agent.show_toast("No active session");
                 return vec![];
@@ -557,9 +571,10 @@ pub(super) fn dispatch_send_prompt_inner(
             if consume_input {
                 agent.prompt.set_text("");
             }
-            return vec![Effect::RunGoalCommand {
+            return vec![Effect::RunSessionCommand {
                 agent_id: id,
                 session_id,
+                method,
                 prompt,
             }];
         }
@@ -779,6 +794,7 @@ pub(super) fn dispatch_send_prompt_inner(
             // Drain prompt images before clearing prompt state.
             drain_prompt_state_to_last_queued(agent);
             agent.prompt.set_text("");
+            agent.note_draft_consumed();
         }
     } else if !literal && crate::slash::commands::exit::is_exit_alias(trimmed) {
         if consume_input {
@@ -863,6 +879,7 @@ pub(super) fn dispatch_send_prompt_inner(
             let images = agent.prompt.drain_images();
             if consume_input {
                 agent.prompt.set_text("");
+                agent.note_draft_consumed();
             }
             // A new prompt is taking the wheel (same contract as the
             // immediate-send branch below).
@@ -888,17 +905,8 @@ pub(super) fn dispatch_send_prompt_inner(
                 // Plain prompt: no images to drain. Clear textarea + record
                 // up-arrow history (same as the local path's history insert).
                 agent.prompt.set_text("");
-                let trimmed_key = text.trim().to_string();
-                if !trimmed_key.is_empty() {
-                    agent
-                        .session
-                        .prompt_history
-                        .retain(|p| p.trim() != trimmed_key);
-                    agent.session.prompt_history.insert(0, text.clone());
-                    if agent.session.prompt_history.len() > 200 {
-                        agent.session.prompt_history.truncate(200);
-                    }
-                }
+                agent.note_draft_consumed();
+                crate::app::agent::remember_prompt(&mut agent.session.prompt_history, &text);
             }
 
             // A new prompt is taking the wheel: the previous response's
@@ -940,6 +948,7 @@ pub(super) fn dispatch_send_prompt_inner(
             // Drain prompt images before clearing prompt state.
             drain_prompt_state_to_last_queued(agent);
             agent.prompt.set_text("");
+            agent.note_draft_consumed();
         }
         // Local queue while a turn is running (e.g. images attached): tip after
         // this branch so the agent mut-borrow is released first.
@@ -967,17 +976,7 @@ pub(super) fn dispatch_send_prompt_inner(
         // Skipped for modal-driven dispatch: the user didn't type these
         // commands and shouldn't see them in up-arrow history.
         if consume_input {
-            let trimmed_key = text.trim().to_string();
-            if !trimmed_key.is_empty() {
-                agent
-                    .session
-                    .prompt_history
-                    .retain(|p| p.trim() != trimmed_key);
-                agent.session.prompt_history.insert(0, text.clone());
-                if agent.session.prompt_history.len() > 200 {
-                    agent.session.prompt_history.truncate(200);
-                }
-            }
+            crate::app::agent::remember_prompt(&mut agent.session.prompt_history, &text);
         }
         maybe_drain_queue(agent)
     };
@@ -1007,16 +1006,13 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
     // Submitting a bash command retires any edit-contextual ephemeral tip.
     agent.ephemeral_tip.clear_on_submit();
 
-    // Store in prompt history with `! ` prefix for restore semantics.
-    let history_key = format!("! {}", command.trim());
-    agent
-        .session
-        .prompt_history
-        .retain(|p| p.trim() != history_key);
-    agent.session.prompt_history.insert(0, history_key);
-    if agent.session.prompt_history.len() > 200 {
-        agent.session.prompt_history.truncate(200);
-    }
+    crate::app::agent::remember_prompt(
+        &mut agent.session.prompt_history,
+        &crate::app::agent_view::prompt_history_text(
+            &command,
+            crate::app::agent_view::PromptInputMode::Bash,
+        ),
+    );
 
     // ── Server-authoritative immediate send for bash while running ──
     // A bash command typed while a turn is RUNNING is sent to the agent
@@ -1050,6 +1046,7 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
         // deltas ours in the ACP gate once it becomes the running turn.
         agent.note_self_originated_prompt(&prompt_id);
         agent.prompt.set_text("");
+        agent.note_draft_consumed();
 
         let sid_str = session_id.0.to_string();
         push_server_queue_echo(app, agent_id, &sid_str, &prompt_id, &command, "bash");
@@ -1068,6 +1065,7 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
 
     agent.session.enqueue_bash_command(command.clone());
     agent.prompt.set_text("");
+    agent.note_draft_consumed();
 
     let drain = maybe_drain_queue(agent);
     note_peek_page_flip(app, id, drain.page_flip_entry);

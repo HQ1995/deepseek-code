@@ -5,13 +5,13 @@
 # and the roster refreshed, then delete it (Ctrl+D, y confirm) and assert
 # the route left settings.yaml; the current provider's delete is refused
 # with the switch-first message. A second boot proves the edited settings
-# persist. Artifacts land in /tmp/provmanage-e2e/.
+# persist. Artifacts use DSCODE_E2E_OUT_DIR, defaulting to /tmp/provmanage-e2e/.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${DSCODE_TUI_BIN:-$ROOT/third_party/grok-build/target/release/dscode}"
 NODE_BIN="${DSCODE_E2E_NODE_BIN:-$(command -v node || true)}"
-OUT=/tmp/provmanage-e2e
+OUT="${DSCODE_E2E_OUT_DIR:-/tmp/provmanage-e2e}"
 mkdir -p "$OUT"
 RUN_ID="$$"
 SCRATCH="$OUT/home-$RUN_ID"

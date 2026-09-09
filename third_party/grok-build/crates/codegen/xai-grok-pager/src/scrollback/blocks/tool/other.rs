@@ -21,6 +21,8 @@ pub struct OtherToolCallBlock {
     pub error: Option<String>,
     /// Optional output.
     pub output: Option<String>,
+    /// Attachment preview errors, independent of tool execution success.
+    pub media_notes: Vec<String>,
     /// When the tool started running (Phase 2: time tracking).
     pub started_at: Option<std::time::Instant>,
     /// Elapsed time in ms after completion (Phase 2: time tracking).
@@ -43,6 +45,7 @@ impl OtherToolCallBlock {
             summary: summary.into(),
             error: None,
             output: None,
+            media_notes: Vec::new(),
             started_at: None,
             elapsed_ms: None,
             image_refs: Vec::new(),
@@ -70,7 +73,7 @@ impl OtherToolCallBlock {
     }
 
     /// Set the media reference from a typed path (no prose scraping).
-    /// `from_path` validates the file and normalizes `\\?\`; an unresolvable
+    /// The constructor validates bytes and normalizes `\\?\`; an unresolvable
     /// path is a no-op.
     pub fn with_media_ref(mut self, path: impl Into<std::path::PathBuf>, is_video: bool) -> Self {
         let path = path.into();
@@ -78,8 +81,8 @@ impl OtherToolCallBlock {
             if let Some(r) = crate::prompt_images::ScrollbackVideoRef::from_path(path) {
                 self.video_refs = vec![r];
             }
-        } else if let Some(r) = crate::prompt_images::ScrollbackImageRef::from_path(path) {
-            self.image_refs = vec![r];
+        } else if let Some(r) = crate::prompt_images::ScrollbackImageRef::from_image_file(path) {
+            self.image_refs.push(r);
         }
         self
     }
@@ -218,6 +221,18 @@ impl BlockContent for OtherToolCallBlock {
                 ratatui::style::Style::default().fg(theme.gray_dim),
             ));
             let mut lines: Vec<BlockLine> = vec![header.into(), path_line.into()];
+            for image in self.image_refs.iter().skip(1) {
+                lines.push(Line::from(image.path.display().to_string()).into());
+            }
+            for note in &self.media_notes {
+                lines.push(
+                    Line::from(Span::styled(
+                        note.clone(),
+                        ratatui::style::Style::default().fg(theme.accent_error),
+                    ))
+                    .into(),
+                );
+            }
 
             // No inline graphics: centered "[Open]" button between blank
             // spacers (its click target is registered in render.rs).
@@ -241,6 +256,18 @@ impl BlockContent for OtherToolCallBlock {
                 lines.push(Line::from("").into());
             }
 
+            return BlockOutput { lines };
+        }
+
+        if !self.media_notes.is_empty() {
+            let mut lines = vec![self.collapsed_line(&theme, false, None).into()];
+            lines.extend(self.media_notes.iter().map(|note| {
+                Line::from(Span::styled(
+                    note.clone(),
+                    ratatui::style::Style::default().fg(theme.accent_error),
+                ))
+                .into()
+            }));
             return BlockOutput { lines };
         }
 

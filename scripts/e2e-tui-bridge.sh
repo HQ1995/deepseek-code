@@ -42,6 +42,8 @@ WORKTREE_RM_OUT="$OUT/worktree-rm-$RUN_ID.txt"
 RESTORE_CODE_ERR="$OUT/restore-code-$RUN_ID.log"
 ENV_AMBIENT_OUT="$OUT/env-ambient-$RUN_ID.json"
 ENV_DSCODE_OUT="$OUT/env-dscode-$RUN_ID.json"
+UPSTREAM_COPY_OUT="$OUT/upstream-copy-$RUN_ID.md"
+UPSTREAM_RAW_OUT="$OUT/upstream-terminal-$RUN_ID.raw"
 MOCK_PID=""
 ACTIVE_SOCKET="$SOCKET"
 BOOT_CWD="$ROOT"
@@ -111,12 +113,58 @@ trap cleanup EXIT
 [[ -x "$TUI_BIN" ]] || fail "TUI binary is missing: $TUI_BIN"
 [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || fail "Node is unavailable"
 command -v tmux >/dev/null 2>&1 || fail "tmux is required"
+command -v typescript-language-server >/dev/null 2>&1 \
+  || fail "LSP acceptance requires typescript-language-server and typescript on PATH (see bridge/grok-leader/README.md)"
 "$NODE_BIN" -e 'const a=process.versions.node.split(".").map(Number), b=[22,19,0]; process.exit(a[0]>b[0] || (a[0]===b[0] && (a[1]>b[1] || (a[1]===b[1] && a[2]>=b[2]))) ? 0 : 1)' \
   || fail "pinned dsh requires Node >=22.19.0 (got $($NODE_BIN --version))"
 DSH_VERSION="$("$NODE_BIN" -p "require('$ROOT/bridge/grok-leader/package.json').dsh.testedVersion")"
 
 mkdir -p "$OUT" "$SCRATCH" "$SCRATCH/e2e-bin" "$SCRATCH/fixture-plugin"
+mkdir -p "$SCRATCH/dsc-tui"
+cat >"$SCRATCH/dsc-tui/config.toml" <<'EOF'
+[ui]
+keep_text_selection = "word_select"
+EOF
+cat >"$SCRATCH/e2e-bin/prompt-editor" <<'EOF'
+#!/bin/sh
+# Exercise a real child that resets terminal reports before exiting.
+printf '\033]777;dscode-child-start\007' >/dev/tty
+printf '\033[?1004l\033[?2004l\033[?1000l\033[?1002l\033[?1003l\033[?1006l' >/dev/tty
+printf '\033]777;dscode-child-end\007' >/dev/tty
+[ ! -f "$0.fail" ] || exit 7
+case "$1" in
+  */agent.cordis.yml) printf '\n# SIX_PRESET_EDITED\n' >>"$1" ;;
+  *) printf 'E2E_EDITOR_DRAFT\nsecond line' >"$1" ;;
+esac
+EOF
+chmod +x "$SCRATCH/e2e-bin/prompt-editor"
+export DSCODE_E2E_MARKDOWN="$SCRATCH/copy-source.md"
+cat >"$DSCODE_E2E_MARKDOWN" <<'EOF'
+# DSCODE_MARKDOWN_COPY
+
+- **bold item**
+
+```rust
+fn main() {}
+```
+
+[named link](https://example.com/named)
+
+https://example.com/DSCODE_OSC8_LONG/segment01/segment02/segment03/segment04/segment05/segment06/segment07/segment08/segment09/segment10/segment11/segment12/segment13/segment14/segment15/segment16/segment17/segment18/segment19/segment20/segment21/segment22
+EOF
 mkdir -p "$SCRATCH/observer-plugin" "$OUT/observer-$RUN_ID"
+export DSCODE_E2E_TABLE="$SCRATCH/table-source.md"
+"$NODE_BIN" --input-type=module - "$DSCODE_E2E_TABLE" "$SCRATCH/stash.png" <<'JS'
+import { writeFileSync } from 'node:fs'
+const cells = [
+  'https://example.com/DSCODE_TABLE_COPY/' + 'segment/'.repeat(24) + 'end',
+  '中文表格内容'.repeat(20),
+  'alpha  beta   gamma / delta '.repeat(12).trim(),
+]
+writeFileSync(process.argv[2], '| Value |\n| --- |\n' + cells.map(text => `| ${text} |`).join('\n') + '\n')
+// Same 8x8 PNG used by the pager image-chip PTY tests.
+writeFileSync(process.argv[3], Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAAAAADhZOFXAAAADklEQVR4nGNogAIGyhgAgIQgAQ2AJGEAAAAASUVORK5CYII=', 'base64'))
+JS
 export DSCODE_E2E_OBSERVER_DIR="$OUT/observer-$RUN_ID"
 cp "$ROOT/scripts/e2e-observer.mjs" "$SCRATCH/observer-plugin/index.mjs"
 printf '%s\n' '{"name":"dscode-e2e-observer","version":"1.0.0","type":"module","main":"index.mjs","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}' >"$SCRATCH/observer-plugin/package.json"
@@ -325,7 +373,7 @@ const responsesEvent = (type, sequenceNumber, response) => JSON.stringify({
   ...response,
 })
 
-let finishPresetProbe
+const heldStreams = new Map()
 http.createServer((request, response) => {
   let body = ''
   request.on('data', part => { body += part })
@@ -333,6 +381,8 @@ http.createServer((request, response) => {
     appendFileSync(logPath, request.method + ' ' + request.url + ' ' + body + '\n')
     const path = request.url?.split('?')[0] ?? ''
     if (request.method === 'POST' && path.endsWith('/preset-probe/release')) {
+      const key = new URL(request.url, 'http://localhost').searchParams.get('key') ?? 'preset'
+      const finishPresetProbe = heldStreams.get(key)
       if (!finishPresetProbe) {
         response.writeHead(409)
         response.end('No active preset probe')
@@ -365,13 +415,14 @@ http.createServer((request, response) => {
           const deadline = setTimeout(() => response.destroy(), 90000)
           response.on('close', () => clearTimeout(deadline))
           if (fixture.releaseText) {
-            finishPresetProbe = () => {
+            const key = fixture.releaseKey ?? 'preset'
+            const finishPresetProbe = () => {
               response.write('data: ' + chunk(fixture.releaseText) + '\n\n')
               response.write('data: ' + chunk('', 'stop') + '\n\n')
               response.end('data: [DONE]\n\n')
-              finishPresetProbe = undefined
             }
-            response.on('close', () => { finishPresetProbe = undefined })
+            heldStreams.set(key, finishPresetProbe)
+            response.on('close', () => { if (heldStreams.get(key) === finishPresetProbe) heldStreams.delete(key) })
           }
           return
         }
@@ -514,6 +565,21 @@ DSH_HOME="$SCRATCH" "$DSH_BIN" plugin --profile dscode add \
 export HOME="$SCRATCH"
 
 
+run_runtime_contracts() {
+  echo "[contracts] exact runtime state, native goals, tasks and durable history"
+  env DSCODE_E2E_SCRATCH="$SCRATCH" DSCODE_E2E_ARTIFACTS="$OUT" \
+    DSCODE_E2E_RUN_ID="$RUN_ID" DSCODE_E2E_MOCK_LOG="$MOCK_LOG" \
+    DSCODE_E2E_GATEWAY="$GATEWAY" \
+    DSCODE_TUI_BIN="$TUI_BIN" DSH_BIN="$DSH_BIN" \
+    "$NODE_BIN" "$ROOT/scripts/e2e-contracts.mjs" \
+    || fail "runtime contract acceptance failed"
+}
+
+if [[ "${DSCODE_E2E_NEXT_SIX_ONLY:-0}" == 1 || "${DSCODE_E2E_CONTRACTS_ONLY:-0}" == 1 || "${DSCODE_E2E_EXTRA_ONLY:-0}" == 1 ]]; then
+  run_runtime_contracts
+  exit 0
+fi
+
 echo "[headless] compiled dscode -> dsh -> bridge -> mock gateway"
 completion_count_before="$(grep -c 'POST /v1/chat/completions' "$MOCK_LOG" 2>/dev/null || true)"
 env PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-headless" \
@@ -543,7 +609,7 @@ completion_count_after="$(grep -c 'POST /v1/chat/completions' "$MOCK_LOG" 2>/dev
   const expected = [
     "ask_user_question", "bash", "create_goal", "edit", "exit_plan_mode",
     "get_goal", "glob", "grep", "interrupt_agent", "job_kill", "job_list",
-    "job_output", "list_agents", "ralph", "read", "read_image", "send_message",
+    "job_output", "list_agents", "ralph", "read", "read_image", "schedule_create", "schedule_delete", "schedule_list", "send_message",
     "skill", "subagent", "subagent_fork", "todo_write", "update_goal",
     "web_fetch", "web_search", "workflow", "write",
   ].sort()
@@ -599,12 +665,12 @@ audit_responses_preset() {
     const standard = [
       "ask_user_question", "bash", "create_goal", "edit", "exit_plan_mode",
       "get_goal", "glob", "grep", "interrupt_agent", "job_kill", "job_list",
-      "job_output", "list_agents", "ralph", "read", "read_image", "send_message",
+      "job_output", "list_agents", "ralph", "read", "read_image", "schedule_create", "schedule_delete", "schedule_list", "send_message",
       "skill", "subagent", "subagent_fork", "todo_write", "update_goal",
       "web_fetch", "web_search", "workflow", "write",
     ].sort()
     const expected = {
-      minimal: ["bash", "str_replace_editor"],
+      minimal: ["bash", "schedule_create", "schedule_delete", "schedule_list", "str_replace_editor"],
       standard,
       history: [...standard, "session_search", "session_event_search", "session_trace", "session_event_trace", "session_event_read"].sort(),
       ptc: ["run_code"],
@@ -613,7 +679,7 @@ audit_responses_preset() {
         "cordis_define", "cordis_inspect_list", "cordis_inspect_query",
         "cordis_inspect_self", "cordis_run", "cordis_stop", "cordis_undefine",
       ].sort(),
-      "fixture-custom": ["bash", "fixture_echo", "str_replace_editor"],
+      "fixture-custom": ["bash", "fixture_echo", "schedule_create", "schedule_delete", "schedule_list", "str_replace_editor"],
     }
     const wanted = expected[preset]
     if (JSON.stringify(names) !== JSON.stringify(wanted)) {
@@ -771,6 +837,15 @@ wait_frame_absent() {
   fail "$label: '$pattern' never disappeared"
 }
 
+wait_screen_mode() {
+  local expected="$1"
+  for _ in $(seq 1 100); do
+    [[ "$(tmux -L "$SESSION" display-message -p -t "$SESSION:0.0" '#{alternate_on}')" == "$expected" ]] && return 0
+    sleep 0.1
+  done
+  fail "terminal alternate screen did not become $expected"
+}
+
 send_line() {
   tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "$1" Enter
 }
@@ -790,7 +865,10 @@ boot() {
   socket="$1"
   shift
   ACTIVE_SOCKET="$socket"
-  cmd="cd '$BOOT_CWD' && exec env PATH='$PATH' DSH_HOME='$SCRATCH' DSC_HOME='$SCRATCH/dsc-tui' DSCODE_SOCKET='$socket' DSCODE_LOG='$LEADER_LOG' DSH_BIN='$DSH_BIN' FAKE_KEY='e2e-key' DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 TERM=xterm-256color '$TUI_BIN'"
+  # Like the upstream PTY fixtures, advertise a known OSC8-capable terminal;
+  # TERM=xterm-256color alone deliberately disables hyperlinks as Unknown.
+  # Cell triple-click uses the existing word-select setting; default double-click folds.
+  cmd="cd '$BOOT_CWD' && exec env PATH='$PATH' DSH_HOME='$SCRATCH' DSC_HOME='$SCRATCH/dsc-tui' DSCODE_SOCKET='$socket' DSCODE_LOG='$LEADER_LOG' DSH_BIN='$DSH_BIN' VISUAL='$SCRATCH/e2e-bin/prompt-editor' EDITOR='$SCRATCH/e2e-bin/prompt-editor' PAGER='$SCRATCH/e2e-bin/prompt-editor' FAKE_KEY='e2e-key' DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 TERM=xterm-256color TERM_PROGRAM=WezTerm '$TUI_BIN'"
   for argument in "$@"; do cmd="$cmd '$argument'"; done
   tmux -L "$SESSION" -f /dev/null new-session -d -s "$SESSION" -x 180 -y 48 "$cmd"
   for _ in $(seq 1 120); do
@@ -879,7 +957,8 @@ grep -q 'Dry run' "$WORKTREE_GC_OUT" \
 echo "[tui] preset picker"
 send_line "/preset"
 wait_frame "preset picker" 'Presets'
-grep -q 'Fixture custom preset' "$FRAME" || fail "custom preset was missing from the picker"
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" End
+wait_frame "custom preset in picker" 'Fixture custom preset'
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Home Enter
 wait_frame "preset selection" 'preset: standard'
 capture
@@ -950,6 +1029,239 @@ wait_frame "cache hit status" 'cache 99\.9%' 300
 grep -q 'POST /v1/chat/completions' "$MOCK_LOG" \
   || fail "the mock gateway never received a completion request"
 
+echo "[tui] CRLF paste stays in the composer until explicit submit"
+clear_prompt
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" 'E2E_CRLF_DRAFT' C-m C-j
+wait_frame "CRLF draft" 'E2E_CRLF_DRAFT'
+sleep 0.5
+if grep -Fq 'E2E_CRLF_DRAFT' "$MOCK_LOG"; then
+  fail "CRLF paste submitted without an explicit Enter"
+fi
+cp "$FRAME" "$OUT/crlf-draft-$RUN_ID.txt"
+send_line 'E2E_AFTER_CRLF'
+for _ in $(seq 1 100); do
+  grep -Fq 'E2E_AFTER_CRLF' "$MOCK_LOG" && break
+  sleep 0.1
+done
+grep -Fq 'E2E_AFTER_CRLF' "$MOCK_LOG" || fail "explicit CRLF draft submission did not reach the provider"
+wait_frame_absent "CRLF turn finished" '\[stop\]'
+
+echo "[tui] fullscreen external editor round trip and failure recovery"
+EDITOR_RAW_OUT="$OUT/editor-terminal-$RUN_ID.raw"
+tmux -L "$SESSION" -f /dev/null pipe-pane -o -t "$SESSION:0.0" "cat > '$EDITOR_RAW_OUT'"
+clear_prompt
+send_line '/edit-prompt'
+wait_frame "fullscreen external editor" 'E2E_EDITOR_DRAFT'
+tmux -L "$SESSION" -f /dev/null set-buffer -b "$SESSION-editor-paste" $'\nE2E_EDITOR_PASTE\npaste second line\n'
+tmux -L "$SESSION" -f /dev/null paste-buffer -d -p -b "$SESSION-editor-paste" -t "$SESSION:0.0"
+sleep 0.5
+if grep -Fq 'E2E_EDITOR_DRAFT' "$MOCK_LOG"; then
+  fail "returning from the external editor automatically submitted its draft"
+fi
+cp "$FRAME" "$OUT/editor-draft-$RUN_ID.txt"
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Enter
+for _ in $(seq 1 100); do
+  grep -Fq 'E2E_EDITOR_DRAFT' "$MOCK_LOG" && break
+  sleep 0.1
+done
+"$NODE_BIN" -e '
+  const fs = require("node:fs")
+  const prefix = "POST /v1/chat/completions "
+  const texts = fs.readFileSync(process.argv[1], "utf8").split("\n")
+    .filter(line => line.startsWith(prefix))
+    .flatMap(line => JSON.parse(line.slice(prefix.length)).messages)
+    .filter(message => message.role === "user")
+    .map(message => typeof message.content === "string" ? message.content
+      : message.content.filter(part => part.type === "text").map(part => part.text).join(""))
+  for (const expected of ["E2E_CRLF_DRAFT\nE2E_AFTER_CRLF", "E2E_EDITOR_DRAFT\nsecond line", "E2E_EDITOR_PASTE\npaste second line"]) {
+    if (!texts.some(text => text.includes(expected))) throw new Error("Draft changed before provider delivery: " + expected)
+  }
+' "$MOCK_LOG" || fail "draft text did not cross the complete product path intact"
+wait_frame_absent "editor turn finished" '\[stop\]'
+touch "$SCRATCH/e2e-bin/prompt-editor.fail"
+clear_prompt
+send_line '/edit-prompt'
+wait_frame "editor failure recovery" 'External prompt editor exited unsuccessfully'
+cp "$FRAME" "$OUT/editor-failure-$RUN_ID.txt"
+
+# Minimal starts with mouse capture disabled. Neither editor nor pager return
+# may turn it on; both must restore focus and bracketed paste after failure.
+send_line '/minimal'
+wait_frame "minimal editor mode" 'Switched to minimal mode'
+CHILD_COUNT=2
+for child in '/edit-prompt' '/transcript'; do
+  send_line "$child"
+  CHILD_COUNT=$((CHILD_COUNT + 1))
+  for _ in $(seq 1 100); do
+    if "$NODE_BIN" -e '
+      const raw = require("node:fs").readFileSync(process.argv[1], "utf8")
+      const ends = raw.split("\x1b]777;dscode-child-end\x07")
+      process.exit(ends.length === Number(process.argv[2]) + 1 && ends.at(-1).includes("\x1b[?2004h") ? 0 : 1)
+    ' "$EDITOR_RAW_OUT" "$CHILD_COUNT"; then break; fi
+    sleep 0.1
+  done
+done
+tmux -L "$SESSION" -f /dev/null pipe-pane -t "$SESSION:0.0"
+"$NODE_BIN" -e '
+  const assert = require("node:assert/strict")
+  const raw = require("node:fs").readFileSync(process.argv[1], "utf8")
+  const runs = raw.split("\x1b]777;dscode-child-start\x07")
+  assert.equal(runs.length, 5, "fullscreen success/failure, minimal editor, and pager must all run")
+  for (let i = 0; i < 4; i++) {
+    const before = runs[i], after = runs[i + 1].split("\x1b]777;dscode-child-end\x07")[1]
+    assert.ok(after, "child exit marker missing")
+    for (const mode of [1004, 2004]) {
+      assert.ok(before.lastIndexOf(`\x1b[?${mode}l`) > before.lastIndexOf(`\x1b[?${mode}h`), `report ${mode} must stop before child ${i}`)
+      assert.ok(after.includes(`\x1b[?${mode}h`), `report ${mode} must resume after child ${i}`)
+    }
+    assert.equal(after.includes("\x1b[?1003h"), i < 2, "restore the existing mouse choice")
+    if (i === 0) assert.ok(!before.includes("\x1b[?1049l"), "fullscreen handoff must keep the alternate screen")
+  }
+' "$EDITOR_RAW_OUT" || fail "external child terminal report restoration failed"
+rm "$SCRATCH/e2e-bin/prompt-editor.fail"
+send_line '/fullscreen'
+wait_frame "fullscreen after external child" 'Switched to fullscreen mode'
+
+echo "[tui] Markdown copy and wrapped OSC8 links through the real bridge"
+tmux -L "$SESSION" -f /dev/null pipe-pane -o -t "$SESSION:0.0" "cat > '$UPSTREAM_RAW_OUT'"
+clear_prompt
+send_line 'exercise upstream markdown copy'
+wait_frame "Markdown response" 'DSCODE_MARKDOWN_COPY' 300
+wait_frame "wrapped URL continuation" 'segment22' 100
+wait_frame_absent "Markdown turn finished" '\[stop\]'
+cp "$FRAME" "$OUT/markdown-response-$RUN_ID.txt"
+clear_prompt
+send_line "/copy $UPSTREAM_COPY_OUT"
+for _ in $(seq 1 100); do
+  [[ -s "$UPSTREAM_COPY_OUT" ]] && break
+  sleep 0.1
+done
+cmp "$DSCODE_E2E_MARKDOWN" "$UPSTREAM_COPY_OUT" || fail "/copy changed Markdown source"
+tmux -L "$SESSION" -f /dev/null pipe-pane -t "$SESSION:0.0"
+"$NODE_BIN" -e '
+  const fs = require("node:fs")
+  const url = fs.readFileSync(process.argv[1], "utf8").split("\n").find(line => line.startsWith("https://"))
+  const raw = fs.readFileSync(process.argv[2], "utf8").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+  const payloads = new Map()
+  for (const match of raw.matchAll(/\x1b\]8;id=(\d+);([^\x07\x1b]*)\x07([^\x1b]*)/g)) {
+    if (match[2] === url) payloads.set(match[1], (payloads.get(match[1]) ?? "") + match[3])
+  }
+  if (![...payloads.values()].some(text => text.includes("DSCODE_OSC8_LONG") && text.includes("segment22"))) {
+    throw new Error("Wrapped URL fragments did not share an OSC8 id: " + JSON.stringify([...payloads]))
+  }
+' "$DSCODE_E2E_MARKDOWN" "$UPSTREAM_RAW_OUT" || fail "wrapped terminal hyperlink was incomplete"
+
+echo "[tui] wrapped table cell copy preserves original source"
+clear_prompt
+tmux -L "$SESSION" -f /dev/null resize-window -t "$SESSION:0" -x 100 -y 48
+send_line 'exercise upstream table copy'
+wait_frame "table response" 'DSCODE_TABLE_COPY' 300
+wait_frame "table last row" 'alpha  beta' 100
+wait_frame_absent "table turn finished" '\[stop\]'
+"$NODE_BIN" --input-type=module - "$SESSION" "$DSCODE_E2E_TABLE" "$OUT/table-copy-$RUN_ID.json" <<'JS'
+import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { readFileSync, writeFileSync } from 'node:fs'
+const [session, source, output] = process.argv.slice(2)
+const tmux = (...args) => execFileSync('tmux', ['-L', session, '-f', '/dev/null', ...args], { encoding: 'utf8' })
+const cells = readFileSync(source, 'utf8').trim().split('\n').slice(2).map(line => line.slice(2, -2))
+const copied = []
+for (const [index, marker] of ['https://example.com/DSCODE_TABLE_COPY/', '中文表格', 'alpha  beta'].entries()) {
+  const lines = tmux('capture-pane', '-p', '-t', `${session}:0.0`).split('\n')
+  const y = lines.findIndex(line => line.includes(marker))
+  assert.ok(y >= 0, `cell is not visible: ${marker}`)
+  const x = lines[y].indexOf(marker)
+  // The cell prefixes are ASCII up to x, so character and terminal columns agree.
+  for (let click = 0; click < 3; click++) {
+    const mouse = `\x1b[<0;${x + 2};${y + 1}M\x1b[<0;${x + 2};${y + 1}m`
+    tmux('send-keys', '-t', `${session}:0.0`, '-H', ...Buffer.from(mouse).toString('hex').match(/../g))
+    await new Promise(resolve => setTimeout(resolve, 40))
+  }
+  let actual
+  for (let attempt = 0; attempt < 50; attempt++) {
+    try { actual = tmux('show-buffer') } catch {}
+    if (actual === cells[index]) break
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  assert.equal(actual, cells[index], `copied cell ${index}`)
+  copied.push(actual)
+  await new Promise(resolve => setTimeout(resolve, 400))
+}
+writeFileSync(output, JSON.stringify({ copied }, null, 2) + '\n')
+JS
+tmux -L "$SESSION" -f /dev/null resize-window -t "$SESSION:0" -x 180 -y 48
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Space
+
+echo "[tui] image draft stash, side prompt and explicit restore"
+clear_prompt
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" 'DSCODE_STASH_MAIN '
+# Use the real wrap image-paste frame: SSH intentionally treats file paths as text.
+"$NODE_BIN" -e 'process.stdout.write("GROK_WRAP_IMG\nimage/png\n" + require("node:fs").readFileSync(process.argv[1]).toString("base64"))' "$SCRATCH/stash.png" \
+  | tmux -L "$SESSION" -f /dev/null load-buffer -
+tmux -L "$SESSION" -f /dev/null paste-buffer -pr -t "$SESSION:0.0"
+wait_frame "image attached to draft" 'Image #1'
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" C-s
+wait_frame "draft stashed" 'Stashed'
+send_line 'DSCODE_STASH_SIDE'
+wait_frame "draft automatically restored" 'DSCODE_STASH_MAIN'
+for _ in $(seq 1 100); do
+  grep -Fq 'DSCODE_STASH_SIDE' "$MOCK_LOG" && break
+  sleep 0.1
+done
+grep -Fq 'DSCODE_STASH_SIDE' "$MOCK_LOG" || fail "side prompt never reached the model"
+if grep -Fq 'DSCODE_STASH_MAIN' "$MOCK_LOG"; then
+  fail "stashed draft sent without explicit submit"
+fi
+wait_frame_absent "stash side turn finished" '\[stop\]'
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Escape s
+wait_frame "Alt+S stashes" 'Stashed'
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Escape s
+wait_frame "Alt+S restores" 'DSCODE_STASH_MAIN'
+cp "$FRAME" "$OUT/stash-restored-$RUN_ID.txt"
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Enter
+for _ in $(seq 1 100); do
+  grep -Fq 'DSCODE_STASH_MAIN' "$MOCK_LOG" && break
+  sleep 0.1
+done
+"$NODE_BIN" -e '
+  const fs = require("node:fs")
+  const prefix = "POST /v1/chat/completions "
+  const requests = fs.readFileSync(process.argv[1], "utf8").split("\n")
+    .filter(line => line.startsWith(prefix)).map(line => JSON.parse(line.slice(prefix.length)))
+  const users = requests.flatMap(request => request.messages).filter(message => message.role === "user")
+  const main = users.find(message => JSON.stringify(message.content).includes("DSCODE_STASH_MAIN"))
+  if (!main || !JSON.stringify(main.content).includes("data:image/")) throw new Error("Stashed image lost before provider delivery")
+  const side = users.find(message => JSON.stringify(message.content).includes("DSCODE_STASH_SIDE"))
+  if (!side || JSON.stringify(side.content).includes("data:image/")) throw new Error("Stashed image leaked into side prompt")
+' "$MOCK_LOG" || fail "image stash did not round-trip through the product"
+wait_frame_absent "restored draft turn finished" '\[stop\]'
+
+echo "[tui] live fullscreen/minimal switch preserves stream and draft"
+clear_prompt
+send_line 'exercise live screen switch'
+wait_frame "held model stream" 'DSCODE_MODE_RUNNING' 300
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" 'DSCODE_SWITCH_DRAFT' C-s
+wait_frame "live draft stashed" 'Stashed'
+SWITCH_LEADER_PID="$(leader_pid "$SOCKET")"
+for round in 1 2; do
+  send_line '/minimal'
+  wait_screen_mode 0
+  wait_frame "live minimal switch" 'Switched to minimal mode'
+  send_line '/fullscreen'
+  wait_screen_mode 1
+  wait_frame "live fullscreen switch" 'Switched to fullscreen mode'
+done
+[[ "$(leader_pid "$SOCKET")" == "$SWITCH_LEADER_PID" ]] || fail "screen switch restarted the leader"
+curl --fail --silent --show-error -X POST "$GATEWAY/preset-probe/release" >/dev/null || fail "screen switch lost the held model stream"
+wait_frame "model stream completed after switches" 'DSCODE_MODE_COMPLETE' 300
+wait_frame_absent "switched turn finished" '\[stop\]'
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" C-s
+wait_frame "draft survived mode switches" 'DSCODE_SWITCH_DRAFT'
+if grep -Fq 'DSCODE_SWITCH_DRAFT' "$MOCK_LOG"; then
+  fail "screen switch sent the stashed draft"
+fi
+cp "$FRAME" "$OUT/mode-switch-$RUN_ID.txt"
+
 echo "[tui] ask_user_question through the real bridge"
 clear_prompt
 send_line "exercise the ask_user_question bridge"
@@ -1003,12 +1315,7 @@ completion_count_after_text_image="$(grep -c 'POST /v1/chat/completions' "$MOCK_
   || fail "text-only image rejection still reached the provider"
 wait_leader_exit "$HEADLESS_TEXT_IMAGE_SOCKET"
 
-echo "[contracts] exact runtime state, native goals, tasks and durable history"
-env DSCODE_E2E_SCRATCH="$SCRATCH" DSCODE_E2E_ARTIFACTS="$OUT" \
-  DSCODE_E2E_RUN_ID="$RUN_ID" DSCODE_E2E_MOCK_LOG="$MOCK_LOG" \
-  DSCODE_TUI_BIN="$TUI_BIN" DSH_BIN="$DSH_BIN" \
-  "$NODE_BIN" "$ROOT/scripts/e2e-contracts.mjs" \
-  || fail "runtime contract acceptance failed"
+run_runtime_contracts
 
 echo "PASS real TUI + dsh + bridge E2E run $RUN_ID"
 echo "  artifacts: $OUT (*-$RUN_ID.*)"

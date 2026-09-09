@@ -33,7 +33,8 @@ import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { createGunzip } from 'node:zlib'
-import { compareVersions, installRelease, needsUpdateWithChannel, resolveRelease, updateOptions, validateRuntime } from './update.mjs'
+import { installationReport, formatInstallationReport } from './doctor.mjs'
+import { compareVersions, installRelease, needsUpdateWithChannel, resolveRelease, updateOptions, validateRuntime, withProfileLock } from './update.mjs'
 
 const RELEASE_REPO = 'HQ1995/deepseek-code'
 const here = dirname(fileURLToPath(import.meta.url))
@@ -468,6 +469,14 @@ export const updateCommandIndex = (args) => {
 
 const main = async () => {
   const args = process.argv.slice(2)
+  // Diagnostics must work even when provisioning/tuple validation would fail.
+  if (args[0] === 'doctor' && args.includes('--runtime')) {
+    if (args.some(arg => !['doctor', '--runtime', '--json'].includes(arg))) throw new Error('Usage: dscode doctor --runtime [--json]')
+    const findings = installationReport({ profile: profileDir })
+    console.log(args.includes('--json') ? JSON.stringify(findings) : formatInstallationReport(findings))
+    process.exitCode = findings.some(finding => finding.status === 'ERROR') ? 1 : 0
+    return
+  }
   const updateIndex = updateCommandIndex(args)
   if (updateIndex === -1 && (args.includes('--help') || args.includes('-h'))) {
     if (existsSync(binPath)) spawnAndExit(binPath, args, process.env)
@@ -527,20 +536,18 @@ const main = async () => {
       spawnAndExit(profileLauncher, args, process.env)
       return
     }
-    ensureProfilePlugin()
-    healLauncherLink()
-    migrateLegacyTuiHome()
   }
-  // The two large first-run operations are independent: install the private
-  // dsh runtime while the platform TUI downloads, instead of serializing
-  // roughly 270 MB of npm packages before a roughly 153 MB release asset.
-  const requestedBin = process.env.DSCODE_BIN
-  const [dshBin, bin] = await Promise.all([
-    ensureDshCli(),
-    requestedBin !== undefined && requestedBin !== ''
-      ? Promise.resolve(requestedBin)
-      : ensureBinary(),
-  ])
+  const [dshBin, bin] = await withProfileLock(profileDir, async () => {
+    if (!process.env.DSCODE_BIN) {
+      ensureProfilePlugin()
+      healLauncherLink()
+      migrateLegacyTuiHome()
+    }
+    return await Promise.all([
+      ensureDshCli(),
+      process.env.DSCODE_BIN ? Promise.resolve(process.env.DSCODE_BIN) : ensureBinary(),
+    ])
+  })
   const localBin = join(homedir(), '.local', 'bin')
   const path = process.env.PATH ?? ''
   const pathParts = path.split(delimiter)

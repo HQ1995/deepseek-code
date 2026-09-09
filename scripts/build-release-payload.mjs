@@ -80,15 +80,15 @@ function sourceConsumer(source, consumer, manifest, reuse) {
   run('pnpm', ['install', '--frozen-lockfile'], source, env);
   run('pnpm', ['run', 'build:official'], source, { ...env, DSH_CLIENT_COMMIT_HASH: commit });
   for (const [family, out] of [['dsh', 'dist/npm'], ['vendor', 'dist/npm-vendor']]) run('pnpm', ['run', 'release:pack', '--family', family, '--out', out], source, env);
-  const native = join(source, 'native/landlock-run');
-  if (process.platform === 'linux') run('pnpm', ['run', 'build:native'], native, env);
-  const packed = join(source, 'dist/npm-landlock');
+  const native = join(source, 'native/system');
+  run('pnpm', ['run', 'build:native'], native, env);
+  const packed = join(source, 'dist/npm-system');
   mkdirSync(packed, { recursive: true });
   run('pnpm', ['--dir', join(native, 'packages/entry'), 'pack', '--pack-destination', packed], source, env);
   // pnpm rewrites entry workspace dependencies, but strips platform binary modes.
-  if (process.platform === 'linux') run('npm', ['pack', '--pack-destination', packed], join(native, 'packages', `linux-${process.arch}`));
+  run('npm', ['pack', '--pack-destination', packed], join(native, 'packages', `${process.platform}-${process.arch}`));
   const dependencies = {};
-  for (const dir of ['dist/npm', 'dist/npm-vendor', 'dist/npm-landlock']) {
+  for (const dir of ['dist/npm', 'dist/npm-vendor', 'dist/npm-system']) {
     for (const file of readdirSync(join(source, dir)).filter(file => file.endsWith('.tgz'))) {
       const path = join(source, dir, file);
       const pkg = JSON.parse(run('tar', ['-xOf', path, 'package/package.json']));
@@ -104,7 +104,6 @@ function sourceConsumer(source, consumer, manifest, reuse) {
     allowScripts: {
       [dependencies['@deepseek-ai/dsh-subprocess-local']]: true,
       esbuild: true,
-      'fs-ext': true,
       koffi: true,
       'node-pty': true,
       protobufjs: true,
@@ -126,10 +125,13 @@ function buildRuntime(consumer, source, manifest, out, work) {
   if (cli.version !== manifest.dsh.testedVersion) throw new Error('Runtime CLI manifest version mismatch');
   symlinkSync(`../node_modules/@deepseek-ai/dsh/${cli.bin.dsh}`, join(stage, 'bin/dsh'));
   if (process.platform === 'linux') {
-    const native = join(stage, `node_modules/@deepseek-ai/node-addon-landlock-run-linux-${process.arch}`);
+    const native = join(stage, `node_modules/@deepseek-ai/node-addon-system-linux-${process.arch}`);
     const descriptor = json(join(native, 'prebuilds.json'));
     if (descriptor.platform !== `linux-${process.arch}` || !descriptor.binaries.some(binary => binary.tool === 'landlock-run' && binary.kind === 'static-musl')) throw new Error('Native helper platform/format mismatch');
-    for (const binary of descriptor.binaries) if (!(statSync(join(native, binary.path)).mode & 0o111)) throw new Error(`Missing executable native helper ${binary.path}`);
+    for (const binary of descriptor.binaries) {
+      const artifact = statSync(join(native, binary.path));
+      if (!artifact.isFile() || (binary.kind === 'static-musl' && !(artifact.mode & 0o111))) throw new Error(`Missing native helper ${binary.path}`);
+    }
   }
   const version = run(process.execPath, [join(stage, 'bin/dsh'), '--version'], stage);
   if (version !== manifest.dsh.testedVersion) throw new Error(`Runtime CLI reports ${version}`);
@@ -142,7 +144,7 @@ function buildRuntime(consumer, source, manifest, out, work) {
 function buildPlugin(consumer, manifest, version, out, work) {
   const stage = join(work, 'plugin');
   mkdirSync(stage);
-  for (const name of ['src', 'bin', 'presets', 'cordis.patch.yml', 'tsconfig.json']) cpSync(join(root, 'bridge/grok-leader', name), join(stage, name), { recursive: true });
+  for (const name of ['src', 'bin', 'presets', 'README.md', 'cordis.patch.yml', 'tsconfig.json']) cpSync(join(root, 'bridge/grok-leader', name), join(stage, name), { recursive: true });
   // A temporary compilation tree consumes the source-built SDK, never registry alpha SDKs.
   symlinkSync(join(consumer, 'node_modules'), join(stage, 'node_modules'));
   save(join(stage, 'package.json'), manifest);

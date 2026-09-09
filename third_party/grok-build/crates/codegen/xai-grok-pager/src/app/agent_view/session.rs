@@ -151,6 +151,9 @@ impl AgentView {
             bash_turn: false,
             cron_task_id: None,
             stashed_prompt: None,
+            prompt_stash: None,
+            draft_consumed: false,
+            prompt_stash_evicted: Vec::new(),
             credit_limit_stashed_prompt: None,
             reauth_stashed_prompt: None,
             active_modal: None,
@@ -297,6 +300,7 @@ impl AgentView {
             session_banner_active: false,
             pinned_upgrade_cta_live: false,
             block_viewer: None,
+            block_viewer_resume: None,
             scrollback_search: None,
             hit_sb_copy: Default::default(),
             hit_sb_view: Default::default(),
@@ -487,13 +491,16 @@ impl AgentView {
     /// replayed updates.
     pub(crate) fn take_replay_rebuilt_state(&mut self) -> ReplayRebuiltState {
         let fresh = self.scrollback.fresh_continuation();
+        let todo = std::mem::take(&mut self.todo);
+        // Replay replaces data, preserving a pane opened while history was loading.
+        self.todo.overlay = todo.overlay;
         ReplayRebuiltState {
             scrollback: std::mem::replace(&mut self.scrollback, fresh),
             tracker: std::mem::replace(
                 &mut self.session.tracker,
                 crate::acp::tracker::AcpUpdateTracker::new(),
             ),
-            todo: std::mem::take(&mut self.todo),
+            todo,
             workflow_blocks: std::mem::take(&mut self.workflow_blocks),
             workflow_runs: std::mem::take(&mut self.workflow_runs),
             workflow_run_revisions: std::mem::take(&mut self.workflow_run_revisions),
@@ -2092,6 +2099,7 @@ mod resolve_turn_activity_tests {
                 child_cwd: None,
                 worktree_path: None,
                 transcript: Default::default(),
+                native: None,
             },
         );
         let meta = NotificationMeta::default();

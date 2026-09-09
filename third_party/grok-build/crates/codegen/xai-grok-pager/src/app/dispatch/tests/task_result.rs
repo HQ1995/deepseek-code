@@ -43,10 +43,10 @@ fn native_goal_result_is_separate_from_live_assistant_and_never_settles_turn() {
             let before = agent.scrollback.len();
             let expected = match &result {
                 Ok(text) => text.clone(),
-                Err(error) => format!("Goal command failed: {error}"),
+                Err(error) => format!("Command failed: {error}"),
             };
             let effects = dispatch(
-                Action::TaskComplete(TaskResult::GoalCommandComplete {
+                Action::TaskComplete(TaskResult::SessionCommandComplete {
                     agent_id: id,
                     session_id,
                     result,
@@ -56,7 +56,8 @@ fn native_goal_result_is_separate_from_live_assistant_and_never_settles_turn() {
             assert!(effects.is_empty());
             let agent = app.agents.get_mut(&id).unwrap();
             assert_eq!(agent.scrollback.len(), before + 1);
-            assert!(matches!(&agent.scrollback.entry(before).unwrap().block,
+            let control_index = agent.scrollback.index_of_id(live_entry).unwrap() - 1;
+            assert!(matches!(&agent.scrollback.entry(control_index).unwrap().block,
                 RenderBlock::System(block) if block.text == expected));
             let entry = agent.scrollback.get_by_id(live_entry).unwrap();
             assert!(entry.is_running);
@@ -89,9 +90,49 @@ fn native_goal_result_is_separate_from_live_assistant_and_never_settles_turn() {
                 matches!(&agent.scrollback.get_by_id(live_entry).unwrap().block,
                 RenderBlock::AgentMessage(message) if message.text() == "live assistant continues")
             );
-            assert!(matches!(&agent.scrollback.entry(before).unwrap().block,
+            assert!(matches!(&agent.scrollback.entry(control_index).unwrap().block,
                 RenderBlock::System(block) if block.text == expected));
         }
+    }
+}
+
+#[test]
+fn native_goal_result_keeps_live_output_visible_in_both_arrival_orders() {
+    for result_first in [true, false] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        let session_id = agent.session.session_id.clone().unwrap();
+        agent.native_session_running = true;
+        agent.scrollback.push_block(RenderBlock::user_prompt("previous turn"));
+        agent.scrollback.push_block(RenderBlock::system("old output\n".repeat(30)));
+        agent.scrollback.prepare_layout(80, 8);
+        agent.scrollback.goto_bottom();
+        for complete in [result_first, !result_first] {
+            if complete {
+                dispatch(Action::TaskComplete(TaskResult::SessionCommandComplete {
+                    agent_id: id,
+                    session_id: session_id.clone(),
+                    result: Ok("Goal created\n".repeat(12)),
+                }), &mut app);
+            } else {
+                let agent = app.agents.get_mut(&id).unwrap();
+                agent.session.tracker.handle_update(
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                        acp::ContentBlock::Text(acp::TextContent::new("native live output")),
+                    )),
+                    &crate::acp::meta::NotificationMeta::default(),
+                    &mut agent.scrollback,
+                );
+            }
+        }
+        let sb = &mut app.agents.get_mut(&id).unwrap().scrollback;
+        sb.prepare_layout(80, 8);
+        let visible = (0..8).filter_map(|row| sb.entry_index_at_screen_row(
+            row, ratatui::layout::Rect::new(0, 0, 80, 8),
+        )).any(|index| matches!(&sb.entry(index).unwrap().block,
+            RenderBlock::AgentMessage(message) if message.text() == "native live output"));
+        assert!(visible, "command result_first={result_first} hid the live response");
     }
 }
 
@@ -116,7 +157,7 @@ fn native_goal_result_ignores_missing_agent_and_stale_or_unbound_session() {
         ] {
             assert!(
                 dispatch(
-                    Action::TaskComplete(TaskResult::GoalCommandComplete {
+                    Action::TaskComplete(TaskResult::SessionCommandComplete {
                         agent_id: if target == "missing-agent" {
                             AgentId(999)
                         } else {

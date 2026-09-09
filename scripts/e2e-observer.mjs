@@ -18,13 +18,26 @@ export function apply(ctx) {
         if (!agent) continue
         const permission = ctx.permissionPresets.current(agent.session)
         const descendants = await ctx.subagents.listDescendants(agent.id)
+        if (ctx.agents.get(listed.id) !== agent) continue
         agents.push({
           id: agent.id, status: agent.status,
+          cwd: agent.session.header.cwd,
+          skills: await (ctx.get('agentPresets')?.serviceFor(agent, 'skills') ?? ctx.get('skills'))?.list({ cwd: agent.session.header.cwd, scope: agent }),
+          inbox: { nextTurn: agent.inbox.nextTurn, nextStep: agent.inbox.nextStep },
           permission, policy: ctx.permissionPresets.resolve(permission),
           goal: ctx.goals.get(agent) ?? null,
+          workflows: agent.session.snapshotEvents().filter(event => String(event.type).startsWith('tool-workflow/')),
+          schedules: agent.session.ownEvents().filter(event => event.type === 'schedule/change'),
+          images: agent.session.snapshotEvents().flatMap(event => event.type !== 'tool/result' ? [] :
+            event.data.message.content.flatMap(result => result.type !== 'tool-result' ? [] :
+              result.content.filter(block => block.type === 'image').map(block => ({
+                callId: result.toolCallId, attachment: block.attachment,
+                path: ctx.get('attachments')?.imageHostPath(block.attachment),
+              })))),
           projections: ctx.sessionProjections.snapshot(agent.session,
-            ['contextPressure', 'tokenUsage', 'contextBreakdown', 'goal', 'permissions']),
+            ['contextPressure', 'tokenUsage', 'contextBreakdown', 'goal', 'permissions', 'schedule']),
           jobs: ctx.jobs.list(agent),
+          terminals: ctx.get('terminals')?.list(agent) ?? [],
           descendants: descendants.map(child => ({ ...child,
             status: ctx.agents.get(child.id)?.status ?? null })),
         })
@@ -39,6 +52,6 @@ export function apply(ctx) {
   }
   const timer = setInterval(sample, 100)
   timer.unref()
-  ctx.on('dispose', () => clearInterval(timer))
+  ctx.effect(() => () => clearInterval(timer))
   void sample()
 }

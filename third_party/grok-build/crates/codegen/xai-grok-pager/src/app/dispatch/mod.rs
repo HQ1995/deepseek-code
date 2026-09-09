@@ -23,6 +23,7 @@ mod import_claude;
 mod interject;
 mod jump;
 mod modes;
+mod native_controls;
 mod notes;
 mod permissions;
 mod prompt;

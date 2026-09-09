@@ -1493,6 +1493,34 @@ impl AgentView {
                 }
                 InputOutcome::Changed
             }
+            ButtonAction::UseSelectedSkill => {
+                let name = self.extensions_modal.as_ref().and_then(|state| {
+                    let TabDataState::Loaded(skills) = &state.skills_data else {
+                        return None;
+                    };
+                    let skill = skills.get(state.selected_data_index()?)?;
+                    (skill.enabled && skill.user_invocable).then(|| skill.name.clone())
+                });
+                let Some(name) = name else {
+                    return InputOutcome::Unchanged;
+                };
+                // A sentence also permits names reserved by a TUI command; the
+                // native skill gesture accepts /name anywhere in user prose.
+                let prefix = if self.prompt.cursor() == 0 { "" } else { "\n" };
+                self.prompt
+                    .insert_replacing_selection(&format!("{prefix}Use /{name} "));
+                self.prompt_input_mode = super::PromptInputMode::Normal;
+                self.extensions_modal = None;
+                self.prompt.refresh_slash(&self.session.models);
+                if let Some(effect) = self.notify_suggestion_text_changed() {
+                    self.pending_effects.push(effect);
+                }
+                if let Some(effect) = self.notify_plugin_cta_text_changed() {
+                    self.pending_effects.push(effect);
+                }
+                self.set_active_pane(super::AgentPane::Prompt, true);
+                InputOutcome::Changed
+            }
             ButtonAction::ReloadSkills => {
                 if let Some(ref mut state) = self.extensions_modal {
                     state.skills_data = crate::views::extensions_modal::TabDataState::Loading;
@@ -3344,6 +3372,49 @@ mod extensions_modal_confirmation_tests {
                     .is_none(),
                 "key {code:?} must dismiss confirmation"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_skill_invocation_tests {
+    use super::*;
+    use crate::views::extensions_modal::{
+        ButtonAction, ExtensionsModalState, ExtensionsTab, TabDataState,
+    };
+
+    #[test]
+    fn use_skill_preserves_draft_and_does_not_send_or_run_bash() {
+        for invocable in [true, false] {
+            let mut agent = test_fixtures::make_agent();
+            agent.prompt.set_text("review this change");
+            agent.prompt_input_mode = super::super::PromptInputMode::Bash;
+            let before = agent.prompt.text().to_string();
+            let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+            modal.skills_data = TabDataState::Loaded(vec![
+                serde_json::from_value(serde_json::json!({
+                    "name": "help", "description": "User-only instructions", "path": "",
+                    "scope": "plugin", "user_invocable": invocable, "enabled": true
+                }))
+                .unwrap(),
+            ]);
+            modal.entry_data_indices = vec![Some(0)];
+            agent.extensions_modal = Some(modal);
+            let result = agent.execute_modal_button_action(ButtonAction::UseSelectedSkill);
+            if invocable {
+                assert!(matches!(result, InputOutcome::Changed));
+                assert!(agent.extensions_modal.is_none());
+                assert!(agent.prompt.text().contains(&before));
+                assert!(agent.prompt.text().contains("Use /help "));
+                assert_eq!(
+                    agent.prompt_input_mode,
+                    super::super::PromptInputMode::Normal
+                );
+            } else {
+                assert!(matches!(result, InputOutcome::Unchanged));
+                assert!(agent.extensions_modal.is_some());
+                assert_eq!(agent.prompt.text(), before);
+            }
         }
     }
 }

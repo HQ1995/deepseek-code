@@ -151,7 +151,7 @@ fn revalidate(app: &mut AppView, request: PendingEditorRequest) -> Option<Pendin
     let access = app
         .agents
         .get(&agent_id)
-        .map(|agent| agent.external_prompt_editor_access(true));
+        .map(|agent| agent.external_prompt_editor_access());
     let message = if app.voice_recording_target()
         == Some(crate::app::app_view::VoiceTarget::Agent(agent_id))
     {

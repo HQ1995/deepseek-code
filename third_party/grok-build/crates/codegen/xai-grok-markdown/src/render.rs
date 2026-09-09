@@ -12,7 +12,9 @@ use anstyle::{Effects, Reset, Style};
 use ratatui::text::{Line, Span};
 use syntect::highlighting::Style as SyntectStyle;
 
-use crate::buffers::{MarkdownBuffers, RenderEvent, RenderEventKind, unicode_display_width};
+use crate::buffers::{
+    MarkdownBuffers, RenderEvent, RenderEventKind, TableCopyMeta, unicode_display_width,
+};
 use crate::checkpoint::Checkpoint;
 use crate::colors::adapt_style;
 use crate::hyperlinks::{ChunkLinkRange, chunk_link_offsets, emit_segment_hyperlinks};
@@ -525,6 +527,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut line_source_map: Vec<usize> = Vec::new();
         let mut hyperlinks: Vec<HyperlinkTarget> = Vec::new();
+        let mut tables: Vec<TableCopyMeta> = Vec::new();
 
         let mut last_pos = 0;
         let mut replace: Option<usize> = None;
@@ -900,8 +903,15 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                                 id: link.id,
                             });
                         }
-                        // Table emits whole pre-rendered lines; reset col so
-                        // any subsequent inline content starts at column 0.
+                        if trepl.n_cols > 0 {
+                            tables.push(TableCopyMeta {
+                                line_index: table_base_line,
+                                line_count: trepl.styled_lines.len(),
+                                n_cols: trepl.n_cols,
+                                cells: trepl.cell_copies.clone(),
+                            });
+                        }
+                        // Table emits whole pre-rendered lines; reset col so any subsequent inline content starts at column 0
                         cur_col_in_line = 0;
 
                         last_pos = trepl.range.end;
@@ -1143,6 +1153,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                 line_source_map,
                 hyperlinks,
                 code_blocks,
+                tables,
             },
             checkpoint,
         )
@@ -1741,7 +1752,7 @@ mod tests {
             // Representable width: at least the widest single grapheme.
             let width = widest.max(4);
 
-            let lines = crate::parse::MarkdownParser::wrap_cell_text(text, width);
+            let lines = crate::parse::MarkdownParser::wrap_cell_text_joins(text, width).0;
             assert!(!lines.is_empty(), "wrap must never return an empty vec");
             assert!(
                 lines.len() > 1,
@@ -1931,6 +1942,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A bare URL wrapped across table-cell lines yields one fragment per line,
+    /// each with the full URL and a shared id.
+    #[test]
+    fn test_table_bare_url_wrapped_keeps_full_url_on_every_line() {
+        let url = "https://example.com/very/long/path/segment/that/wraps/around/the/cell";
+        let md = format!("| A | B |\n|---|---|\n| x | see {url} now |\n\n");
+
+        let mut buffers = crate::MarkdownBuffers::new();
+        let (output, _) = crate::render_markdown_ratatui_with_buffers_width(
+            &md,
+            test_style::STYLE,
+            true,
+            &mut buffers,
+            None,
+            Some(30),
+        );
+        let lines = lines_to_text(&output.lines);
+
+        let links = &output.hyperlinks;
+        assert!(
+            links.len() >= 2,
+            "URL must wrap into multiple fragments: {links:#?}\n{lines:#?}"
+        );
+        let id = links[0].id;
+        let mut covered = String::new();
+        for link in links {
+            assert_eq!(link.url, url, "every fragment must carry the full URL");
+            assert_eq!(link.id, id, "fragments must share one link id");
+            let line = &lines[link.line_index];
+            covered.extend(
+                line.chars()
+                    .skip(link.column_range.start)
+                    .take(link.column_range.len()),
+            );
+        }
+        assert_eq!(
+            covered, url,
+            "fragments must cover exactly the URL text, not the surrounding words"
+        );
+    }
+
+    /// Same for a bare email: every wrapped fragment carries the `mailto:` target.
+    #[test]
+    fn test_table_bare_email_wrapped_keeps_mailto_on_every_line() {
+        let email = "someone.with.a.long.name@subdomain.example-organisation.com";
+        let md = format!("| A | B |\n|---|---|\n| x | {email} |\n\n");
+
+        let mut buffers = crate::MarkdownBuffers::new();
+        let (output, _) = crate::render_markdown_ratatui_with_buffers_width(
+            &md,
+            test_style::STYLE,
+            true,
+            &mut buffers,
+            None,
+            Some(30),
+        );
+
+        let links = &output.hyperlinks;
+        assert!(
+            links.len() >= 2,
+            "email must wrap into fragments: {links:#?}"
+        );
+        assert!(
+            links
+                .iter()
+                .all(|l| l.url == format!("mailto:{email}") && l.id == links[0].id),
+            "every fragment must carry the full mailto target: {links:#?}"
+        );
     }
 
     /// Table source map: rendered line numbers must not exceed the table's

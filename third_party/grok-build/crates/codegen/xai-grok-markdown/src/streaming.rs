@@ -315,9 +315,11 @@ impl StreamingMarkdownRenderer {
         self.output
             .hyperlinks
             .retain(|h| h.line_index < self.frozen.lines_len);
-        // Discard stale tail code-block spans (keep frozen ones — those whose
-        // body lies entirely within the frozen prefix). A still-open fence in
-        // the tail has no span at all, so spans become stable only once frozen.
+        self.output
+            .tables
+            .retain(|t| t.line_index < self.frozen.lines_len);
+        // Discard stale tail code-block spans, keeping frozen ones (those whose body lies entirely within the frozen prefix)
+        // A still-open fence in the tail has no span, so spans become stable only once frozen
         self.output
             .code_blocks
             .retain(|cb| cb.output_line_range.end <= self.frozen.lines_len);
@@ -370,6 +372,12 @@ impl StreamingMarkdownRenderer {
             .extend(tail_output.hyperlinks.into_iter().map(|mut h| {
                 h.line_index += frozen_lines;
                 h
+            }));
+        self.output
+            .tables
+            .extend(tail_output.tables.into_iter().map(|mut t| {
+                t.line_index += frozen_lines;
+                t
             }));
 
         // Append tail code-block spans, rebasing their tail-relative ranges to
@@ -1574,6 +1582,39 @@ Final paragraph with no trailing newline."#;
             &["| A | B |\n|---|---|\n| 1 | 2 |\n\n", "Paragraph\n\n"],
             "table then paragraph",
         );
+    }
+
+    #[test]
+    fn table_copy_metadata_survives_streaming_and_width_changes() {
+        let chunks = [
+            "# Intro\n\n",
+            "| Value |\n| --- |\n| https://example.com/a_long_identifier/路径/item |",
+            "\n\nAfter the first table.\n\n",
+            "| Value |\n| --- |\n| alpha  beta   gamma / 中文 |",
+            "\n\nTail.\n",
+        ];
+        let source = chunks.concat();
+        let mut renderer = StreamingMarkdownRenderer::new(test_style::STYLE, true);
+        renderer.set_max_table_width(Some(24));
+        for chunk in chunks {
+            renderer.push_and_render(chunk, None);
+        }
+        assert!(renderer.frozen_lines_count() > 0);
+        for width in [24, 18] {
+            renderer.set_max_table_width(Some(width));
+            let streamed = renderer.finish(None).tables.to_vec();
+            let mut batch = StreamingMarkdownRenderer::new(test_style::STYLE, true);
+            batch.set_max_table_width(Some(width));
+            batch.push(&source);
+            assert_eq!(streamed, batch.finish(None).tables);
+            assert_eq!(streamed.len(), 2);
+            assert!(streamed[1].line_index > streamed[0].line_index);
+            assert_eq!(
+                streamed[0].cells[1].text,
+                "https://example.com/a_long_identifier/路径/item"
+            );
+            assert_eq!(streamed[1].cells[1].text, "alpha  beta   gamma / 中文");
+        }
     }
 
     #[test]

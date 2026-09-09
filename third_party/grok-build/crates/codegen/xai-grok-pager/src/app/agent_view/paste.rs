@@ -229,7 +229,7 @@ impl AgentView {
     /// After a deferred paste probe completes, take the kind of any send
     /// stashed while the probe(s) were in flight. Returns `None` while probes
     /// remain in flight or nothing is stashed. The stash is always cleared; the
-    /// caller builds the action (via [`Self::build_deferred_send_action`]) only
+    /// caller resumes the action (via [`Self::resume_deferred_send`]) only
     /// when it actually reissues, so a dropped reissue keeps the draft intact.
     pub(crate) fn take_deferred_send_after_paste(&mut self) -> Option<AgentDeferredSend> {
         if self.paste_probe_in_flight != 0 {
@@ -242,13 +242,13 @@ impl AgentView {
     /// aligned range) travels with it. Call only when actually reissuing — the
     /// interject variant consumes the draft (drain images + clear) exactly like
     /// the `InterjectPrompt` arm it was stashed from.
-    pub(crate) fn build_deferred_send_action(&mut self, kind: AgentDeferredSend) -> Option<Action> {
+    pub(crate) fn resume_deferred_send(&mut self, kind: AgentDeferredSend) -> Option<Action> {
         match kind {
             AgentDeferredSend::SendPrompt => {
                 let text = self.prompt.text().to_string();
                 (!text.trim().is_empty()).then_some(Action::SendPrompt(text))
             }
-            AgentDeferredSend::Interject => {
+            AgentDeferredSend::Interject | AgentDeferredSend::Steer => {
                 let text = self.prompt.text().trim().to_string();
                 if !ActionRegistry::interjection_possible(
                     self.session.state.is_turn_running(),
@@ -258,7 +258,16 @@ impl AgentView {
                 }
                 let images = self.prompt.drain_images();
                 self.prompt.set_text("");
-                Some(Action::SendPromptNow { text, images })
+                self.note_draft_consumed();
+                Some(if kind == AgentDeferredSend::Steer {
+                    Action::Interject { text, images }
+                } else {
+                    Action::SendPromptNow { text, images }
+                })
+            }
+            AgentDeferredSend::Stash => {
+                self.handle_stash_prompt_key();
+                None
             }
         }
     }

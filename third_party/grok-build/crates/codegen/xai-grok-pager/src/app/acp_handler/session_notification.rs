@@ -8,6 +8,13 @@ fn retain_subagent_terminal_output(
     child_session_id: &str,
     output: &str,
 ) -> bool {
+    if agent
+        .subagent_sessions
+        .get(child_session_id)
+        .is_some_and(|info| info.native.is_some())
+    {
+        return false;
+    }
     if output.is_empty() || !agent.subagent_views.contains_key(child_session_id) {
         return false;
     }
@@ -234,9 +241,46 @@ pub(super) fn handle_session_notification_with_origin(
         &session_notif.update,
         XaiSessionUpdate::WorkflowUpdated { .. }
     );
-    let is_subagent_lifecycle = if let Some(lifecycle) =
-        classify_subagent_lifecycle(&session_notif.update, origin)
+    let native_attempt = session_notif
+        .meta
+        .as_ref()
+        .and_then(|value| value.get("nativeAttemptId"))
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+    let native_history = session_notif
+        .meta
+        .as_ref()
+        .and_then(|value| value.get("nativeChildHistory"))
+        .and_then(|value| value.as_bool())
+        == Some(true);
+    if let XaiSessionUpdate::SubagentFinished {
+        child_session_id, ..
+    } = &session_notif.update
+        && agent
+            .subagent_sessions
+            .get(child_session_id)
+            .and_then(|info| info.native.as_ref())
+            .is_some_and(|native| native_attempt.as_deref() != Some(native.attempt_id.as_str()))
     {
+        return false;
+    }
+    // DSH continuations reuse the child session. Only a fresh, explicit live
+    // resume may reopen a terminal row; delayed spawn/replay duplicates may not.
+    let native_resume = !meta.is_replay
+        && meta.event_seq.is_some_and(|seq| {
+            agent
+                .last_applied_xai_event_seq
+                .is_none_or(|last| seq > last)
+        })
+        && matches!(&session_notif.update,
+        XaiSessionUpdate::SubagentSpawned { child_session_id, subagent_type, resumed_from, .. }
+            if resumed_from.as_deref() == Some(child_session_id.as_str())
+                && agent.subagent_sessions.get(child_session_id).is_some_and(|info| {
+                    info.native.as_ref().map_or(subagent_type == "continuable" && info.finished, |native| native_attempt.as_deref().is_some_and(|attempt| native.attempt_id != attempt))
+                }));
+    let is_subagent_lifecycle = if native_resume {
+        true
+    } else if let Some(lifecycle) = classify_subagent_lifecycle(&session_notif.update, origin) {
         match gate_subagent_lifecycle(
             &agent.subagent_sessions,
             &agent.scrollback,
@@ -478,12 +522,26 @@ pub(super) fn handle_session_notification_with_origin(
                 subagent_type = %subagent_type,
                 "Subagent spawned"
             );
+            let workflow_member = agent.workflow_runs.iter().find_map(|run| {
+                run.agents.iter().find(|member| member.agent_id == child_session_id)
+                    .map(|member| (run, member))
+            });
+            let description = if description.is_empty() {
+                workflow_member.map(|(_, member)| member.label.clone()).unwrap_or(description)
+            } else { description };
+            let workflow_run_id = workflow_run_id.or_else(|| workflow_member.map(|(run, _)| run.run_id.clone()));
             let is_background = agent
                 .session
                 .tracker
                 .task_tool_background
                 .remove(&subagent_id)
-                .unwrap_or(false);
+                .unwrap_or_else(|| {
+                    native_resume
+                        && agent
+                            .subagent_sessions
+                            .get(&child_session_id)
+                            .is_some_and(|info| info.is_background)
+                });
             let persona_display = persona.clone();
             let role_display = role.clone();
             let model_display = model.clone();
@@ -492,7 +550,7 @@ pub(super) fn handle_session_notification_with_origin(
             let retained_terminal_finish = agent
                 .subagent_sessions
                 .get(&child_session_id)
-                .filter(|info| info.finished)
+                .filter(|info| info.finished && !native_resume)
                 .map(|info| SessionNotification {
                     session_id: session_notif.session_id.clone(),
                     update: XaiSessionUpdate::SubagentFinished {
@@ -521,6 +579,9 @@ pub(super) fn handle_session_notification_with_origin(
                         meta
                     },
                 });
+            let retained_child_info = native_resume
+                .then(|| agent.subagent_sessions.remove(&child_session_id))
+                .flatten();
             agent.subagent_sessions.insert(
                 child_session_id.clone(),
                 SubagentInfo {
@@ -561,98 +622,134 @@ pub(super) fn handle_session_notification_with_origin(
                     child_cwd: None,
                     worktree_path: None,
                     transcript: Default::default(),
+                    native: native_history.then(|| crate::app::subagent::native::NativeChild {
+                        attempt_id: native_attempt.clone().unwrap_or_default(),
+                        ..Default::default()
+                    }),
                 },
             );
+            if let Some(previous) = retained_child_info
+                && let Some(info) = agent.subagent_sessions.get_mut(&child_session_id)
+            {
+                info.prompt = previous.prompt;
+                info.child_cwd = previous.child_cwd;
+                info.worktree_path = previous.worktree_path;
+                info.transcript = previous.transcript;
+                if let Some(mut native) = previous.native {
+                    native.attempt_id = native_attempt.clone().unwrap_or(native.attempt_id);
+                    native.durable = false;
+                    info.native = Some(native);
+                }
+                if let Some(entry) = previous.scrollback_entry_id {
+                    agent.scrollback.finish_running(entry);
+                }
+            }
             if let Some(ref sid) = agent.session.session_id
                 && let Some(info) = agent.subagent_sessions.get_mut(&child_session_id)
             {
-                crate::app::subagent::enrich_from_meta(info, &agent.session.cwd, sid.0.as_ref());
+                if info.native.is_none() {
+                    crate::app::subagent::enrich_from_meta(
+                        info,
+                        &agent.session.cwd,
+                        sid.0.as_ref(),
+                    );
+                }
             }
-            let (effective_child_cwd, effective_is_worktree) = derive_child_cwd(
-                &agent.session.cwd,
-                agent.subagent_sessions.get(&child_session_id),
-            );
-            let child_session = AgentSession {
-                id: AgentId(0),
-                acp_tx: agent.session.acp_tx.clone(),
-                session_id: Some(acp::SessionId::new(child_session_id.clone())),
-                models: agent.session.models.clone(),
-                state: AgentState::TurnRunning,
-                tracker: AcpUpdateTracker::new(),
-                cwd: effective_child_cwd,
-                is_worktree: effective_is_worktree,
-                forked_from: None,
-                pending_prompts: std::collections::VecDeque::new(),
-                next_queue_id: 0,
-                yolo_mode: true,
-                auto_mode: false,
-                prompt_history: Vec::new(),
-                prompt_history_loading: false,
-                loading_replay: false,
-                restore_degree: None,
-                rate_limited: false,
-                model_incompatible: false,
-                credit_limit_blocked: false,
-                free_usage_blocked: false,
-                bg_tasks: std::collections::BTreeMap::new(),
-                bg_tool_call_to_task: std::collections::HashMap::new(),
-                scheduled_tasks: std::collections::HashMap::new(),
-                available_commands: Vec::new(),
-                available_commands_generation: 0,
-                available_tools: None,
-                available_capabilities: None,
-                model_switch_pending: false,
-                user_model_preference: None,
-                deferred_model_switch: None,
-                in_flight_prompt: None,
-                compact_held_prompt: None,
-                current_prompt_id: None,
-                created_via_new: false,
-            };
-            let mut child_scrollback = crate::scrollback::state::ScrollbackState::new();
-            child_scrollback.set_appearance(agent.scrollback.appearance().clone());
-            let mut child_view = AgentView::new(child_session, child_scrollback);
-            child_view.set_input_mode(InputMode::Vim);
-            child_view.active_pane = crate::views::agent::ActivePane::Scrollback;
-            child_view.set_sharing_enabled(agent.sharing_enabled);
-            child_view.set_billing_surface_visible(agent.billing_surface_visible);
-            child_view.set_usage_command_visible(agent.usage_command_visible);
-            let dashboard_visible = agent
-                .prompt
-                .slash_controller
-                .registry()
-                .get("dashboard")
-                .is_some();
-            child_view.set_dashboard_visible(dashboard_visible);
-            child_view.set_has_session_announcements(
-                agent.prompt.slash_controller.has_session_announcements(),
-            );
-            child_view
-                .prompt
-                .set_screen_mode(agent.prompt.slash_controller.screen_mode());
-            child_view.app_chat_mode = agent.app_chat_mode;
-            let recap_visible = agent
-                .prompt
-                .slash_controller
-                .registry()
-                .get("recap")
-                .is_some();
-            child_view.set_session_recap_available(recap_visible);
-            let voice_visible = agent
-                .prompt
-                .slash_controller
-                .registry()
-                .get("voice")
-                .is_some();
-            child_view.set_voice_mode_available(voice_visible);
-            let restricted = agent
-                .prompt
-                .slash_controller
-                .registry()
-                .restricted_commands();
-            child_view.set_restricted_commands(&restricted);
-            agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view));
-            if !agent.session.loading_replay && !meta.is_replay {
+            if let Some(child_view) = agent
+                .subagent_views
+                .get_mut(&child_session_id)
+                .filter(|_| native_resume)
+            {
+                child_view.start_turn_boundary(None);
+                child_view.session.tracker.clear_user_echo_skip();
+            } else {
+                let (effective_child_cwd, effective_is_worktree) = derive_child_cwd(
+                    &agent.session.cwd,
+                    agent.subagent_sessions.get(&child_session_id),
+                );
+                let child_session = AgentSession {
+                    id: AgentId(0),
+                    acp_tx: agent.session.acp_tx.clone(),
+                    session_id: Some(acp::SessionId::new(child_session_id.clone())),
+                    models: agent.session.models.clone(),
+                    state: AgentState::TurnRunning,
+                    tracker: AcpUpdateTracker::new(),
+                    cwd: effective_child_cwd,
+                    is_worktree: effective_is_worktree,
+                    forked_from: None,
+                    pending_prompts: std::collections::VecDeque::new(),
+                    next_queue_id: 0,
+                    yolo_mode: true,
+                    auto_mode: false,
+                    prompt_history: Vec::new(),
+                    prompt_history_loading: false,
+                    loading_replay: false,
+                    restore_degree: None,
+                    rate_limited: false,
+                    model_incompatible: false,
+                    credit_limit_blocked: false,
+                    free_usage_blocked: false,
+                    bg_tasks: std::collections::BTreeMap::new(),
+                    bg_tool_call_to_task: std::collections::HashMap::new(),
+                    scheduled_tasks: std::collections::HashMap::new(),
+                    available_commands: Vec::new(),
+                    available_commands_generation: 0,
+                    available_tools: None,
+                    available_capabilities: None,
+                    model_switch_pending: false,
+                    user_model_preference: None,
+                    deferred_model_switch: None,
+                    in_flight_prompt: None,
+                    compact_held_prompt: None,
+                    current_prompt_id: None,
+                    created_via_new: false,
+                };
+                let mut child_scrollback = crate::scrollback::state::ScrollbackState::new();
+                child_scrollback.set_appearance(agent.scrollback.appearance().clone());
+                let mut child_view = AgentView::new(child_session, child_scrollback);
+                child_view.set_input_mode(InputMode::Vim);
+                child_view.active_pane = crate::views::agent::ActivePane::Scrollback;
+                child_view.set_sharing_enabled(agent.sharing_enabled);
+                child_view.set_billing_surface_visible(agent.billing_surface_visible);
+                child_view.set_usage_command_visible(agent.usage_command_visible);
+                let dashboard_visible = agent
+                    .prompt
+                    .slash_controller
+                    .registry()
+                    .get("dashboard")
+                    .is_some();
+                child_view.set_dashboard_visible(dashboard_visible);
+                child_view.set_has_session_announcements(
+                    agent.prompt.slash_controller.has_session_announcements(),
+                );
+                child_view
+                    .prompt
+                    .set_screen_mode(agent.prompt.slash_controller.screen_mode());
+                child_view.app_chat_mode = agent.app_chat_mode;
+                let recap_visible = agent
+                    .prompt
+                    .slash_controller
+                    .registry()
+                    .get("recap")
+                    .is_some();
+                child_view.set_session_recap_available(recap_visible);
+                let voice_visible = agent
+                    .prompt
+                    .slash_controller
+                    .registry()
+                    .get("voice")
+                    .is_some();
+                child_view.set_voice_mode_available(voice_visible);
+                let restricted = agent
+                    .prompt
+                    .slash_controller
+                    .registry()
+                    .restricted_commands();
+                child_view.set_restricted_commands(&restricted);
+                agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view));
+            }
+            if !native_history && !native_resume && !agent.session.loading_replay && !meta.is_replay
+            {
                 let fallback = if live_resume {
                     ReplayLookupFallback::Relocation
                 } else {
@@ -909,7 +1006,13 @@ pub(super) fn handle_session_notification_with_origin(
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
                 child_view.session.state = AgentState::Idle;
             }
-            if !resuming {
+            if agent
+                .subagent_sessions
+                .get(&child_session_id)
+                .is_some_and(|info| info.native.is_some())
+            {
+                crate::app::subagent::native::request_history(agent, &child_session_id);
+            } else if !resuming {
                 let evicted =
                     crate::app::subagent::evict_finished_child_view(agent, &child_session_id);
                 if !evicted

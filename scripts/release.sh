@@ -65,6 +65,8 @@ if [[ "$DRY_RUN" == 0 ]]; then
 fi
 
 echo "releasing deepseek-code $TAG"
+bash "$ROOT/scripts/check.sh"
+node --test "$ROOT/scripts/release-payload.test.mjs"
 DIST="$ROOT/dist"
 mkdir -p "$DIST"
 
@@ -73,7 +75,8 @@ if [[ -n "$HOST_ASSET" ]] && command -v cargo >/dev/null 2>&1; then
   GROK_VERSION="$VERSION" bash "$ROOT/scripts/build-deepseek-tui.sh"
   BIN="$ROOT/third_party/grok-build/target/release/dscode"
   banner="$("$BIN" --version)"
-  if [[ "$banner" != *"$VERSION"* ]]; then
+  read -r binary_name binary_version binary_rest <<< "$banner"
+  if [[ "$binary_name" != dscode || "$binary_version" != "$VERSION" ]]; then
     echo "error: built binary reports '$banner', expected it to carry $VERSION" >&2
     exit 1
   fi
@@ -119,6 +122,7 @@ if [[ "$DRY_RUN" == 1 ]]; then
   exit 0
 fi
 
+RELEASE_SHA="$(git -C "$ROOT" rev-parse HEAD)"
 git -C "$ROOT" tag -a "$TAG" -m "deepseek-code $TAG"
 git -C "$ROOT" push origin "$TAG"
 # CI is the sole owner of platform assets. Concurrent host + CI uploads replace
@@ -140,8 +144,28 @@ fi
 gh release create "$TAG" "${release_args[@]}" "${gh_files[@]}"
 echo "created draft release $TAG"
 
-echo "  waiting for CI to attach both platforms' complete release payloads..."
-deadline=$((SECONDS + 2400))
+echo "  waiting for this commit's release checks and platform builds..."
+deadline=$((SECONDS + 10800))
+run_record="$DIST/release-run.json"
+while :; do
+  gh run list --repo "$RELEASE_REPO" --workflow release.yml --branch "$TAG" --commit "$RELEASE_SHA" --event push \
+    --json databaseId,headSha,headBranch,status,conclusion --limit 1 --jq '.[0] // {status: "pending"}' > "$run_record"
+  run_status="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))?.status ?? 'pending'" "$run_record")"
+  if [[ "$run_status" == completed ]]; then
+    node --input-type=module - "$ROOT" "$run_record" "$RELEASE_SHA" "$TAG" <<'JS'
+import { readFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
+const [root, record, sha, tag] = process.argv.slice(2)
+const { assertReleaseRun } = await import(pathToFileURL(`${root}/scripts/verify-release-assets.mjs`))
+assertReleaseRun(JSON.parse(readFileSync(record, 'utf8')), sha, tag)
+JS
+    break
+  fi
+  if (( SECONDS >= deadline )); then echo "error: release checks timed out; $TAG remains a draft" >&2; exit 1; fi
+  sleep 20
+done
+
+echo "  checking both platforms' complete release payloads..."
 while IFS= read -r required; do
     while ! gh release view "$TAG" --repo "$RELEASE_REPO" --json assets --jq '.assets[].name' \
       | grep -Fxq "$required"; do
@@ -156,6 +180,12 @@ while IFS= read -r required; do
     echo "    $required ready"
 done < <(node "$ROOT/scripts/build-release-payload.mjs" --assets --version "$VERSION")
 
+verified="$DIST/verified-$TAG"
+mkdir "$verified"
+gh release download "$TAG" --repo "$RELEASE_REPO" --dir "$verified"
+node "$ROOT/scripts/verify-release-assets.mjs" "$verified" "$run_record" "$RELEASE_SHA" "$TAG"
+cmp "$DIST/dscode-plugin.tgz.sha256" "$verified/dscode-plugin.tgz.sha256"
+cmp "$LICENSES" "$verified/dscode-licenses.tar.gz"
 gh release edit "$TAG" --repo "$RELEASE_REPO" --draft=false "${PUBLISH_FLAGS[@]}"
 echo "published $TAG with complete platform assets"
 

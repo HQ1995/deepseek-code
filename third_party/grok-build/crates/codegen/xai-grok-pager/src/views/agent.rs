@@ -996,7 +996,7 @@ pub fn build_hints(
             hints
         }
         ActivePane::Tasks => {
-            let mut hints = Vec::new();
+            let mut hints = vec![HintItem::new(crate::key!('t'), "terminals")];
             if selected_supports_fullscreen {
                 hints.push(HintItem::new(crate::key!(Enter), "view"));
             }

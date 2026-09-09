@@ -1,3 +1,4 @@
+import { protectTerminalSignals } from './terminal-signal.ts'
 /**
  * Grok leader-protocol unix-socket server driving harness agents.
  *
@@ -25,8 +26,10 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { symbols, type Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
-import { installModelSelection, type Agent, type AgentOptions, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import { installModelSelection, type Agent, type AgentOptions, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import { installLegacySessionMigration, LEGACY_MODEL_SELECTION_EVENTS } from './session-migration.ts'
 import type {} from '@deepseek-ai/dsh-agent-presets'
+import type { SessionReferenceResolver } from '@deepseek-ai/dsh-session-reference'
 import {
   admitEncodedImages,
   isImageAdmissionError,
@@ -35,10 +38,11 @@ import {
   type ImageAttachmentRef,
   type ImageMediaType,
 } from '@deepseek-ai/dsh-attachment'
-import { ReasoningEffortId, createUserMessage, errorChain, type TokenUsage } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId, ToolCallId, createUserMessage, errorChain, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm-retry'
 import { KNOWN_SESSION_EVENT_TYPES, SessionId, SessionLogOffset, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import { SessionFormatUnsupportedError, SessionPersistenceCorruptionError, SessionPersistenceNotFoundError, type SessionInspection, type SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import type { SubagentRuntime, SubagentPromptRequestId } from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { load as loadYaml } from 'js-yaml'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
@@ -46,6 +50,14 @@ import { encodeJsonFrame, FrameDecoder } from './codec.ts'
 import { AcpMcpConfigError, mountMcpConfigs, resolveAcpMcpConfigs, type McpClientConfig } from './mcp.ts'
 import { LEADER_PROTOCOL_VERSION, RpcError, decodeClientMessage, encodeServerMessage, type ClientMessage, type ServerMessage } from './protocol.ts'
 import { SessionListIndex } from './session-list.ts'
+import { workflowUpdates, type LiveWorkflow } from './workflows.ts'
+import { observeJobOutputs } from './job-output.ts'
+import { createImageOutputProjector } from './image-output.ts'
+import { parseReminder } from './reminders.ts'
+import { TerminalSessionId, type TerminalSessionService } from '@deepseek-ai/dsh-terminal'
+import { exportSessionArchive } from './session-export.ts'
+import { foldScheduleEvents } from '@deepseek-ai/dsh-schedule'
+import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { acpPromptToText, assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, parseJsonObject, promptHasUnsupportedContent, sessionEventToUpdates, textBlocks, toolKindForName, turnEndToStopReason, type GrokSessionUpdate, type ProjectedUpdate, type StopReasonWire, type ToolKindWire, type ToolResultContentBlock } from './projection.ts'
 import { contextInfoFromProjection, goalUpdateFromView, type ContextProjectionValues, type NativeGoalView } from './projection.ts'
 
@@ -60,6 +72,8 @@ interface DscodeModelSelectionEvent {
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
+    /** Standard DSH model selection event shared with its session controller. */
+    'model/selection': ModelSelection
     /** Durable per-session provider/model/effort selection. Latest write wins. */
     'dscode/model-selected': DscodeModelSelectionEvent
     /** Pre-0.0.10 development logs used the unnamespaced event id. */
@@ -67,7 +81,7 @@ declare module '@deepseek-ai/dsh-session/types' {
   }
 }
 
-const MODEL_SELECTION_EVENT = 'dscode/model-selected' as const
+const MODEL_SELECTION_EVENT = 'model/selection' as const
 const LEGACY_MODEL_SELECTION_EVENT = 'model/selected' as const
 /**
  * Register the bridge's durable event vocabulary with dsh's persistence read
@@ -85,7 +99,7 @@ if (Object.isFrozen(knownSessionEventTypes)) {
   // SessionFormatUnsupportedError later for an event we wrote ourselves.
   throw new Error('dsh session event vocabulary is frozen; dscode cannot register its model-selected event')
 }
-knownSessionEventTypes.add(MODEL_SELECTION_EVENT)
+knownSessionEventTypes.add('dscode/model-selected')
 knownSessionEventTypes.add(LEGACY_MODEL_SELECTION_EVENT)
 export const name = 'grok-leader'
 /** The bridge cannot accept clients until agents and durable session discovery are ready. */
@@ -133,13 +147,13 @@ export const Config: Schema<GrokLeaderConfig> = Schema.object({
 // bare cargo build). The fallback covers clients that omit a version.
 const LEADER_BINARY_VERSION = '0.0.0'
 
-const packageVersion = (): string => {
+const packageDirectory = (): string => {
   let dir = dirname(fileURLToPath(import.meta.url))
   for (;;) {
     const candidate = join(dir, 'package.json')
     if (existsSync(candidate)) {
       const manifest = JSON.parse(readFileSync(candidate, 'utf8')) as { name?: string; version?: string }
-      if (manifest.name === '@hqzhao95/dscode' && typeof manifest.version === 'string') return manifest.version
+      if (manifest.name === '@hqzhao95/dscode' && typeof manifest.version === 'string') return dir
     }
     const parent = dirname(dir)
     if (parent === dir) throw new Error('could not locate @hqzhao95/dscode package.json')
@@ -147,7 +161,8 @@ const packageVersion = (): string => {
   }
 }
 
-const PACKAGE_VERSION = packageVersion()
+const PACKAGE_DIRECTORY = packageDirectory()
+const PACKAGE_VERSION = (JSON.parse(readFileSync(join(PACKAGE_DIRECTORY, 'package.json'), 'utf8')) as { version: string }).version
 
 /** How long an unregistered connection may sit before it is dropped (server.rs). */
 const REGISTRATION_TIMEOUT_MS = 30_000
@@ -519,7 +534,7 @@ type PersistenceLike = Pick<SessionPersistence, 'list' | 'open'>
 async function readPersistedSession(store: PersistenceLike, id: SessionId): Promise<SessionInspection> {
   const handle = await store.open(id, 'read')
   try {
-    return { meta: handle.header, inheritedEventCount: handle.inheritedEventCount, events: await handle.read() }
+    return { meta: handle.header, inheritedEventCount: handle.inheritedEventCount, events: (await handle.read()).events }
   } finally {
     await handle.close()
   }
@@ -696,8 +711,8 @@ function modelEffortsForSelection(selection: ModelSelectionRef['current']): Map<
 function sessionModelSelectionFromLog(events: readonly SessionEvent[]): ModelSelectionRef['current'] {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
-    if (event?.type !== MODEL_SELECTION_EVENT && event?.type !== LEGACY_MODEL_SELECTION_EVENT) continue
-    const { provider, model, reasoningEffort } = event.data
+    if (event === undefined || (event.type !== MODEL_SELECTION_EVENT && !LEGACY_MODEL_SELECTION_EVENTS.has(event.type))) continue
+    const { provider, model, reasoningEffort } = event.data as DscodeModelSelectionEvent
     if (!nonEmptyString(provider) || !nonEmptyString(model)) continue
     return {
       provider,
@@ -717,8 +732,8 @@ function sessionModelEffortsFromLog(
 ): Map<string, string> {
   const efforts = modelEffortsForSelection(selection)
   for (const event of events) {
-    if (event.type !== MODEL_SELECTION_EVENT && event.type !== LEGACY_MODEL_SELECTION_EVENT) continue
-    const { provider, model, reasoningEffort } = event.data
+    if (event.type !== MODEL_SELECTION_EVENT && !LEGACY_MODEL_SELECTION_EVENTS.has(event.type)) continue
+    const { provider, model, reasoningEffort } = event.data as DscodeModelSelectionEvent
     if (!nonEmptyString(provider) || !nonEmptyString(model) || !nonEmptyString(reasoningEffort)) continue
     efforts.set(modelEffortKey(provider, model), reasoningEffort)
   }
@@ -728,7 +743,9 @@ function sessionModelEffortsFromLog(
 /** Structural read of the preset roster: discovery plus per-agent composition. */
 interface AgentPresetsLike {
   list(): Promise<Array<{ id: string; name?: string; description?: string; trust?: 'system' | 'user' }>>
-  resolve(id?: string): Promise<{ id: string }>
+  resolve(id?: string): Promise<{ id: string; path?: string; trust?: 'system' | 'user' }>
+  read?(id: string): Promise<string>
+  copy?(from: string, id: string): Promise<void>
   mount(agentCtx: Context, id?: string): Promise<unknown>
   recompose(agentCtx: Context, id: string): Promise<unknown>
   composedPreset?(agentCtx: Context): string | undefined
@@ -919,6 +936,11 @@ export function inspectPluginRuntime(ctx: Context, packageName: string): string 
 
 export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const agents = ctx.agents
+  protectTerminalSignals(ctx)
+  const jobOutput = observeJobOutputs(ctx)
+  const projectImages = createImageOutputProjector(ctx)
+  const projectedOutputTails = new WeakMap<SessionRecord, Promise<void>>()
+  ctx.effect(() => installLegacySessionMigration(ctx.get('sessionPersistence')))
   const llm = (): LlmLike | undefined => ctx.get('llm') as LlmLike | undefined
   const logger = ctx.logger
   // Build provenance banner: three caches can pin stale bridge code (the
@@ -1421,28 +1443,41 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const emitUpdate = (
     conn: ClientConnection,
     record: SessionRecord,
-    item: ProjectedUpdate,
+    item: ProjectedUpdate | Promise<ProjectedUpdate>,
     isReplay: boolean,
     agentTimestampMs?: number,
   ): void => {
-    const eventSeq = record.eventSeq
-    record.eventSeq = eventSeq + 1
     const inflight = record.inflight
-    const { totalTokens, cacheHitPercent, ...update } = item
-    sendNotification(conn, WIRE.sessionUpdate, {
-      sessionId: record.agent.session.id,
-      update,
-      _meta: {
-        eventSeq,
-        ...inflight === undefined ? {} : { promptId: inflight.promptId },
-        ...isReplay ? { isReplay: true } : {},
-        contextInfo: contextSnapshot(record),
-        ...totalTokens === undefined ? {} : { cumulativeTokens: totalTokens },
-        ...cacheHitPercent === undefined ? {} : { cacheHitPercent },
-        ...agentTimestampMs === undefined ? {} : { agentTimestampMs },
-        ...record.turnStartMs === undefined ? {} : { streamStartMs: record.turnStartMs, turnStartMs: record.turnStartMs },
-      },
-    })
+    const send = (item: ProjectedUpdate) => {
+      const eventSeq = record.eventSeq++
+      const { totalTokens, cacheHitPercent, ...update } = item
+      sendNotification(conn, WIRE.sessionUpdate, {
+        sessionId: record.agent.session.id,
+        update,
+        _meta: {
+          eventSeq,
+          ...inflight === undefined ? {} : { promptId: inflight.promptId },
+          ...isReplay ? { isReplay: true } : {},
+          contextInfo: contextSnapshot(record),
+          ...totalTokens === undefined ? {} : { cumulativeTokens: totalTokens },
+          ...cacheHitPercent === undefined ? {} : { cacheHitPercent },
+          ...agentTimestampMs === undefined ? {} : { agentTimestampMs },
+          ...record.turnStartMs === undefined ? {} : { streamStartMs: record.turnStartMs, turnStartMs: record.turnStartMs },
+        },
+      })
+    }
+    const previous = projectedOutputTails.get(record)
+    if (previous !== undefined || item instanceof Promise) {
+      // Hydrate a tool result once, before its completion and subsequent text.
+      // The pager discards further updates after completing that tool call.
+      const tail = (previous ?? Promise.resolve()).then(() => item).then(value => {
+        if (ownedAgentRecord(record.agent) === record) send(value)
+      }).catch(error => logger.warn('TUI output projection: ' + errorChain(error)))
+      projectedOutputTails.set(record, tail)
+      void tail.then(() => {
+        if (projectedOutputTails.get(record) === tail) projectedOutputTails.delete(record)
+      })
+    } else send(item)
   }
 
   const emitActivity = (record: SessionRecord): void => {
@@ -1582,12 +1617,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   // Translate the session firehose into grok streaming deltas. Committed text,
-  // reasoning deltas, tool calls, and tool results stream; titles, plans, and
-  // retry markers are presentation or trace data and stay off the wire.
+  // reasoning deltas, tool calls, tool results, and Todo plans stream; titles
+  // and retry markers are presentation or trace data and stay off this path.
   ctx.on('session/event', (session, event: SessionEvent) => {
     const record = sessions.get(session.header.id)
     if (record === undefined || record.agent.session !== session) return
     emitGoal(record)
+    if (String(event.type) === 'schedule/change') emitReminders(record)
+    if (String(event.type).startsWith('tool-workflow/')) {
+      emitWorkflows(record, false, (event.data as { runId: string }).runId)
+    }
     sessionListIndex.recordEvent(session.header.id, session.header.createdAt, event)
     const conn = connections.get(record.clientId)
     if (conn === undefined) return
@@ -1604,18 +1643,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           stream.pending.push(event)
           return
         }
-        if (String(event.type) === 'todo/write') {
-          const data = event.data as { todos?: Array<{ content?: unknown; status?: unknown }> }
-          const entries = (data.todos ?? []).map(todo => ({
-            content: String(todo.content ?? ''),
-            priority: 'medium',
-            status: todo.status === 'in_progress' ? 'in_progress' : todo.status === 'completed' ? 'completed' : 'pending',
-          }))
-          emitUpdate(conn, record, { sessionUpdate: 'plan', entries }, false, event.time)
-        }
-        for (const item of mapEvent(record, event, false)) {
-          emitUpdate(conn, record, item, false, event.time)
-        }
+        const updates = mapEvent(record, event, false)
+        const result = event.type === 'tool/result' ? event.data.message.content[0] : undefined
+        const projected = result?.type === 'tool-result' && result.content.some(block => block.type === 'image')
+          ? projectImages(event, updates) : undefined
+        updates.forEach((item, index) => emitUpdate(conn, record,
+          projected === undefined ? item : projected.then(items => items[index]!), false, event.time))
       }
     } finally {
       const inflight = record.inflight
@@ -1782,11 +1815,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
    * commandCatalog(). The TUI's builtin /preset picker shadows the advert;
    * headless/other ACP clients use the bridge's raw /preset handler.
    */
-  const availableCommands = async (): Promise<Array<{ name: string; description: string; input?: { hint: string } }>> => {
+  const availableCommands = async (): Promise<Array<{ name: string; description: string; input?: { hint: string }; _meta?: { scope: string; path: string; pluginName: string } }>> => {
     const commands: Array<{ name: string; description: string; input?: { hint: string } }> = [{
       name: 'dsh',
       description: 'Manage dsh plugins',
       input: { hint: 'plugins | add [--trust] <package> | remove <name> | inspect <name>' },
+    }, {
+      name: 'subagents',
+      description: 'Inspect and control child conversations',
+      input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' },
     }]
     const roster = agentPresets()
     const presets = roster === undefined ? [] : await roster.list()
@@ -2016,6 +2053,23 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
+  const sessionOperations = new Set<Promise<unknown>>()
+  const sessionOperation = async (clientId: number, operation: () => Promise<unknown>): Promise<unknown> => {
+    assertOpen()
+    if (connections.get(clientId)?.socket.destroyed !== false) throw invalidParams('client disconnected')
+    const pending = operation()
+    sessionOperations.add(pending)
+    try { return await pending } finally { sessionOperations.delete(pending) }
+  }
+
+  const publishSession = async (sessionId: SessionId, record: SessionRecord): Promise<void> => {
+    if (closed || connections.get(record.clientId)?.socket.destroyed !== false || sessions.has(sessionId)) {
+      await record.dispose()
+      throw invalidParams('session owner disconnected, leader closed, or session already in use')
+    }
+    sessions.set(sessionId, record)
+  }
+
   const newSession = async (clientId: number, params: unknown): Promise<unknown> => {
     assertOpen()
     const p = paramRecord(params, 'session/new')
@@ -2067,10 +2121,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         await mountMcpConfigs(agentCtx, mcpConfigs)
       },
     })
-    if (closed) {
-      await handle.dispose()
-      throw internalError('the grok leader was disposed during session/new')
-    }
     const record: SessionRecord = {
       agent: handle.agent,
       dispose: () => handle.dispose(),
@@ -2122,10 +2172,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         throw error
       }
     }
-    sessions.set(sessionId, record)
+    await publishSession(sessionId, record)
     emitActivity(record)
     emitGoal(record, true)
+    emitWorkflows(record, true)
     emitJobsForRecord(record)
+    emitReminders(record)
     refreshChildren(record)
     void broadcastAvailableCommands(record)
     // The pager parks on "Starting session…" until this arrives (the probe
@@ -2261,6 +2313,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       // never stalled behind a settled failure.
       record.inflight = undefined
     }
+    // Completion must not clear the pager's pending tools before image hydration.
+    for (let tail; (tail = projectedOutputTails.get(record)) !== undefined;) await tail
     // Cleanup on BOTH paths: a followup rejection or a rejected turn must not
     // strand runningPromptId or stall the queued successors.
     record.runningPromptId = undefined
@@ -2516,7 +2570,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
    *  available_commands_update). Plugin commands come from the dsh command
    *  registry, so any plugin's ctx.commands.register() surfaces as a pager
    *  slash command with completion — no bridge or TUI change per plugin. */
-  const commandCatalog = async (record?: SessionRecord): Promise<Array<{ name: string; description: string; input?: { hint: string } }>> => {
+  const commandCatalog = async (record?: SessionRecord): Promise<Array<{ name: string; description: string; input?: { hint: string }; _meta?: { scope: string; path: string; pluginName: string } }>> => {
     const commands = await availableCommands()
     if (record === undefined) return commands
     const registry = dshCommands()
@@ -2531,22 +2585,38 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       claimed.add(command.name.toLowerCase())
       commands.push(command)
     }
+    for (const skill of await sessionSkills(record)) {
+      if (skill.invocation?.userInvocable === false || claimed.has(skill.name.toLowerCase())) continue
+      claimed.add(skill.name.toLowerCase())
+      commands.push({
+        name: skill.name,
+        description: skillDescription(skill),
+        input: { hint: 'Instructions for this skill' },
+        _meta: { scope: skillScope(skill), path: skillPath(skill), pluginName: skill.provider ?? 'dsh' },
+      })
+    }
     return commands
   }
 
   const broadcastAvailableCommands = async (record: SessionRecord): Promise<void> => {
     const conn = connections.get(record.clientId)
     if (conn === undefined) return
-    // Sent directly, not through emitUpdate: a roster refresh is ambient, not
-    // a turn event, so it must not consume eventSeq or carry a promptId.
-    sendNotification(conn, WIRE.sessionUpdate, {
-      sessionId: record.agent.session.id,
-      update: {
-        sessionUpdate: 'available_commands_update',
-        availableCommands: await commandCatalog(record),
-        meta: { capabilities: capabilitiesFor(record) },
-      },
-    })
+    try {
+      const availableCommands = await commandCatalog(record)
+      if (ownedRecord(record.clientId, record.agent.session.id) !== record) return
+      // Sent directly, not through emitUpdate: a roster refresh is ambient, not
+      // a turn event, so it must not consume eventSeq or carry a promptId.
+      sendNotification(conn, WIRE.sessionUpdate, {
+        sessionId: record.agent.session.id,
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands,
+          meta: { capabilities: capabilitiesFor(record) },
+        },
+      })
+    } catch (error) {
+      logger.warn('command discovery failed: %s', error instanceof Error ? error.message : String(error))
+    }
   }
 
   /** Refresh model state for one live session. An unselected onboarding
@@ -2583,10 +2653,21 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     sendNotification(conn, WIRE.modelsUpdate, params)
   }
 
-  /** Provider mutations change one process-wide catalog, so every connected
-   * session must receive the same refreshed roster and model list. */
+  /** Provider mutations refresh all clients, including the welcome screen
+   * before its first session exists. Live sessions keep their own selection. */
   const broadcastModelsUpdate = (): void => {
-    for (const record of sessions.values()) notifyModelsUpdate(record)
+    const awaitingSession = new Map(connections)
+    for (const record of sessions.values()) {
+      notifyModelsUpdate(record)
+      awaitingSession.delete(record.clientId)
+    }
+    const current = catalog
+    if (current === undefined) return
+    for (const conn of awaitingSession.values()) sendNotification(conn, WIRE.modelsUpdate, {
+      currentModelId: current.currentModelId,
+      availableModels: current.availableModels,
+      _meta: { currentProviderId: current.currentProviderId, providers: current.providers },
+    })
   }
 
   // Live refresh: a plugin registering or removing commands re-advertises to
@@ -2594,9 +2675,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   // The event is declared by @deepseek-ai/dsh-commands, an optional
   // composition member this bridge reads structurally; the cast keeps that
   // optionality without importing its type augmentation.
-  ;(ctx as unknown as { on(event: string, listener: () => void): void }).on('commands/change', () => {
-    for (const record of sessions.values()) void broadcastAvailableCommands(record)
-  })
+  for (const event of ['commands/change', 'skills/change']) {
+    ;(ctx as unknown as { on(event: string, listener: () => void): void }).on(event, () => {
+      for (const record of sessions.values()) void broadcastAvailableCommands(record)
+    })
+  }
 
   type BundleInspection =
     | { kind: 'plain' }
@@ -2969,6 +3052,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (parsed.images.length > 0) throw invalidParams('/preset does not accept image attachments')
       return await runPresetCommand(record, p, text.trim())
     }
+    if (/^\/subagents(?:\s|$)/i.test(text.trim())) {
+      const execution = await executeSubagentCommand(clientId, p)
+      const { kind, text: body } = execution.result
+      return settleBridgeCommand(record, p, kind === 'error' ? 'error: ' + body : body)
+    }
     const slashName = /^\/([^\s]+)/.exec(text.trim())?.[1]?.toLowerCase()
     const unsupported = slashName === undefined ? undefined : unsupportedSlashCommands[slashName]
     if (unsupported !== undefined) {
@@ -3213,10 +3301,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       await handle.dispose()
       throw error
     }
-    sessions.set(sessionId, record)
+    await publishSession(sessionId, record)
     emitActivity(record)
     emitGoal(record, true, true)
+    emitWorkflows(record, true)
     emitJobsForRecord(record)
+    emitReminders(record)
     refreshChildren(record)
     void broadcastAvailableCommands(record)
     // Rebuild the up-arrow history from the persisted user prompts so
@@ -3236,7 +3326,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       // Keep turnStartMs current so replayed updates carry streamStartMs
       // and the pager renders ThinkingBlock durations on resume.
       if (event.type === 'turn/start') record.turnStartMs = event.time
-      const items = mapEvent(record, event, true)
+      const items = await projectImages(event, mapEvent(record, event, true))
       if (!noReplay && conn !== undefined) {
         if (!admitEvent(record, event.seq)) continue
         for (const item of items) {
@@ -3319,11 +3409,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // Commit the session-specific choice before advertising success. This log
     // is distinct from agent-default-model: resume restores the session's own
     // route, while a brand-new session inherits the latest global default.
-    record.agent.session.append(MODEL_SELECTION_EVENT, {
-      provider,
-      model: rawModel,
-      ...effectiveEffort === undefined ? {} : { reasoningEffort: effectiveEffort },
-    })
+    record.agent.session.append(MODEL_SELECTION_EVENT, selection)
     record.selection.current = selection
     const defaultModel = agentDefaultModel()
     if (defaultModel !== undefined) await defaultModel.saveSelection(selection)
@@ -3810,6 +3896,127 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
+  const runtimeDoctor = async (clientId: number, params: unknown): Promise<unknown> => {
+    const p = paramRecord(params, 'x.ai/doctor')
+    const record = typeof p.sessionId === 'string' ? ownedRecord(clientId, SessionId(p.sessionId)) : undefined
+    if (record === undefined) throw invalidParams('doctor requires an owned sessionId')
+    if (typeof p.tuiVersion !== 'string' || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(p.tuiVersion)) throw invalidParams('Invalid TUI version')
+    const findings: Array<{ status: string; name: string; detail: string }> = []
+    try {
+      const { stdout } = await execFileAsync(process.execPath, [join(PACKAGE_DIRECTORY, 'bin', 'doctor.mjs'), '--json', '--runtime-only'], {
+        env: { ...process.env, ...dshProfileDir() ? { DSH_PROFILE_DIR: dshProfileDir() } : {}, DSCODE_DOCTOR_TUI_VERSION: p.tuiVersion },
+        timeout: 20000, maxBuffer: 128 * 1024,
+      })
+      findings.push(...JSON.parse(stdout))
+    } catch { findings.push({ status: 'ERROR', name: 'Installation checks', detail: 'Could not finish. Run dscode doctor --runtime in a shell.' }) }
+    const subprocess = presetServiceFor(record, 'subprocess') as {
+      resolveExecutable(command: string, env: Record<string, string>, signal: AbortSignal): Promise<string>
+      spawnTerminal?: unknown
+    } | undefined
+    const missing: string[] = []
+    for (const command of ['typescript-language-server', 'tsc']) {
+      try {
+        if (subprocess === undefined) throw new Error('no execution host')
+        await subprocess.resolveExecutable(command, {}, AbortSignal.timeout(3000))
+      } catch { missing.push(command) }
+    }
+    const names = toolNamesFor(record)
+    findings.push({ status: missing.length ? (record.agent.session.header.agentPreset === 'lsp' ? 'ERROR' : 'INFO') : 'OK', name: 'Shipped LSP preset', detail: missing.length
+      ? `Optional dependencies missing in execution host: ${missing.join(', ')}. Install typescript-language-server and typescript there (npm install -g typescript-language-server typescript), then restart. Standard works without them.`
+      : 'typescript-language-server and tsc resolve in the execution host; server startup is checked on the first LSP query.' })
+    findings.push({ status: 'INFO', name: 'Session tools', detail: `LSP ${names.has('lsp') ? 'enabled' : 'not selected'}; terminal ${names.has('terminal_open') ? 'enabled' : 'not selected'}. Use /preset lsp or /preset terminal before starting a new conversation.` })
+    const terminals = presetServiceFor(record, 'terminals') as TerminalSessionService | undefined
+    const backends = terminals?.listBackends() ?? []
+    findings.push({ status: backends.includes('shell') && typeof subprocess?.spawnTerminal === 'function' ? 'OK' : 'WARN', name: 'PTY backend', detail: backends.includes('shell') && typeof subprocess?.spawnTerminal === 'function'
+      ? `shell backend registered; ${terminals!.list(record.agent).length} terminals owned by this session. Shell startup and sandbox permissions are checked when opening a terminal.`
+      : 'Shell backend or subprocess PTY support is unavailable. Restore the terminal services in the dscode profile and restart; run dscode update --force-reinstall if runtime files are missing.' })
+    if (ownedRecord(clientId, record.agent.session.id) !== record) throw invalidParams('session closed')
+    return { text: ['Dscode runtime diagnostics', ...findings.map(f => `[${f.status}] ${f.name}: ${f.detail}`)].join('\n\n') }
+  }
+
+  const terminalControls = async (clientId: number, params: unknown): Promise<unknown> => {
+    const p = paramRecord(params, 'x.ai/terminals')
+    const record = typeof p.sessionId === 'string' ? ownedRecord(clientId, SessionId(p.sessionId)) : undefined
+    if (record === undefined) throw invalidParams('terminals requires an owned sessionId')
+    const terminals = presetServiceFor(record, 'terminals') as TerminalSessionService | undefined
+    if (terminals === undefined) throw invalidParams('Persistent terminals are unavailable. Run /doctor.')
+    const action = p.action ?? 'list'
+    if (!['list', 'interrupt', 'close'].includes(String(action))) throw invalidParams('Unknown terminal action')
+    let id: TerminalSessionId | undefined
+    if (p.terminalId !== undefined && p.terminalId !== null) {
+      if (typeof p.terminalId !== 'string') throw invalidParams('Invalid terminal id')
+      if (terminals.list(record.agent).some(item => item.sessionId === p.terminalId)) id = TerminalSessionId(p.terminalId)
+      else if (action !== 'list') throw invalidParams('Unknown terminal in this session. Refresh the list.')
+      // A model may close the selected PTY between polls. Refresh the owned
+      // roster without reading the vanished/foreign id or trapping the UI in an error loop.
+    }
+    if (action !== 'list') {
+      if (id === undefined) throw invalidParams('Select a terminal first.')
+      if (action === 'interrupt') await terminals.signal(record.agent, id, 'SIGINT')
+      else { await terminals.kill(record.agent, id, 'closed from Tasks'); id = undefined }
+      if (ownedRecord(clientId, record.agent.session.id) !== record) throw invalidParams('session closed')
+    }
+    return {
+      title: 'Persistent terminals',
+      items: terminals.list(record.agent).map(item => {
+        const output = item.sessionId === id ? terminals.read(record.agent, item.sessionId, { count: 1000 }) : undefined
+        const state = item.status.kind === 'running' ? 'shell alive' : `exited (${item.status.exitCode ?? item.status.signal ?? 'unknown'})`
+        return {
+          id: item.sessionId,
+          text: [item.name ?? item.sessionId, ...(output === undefined ? [] : [
+            `Lines ${output.lineBegin}–${output.lineEnd} of ${output.totalLines}${output.truncated ? ' (retained tail)' : ''}`,
+            output.text,
+          ])].join('\n'),
+          detail: `${item.sessionId} · ${item.type} · ${state}${item.pid === undefined ? '' : ` · PID ${item.pid}`}`,
+          editable: false,
+        }
+      }),
+    }
+  }
+
+  const presetControls = async (clientId: number, params: unknown): Promise<unknown> => {
+    const p = paramRecord(params, 'x.ai/presets')
+    const record = typeof p.sessionId === 'string' ? ownedRecord(clientId, SessionId(p.sessionId)) : undefined
+    if (record === undefined) throw invalidParams('presets requires an owned sessionId')
+    const roster = agentPresets()
+    if (roster === undefined) throw invalidParams('Preset management is unavailable.')
+    const presetId = (value: unknown): string => {
+      if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(value)) {
+        throw invalidParams('Preset id must contain lowercase letters, digits or hyphens.')
+      }
+      return value
+    }
+    const action = p.action ?? 'list'
+    let document: { id: string; content: string; editPath?: string } | undefined
+    if (action === 'copy') {
+      if (roster.copy === undefined) throw invalidParams('Preset copying is unavailable.')
+      await roster.copy(presetId(p.from), presetId(p.id))
+    } else if (action === 'read' || action === 'edit') {
+      if (roster.read === undefined) throw invalidParams('Preset reading is unavailable.')
+      const preset = await roster.resolve(presetId(p.id))
+      if (action === 'edit' && (preset.trust !== 'user' || preset.path === undefined)) {
+        throw invalidParams('Copy this shipped preset before editing it.')
+      }
+      document = {
+        id: preset.id,
+        content: await roster.read(preset.id),
+        ...action === 'edit' ? { editPath: preset.path } : {},
+      }
+    } else if (action !== 'list') {
+      throw invalidParams('Unknown preset action: ' + String(action))
+    }
+    return {
+      title: 'Agent presets',
+      items: (await roster.list()).map(preset => ({
+        id: preset.id,
+        text: [preset.name ?? preset.id, preset.description].filter(Boolean).join('\n'),
+        detail: preset.id + ' · ' + (preset.trust ?? 'system'),
+        editable: preset.trust === 'user',
+      })),
+      ...document === undefined ? {} : { document },
+    }
+  }
+
   const forkSession = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'x.ai/session/fork')
     validateSessionMeta(p, 'x.ai/session/fork')
@@ -3896,10 +4103,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return preset.mount === undefined ? undefined : preset.mount(agentCtx)
       },
     })
-    if (closed) {
-      await handle.dispose()
-      throw internalError('the grok leader was disposed during session/fork')
-    }
     const record: SessionRecord = {
       agent: handle.agent,
       dispose: () => handle.dispose(),
@@ -3942,13 +4145,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       await handle.dispose()
       throw error
     }
-    sessions.set(sessionId, record)
+    await publishSession(sessionId, record)
     emitActivity(record)
     emitGoal(record, true)
     emitJobsForRecord(record)
+    emitReminders(record)
     refreshChildren(record)
     void broadcastAvailableCommands(record)
     const conn = connections.get(clientId)
+    emitWorkflows(record, true)
     if (conn !== undefined) {
       record.mcpInitTimer = setTimeout(() => {
         record.mcpInitTimer = undefined
@@ -4081,36 +4286,49 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
-  const listSkills = async (record: SessionRecord | undefined): Promise<{ skills: Array<Record<string, unknown>> }> => {
-    const skillsService = record?.agent.ctx.get('skills') as
-      | {
-          list(): Promise<Array<{
-            name: string
-            description: string
-            whenToUse?: string
-            invocation?: { userInvocable?: boolean; modelInvocable?: boolean }
-            source?: string
-            provider?: string
-            path?: string
-          }>>
-        }
-      | undefined
-    const rows = skillsService === undefined ? [] : await skillsService.list()
-    return {
-      skills: rows.map(skill => ({
-        name: skill.name,
-        display_name: skill.name,
-        description: skill.description,
-        has_user_specified_description: false,
-        when_to_use: skill.whenToUse,
-        short_description: skill.description,
-        path: skill.path ?? '',
-        scope: 'plugin',
-        user_invocable: skill.invocation?.userInvocable ?? true,
-        enabled: true,
-      })),
-    }
+  interface NativeSkillSummary {
+    name: string
+    description: string
+    whenToUse?: string
+    invocation?: { userInvocable?: boolean; modelInvocable?: boolean }
+    provider?: string
+    source?: string
+    resourceBase?: { kind: string; path?: string }
+    path?: string
   }
+
+  const sessionSkills = async (record: SessionRecord): Promise<NativeSkillSummary[]> => {
+    const service = (presetServiceFor(record, 'skills') ?? record.agent.ctx.get('skills')) as
+      | { list(lookup: { cwd?: string; scope: unknown }): Promise<NativeSkillSummary[]> }
+      | undefined
+    return service === undefined ? [] : await service.list({
+      cwd: record.agent.session.header.cwd,
+      scope: record.agent,
+    })
+  }
+
+  const skillScope = (skill: NativeSkillSummary): string => skill.source?.startsWith('project-') ? 'repo'
+    : skill.source?.startsWith('user-') ? 'user' : skill.source === 'bundled' ? 'bundled' : 'plugin'
+  const skillPath = (skill: NativeSkillSummary): string => skill.path ?? skill.resourceBase?.path ?? ''
+
+  const skillDescription = (skill: NativeSkillSummary): string =>
+    (skill.invocation?.modelInvocable === false ? 'User only · ' : '') + skill.description
+
+  const listSkills = async (record: SessionRecord): Promise<{ skills: Array<Record<string, unknown>> }> => ({
+    skills: (await sessionSkills(record)).map(skill => ({
+      name: skill.name,
+      display_name: skill.name,
+      description: skillDescription(skill),
+      has_user_specified_description: false,
+      when_to_use: skill.whenToUse,
+      short_description: skillDescription(skill),
+      path: skillPath(skill),
+      scope: skillScope(skill),
+      ...skill.provider === undefined ? {} : { plugin_name: skill.provider },
+      user_invocable: skill.invocation?.userInvocable ?? true,
+      enabled: true,
+    })),
+  })
 
   const setSessionMode = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'session/set_mode')
@@ -4221,22 +4439,74 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   const dispatchRequest = async (clientId: number, method: string, params: unknown): Promise<unknown> => {
     switch (method) {
+      case 'x.ai/session/export': {
+        const p = paramRecord(params, method)
+        const record = ownedRecord(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+        const connection = connections.get(clientId)
+        if (record === undefined || connection === undefined) throw invalidParams('archive requires an owned sessionId')
+        if (!Array.isArray(p.prompt) || p.prompt.length !== 1 || p.prompt[0]?.type !== 'text' || typeof p.prompt[0].text !== 'string') {
+          throw invalidParams('archive requires one text filename')
+        }
+        const controller = new AbortController()
+        const abort = () => controller.abort()
+        connection.socket.once('close', abort)
+        try {
+          const path = await exportSessionArchive(ctx, record.agent.session.id, record.agent.session.header.cwd ?? process.cwd(), p.prompt[0].text, controller.signal)
+          return { result: { kind: 'success', text: 'Session archive exported to ' + path } }
+        } finally {
+          connection.socket.off('close', abort)
+        }
+      }
+      case 'x.ai/session/references': {
+        const p = paramRecord(params, method)
+        if (!nonEmptyString(p.sessionId) || typeof p.query !== 'string' || p.query.length > 1024) {
+          throw invalidParams('session references requires sessionId and a query of at most 1024 characters')
+        }
+        const record = ownedRecord(clientId, SessionId(p.sessionId))
+        if (record === undefined) throw invalidParams('unknown session')
+        const resolver = ctx.get('sessionReferenceResolver') as SessionReferenceResolver | undefined
+        if (resolver === undefined) throw internalError('session references are unavailable')
+        const candidates = await resolver.remoteExportCandidates(record.agent, p.query, AbortSignal.timeout(10_000))
+        if (ownedRecord(clientId, record.agent.session.id) !== record) throw invalidParams('session closed')
+        return { candidates }
+      }
       case 'x.ai/goal':
         return await goalCommand(clientId, params)
+      case 'x.ai/task/output': {
+        const p = paramRecord(params, method)
+        if (!nonEmptyString(p.sessionId) || !nonEmptyString(p.taskId)) throw invalidParams('task output requires sessionId and taskId')
+        const record = ownedRecord(clientId, SessionId(p.sessionId))
+        if (record === undefined) throw invalidParams('unknown session')
+        const jobs = jobsService(record)
+        if (jobs === undefined) throw invalidParams('jobs unavailable')
+        const job = jobs.get(p.taskId, record.agent)
+        const output = jobOutput(jobs, record.agent, job.id)
+        return { taskId: job.id, status: job.status, available: output !== undefined, output: output ?? '' }
+      }
       case 'x.ai/task/kill':
         return await killTask(clientId, params)
+      case 'x.ai/subagent/history':
+        return await childHistory(clientId, params)
       case 'x.ai/subagent/cancel':
         return await cancelSubagent(clientId, params)
+      case 'x.ai/subagent/inbox':
+        return await childInbox(clientId, params)
+      case 'x.ai/scheduler/list':
+      case 'x.ai/scheduler/create':
+      case 'x.ai/scheduler/delete':
+        return await reminders(clientId, method, params)
+      case 'x.ai/subagents':
+        return await executeSubagentCommand(clientId, params)
       case WIRE.initialize:
         return await initializeResponse()
       case WIRE.authenticate:
         return {}
       case WIRE.sessionNew:
-        return await newSession(clientId, params)
+        return await sessionOperation(clientId, () => newSession(clientId, params))
       case WIRE.sessionPrompt:
         return await prompt(clientId, params)
       case WIRE.sessionLoad:
-        return await loadSession(clientId, params)
+        return await sessionOperation(clientId, () => loadSession(clientId, params))
       case WIRE.sessionList:
         return await listSessions()
       case WIRE.sessionSetModel:
@@ -4244,11 +4514,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       case WIRE.sessionSetMode:
         return await setSessionMode(clientId, params)
       case 'x.ai/session/fork':
-        return await forkSession(clientId, params)
+        return await sessionOperation(clientId, () => forkSession(clientId, params))
       case 'x.ai/rewind/points':
         return await rewindPoints(clientId, params)
       case 'x.ai/rewind/execute':
-        return await executeRewind(clientId, params)
+        return await sessionOperation(clientId, () => executeRewind(clientId, params))
       case 'x.ai/session/rename':
         return await renameSession(clientId, params)
       case WIRE.sessionClose:
@@ -4305,10 +4575,17 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return promptHistory(clientId, params)
       case 'x.ai/marketplace/list':
         return { sources: [] }
+      case 'x.ai/doctor':
+        return await runtimeDoctor(clientId, params)
+      case 'x.ai/terminals':
+        return await terminalControls(clientId, params)
+      case 'x.ai/presets':
+        return await presetControls(clientId, params)
       case 'x.ai/skills/list': {
         const p = paramRecord(params, 'x.ai/skills/list')
         const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
         const record = sessionId === undefined ? undefined : ownedRecord(clientId, sessionId)
+        if (record === undefined) throw invalidParams('skills/list requires an owned sessionId')
         return await listSkills(record)
       }
       case 'x.ai/mcp/list': {
@@ -4318,7 +4595,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return listMcpServers(record)
       }
       case 'x.ai/workflows/list':
-        // TODO(deepseek): enumerate dsh workflow runs from the workflow engine.
+        // Legacy template catalog. Native run history is pushed via workflow_updated.
         return { workflows: [] }
       case 'x.ai/billing':
         return { config: null, onDemandEnabled: false, subscriptionTier: null }
@@ -4363,22 +4640,19 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
             || (query !== undefined && header.id.toLowerCase() === query))
         // Backfill display titles BEFORE the text query so picker search can
         // match prompt text. Misses stay uncached and in-flight loads dedupe.
-        await Promise.all(candidateHeaders.map(async header => {
-          if (!sessionListIndex.beginInspection(header.id)) return
+        const projections = await Promise.all(candidateHeaders.map(header => sessionListIndex.inspect(header.id, header.createdAt, async () => {
           try {
             const inspection = await readPersistedSession(store, SessionId(header.id))
-            sessionListIndex.recordInspection(header.id, header.createdAt, inspection.events)
+            return inspection.events
           } catch (error) {
             // Retry missing or invalid artifacts, but surface operational storage failures.
             if (!(error instanceof SessionPersistenceNotFoundError)
               && !(error instanceof SessionPersistenceCorruptionError)
               && !(error instanceof SessionFormatUnsupportedError)) throw error
-          } finally {
-            sessionListIndex.finishInspection(header.id)
           }
-        }))
-        let rows = candidateHeaders.map(header => {
-          const projection = sessionListIndex.projection(header.id, header.createdAt)
+        })))
+        let rows = candidateHeaders.map((header, index) => {
+          const projection = projections[index]!
           const title = projection.title
           return {
             sessionId: header.id,
@@ -4748,7 +5022,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   /** In-flight per-client teardowns (flush + dispose); the idle exit awaits them. */
   const teardowns = new Set<Promise<void>>()
   let idleExitTimer: ReturnType<typeof setTimeout> | undefined
+  let idleExitGeneration = 0
   const cancelIdleExit = (): void => {
+    idleExitGeneration += 1
     if (idleExitTimer !== undefined) {
       clearTimeout(idleExitTimer)
       idleExitTimer = undefined
@@ -4756,23 +5032,27 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
   const scheduleIdleExit = (): void => {
     cancelIdleExit()
-    if (connections.size > 0) return
+    if (closed || connections.size > 0) return
+    const generation = idleExitGeneration
     idleExitTimer = setTimeout(() => {
       idleExitTimer = undefined
       // appExit(0) takes the host down; it must not beat a teardown that is
       // still flushing persisted state.
       void (async () => {
         if (teardowns.size > 0) await Promise.allSettled([...teardowns])
-        await quiesce()
-      })().catch((failure: unknown) => {
-        logger.warn('grok-leader: quiesce failed: ' + errorChain(failure))
-      }).finally(() => {
+        if (sessionOperations.size > 0) await Promise.allSettled([...sessionOperations])
+        if (closed || connections.size > 0 || generation !== idleExitGeneration) return
+        try { await quiesce() } catch (failure: unknown) {
+          logger.warn('grok-leader: quiesce failed: ' + errorChain(failure))
+        }
         const exit = ctx.get('appExit') as ((code: number) => void) | undefined
         if (exit === undefined) {
           logger.warn('grok-leader: the host exposes no appExit; the leader will stay up with no clients')
         } else {
           exit(0)
         }
+      })().catch((failure: unknown) => {
+        logger.warn('grok-leader: idle exit failed: ' + errorChain(failure))
       })
     }, idleExitMs)
   }
@@ -4818,6 +5098,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   const handleSocket = (socket: Socket): void => {
+    if (closed) { socket.destroy(); return }
     const conn: ClientConnection = { socket, clientId: ++clientSeq, pending: new Map(), nextRequestId: 0 }
     const decoder = new FrameDecoder()
     let registered = false
@@ -4892,6 +5173,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       }
       switch (msg.type) {
         case 'register': {
+          if (closed || socket.destroyed) { socket.destroy(); return }
           if (registered) {
             // Mirrors server.rs: a second registration is a client bug.
             send({ type: 'error', code: 2, message: 'Already registered' })
@@ -4946,7 +5228,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const quiesce = (): Promise<void> => {
     if (quiescing !== undefined) return quiescing
     closed = true
-    clearInterval(goalRefreshTimer)
     const records = [...sessions.values()]
     sessions.clear()
     for (const record of records) {
@@ -4957,11 +5238,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
     quiescing = (async () => {
       for (const conn of connections.values()) conn.socket.destroy()
+      await Promise.allSettled([...sessionOperations, ...teardowns])
       // Flush persisted state before disposal, like closeSession.
       const store = ctx.get('sessions') as SessionsLike | undefined
       const disposals = await Promise.allSettled(records.map(async record => {
-        if (store !== undefined) await store.flush(record.agent.session)
-        await record.dispose()
+        try {
+          if (store !== undefined) await store.flush(record.agent.session)
+        } finally { await record.dispose() }
       }))
       const failures: unknown[] = []
       for (const result of disposals) {
@@ -4990,6 +5273,73 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     })
     ctx.effect(() => unsubscribe)
   }
+  const reminderSnapshots = new WeakMap<SessionRecord, Map<string, string>>()
+  const emitReminders = (record: SessionRecord): void => {
+    const conn = connections.get(record.clientId)
+    if (conn === undefined || ownedAgentRecord(record.agent) !== record) return
+    const { active, seenIds } = foldScheduleEvents(record.agent.session.ownEvents())
+    // Reconnect also clears native IDs that were deleted while the UI was away.
+    const previous = reminderSnapshots.get(record) ?? new Map<string, string>(seenIds.map(id => [id, '']))
+    const next = new Map<string, string>()
+    for (const reminder of active) {
+      const serialized = JSON.stringify(reminder)
+      next.set(reminder.id, serialized)
+      if (previous.get(reminder.id) === serialized) continue
+      sendNotification(conn, 'x.ai/session_notification', {
+        sessionId: record.agent.session.id,
+        update: {
+          sessionUpdate: 'scheduled_task_created', task_id: reminder.id, prompt: reminder.prompt,
+          human_schedule: reminder.kind === 'every' ? `every ${reminder.everySeconds}s` : 'once',
+          next_fire_at: reminder.scheduledAt,
+        },
+        _meta: { eventSeq: record.eventSeq++, nativeSchedule: true },
+      })
+    }
+    for (const id of previous.keys()) {
+      if (next.has(id)) continue
+      sendNotification(conn, 'x.ai/session_notification', {
+        sessionId: record.agent.session.id,
+        update: { sessionUpdate: 'scheduled_task_deleted', task_id: id, reason: 'deleted' },
+        _meta: { eventSeq: record.eventSeq++, nativeSchedule: true },
+      })
+    }
+    reminderSnapshots.set(record, next)
+  }
+
+  const reminders = async (clientId: number, method: string, params: unknown): Promise<unknown> => {
+    const p = paramRecord(params, method)
+    const record = ownedRecord(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+    if (record === undefined) throw invalidParams('unknown session')
+    const tools = record.agent.ctx.get('tools') as ToolRuntime | undefined
+    if (tools === undefined || !toolNamesFor(record).has('schedule_list')) throw invalidParams('Reminders are unavailable in this preset.')
+    const invoke = async (name: string, args: unknown) => {
+      const result = await tools.execute({ callId: ToolCallId('tui-' + randomUUID()), name, arguments: args, agent: record.agent, signal: AbortSignal.timeout(10_000) })
+      if (ownedRecord(clientId, record.agent.session.id) !== record) throw invalidParams('session closed')
+      if (result.isError) throw internalError(result.error.message)
+      const value = result.value
+      if (value !== null && !Array.isArray(value) && typeof value === 'object' && typeof value.code === 'string') {
+        throw invalidParams(String(value.message ?? value.code))
+      }
+      return value
+    }
+    if (method === 'x.ai/scheduler/create') {
+      if (typeof p.text !== 'string') throw invalidParams('A reminder is required.')
+      let args: Record<string, unknown>
+      try { args = parseReminder(p.text) } catch (error) { throw invalidParams(errorChain(error)) }
+      await invoke('schedule_create', args)
+    } else if (method === 'x.ai/scheduler/delete') {
+      if (!nonEmptyString(p.taskId)) throw invalidParams('taskId is required')
+      await invoke('schedule_delete', { id: p.taskId })
+    }
+    const rows = await invoke('schedule_list', {})
+    if (!Array.isArray(rows)) throw internalError('Invalid reminder list')
+    emitReminders(record)
+    return { title: 'Session reminders', items: rows.map(value => {
+      const row = value as Record<string, unknown>
+      return { id: row.id, text: row.prompt, detail: `${row.state} · ${row.scheduledAt} · ${row.kind === 'every' ? 'every ' + String(row.everySeconds) + 's' : 'once'}`, editable: false }
+    }) }
+  }
+
   type JobSnapshotLike = {
     id: string; kind: string; label: string; ownerSession?: string
     status: 'running' | 'stopping' | 'completed' | 'killed' | 'failed'
@@ -5017,6 +5367,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
   const jobSubscriptions = new WeakSet<JobsLike>()
   const jobSnapshots = new WeakMap<SessionRecord, Map<string, string>>()
+  const jobOutputSnapshots = new WeakMap<SessionRecord, Map<string, string>>()
   const jobIsRunning = (job: JobSnapshotLike): boolean => job.status === 'running' || job.status === 'stopping'
   const emitJobsForRecord = (record: SessionRecord): void => {
     if (sessions.get(record.agent.session.id) !== record) return
@@ -5036,8 +5387,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (previous === undefined) { previous = new Map(); jobSnapshots.set(record, previous) }
     const systemTime = (ms: number): unknown => ({ secs_since_epoch: Math.floor(ms / 1000), nanos_since_epoch: (ms % 1000) * 1_000_000 })
     for (const job of jobs.list(record.agent)) {
-      const serialized = JSON.stringify(job)
-      if (previous.get(job.id) === serialized) continue
+      // Settled producers are immutable; do not rescan their output every tick.
+      if (!jobIsRunning(job) && previous.get(job.id) === JSON.stringify([job, true])) continue
+      const output = jobOutput(jobs, record.agent, job.id)
+      const serialized = JSON.stringify([job, output !== undefined])
+      if (previous.get(job.id) === serialized) {
+        emitJobOutput(record, job.id, output)
+        continue
+      }
       previous.set(job.id, serialized)
       const cwd = record.agent.session.header.cwd ?? ''
       if (jobIsRunning(job)) {
@@ -5055,14 +5412,38 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
               task_id: job.id, command: job.label, display_command: job.label, cwd,
               start_time: systemTime(job.startedAt),
               end_time: job.finishedAt === undefined ? null : systemTime(job.finishedAt),
-              exit_code: null, signal: null, completed: true,
+              exit_code: null, signal: null, completed: true, output: output ?? '',
             },
           },
-          _meta: { eventSeq: record.eventSeq++, nativeTask: { status: job.status, kind: job.kind, outputAvailable: false, ...job.detail === undefined ? {} : { detail: job.detail } } },
+          _meta: { eventSeq: record.eventSeq++, nativeTask: { status: job.status, kind: job.kind, outputAvailable: output !== undefined, ...job.detail === undefined ? {} : { detail: job.detail } } },
         })
       }
+      emitJobOutput(record, job.id, output)
     }
   }
+  const emitJobOutput = (record: SessionRecord, id: string, output: string | undefined): void => {
+    if (output === undefined) return
+    const conn = connections.get(record.clientId)
+    if (conn === undefined) return
+    let previous = jobOutputSnapshots.get(record)
+    if (previous === undefined) { previous = new Map(); jobOutputSnapshots.set(record, previous) }
+    if (previous.get(id) === output) return
+    previous.set(id, output)
+    emitUpdate(conn, record, {
+      sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed',
+      rawOutput: { type: 'Bash', output_for_prompt: output },
+    }, false)
+  }
+  ctx.effect(() => {
+    // Collected readers are bounded and independent of the model cursor.
+    const timer = setInterval(() => {
+      for (const record of sessions.values()) {
+        try { emitJobsForRecord(record) } catch (error) { logger.warn('TUI job output: ' + errorChain(error)) }
+      }
+    }, 500)
+    timer.unref()
+    return () => clearInterval(timer)
+  })
 
   const killTask = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'x.ai/task/kill')
@@ -5082,22 +5463,72 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   type ChildRow = { kind: 'child' | 'diagnostic'; id: string; mode?: 'continuable' | 'one-shot'; label?: string; parentId?: string }
+  const liveWorkflows = new Map<string, LiveWorkflow>()
+  const emitWorkflows = (record: SessionRecord, replay = false, runId?: string): void => {
+    const conn = connections.get(record.clientId)
+    if (conn === undefined || ownedAgentRecord(record.agent) !== record) return
+    // ponytail: scan on workflow transitions only; add a native projection if
+    // sessions with very large workflow histories make this measurable.
+    for (const update of workflowUpdates(record.agent.session.snapshotEvents(), liveWorkflows, Date.now())) {
+      if (runId !== undefined && update.run_id !== runId) continue
+      sendNotification(conn, 'x.ai/session_notification', {
+        sessionId: record.agent.session.id, update,
+        _meta: { eventSeq: record.eventSeq++, isReplay: replay },
+      })
+    }
+  }
+  const workflowEvents = ctx as unknown as {
+    on(event: 'workflow/start', listener: (info: { id: string; meta: LiveWorkflow['meta'] }) => void): void
+    on(event: 'workflow/phase', listener: (info: { id: string }, phase: string) => void): void
+    on(event: 'workflow/end', listener: (info: { id: string }) => void): void
+  }
+  workflowEvents.on('workflow/start', info => { liveWorkflows.set(info.id, { meta: info.meta }) })
+  workflowEvents.on('workflow/phase', (info, phase) => {
+    const run = liveWorkflows.get(info.id)
+    if (run === undefined) return
+    run.phase = phase
+    for (const record of sessions.values()) emitWorkflows(record, false, info.id)
+  })
+  workflowEvents.on('workflow/end', info => {
+    liveWorkflows.delete(info.id)
+    // The tool appends run-end as its awaited native result settles.
+    setTimeout(() => { for (const record of sessions.values()) emitWorkflows(record, false, info.id) }, 0)
+  })
   type SubagentsLike = {
     listDescendants(root: SessionId): Promise<ChildRow[]>
     interrupt(id: SessionId, authority: { kind: 'ancestor'; agent: Agent }): void
+    prompt?: SubagentRuntime['prompt']
   }
   const subagentsService = (record: SessionRecord): SubagentsLike | undefined => {
     const service = presetServiceFor(record, 'subagents') as SubagentsLike | undefined
     return typeof service?.listDescendants === 'function' && typeof service.interrupt === 'function' ? service : undefined
   }
-  type ChildState = { agent: Agent; label: string; status: string; output?: string }
-  // Exact child handles survive disposal long enough to attribute the native end edge.
+  type ChildState = { agent?: Agent; label: string; status: string; attemptId: string; output?: string }
   const childStates = new WeakMap<SessionRecord, Map<string, ChildState>>()
   const childSettlements = new WeakMap<Agent, Set<(status: string) => void>>()
-  const emitChildFinished = (record: SessionRecord, id: string, status: string, output?: unknown): void => {
+  const childTerminalStatus = (kind: string): string => kind === 'completed' || kind === 'max-tokens' ? 'completed'
+    : kind === 'aborted' || kind === 'interrupted' ? 'cancelled' : 'failed'
+  const childOverview = (id: string, events: readonly SessionEvent[], agent?: Agent): Pick<ChildState, 'attemptId' | 'status'> => {
+    const start = events.findLast(event => event.type === 'turn/start')
+    const end = events.findLast(event => event.type === 'turn/end')
+    return {
+      attemptId: id + ':' + String(start?.type === 'turn/start' ? start.data.turn : 'pending'),
+      status: agent?.status === 'running' ? 'running'
+        : end?.type === 'turn/end' && (start?.type !== 'turn/start' || end.data.turn === start.data.turn)
+          ? childTerminalStatus(end.data.reason.kind) : 'cancelled',
+    }
+  }
+  const inspectChild = async (id: string): Promise<SessionInspection> => {
+    const agent = agents.get(SessionId(id))
+    if (agent !== undefined) return { meta: agent.session.header, inheritedEventCount: agent.session.inheritedEventCount, events: agent.session.snapshotEvents() }
+    const store = persistence()
+    if (store === undefined) throw internalError('session persistence is not configured')
+    return await readPersistedSession(store, SessionId(id))
+  }
+  const emitChildFinished = (record: SessionRecord, id: string, status: string, output?: unknown, attemptId?: string): void => {
     const state = childStates.get(record)?.get(id)
-    if (state === undefined) return
-    for (const settle of childSettlements.get(state.agent) ?? []) settle(status)
+    if (state === undefined || (attemptId !== undefined && state.attemptId !== attemptId)) return
+    if (state.agent !== undefined) for (const settle of childSettlements.get(state.agent) ?? []) settle(status)
     const text = output === undefined ? undefined : typeof output === 'string' ? output : textBlocks(output).map(block => block.text).join('\n')
     if (state.status === status && (text === undefined || text === state.output)) return
     if (text !== undefined) state.output = text
@@ -5110,7 +5541,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         sessionUpdate: 'subagent_finished', subagent_id: id, child_session_id: id, status,
         ...state.output === undefined ? {} : { output: state.output },
       },
-      _meta: { eventSeq: record.eventSeq++, subagentMetricsAvailable: false },
+      _meta: { eventSeq: record.eventSeq++, subagentMetricsAvailable: false, nativeAttemptId: state.attemptId },
     })
   }
   const emitChildrenForRecord = async (record: SessionRecord): Promise<void> => {
@@ -5122,31 +5553,43 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     let known = childStates.get(record)
     if (known === undefined) { known = new Map(); childStates.set(record, known) }
     for (const row of rows) {
-      // One-shot runs are holder-owned; interrupt is an accepted no-op for them.
-      if (row.kind !== 'child' || row.mode !== 'continuable') continue
+      if (row.kind !== 'child') continue
+      const inspection = await inspectChild(row.id)
+      if (sessions.get(record.agent.session.id) !== record || connections.get(record.clientId) !== conn) return
       const child = agents.get(SessionId(row.id))
-      if (child === undefined || child.status !== 'running') continue
+      const overview = childOverview(row.id, inspection.events, child)
       const previous = known.get(row.id)
-      if (previous?.agent === child && previous.status === 'running') continue
-      known.set(row.id, { agent: child, label: row.label ?? '', status: 'running' })
+      if (previous !== undefined && previous.agent === child && previous.attemptId === overview.attemptId) {
+        if (overview.status !== 'running') emitChildFinished(record, row.id, overview.status, undefined, overview.attemptId)
+        continue
+      }
+      known.set(row.id, { agent: child, label: row.label ?? '', status: 'running', attemptId: overview.attemptId })
       sendNotification(conn, 'x.ai/session_notification', {
         sessionId: record.agent.session.id,
-        update: { sessionUpdate: 'subagent_spawned', subagent_id: row.id, child_session_id: row.id, parent_session_id: row.parentId ?? record.agent.session.id, subagent_type: 'continuable', description: row.label ?? '' },
-        _meta: { eventSeq: record.eventSeq++ },
+        update: { sessionUpdate: 'subagent_spawned', subagent_id: row.id, child_session_id: row.id, parent_session_id: row.parentId ?? record.agent.session.id, subagent_type: row.mode ?? 'continuable', description: row.label ?? '', ...previous === undefined ? {} : { effective_context_source: 'resumed', resumed_from: row.id } },
+        _meta: { eventSeq: record.eventSeq++, nativeChildHistory: true, nativeAttemptId: overview.attemptId },
       })
+      if (overview.status !== 'running') emitChildFinished(record, row.id, overview.status, undefined, overview.attemptId)
     }
   }
+  const childRefreshes = new WeakMap<SessionRecord, Promise<void>>()
   const refreshChildren = (record: SessionRecord): void => {
-    void emitChildrenForRecord(record).catch(error => logger.warn('grok-leader: subagent snapshot failed: ' + errorChain(error)))
+    const refresh = (childRefreshes.get(record) ?? Promise.resolve()).then(() => emitChildrenForRecord(record))
+      .catch(error => logger.warn('grok-leader: subagent snapshot failed: ' + errorChain(error)))
+    childRefreshes.set(record, refresh)
+    void refresh.finally(() => { if (childRefreshes.get(record) === refresh) childRefreshes.delete(record) })
   }
-  const childTerminalStatus = (kind: string): string => kind === 'completed' || kind === 'max-tokens' ? 'completed'
-    : kind === 'aborted' || kind === 'interrupted' ? 'cancelled' : 'failed'
   ctx.on('session/event', (session, event: SessionEvent) => {
-    if (event.type !== 'turn/start' && event.type !== 'turn/end') return
     for (const record of sessions.values()) {
       const child = childStates.get(record)?.get(session.id)
-      if (event.type === 'turn/end' && child?.agent.session === session) emitChildFinished(record, session.id, childTerminalStatus(event.data.reason.kind))
-      else if (event.type === 'turn/start' && session !== record.agent.session) refreshChildren(record)
+      if (child?.agent?.session === session) {
+        const conn = connections.get(record.clientId)
+        if (conn !== undefined) sendNotification(conn, 'x.ai/subagent/history_changed', {
+          sessionId: record.agent.session.id, childSessionId: session.id, nextSeq: event.seq + 1,
+        })
+        if (event.type === 'turn/end') emitChildFinished(record, session.id, childTerminalStatus(event.data.reason.kind), undefined, session.id + ':' + String(event.data.turn))
+      }
+      if (event.type === 'turn/start' && session !== record.agent.session) refreshChildren(record)
     }
   })
   type SubagentLifecycle = { id: string; stopReason?: string; lastAssistantMessage?: unknown }
@@ -5154,9 +5597,49 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   subagentEvents.on('subagent/start', () => { for (const record of sessions.values()) refreshChildren(record) })
   subagentEvents.on('subagent/end', info => {
     for (const record of sessions.values()) {
-      if (childStates.get(record)?.has(info.id) === true) emitChildFinished(record, info.id, childTerminalStatus(info.stopReason ?? 'error'), info.lastAssistantMessage)
+      const state = childStates.get(record)?.get(info.id)
+      // The exact turn/end settles lifecycle; holder-level end only enriches its terminal output.
+      if (state !== undefined && state.status !== 'running') emitChildFinished(record, info.id, state.status, info.lastAssistantMessage)
+      refreshChildren(record)
     }
   })
+
+  const childHistory = async (clientId: number, params: unknown): Promise<unknown> => {
+    const p = paramRecord(params, 'x.ai/subagent/history')
+    if (!nonEmptyString(p.sessionId) || !nonEmptyString(p.childSessionId)) throw invalidParams('subagent history requires sessionId and childSessionId')
+    const record = ownedRecord(clientId, SessionId(p.sessionId))
+    if (record === undefined) throw invalidParams('unknown session: ' + p.sessionId)
+    const rows = await subagentsService(record)?.listDescendants(record.agent.session.id)
+    if (!rows?.some(row => row.kind === 'child' && row.id === p.childSessionId)) throw invalidParams('unknown subagent')
+    const after = p.after ?? 0
+    if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0) throw invalidParams('invalid child history cursor')
+    const inspection = await inspectChild(p.childSessionId)
+    if (ownedRecord(clientId, SessionId(p.sessionId)) !== record) throw invalidParams('unknown session')
+    if (after > inspection.events.length) throw invalidParams('child history cursor is ahead of the stored transcript')
+    const nextSeq = Math.min(after + 256, inspection.events.length)
+    const calls = new Map<string, { name: string; arguments: unknown }>()
+    const entries: Array<{ update?: GrokSessionUpdate; meta?: Record<string, unknown>; turnEnded?: boolean }> = []
+    let turnStartMs: number | undefined
+    for (const event of inspection.events) {
+      if (event.seq >= nextSeq) break
+      if (event.type === 'turn/start') turnStartMs = event.time
+      if (event.type === 'tool/call') calls.set(String(event.data.callId), { name: event.data.name, arguments: parseJsonObject(event.data.arguments) })
+      if (event.seq < after) continue
+      const updates = await projectImages(event, sessionEventToUpdates(event, { replay: true, toolCall: id => calls.get(id) }))
+      for (const update of updates) entries.push({ update, meta: { isReplay: true, agentTimestampMs: event.time, turnStartMs, streamStartMs: turnStartMs } })
+      if (event.type === 'turn/end') entries.push({ turnEnded: true })
+    }
+    const live = agents.get(SessionId(p.childSessionId))
+    let durable = live === undefined
+    if (live !== undefined && live.status !== 'running') {
+      const store = ctx.get('sessions') as SessionsLike | undefined
+      await store?.flush(live.session)
+      const disk = await readPersistedSession(persistence()!, SessionId(p.childSessionId))
+      durable = disk.events.length >= inspection.events.length
+    }
+    if (ownedRecord(clientId, SessionId(p.sessionId)) !== record) throw invalidParams('unknown session')
+    return { nextSeq, totalSeq: inspection.events.length, entries, durable }
+  }
 
   const cancelSubagent = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'x.ai/subagent/cancel')
@@ -5176,7 +5659,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (row.mode !== 'continuable') throw internalError('one-shot subagents are not interruptible through the released subagent service')
     let known = childStates.get(record)
     if (known === undefined) { known = new Map(); childStates.set(record, known) }
-    known.set(subagentId, { agent: child, label: row.label ?? '', status: 'running' })
+    known.set(subagentId, { agent: child, label: row.label ?? '', ...childOverview(subagentId, child.session.snapshotEvents(), child) })
     let listeners = childSettlements.get(child)
     if (listeners === undefined) { listeners = new Set(); childSettlements.set(child, listeners) }
     let settle!: (status: string) => void
@@ -5193,6 +5676,138 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     } finally {
       clearTimeout(timer)
       listeners.delete(settle)
+    }
+  }
+
+  const childInbox = async (clientId: number, params: unknown): Promise<unknown> => {
+    const p = paramRecord(params, 'x.ai/subagent/inbox')
+    const record = ownedRecord(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+    if (record === undefined) throw invalidParams('unknown session')
+    const service = subagentsService(record)
+    if (service === undefined) throw invalidParams('Subagents unavailable')
+    const rows = (await service.listDescendants(record.agent.session.id)).filter(row => row.kind === 'child' && row.mode === 'continuable')
+    if (ownedRecord(clientId, record.agent.session.id) !== record) throw invalidParams('session closed')
+    if (p.childId === undefined || p.childId === null) {
+      return { title: 'Child conversations', items: rows.map(row => ({ id: row.id, text: row.label || row.id, detail: agents.get(SessionId(row.id))?.status ?? 'inactive', editable: false })) }
+    }
+    const row = rows.find(row => row.id === p.childId)
+    if (row === undefined) throw invalidParams('Unknown continuable child')
+    const action = p.action ?? 'list'
+    if (typeof action !== 'string' || !['list', 'queue', 'steer', 'edit', 'remove', 'steer-queued', 'clear', 'stop'].includes(action)) throw invalidParams('Unknown inbox action')
+    if (action !== 'list') {
+      let body = ''
+      if (['edit', 'remove', 'steer-queued'].includes(action)) {
+        const child = agents.get(SessionId(row.id))
+        const message = [...child?.inbox.nextTurn ?? [], ...child?.inbox.nextStep ?? []].find(message => message.id === p.messageId)
+        if (message === undefined) throw invalidParams('This message has already left the queue. Refresh and try again.')
+        body = message.id
+      }
+      if (['queue', 'steer', 'edit'].includes(action)) {
+        if (typeof p.text !== 'string' || p.text.trim().length === 0) throw invalidParams('A message is required.')
+        body += (body.length > 0 ? ' ' : '') + p.text
+      }
+      const result = await executeSubagentCommand(clientId, { sessionId: record.agent.session.id, expectedText: p.expectedText, prompt: [{ type: 'text', text: `/subagents ${action} ${row.id}${body.length > 0 ? ' ' + body : ''}` }] })
+      if (result.result.kind === 'error') throw invalidParams(result.result.text)
+    }
+    const child = agents.get(SessionId(row.id))
+    return { title: 'Input queue · ' + (row.label || row.id), items: [...child?.inbox.nextTurn ?? [], ...child?.inbox.nextStep ?? []].map(message => ({
+      id: message.id, text: textBlocks(message.content).map(block => block.text).join(''),
+      detail: child?.inbox.nextTurn.includes(message) ? 'queued for next turn' : 'steering at next step',
+      editable: message.content.every(block => block.type === 'text'),
+    })) }
+  }
+
+  /** Human controls use native child admission and inbox mutations; the parent turn is untouched. */
+  const executeSubagentCommand = async (clientId: number, params: unknown): Promise<{ result: { kind: 'success' | 'error'; text: string } }> => {
+    const p = paramRecord(params, 'x.ai/subagents')
+    const record = ownedRecord(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+    if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
+    const parsed = parsePrompt(p.prompt)
+    if (parsed.images.length > 0) throw invalidParams('/subagents accepts text commands only')
+    const match = /^\/subagents(?:\s+(\S+))?(?:\s+(\S+))?(?:\s+([\s\S]*))?$/i.exec(parsed.text.trim())
+    if (match === null) throw invalidParams('x.ai/subagents requires a /subagents invocation')
+    const [, verb = 'list', selector, body = ''] = match
+    const usage = 'Usage: /subagents list\n/subagents pending <child>\n/subagents queue|steer <child> <text>\n/subagents edit <child> <message> <text>\n/subagents remove <child> <message>\n/subagents steer-queued <child> <message|all>\n/subagents clear|stop <child>\nChild and message IDs accept unique prefixes. Stop preserves queued input.'
+    const success = (text: string) => ({ result: { kind: 'success' as const, text } })
+    try {
+      const service = subagentsService(record)
+      if (service === undefined) throw new Error('Subagents are unavailable in this preset.')
+      const rows = (await service.listDescendants(record.agent.session.id)).filter(row => row.kind === 'child')
+      if (ownedRecord(clientId, record.agent.session.id) !== record) throw new Error('The owning session was closed.')
+      if (verb === 'list' && selector === undefined) {
+        return success((rows.length === 0 ? 'No child conversations.' : rows.map(row => {
+          const child = agents.get(SessionId(row.id))
+          return `${row.id}  ${child?.status === 'running' ? 'running' : 'idle'}  ${row.mode ?? 'unknown'}  ${row.label ?? ''}`
+        }).join('\n')) + '\n\n' + usage)
+      }
+      if (selector === undefined || !['pending', 'queue', 'steer', 'edit', 'remove', 'steer-queued', 'clear', 'stop'].includes(verb)) throw new Error(usage)
+      const resolvePrefix = <T extends { id: string }>(items: readonly T[], id: string, label: string): T => {
+        const exact = items.find(item => item.id === id)
+        if (exact !== undefined) return exact
+        const matches = id.length === 0 ? [] : items.filter(item => item.id.startsWith(id))
+        if (matches.length !== 1) throw new Error(`${matches.length === 0 ? 'Unknown' : 'Ambiguous'} ${label}: ${id}`)
+        return matches[0]!
+      }
+      const row = resolvePrefix(rows, selector, 'child')
+      if (row.mode !== 'continuable') throw new Error('Only continuable children accept these controls.')
+      const childId = SessionId(row.id)
+      const child = agents.get(childId)
+      if (verb === 'queue' || verb === 'steer') {
+        if (body.trim().length === 0) throw new Error('A message is required.\n' + usage)
+        if (service.prompt === undefined) throw new Error('Child message admission is unavailable.')
+        const receipt = await service.prompt({
+          requestId: randomUUID() as SubagentPromptRequestId,
+          parentSessionId: SessionId(row.parentId ?? record.agent.session.id),
+          childSessionId: childId,
+          mode: 'continuable', delivery: verb,
+          content: [{ type: 'text', text: body }],
+        }, new AbortController().signal)
+        return success(`${verb === 'queue' ? 'Queued' : 'Steering'} child ${row.id}: ${receipt.messageId}`)
+      }
+      if (verb === 'stop') {
+        if (body.length > 0) throw new Error(usage)
+        await cancelSubagent(clientId, { sessionId: record.agent.session.id, subagentId: row.id })
+        return success(`Child ${row.id} stopped; queued input is preserved.`)
+      }
+      if (child === undefined) {
+        if (verb === 'pending') return success(`Child ${row.id} is inactive; no live queue is available.`)
+        throw new Error('The child is inactive; queue a new message to continue it before editing pending input.')
+      }
+      const pending = [...child.inbox.nextTurn, ...child.inbox.nextStep]
+      if (verb === 'pending') {
+        if (body.length > 0) throw new Error(usage)
+        return success(`Pending input for ${row.id}:\n` + (pending.length === 0 ? '(empty)' : pending.map(message =>
+          `${message.id}  ${child.inbox.nextTurn.includes(message) ? 'queued' : 'next-step'}  ${textBlocks(message.content).map(block => block.text).join('\n')}`).join('\n')))
+      }
+      if (verb === 'clear') {
+        if (body.length > 0) throw new Error(usage)
+        child.inbox.clear()
+        return success(`Cleared ${pending.length} pending message(s) for ${row.id}.`)
+      }
+      if (verb === 'steer-queued') {
+        if (child.status !== 'running') throw new Error('The child has no running turn to steer.')
+        const selected = body === 'all' ? [...child.inbox.nextTurn] : [resolvePrefix(child.inbox.nextTurn, body, 'queued message')]
+        for (const message of selected) {
+          child.inbox.remove(message.id)
+          child.steer(message)
+        }
+        return success(`Steering ${selected.length} queued message(s) into child ${row.id}.`)
+      }
+      const edit = verb === 'edit' ? /^(\S+)\s+([\s\S]+)$/.exec(body) : undefined
+      if (verb === 'edit' && edit == null) throw new Error(usage)
+      const message = resolvePrefix(pending, edit?.[1] ?? body, 'pending message')
+      if (verb === 'edit') {
+        // Validate after asynchronous descendant lookup, immediately before replacement.
+        if (message.content.some(block => block.type !== 'text') || (p.expectedText !== undefined && p.expectedText !== textBlocks(message.content).map(block => block.text).join(''))) {
+          throw new Error('This message changed or contains attachments; it cannot be replaced by this text edit.')
+        }
+        child.inbox.replace(message.id, { ...message, content: [{ type: 'text', text: edit![2]! }] })
+        return success(`Edited pending message ${message.id} for ${row.id}.`)
+      }
+      child.inbox.remove(message.id)
+      return success(`Removed pending message ${message.id} for ${row.id}.`)
+    } catch (error) {
+      return { result: { kind: 'error', text: errorChain(error) } }
     }
   }
 
@@ -5233,21 +5848,25 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       emitActivity(record)
       queueMicrotask(() => emitGoal(record))
     }
-    else if (status === 'running') for (const owner of sessions.values()) refreshChildren(owner)
+    else for (const owner of sessions.values()) {
+      refreshChildren(owner)
+      if (status === 'idle' && childStates.get(owner)?.get(agent.session.id)?.agent === agent) {
+        const conn = connections.get(owner.clientId)
+        if (conn !== undefined) sendNotification(conn, 'x.ai/subagent/history_changed', {
+          sessionId: owner.agent.session.id, childSessionId: agent.session.id, nextSeq: agent.session.snapshotEvents().length,
+        })
+      }
+    }
   })
   ctx.on('agent/session-start', ({ agent }) => {
     const record = ownedAgentRecord(agent)
     if (record !== undefined) queueMicrotask(() => emitGoal(record))
   })
-  // ponytail: native disarm has no complete activation feed; one 1s timer reconciles connected sessions until the native feed covers it.
-  const goalRefreshTimer = setInterval(() => {
-    for (const record of sessions.values()) {
-      if (!connections.has(record.clientId) || goalService(record) === undefined) continue
-      try { emitGoal(record) } catch (error) { logger.warn('grok-leader: goal refresh failed: ' + errorChain(error)) }
-    }
-  }, 1000)
-  goalRefreshTimer.unref()
-  ctx.effect(() => () => clearInterval(goalRefreshTimer))
+  const activationEvents = ctx as unknown as { on(event: string, listener: (payload: { sessionId: string }) => void): void }
+  activationEvents.on('goal/activation-changed', ({ sessionId }) => {
+    const record = sessions.get(SessionId(sessionId))
+    if (record !== undefined) emitGoal(record)
+  })
 
   const socketPath = config.socketPath ?? '/tmp/dsh-grok-leader.sock'
   const server: Server = createServer((socket) => { handleSocket(socket) })

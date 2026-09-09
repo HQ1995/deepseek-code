@@ -142,6 +142,7 @@ pub struct WorkflowsViewState {
     pub detail_run_id: Option<String>,
     pub selected_phase: usize,
     pub selected_phase_name: Option<String>,
+    pub selected_agent_id: Option<String>,
     pub phase_viewport: usize,
     pub phase_pinned: bool,
     pub pin_active_phase: Option<String>,
@@ -175,13 +176,13 @@ pub fn footer_shortcuts(
     let mut s = Vec::new();
     if in_detail {
         s.push(Shortcut {
-            label: "↑↓ phase · enter agent",
+            label: "↑↓ phase · Tab agent · Enter open",
             clickable: false,
             id: 0,
         });
         if has_run_list {
             s.push(Shortcut {
-                label: "←/tab runs",
+                label: "← runs",
                 clickable: true,
                 id: shortcut_ids::RUNS,
             });
@@ -341,6 +342,7 @@ impl WorkflowsViewState {
     }
 
     pub fn select_phase(&mut self, idx: usize, run: &WorkflowRunSnapshot) {
+        self.selected_agent_id = None;
         let rail = phase_rail(run);
         self.selected_phase = idx.min(rail.len().saturating_sub(1));
         self.selected_phase_name = rail
@@ -348,6 +350,32 @@ impl WorkflowsViewState {
             .map(|(title, _)| title.clone());
         self.phase_pinned = true;
         self.pin_active_phase = run.effective_active_phase();
+    }
+
+    pub fn select_next_agent(&mut self, run: &WorkflowRunSnapshot, backwards: bool) {
+        let agents = run.agents_in_phase(
+            self.selected_phase_name
+                .as_deref()
+                .filter(|name| *name != "All agents"),
+        );
+        if agents.is_empty() {
+            self.selected_agent_id = None;
+            return;
+        }
+        let current = agents
+            .iter()
+            .position(|agent| Some(&agent.agent_id) == self.selected_agent_id.as_ref());
+        let index = match current {
+            Some(index) if backwards => (index + agents.len() - 1) % agents.len(),
+            Some(index) => (index + 1) % agents.len(),
+            None if backwards => agents.len() - 1,
+            None => 0,
+        };
+        self.selected_agent_id = Some(agents[index].agent_id.clone());
+        self.phase_pinned = true;
+        self.pin_active_phase = run.effective_active_phase();
+        self.roster_top_agent_id = None;
+        self.roster_scroll = agents.len().saturating_sub(index + 1);
     }
 
     pub fn ensure_run_visible(&mut self, visible_rows: usize, total_rows: usize) {
@@ -498,7 +526,7 @@ fn agent_glyph_and_style(state: &str, theme: &Theme) -> (&'static str, Style) {
     match state {
         "running" => ("●", Style::default().fg(theme.accent_plan)),
         "done" => ("✓", Style::default().fg(theme.accent_success)),
-        "failed" => ("✗", Style::default().fg(theme.accent_error)),
+        "failed" | "interrupted" | "cancelled" => ("✗", Style::default().fg(theme.accent_error)),
         _ => ("◌", Style::default().fg(theme.gray_dim)),
     }
 }
@@ -1038,7 +1066,13 @@ fn render_detail(
             roster_inner.x + 2,
             y,
             &label,
-            Style::default().fg(theme.text_primary),
+            if state.selected_agent_id.as_ref() == Some(&agent.agent_id) {
+                Style::default()
+                    .fg(theme.accent_plan)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().fg(theme.text_primary)
+            },
             tokens_x,
         );
         let label_w = unicode_width::UnicodeWidthStr::width(label.as_str()) as u16;

@@ -1,0 +1,3 @@
+name: Terminal mode
+description: Standard coding agent with persistent shell, REPL and debugger tools. Terminal processes last only for the live agent.
+order: 7

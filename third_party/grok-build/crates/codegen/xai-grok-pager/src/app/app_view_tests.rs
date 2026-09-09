@@ -283,6 +283,7 @@ pub(crate) fn test_app() -> AppView {
         import_claude_modal: None,
         welcome_doc_viewer: None,
         screen_mode: ScreenMode::Inline,
+        pending_screen_mode_switch: None,
         pending_effects: Vec::new(),
         pending_editor: None,
         pending_pager_path: None,
@@ -3060,6 +3061,26 @@ fn esc_cancels_running_wake_turn_while_pane_is_idle() {
         app.agents[&id].cancel_trigger_hint,
         Some(crate::app::actions::CancelTrigger::Esc)
     );
+}
+#[test]
+fn streaming_wake_turn_counts_as_running_for_minimal_commit() {
+    let mut app = test_app_with_agent();
+    let agent = app
+        .agents
+        .get_mut(&super::super::agent::AgentId(0))
+        .unwrap();
+    assert!(!crate::minimal_api::is_turn_or_wake_running(agent));
+    agent.note_streaming_wake_turn("subagent-completed-abc");
+    assert!(crate::minimal_api::is_turn_or_wake_running(agent));
+    agent.mark_wake_cancel_sent();
+    assert!(
+        crate::minimal_api::is_turn_or_wake_running(agent),
+        "a cancelling wake may still deliver its final chunks"
+    );
+    agent.running_wake_turn = None;
+    assert!(!crate::minimal_api::is_turn_or_wake_running(agent));
+    agent.session.state = AgentState::TurnRunning;
+    assert!(crate::minimal_api::is_turn_or_wake_running(agent));
 }
 #[test]
 fn esc_from_prompt_pane_running_turn_with_draft_cancels_preserving_draft() {
@@ -6703,4 +6724,15 @@ fn welcome_ctrl_e_ignored_when_zdr_blocked() {
         WelcomeWorkspaceMode::Sandbox,
         "Ctrl+E must not cycle mode on ZDR-blocked welcome"
     );
+}
+
+#[test]
+fn native_preset_document_viewer_survives_ticks_without_a_transcript_anchor() {
+    let mut agent = crate::app::agent_view::test_fixtures::make_agent();
+    agent.install_block_viewer(crate::views::block_viewer::BlockViewerPane::for_plain_text(
+        "Preset: custom",
+        "- id: native",
+    ));
+    assert!(!AppView::tick_agent_block_viewer(&mut agent));
+    assert!(agent.block_viewer.is_some());
 }

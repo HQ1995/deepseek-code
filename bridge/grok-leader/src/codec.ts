@@ -8,11 +8,6 @@
 /** Largest accepted frame payload, mirroring MAX_MESSAGE_SIZE in protocol.rs. */
 export const MAX_MESSAGE_SIZE = 64 * 1024 * 1024
 
-/** Cap on bytes buffered while one incomplete frame is trickling in; a peer
- * pushing past it is dropped instead of pinning unbounded memory (and
- * forcing quadratic re-concatenation of the pending buffer). */
-export const MAX_PENDING_BUFFER = 8 * 1024 * 1024
-
 /** A byte sequence violates the leader framing contract. */
 export class FrameError extends Error {
   constructor(message: string) {
@@ -51,7 +46,10 @@ export function encodeJsonFrame(value: unknown): Uint8Array {
  * buffered until their body arrives.
  */
 export class FrameDecoder {
-  #pending: Uint8Array = new Uint8Array(0)
+  #header = new Uint8Array(4)
+  #headerBytes = 0
+  #body: Uint8Array | undefined
+  #bodyBytes = 0
 
   /**
    * Feed received bytes and collect every newly completed frame.
@@ -60,35 +58,32 @@ export class FrameDecoder {
    * @throws {FrameError} when a declared payload length exceeds MAX_MESSAGE_SIZE.
    */
   push(chunk: Uint8Array): Uint8Array[] {
-    // Always copy: the caller may reuse/mutate the chunk buffer while an
-    // incomplete frame stays pending.
-    this.#pending = this.#pending.byteLength === 0 ? chunk.slice() : concat(this.#pending, chunk)
     const frames: Uint8Array[] = []
-    for (;;) {
-      if (this.#pending.byteLength < 4) break
-      const view = new DataView(this.#pending.buffer, this.#pending.byteOffset, this.#pending.byteLength)
-      const length = view.getUint32(0)
-      if (length > MAX_MESSAGE_SIZE) {
-        throw new FrameError('message too large: ' + String(length) + ' bytes (max: ' + String(MAX_MESSAGE_SIZE) + ')')
-      }
-      if (this.#pending.byteLength < 4 + length) {
-        // Incomplete frame: bound the pending buffer; the socket handler
-        // warns and destroys the connection when this FrameError surfaces.
-        if (this.#pending.byteLength > MAX_PENDING_BUFFER) {
-          throw new FrameError('incomplete frame exceeded the ' + String(MAX_PENDING_BUFFER) + '-byte pending cap')
+    let offset = 0
+    while (offset < chunk.byteLength) {
+      if (this.#body === undefined) {
+        const count = Math.min(4 - this.#headerBytes, chunk.byteLength - offset)
+        this.#header.set(chunk.subarray(offset, offset + count), this.#headerBytes)
+        this.#headerBytes += count
+        offset += count
+        if (this.#headerBytes < 4) break
+        const length = new DataView(this.#header.buffer).getUint32(0)
+        if (length > MAX_MESSAGE_SIZE) {
+          throw new FrameError('message too large: ' + String(length) + ' bytes (max: ' + String(MAX_MESSAGE_SIZE) + ')')
         }
-        break
+        // One bounded allocation and one copy per byte, independent of socket
+        // fragmentation. Never retain buffers that the caller can mutate.
+        this.#body = new Uint8Array(length)
       }
-      frames.push(this.#pending.slice(4, 4 + length))
-      this.#pending = this.#pending.slice(4 + length)
+      const count = Math.min(this.#body.byteLength - this.#bodyBytes, chunk.byteLength - offset)
+      this.#body.set(chunk.subarray(offset, offset + count), this.#bodyBytes)
+      this.#bodyBytes += count
+      offset += count
+      if (this.#bodyBytes !== this.#body.byteLength) break
+      frames.push(this.#body)
+      this.#body = undefined
+      this.#bodyBytes = this.#headerBytes = 0
     }
     return frames
   }
-}
-
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const out = new Uint8Array(a.byteLength + b.byteLength)
-  out.set(a, 0)
-  out.set(b, a.byteLength)
-  return out
 }

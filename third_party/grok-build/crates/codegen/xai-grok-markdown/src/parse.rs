@@ -15,14 +15,16 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::buffers::{
-    CodeBlockMeta, Highlight, LinkTarget, MarkdownBuffers, Replace, StyledCell, TableHyperlink,
-    TableReplace, TableState, Transform, floor_char_boundary, unicode_display_width,
+    CellJoin, CodeBlockMeta, Highlight, LinkTarget, MarkdownBuffers, Replace, StyledCell,
+    TableCellCopy, TableHyperlink, TableReplace, TableState, Transform, floor_char_boundary,
+    unicode_display_width,
 };
 use crate::checkpoint::CheckpointKind;
 use crate::latex;
 use crate::open_code_highlighter::OpenCodeHighlighter;
 use crate::style::{MarkdownStyle, TableBorders};
 use crate::syntax::{Syntect, syntax_highlight_raw};
+use crate::url_scan;
 
 /// Trait for converting anstyle to ratatui style.
 trait StyleInto<T> {
@@ -398,6 +400,59 @@ pub(crate) fn cell_word_separator<'a>(
     }))
 }
 
+fn cell_wrap_joins(source: &str, lines: &[String]) -> Vec<CellJoin> {
+    let want = lines.len().saturating_sub(1);
+    if want == 0 {
+        return Vec::new();
+    }
+    let mut joins = Vec::with_capacity(want);
+    let mut cursor = 0usize;
+    let mut prev_end: Option<usize> = None;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if prev_end.is_some() {
+                joins.push(CellJoin::Tight);
+            }
+            continue;
+        }
+        let Some(rest) = source.get(cursor..) else {
+            if prev_end.is_some() {
+                joins.push(CellJoin::Tight);
+            }
+            continue;
+        };
+        let Some(off) = rest.find(trimmed) else {
+            if prev_end.is_some() {
+                joins.push(CellJoin::Tight);
+            }
+            continue;
+        };
+        let start = cursor + off;
+        let end = start + trimmed.len();
+        if let Some(prev) = prev_end {
+            if prev <= start
+                && start <= source.len()
+                && source.is_char_boundary(prev)
+                && source.is_char_boundary(start)
+            {
+                if start > prev {
+                    joins.push(CellJoin::Gap(source[prev..start].to_string()));
+                } else {
+                    joins.push(CellJoin::Tight);
+                }
+            } else {
+                joins.push(CellJoin::Tight);
+            }
+        }
+        prev_end = Some(end);
+        cursor = end;
+    }
+    joins.resize(want, CellJoin::Tight);
+    joins.truncate(want);
+    joins
+}
+
 /// Output of [`MarkdownParser::format_table`]: the rendered lines of a single table.
 #[derive(Default)]
 struct FormattedTable {
@@ -409,6 +464,8 @@ struct FormattedTable {
     line_source_offsets: Vec<usize>,
     /// Hyperlinks (in table-local line coordinates) for links inside cells.
     hyperlinks: Vec<TableHyperlink>,
+    cell_copies: Vec<TableCellCopy>,
+    n_cols: usize,
 }
 
 impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
@@ -581,9 +638,7 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
             Event::End(tag_end) => self.on_end(tag_end, range),
             Event::Text(text) => {
                 // Capture text into table cell if we're inside a table
-                if let Some(ref mut state) = self.table_state {
-                    state.push_text(&text);
-                }
+                self.push_table_text_linking_urls(&text);
 
                 // Record the enclosing fenced block's raw byte range and its
                 // de-prefixed body content. pulldown merges the body into one
@@ -1293,6 +1348,8 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                         styled_lines,
                         line_source_offsets,
                         hyperlinks,
+                        cell_copies,
+                        n_cols,
                     } = self.format_table(&state);
                     self.buffers.table_replaces.push(TableReplace {
                         lines,
@@ -1300,6 +1357,8 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                         range: state.range,
                         line_source_offsets,
                         hyperlinks,
+                        cell_copies,
+                        n_cols,
                     });
                 }
                 None
@@ -1379,6 +1438,36 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                 true
             }
             None => false,
+        }
+    }
+
+    /// Push text into the current table cell (no-op outside a table), tagging
+    /// bare URLs/emails as link spans. The post-render URL scan runs after the
+    /// table has wrapped the cell, so it would only catch the first line of a
+    /// wrapped URL; tagging here uses the wrap-aware `TableHyperlink` path.
+    fn push_table_text_linking_urls(&mut self, text: &str) {
+        let Some(state) = self.table_state.as_mut() else {
+            return;
+        };
+        if state.cell_link.is_some() {
+            state.push_text(text);
+            return;
+        }
+
+        let mut cursor = 0;
+        url_scan::for_each_plain_link(text, |range, url| {
+            if range.start > cursor {
+                state.push_text(&text[cursor..range.start]);
+            }
+            let id = self.link_id_counter;
+            self.link_id_counter += 1;
+            state.cell_link = Some((url, id));
+            state.push_text(&text[range.clone()]);
+            state.cell_link = None;
+            cursor = range.end;
+        });
+        if cursor < text.len() {
+            state.push_text(&text[cursor..]);
         }
     }
 
@@ -1547,6 +1636,8 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
             range,
             line_source_offsets,
             hyperlinks: Vec::new(),
+            cell_copies: Vec::new(),
+            n_cols: 0,
         });
         true
     }
@@ -1714,6 +1805,7 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
         let mut styled_lines = Vec::new();
         let mut line_source_offsets: Vec<usize> = Vec::new();
         let mut hyperlinks: Vec<TableHyperlink> = Vec::new();
+        let mut cell_copies: Vec<TableCellCopy> = Vec::new();
 
         // Source line layout within a table:
         //   offset 0: header row   (| Col A | Col B |)
@@ -1737,15 +1829,17 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
 
         // Header row
         if !state.header.is_empty() {
-            let (row_plains, row_styleds, row_links) = self.format_styled_content_lines(
-                &state.header,
-                &col_widths,
-                &alignments,
-                padding,
-                borders.v(),
-                border_style,
-                true,
-            );
+            let (row_plains, row_styleds, row_links, row_copies) = self
+                .format_styled_content_lines(
+                    &state.header,
+                    &col_widths,
+                    &alignments,
+                    padding,
+                    borders.v(),
+                    border_style,
+                    true,
+                );
+            cell_copies.extend(row_copies);
             let base_line = styled_lines.len();
             for (p, s) in row_plains.into_iter().zip(row_styleds) {
                 lines.push(p);
@@ -1775,15 +1869,17 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
         for (i, row) in state.rows.iter().enumerate() {
             let row_offset = separator_offset + 1 + i; // offset 2, 3, ...
 
-            let (row_plains, row_styleds, row_links) = self.format_styled_content_lines(
-                row,
-                &col_widths,
-                &alignments,
-                padding,
-                borders.v(),
-                border_style,
-                false,
-            );
+            let (row_plains, row_styleds, row_links, row_copies) = self
+                .format_styled_content_lines(
+                    row,
+                    &col_widths,
+                    &alignments,
+                    padding,
+                    borders.v(),
+                    border_style,
+                    false,
+                );
+            cell_copies.extend(row_copies);
             let base_line = styled_lines.len();
             for (p, s) in row_plains.into_iter().zip(row_styleds) {
                 lines.push(p);
@@ -1830,56 +1926,59 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
             styled_lines,
             line_source_offsets,
             hyperlinks,
+            cell_copies,
+            n_cols: num_cols,
         }
     }
 
     /// Word-wrap a cell's plain text into lines of at most `width` display columns.
     /// Returns a Vec of Strings, one per visual line (never an empty Vec).
     ///
-    /// Delegates to `textwrap::wrap` with a custom word separator that allows
-    /// line breaks after spaces, punctuation, and symbol characters — but never
-    /// mid-word.  A single word wider than `width` is then hard-split on
-    /// grapheme boundaries so no visual line exceeds the column width.
-    pub(crate) fn wrap_cell_text(text: &str, width: usize) -> Vec<String> {
-        if width == 0 {
-            return vec![String::new()];
-        }
-        let opts = textwrap::Options::new(width)
-            .wrap_algorithm(textwrap::WrapAlgorithm::FirstFit)
-            .word_separator(textwrap::WordSeparator::Custom(cell_word_separator))
-            .break_words(false);
-        let wrapped = textwrap::wrap(text, opts);
-        let mut lines: Vec<String> = Vec::with_capacity(wrapped.len());
-        for cow in wrapped {
-            let line = cow.into_owned();
-            if unicode_display_width(&line) <= width {
-                lines.push(line);
-                continue;
-            }
-            // An unbreakable word survived textwrap wider than the column
-            // (break_words is off, and textwrap's char-based emergency split
-            // can tear grapheme clusters): hard-split on grapheme boundaries
-            // using the same display-width model as the table formatter.
-            let mut piece = String::new();
-            let mut piece_width = 0usize;
-            for grapheme in line.graphemes(true) {
-                let grapheme_width = unicode_display_width(grapheme);
-                if piece_width > 0 && piece_width.saturating_add(grapheme_width) > width {
-                    lines.push(std::mem::take(&mut piece));
-                    piece_width = 0;
-                }
-                piece.push_str(grapheme);
-                piece_width = piece_width.saturating_add(grapheme_width);
-            }
-            if !piece.is_empty() {
-                lines.push(piece);
-            }
-        }
-        if lines.is_empty() {
+    /// Delegates to `textwrap::wrap` with a custom word separator that allows line breaks after spaces, punctuation, and symbol characters.
+    /// It never breaks mid-word.
+    /// A single word wider than `width` is then hard-split on grapheme boundaries so no visual line exceeds the column width.
+    pub(crate) fn wrap_cell_text_joins(text: &str, width: usize) -> (Vec<String>, Vec<CellJoin>) {
+        let lines = if width == 0 {
             vec![String::new()]
         } else {
-            lines
-        }
+            let opts = textwrap::Options::new(width)
+                .wrap_algorithm(textwrap::WrapAlgorithm::FirstFit)
+                .word_separator(textwrap::WordSeparator::Custom(cell_word_separator))
+                .break_words(false);
+            let wrapped = textwrap::wrap(text, opts);
+            let mut lines: Vec<String> = Vec::with_capacity(wrapped.len());
+            for cow in wrapped {
+                let line = cow.into_owned();
+                if unicode_display_width(&line) <= width {
+                    lines.push(line);
+                    continue;
+                }
+                // An unbreakable word survived textwrap wider than the column
+                // break_words is off, and textwrap's char-based emergency split can tear grapheme clusters
+                // Hard-split on grapheme boundaries using the same display-width model as the table formatter
+                let mut piece = String::new();
+                let mut piece_width = 0usize;
+                for grapheme in line.graphemes(true) {
+                    let grapheme_width = unicode_display_width(grapheme);
+                    if piece_width > 0 && piece_width.saturating_add(grapheme_width) > width {
+                        lines.push(std::mem::take(&mut piece));
+                        piece_width = 0;
+                    }
+                    piece.push_str(grapheme);
+                    piece_width = piece_width.saturating_add(grapheme_width);
+                }
+                if !piece.is_empty() {
+                    lines.push(piece);
+                }
+            }
+            if lines.is_empty() {
+                vec![String::new()]
+            } else {
+                lines
+            }
+        };
+        let joins = cell_wrap_joins(text, &lines);
+        (lines, joins)
     }
 
     /// Format a table row that may span multiple visual lines (when cells wrap).
@@ -1898,14 +1997,21 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
         v: char,
         border_style: ratatui::style::Style,
         is_header: bool,
-    ) -> (Vec<String>, Vec<Line<'static>>, Vec<TableHyperlink>) {
+    ) -> (
+        Vec<String>,
+        Vec<Line<'static>>,
+        Vec<TableHyperlink>,
+        Vec<TableCellCopy>,
+    ) {
         // 1. Wrap each cell's text into lines constrained to col_widths[i].
-        let wrapped_cells: Vec<Vec<String>> = (0..col_widths.len())
-            .map(|i| {
-                let text = cells.get(i).map(|c| c.plain_text()).unwrap_or_default();
-                Self::wrap_cell_text(&text, col_widths[i])
-            })
-            .collect();
+        let mut wrapped_cells = Vec::with_capacity(col_widths.len());
+        let mut cell_copies = Vec::with_capacity(col_widths.len());
+        for (i, &width) in col_widths.iter().enumerate() {
+            let text = cells.get(i).map(|c| c.plain_text()).unwrap_or_default();
+            let (lines, joins) = Self::wrap_cell_text_joins(&text, width);
+            cell_copies.push(TableCellCopy { text, joins });
+            wrapped_cells.push(lines);
+        }
 
         // 2. Determine the number of visual lines (max wrapped lines across cells).
         let num_visual_lines = wrapped_cells.iter().map(|c| c.len()).max().unwrap_or(1);
@@ -1933,8 +2039,9 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
             display_col += unicode_display_width(&v.to_string());
 
             for (i, width) in col_widths.iter().enumerate() {
-                let cell_line_text = wrapped_cells[i]
-                    .get(vis_line)
+                let cell_line_text = wrapped_cells
+                    .get(i)
+                    .and_then(|c| c.get(vis_line))
                     .map(|s| s.as_str())
                     .unwrap_or("");
                 let cell_line_width = unicode_display_width(cell_line_text);
@@ -2067,7 +2174,7 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
             all_styled.push(Line::from(spans));
         }
 
-        (all_plains, all_styled, all_links)
+        (all_plains, all_styled, all_links, cell_copies)
     }
 
     fn format_border_line(
@@ -2123,5 +2230,99 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
             last_checkpoint,
             next_link_id,
         }
+    }
+}
+
+#[cfg(test)]
+mod wrap_cell_joins_tests {
+    use super::cell_wrap_joins;
+    use crate::buffers::CellJoin;
+    use crate::parse::MarkdownParser;
+
+    fn reconstruct(lines: &[String], joins: &[CellJoin]) -> String {
+        let mut out = String::new();
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0
+                && let Some(CellJoin::Gap(s)) = joins.get(i - 1)
+            {
+                out.push_str(s);
+            }
+            out.push_str(line.trim());
+        }
+        out
+    }
+
+    #[test]
+    fn zebraone_space_before_slash_is_gap() {
+        let src = "ZebraOne / BravoCat / Quick Fox";
+        let mut saw_slash_wrap = false;
+        for width in 8..src.len() {
+            let (lines, joins) = MarkdownParser::wrap_cell_text_joins(src, width);
+            if lines.len() <= 1 {
+                continue;
+            }
+            assert_eq!(joins.len(), lines.len() - 1, "width={width}");
+            assert_eq!(
+                reconstruct(&lines, &joins),
+                src,
+                "width={width} lines={lines:?} joins={joins:?}"
+            );
+            for (i, join) in joins.iter().enumerate() {
+                if lines[i + 1].trim_start().starts_with('/') {
+                    assert!(
+                        matches!(join, CellJoin::Gap(g) if g.contains(' ')),
+                        "width={width} join before slash line must keep the space, \
+                         join={join:?} lines={lines:?}"
+                    );
+                    saw_slash_wrap = true;
+                }
+            }
+        }
+        assert!(
+            saw_slash_wrap,
+            "expected some width to wrap onto a slash-leading line"
+        );
+    }
+
+    #[test]
+    fn foo_bar_punct_wrap_is_tight() {
+        let src = "foo/bar";
+        let (lines, joins) = MarkdownParser::wrap_cell_text_joins(src, 4);
+        assert!(lines.len() > 1, "expected punct wrap, got {lines:?}");
+        assert_eq!(joins.len(), lines.len().saturating_sub(1));
+        assert_eq!(reconstruct(&lines, &joins), src);
+        assert!(
+            joins.iter().all(|j| matches!(j, CellJoin::Tight)),
+            "punct wrap must be Tight, joins={joins:?} lines={lines:?}"
+        );
+    }
+
+    #[test]
+    fn hard_split_url_is_all_tight() {
+        let src = "https://github.com/long/org/repo/pull/9";
+        let (lines, joins) = MarkdownParser::wrap_cell_text_joins(src, 20);
+        assert!(lines.len() > 1, "expected hard split, got {lines:?}");
+        assert_eq!(joins.len(), lines.len().saturating_sub(1));
+        assert_eq!(reconstruct(&lines, &joins), src);
+        assert!(
+            joins.iter().all(|j| matches!(j, CellJoin::Tight)),
+            "hard-split must be Tight, joins={joins:?} lines={lines:?}"
+        );
+        assert_eq!(cell_wrap_joins(src, &lines), joins);
+    }
+
+    #[test]
+    fn likes_long_walks_gap_is_space() {
+        let src = "likes long walks";
+        let (lines, joins) = MarkdownParser::wrap_cell_text_joins(src, 8);
+        assert!(lines.len() > 1, "expected prose wrap, got {lines:?}");
+        assert_eq!(joins.len(), lines.len().saturating_sub(1));
+        assert_eq!(reconstruct(&lines, &joins), src);
+        assert!(
+            joins
+                .iter()
+                .all(|j| matches!(j, CellJoin::Gap(g) if g == " ")),
+            "prose joins must be Gap(\" \"), joins={joins:?} lines={lines:?}"
+        );
     }
 }

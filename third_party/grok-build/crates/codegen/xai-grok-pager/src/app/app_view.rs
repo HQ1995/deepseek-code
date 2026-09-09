@@ -1228,6 +1228,8 @@ pub struct AppView {
     /// Whether the pager uses fullscreen (alt-screen) or inline mode.
     /// Set from the resolved terminal state at startup.
     pub(crate) screen_mode: super::ScreenMode,
+    /// Target consumed by the event loop without restarting the session.
+    pub(crate) pending_screen_mode_switch: Option<super::ScreenMode>,
     /// Onboarding tutorial overlay, if open. Top-level (not per-agent) so it
     /// works over both the welcome screen and an agent session. Opened by
     /// `/tutorial` (also in the command palette).
@@ -1656,6 +1658,7 @@ impl AppView {
             import_claude_modal: None,
             welcome_doc_viewer: None,
             screen_mode: ScreenMode::Inline,
+            pending_screen_mode_switch: None,
             show_resolved_model: true,
             sharing_enabled: false,
             plugin_cta_enabled: false,
@@ -3814,7 +3817,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             if key!('w', CONTROL).matches(key) && ctx.cwd_has_git_ancestor {
                 return InputOutcome::Action(Action::OpenNewWorktreeDialog);
             }
-            if key!('s', CONTROL).matches(key) {
+            if key!(F(3)).matches(key) {
                 return InputOutcome::Action(Action::FetchSessionList);
             }
             if ctx.has_pending_update && key!('u', CONTROL).matches(key) {
@@ -5048,25 +5051,28 @@ impl AppView {
                                 self.dashboard_sessions_loading,
                                 dash_upgrade_cta,
                             );
-                            let (popup_cursor, popup_post_flush, drawn_popup_agent) =
-                                if let Some(agent_id) = dashboard.attached_agent {
-                                    let theme = crate::theme::Theme::current();
-                                    let popup_area = crate::views::dashboard::popup_rect(view_area);
-                                    let title = agents
-                                        .get(&agent_id)
-                                        .map(crate::views::session_title::entry_title)
-                                        .unwrap_or_else(|| "(session)".to_string());
-                                    let bundle_state = &self.bundle_state;
-                                    let (cursor, post_flush, drawn) =
-                                        crate::views::dashboard::render_popup_overlay(
-                                            f.buffer_mut(),
-                                            popup_area,
-                                            &theme,
-                                            &title,
-                                            dashboard,
-                                            |inner, buf| {
-                                                if let Some(agent) = agents.get_mut(&agent_id) {
-                                                    agent.draw(
+                            let (popup_cursor, popup_post_flush, drawn_popup_agent) = if let Some(
+                                agent_id,
+                            ) =
+                                dashboard.attached_agent
+                            {
+                                let theme = crate::theme::Theme::current();
+                                let popup_area = crate::views::dashboard::popup_rect(view_area);
+                                let title = agents
+                                    .get(&agent_id)
+                                    .map(crate::views::session_title::entry_title)
+                                    .unwrap_or_else(|| "(session)".to_string());
+                                let bundle_state = &self.bundle_state;
+                                let (cursor, post_flush, drawn) =
+                                    crate::views::dashboard::render_popup_overlay(
+                                        f.buffer_mut(),
+                                        popup_area,
+                                        &theme,
+                                        &title,
+                                        dashboard,
+                                        |inner, buf| {
+                                            if let Some(agent) = agents.get_mut(&agent_id) {
+                                                agent.draw(
                                                     inner,
                                                     buf,
                                                     registry,
@@ -5084,19 +5090,21 @@ impl AppView {
                                                         preset_label: self
                                                             .persona_override
                                                             .as_deref()
-                                                            .unwrap_or(self.preset_default.as_str()),
+                                                            .unwrap_or(
+                                                                self.preset_default.as_str(),
+                                                            ),
                                                         ..Default::default()
                                                     },
                                                 )
-                                                } else {
-                                                    (None, None)
-                                                }
-                                            },
-                                        );
-                                    (cursor, post_flush, drawn.then_some(agent_id))
-                                } else {
-                                    (None, None, None)
-                                };
+                                            } else {
+                                                (None, None)
+                                            }
+                                        },
+                                    );
+                                (cursor, post_flush, drawn.then_some(agent_id))
+                            } else {
+                                (None, None, None)
+                            };
                             let stale_clears =
                                 Self::dashboard_stale_image_clears(agents, drawn_popup_agent);
                             let popup_post_flush =
@@ -5769,6 +5777,9 @@ impl AppView {
     fn tick_agent_block_viewer(agent: &mut AgentView) -> bool {
         let mut needs_redraw = false;
         if let Some(ref mut viewer) = agent.block_viewer {
+            if viewer.kind == crate::views::block_viewer::ViewerKind::PlainText {
+                return false;
+            }
             if viewer.kind == crate::views::block_viewer::ViewerKind::BgTask
                 && let Some(ref task_id) = viewer.bg_task_id.clone()
                 && let Some(task) = agent.session.bg_tasks.get(task_id)
@@ -5778,7 +5789,7 @@ impl AppView {
             } else if let Some(entry) = agent.scrollback.get_by_id(viewer.entry_id) {
                 needs_redraw |= viewer.tick(entry);
             } else {
-                agent.block_viewer = None;
+                agent.clear_block_viewer();
                 needs_redraw = true;
             }
         }

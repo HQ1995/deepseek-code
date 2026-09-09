@@ -137,8 +137,8 @@ pub(super) fn default_actions(
         },
         ActionDef {
             id: ActionId::NextResponse,
-            label: "response",
-            description: "Next response",
+            label: "turn",
+            description: "Next turn below viewport",
             default_key: key!('J'),
             alt_keys: vec![],
             category: Category::ConversationNav,
@@ -150,8 +150,8 @@ pub(super) fn default_actions(
         },
         ActionDef {
             id: ActionId::PrevResponse,
-            label: "response",
-            description: "Previous response",
+            label: "turn",
+            description: "Previous turn above viewport",
             default_key: key!('K'),
             alt_keys: vec![],
             category: Category::ConversationNav,
@@ -597,7 +597,7 @@ pub(super) fn default_actions(
             id: ActionId::OpenSessions,
             label: "sessions",
             description: "Open sessions",
-            default_key: key!('s', CONTROL),
+            default_key: key!(F(3)),
             alt_keys: vec![],
             category: Category::Panels,
             context: When::AgentScreen,
@@ -605,7 +605,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Opens the session browser to resume or switch between past conversations.\nSelect one to reattach to its full history.\nSeparate from the Agent Dashboard (Ctrl+\\), which manages many live agents at once.",
+                "Opens the session browser to resume or switch between past conversations.\nSelect one to reattach to its full history. `/resume` does the same.\nSeparate from the Agent Dashboard (Ctrl+\\), which manages many live agents at once.",
             ),
         },
         ActionDef {
@@ -755,6 +755,22 @@ pub(super) fn default_actions(
             requires_confirmation: false,
             long_help: Some(
                 "Toggles a persistent multi-line prompt so the editor stays expanded for composing longer messages.\nInsert newlines with Shift+Enter or Alt+Enter (or a trailing backslash); bare Enter still sends.\nCtrl+M toggles multiline in the prompt; off the prompt it opens the model picker.",
+            ),
+        },
+        ActionDef {
+            id: ActionId::StashPrompt,
+            label: "stash",
+            description: "Stash / pop prompt draft",
+            default_key: key!('s', CONTROL),
+            // The escape hatch for terminals that swallow Ctrl+S as XOFF.
+            alt_keys: vec![key!('s', ALT)],
+            category: Category::Input,
+            context: When::PromptFocused,
+            hint_priority: None,
+            hint_key_display: None,
+            requires_confirmation: false,
+            long_help: Some(
+                "Stash your current prompt as a draft.\nCtrl+S sets the draft aside and clears the composer. Ctrl+S on an empty composer restores it. The draft also restores by itself after you send your next prompt. Use Alt+S if your terminal swallows Ctrl+S.\nOne draft at a time: a new stash replaces the old one.",
             ),
         },
         ActionDef {

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Product contracts shared by PR checks and the release gate.
+set -euo pipefail
+# Process-lifecycle tests must not be able to signal unrelated host processes.
+if [[ "$(uname -s)" == Linux && "${DSCODE_RUST_TESTS_ISOLATED:-}" != 1 ]]; then
+  exec unshare --user --map-root-user --pid --fork --mount-proc \
+    env DSCODE_RUST_TESTS_ISOLATED=1 bash "$0" "$@"
+fi
+export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT/third_party/grok-build"
+cargo check -p xai-grok-pager-bin
+cargo test -p xai-grok-shell-base util::tests:: --lib
+cargo test -p xai-grok-shell leader:: --lib
+cargo test -p xai-grok-update --lib
+cargo test -p xai-grok-pager --lib -- \
+  to_meta_ native_controls doctor tasks shortcuts_help subagent mode_switch prompt_stash overlay_post_flush
+echo 'PASS Rust product contracts'

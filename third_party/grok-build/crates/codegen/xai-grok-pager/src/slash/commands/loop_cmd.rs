@@ -1,7 +1,5 @@
 use agent_client_protocol as acp;
-use xai_grok_tools::implementations::grok_build::{
-    LoopFireMode, loop_schedule_instruction, loop_usage_message,
-};
+use xai_grok_tools::implementations::grok_build::loop_usage_message;
 
 use crate::slash::command::{CommandExecCtx, CommandResult, ScheduledTaskPreview, SlashCommand};
 
@@ -116,17 +114,12 @@ impl SlashCommand for LoopCommand {
             .map_or(true, |caps| caps.contains("schedule"))
     }
 
-    fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         if args.trim().is_empty() {
             return CommandResult::Message(loop_usage_message().to_string());
         }
 
         let (interval_token, prompt) = parse_loop_args(args);
-        let fire_mode = if ctx.pager_state.scheduler_background_loops {
-            LoopFireMode::Detached
-        } else {
-            LoopFireMode::InSession
-        };
 
         // Show a concrete cadence only for an unambiguous leading token;
         // otherwise a neutral placeholder, since the authoritative schedule
@@ -139,13 +132,9 @@ impl SlashCommand for LoopCommand {
 
         CommandResult::InjectSkill {
             display_text: format!("/loop {args}"),
-            prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
-                // DIVERGENCE(deepseek): dsh-schedule uses schedule_create /
-                // schedule_delete rather than grok's scheduler_create.
-                loop_schedule_instruction(args, fire_mode)
-                    .replace("scheduler_create", "schedule_create")
-                    .replace("scheduler_delete", "schedule_delete"),
-            ))],
+            prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(format!(
+                "Create a session-local recurring reminder with schedule_create. Parse a <number><unit> interval (s/m/h/d) or natural-language cadence; if absent, ask the user how often. Use prompt and every_seconds (a safe integer of at least 300). Reminders run only while this session is live; missed intervals coalesce when resumed. User request: {args}"
+            )))],
             display_as_skill: false,
             scheduled_task_preview: Some(ScheduledTaskPreview {
                 prompt: prompt.to_string(),
@@ -373,26 +362,21 @@ mod tests {
         }
     }
 
-    // Drift guard (pager end): pager text == shared helper. With the shell's
-    // `loop_prompt_matches_pager_wording`, this pins full shell↔pager parity.
     #[test]
-    fn run_instruction_matches_shared_helper() {
+    fn run_instruction_uses_native_session_schedule_in_both_settings() {
         let args = "2h run tests";
-        for (background_loops, mode) in [
-            (true, LoopFireMode::Detached),
-            (false, LoopFireMode::InSession),
-        ] {
+        for background_loops in [true, false] {
             match run_loop_with_background_loops(args, background_loops) {
                 CommandResult::InjectSkill { prompt_blocks, .. } => {
                     let acp::ContentBlock::Text(text) = &prompt_blocks[0] else {
                         panic!("expected a text prompt block");
                     };
-                    assert_eq!(
-                        text.text,
-                        loop_schedule_instruction(args, mode)
-                            .replace("scheduler_create", "schedule_create")
-                            .replace("scheduler_delete", "schedule_delete"),
-                    );
+                    assert!(text.text.contains("schedule_create"));
+                    assert!(text.text.contains("every_seconds"));
+                    assert!(text.text.contains("at least 300"));
+                    assert!(text.text.contains("only while this session is live"));
+                    assert!(text.text.contains(args));
+                    assert!(!text.text.contains("cron"));
                 }
                 other => panic!("expected InjectSkill, got {other:?}"),
             }

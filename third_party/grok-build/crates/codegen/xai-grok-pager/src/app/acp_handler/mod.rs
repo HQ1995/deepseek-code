@@ -252,6 +252,16 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         if !meta.is_replay
                             && let Some(running) = meta.session_running
                         {
+                            if running
+                                && !agent.native_session_running
+                                && !agent.session.state.is_turn_running()
+                                && agent.scrollback.is_follow_mode()
+                            {
+                                // Native rounds have no foreground send to release
+                                // the finished prompt's page-flip pin. Follow their
+                                // output, preserving deliberate history browsing.
+                                agent.scrollback.enable_follow_mode();
+                            }
                             agent.native_session_running = running;
                         }
                         if let Some(context) = meta.context_info.as_ref() {
@@ -740,6 +750,7 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         return handle_session_notification(notif, app);
     }
     match method {
+        "x.ai/subagent/history_changed" => crate::app::subagent::native::history_changed(notif, app),
         "x.ai/follow_ups" => handle_follow_ups(notif, app),
         "x.ai/task_backgrounded" => handle_task_backgrounded(notif, app),
         "x.ai/task_completed" => handle_task_completed(notif, app),

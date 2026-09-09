@@ -4,6 +4,7 @@
 //! source of truth — used by both the subagent pane (display) and the
 //! permission view (provenance labels).
 use serde::Deserialize;
+pub(crate) mod native;
 use std::sync::Arc;
 use std::time::Instant;
 use xai_grok_shell::session::storage::{
@@ -17,6 +18,7 @@ use xai_grok_shell::session::storage::{
 /// `SubagentProgress` and `SubagentFinished`.
 #[derive(Debug, Clone)]
 pub struct SubagentInfo {
+    pub(crate) native: Option<native::NativeChild>,
     pub subagent_id: Arc<str>,
     pub child_session_id: Arc<str>,
     pub description: Arc<str>,
@@ -350,6 +352,10 @@ pub(crate) fn ensure_subagent_child_replayed(
     parent: &mut crate::app::agent_view::AgentView,
     child_sid: &str,
 ) {
+    if parent.subagent_sessions.get(child_sid).is_some_and(|info| info.native.is_some()) {
+        native::request_history(parent, child_sid);
+        return;
+    }
     let Some(info) = parent.subagent_sessions.get(child_sid) else {
         return;
     };
@@ -495,6 +501,9 @@ pub(crate) fn evict_finished_child_view(
     parent: &mut crate::app::agent_view::AgentView,
     child_sid: &str,
 ) -> bool {
+    if parent.subagent_sessions.get(child_sid).is_some_and(|info| info.native.is_some()) {
+        return native::evict(parent, child_sid);
+    }
     if parent.active_subagent.as_deref() == Some(child_sid) {
         return false;
     }
@@ -803,6 +812,7 @@ mod tests {
             child_cwd: None,
             worktree_path: None,
             transcript: Default::default(),
+            native: None,
         }
     }
     fn make_min_child_view() -> AgentView {

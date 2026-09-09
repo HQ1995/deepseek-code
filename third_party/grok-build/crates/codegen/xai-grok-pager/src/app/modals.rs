@@ -120,6 +120,20 @@ impl AgentView {
             return InputOutcome::Changed;
         };
 
+        if let ActiveModal::NativeControls { state } = modal {
+            return match state.key(key) {
+                crate::views::native_controls::NativeControlOutcome::Close => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                crate::views::native_controls::NativeControlOutcome::Changed => {
+                    InputOutcome::Changed
+                }
+                crate::views::native_controls::NativeControlOutcome::Request { method, params } => {
+                    InputOutcome::Action(Action::RequestNativeControls { method, params })
+                }
+            };
+        }
         // Picker-based modals: route Esc through ModalWindow chrome first,
         // then delegate remaining keys to the picker input handler.
         if matches!(
@@ -548,6 +562,7 @@ impl AgentView {
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
+            | ActiveModal::NativeControls { .. }
             | ActiveModal::AddProvider { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
             | ActiveModal::RememberNoteReview { .. } => unreachable!(),
@@ -586,6 +601,10 @@ impl AgentView {
         }
         if let Some(ActiveModal::MemoryBrowser { state }) = self.active_modal.as_mut() {
             return crate::views::memory_modal::handle_memory_paste(state, text);
+        }
+        if let Some(ActiveModal::NativeControls { state }) = self.active_modal.as_mut() {
+            state.paste(text);
+            return InputOutcome::Changed;
         }
         if let Some(ActiveModal::AddProvider { state }) = self.active_modal.as_mut() {
             return match crate::views::add_provider_modal::handle_add_provider_paste(state, text) {
@@ -738,6 +757,15 @@ impl AgentView {
 
         match step {
             ArgPickerStep::FilterChanged => {
+                if command_clone == "reference" {
+                    let Some(ActiveModal::ArgPicker { state, .. }) = self.active_modal.as_ref()
+                    else {
+                        return InputOutcome::Changed;
+                    };
+                    return InputOutcome::Action(Action::SearchSessionReferences {
+                        query: Some(state.query().to_owned()),
+                    });
+                }
                 if let Some(ActiveModal::ArgPicker {
                     items,
                     original_items,
@@ -801,6 +829,13 @@ impl AgentView {
                 InputOutcome::Changed
             }
             ArgPickerStep::Selected(item) => {
+                if command_clone == "reference" {
+                    self.active_modal = None;
+                    self.prompt
+                        .textarea
+                        .insert_str(&format!("{} ", item.insert_text));
+                    return InputOutcome::Changed;
+                }
                 let chains_to_effort = matches!(command_clone.as_str(), "model" | "m")
                     && item.insert_text.ends_with(char::is_whitespace);
                 if chains_to_effort {
@@ -1810,6 +1845,20 @@ impl AgentView {
             }
         }
 
+        if let Some(ActiveModal::NativeControls { state }) = &mut self.active_modal {
+            return match mw::handle_modal_mouse(
+                &mut state.window,
+                mouse.kind,
+                mouse.column,
+                mouse.row,
+            ) {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                _ => InputOutcome::Changed,
+            };
+        }
         // AddProvider: chrome-only mouse (close button / click-outside);
         // the form itself is keyboard-driven.
         if let Some(ActiveModal::AddProvider { state }) = &mut self.active_modal {
@@ -2047,9 +2096,10 @@ impl AgentView {
                     "model" | "m" => "Pick model",
                     "theme" | "t" => "Pick theme",
                     "provider" => "Providers",
+                    "reference" => "Reference session (Enter inserts into draft)",
                     _ => "Pick option",
                 };
-                let picker_entries: Vec<PickerEntry> = items
+                let mut picker_entries: Vec<PickerEntry> = items
                     .iter()
                     .enumerate()
                     .map(|(i, item)| {
@@ -2071,6 +2121,15 @@ impl AgentView {
                         })
                     })
                     .collect();
+                if command == "reference" && picker_entries.is_empty() {
+                    picker_entries.push(PickerEntry::Header {
+                        label: if args_query.starts_with("loading:") {
+                            "Searching sessions…"
+                        } else {
+                            "No matching sessions"
+                        },
+                    });
+                }
                 let compact = self.scrollback.appearance().prompt.compact;
                 // Surface `i search` in the footer when vim nav mode is active.
                 mw::push_vim_nav_search_hint(&mut picker_shortcuts, state.search_active);
@@ -2614,6 +2673,8 @@ impl AgentView {
                     compact,
                     &theme,
                 );
+            } else if let modal::ActiveModal::NativeControls { state } = active_modal {
+                state.render(buf, area);
             } else if let modal::ActiveModal::AddProvider { state } = active_modal {
                 crate::views::add_provider_modal::render_add_provider_modal(buf, area, state);
             } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
@@ -2666,6 +2727,40 @@ mod session_picker_delete_tests {
     use crate::app::app_view::{InputOutcome, SessionPickerEntry};
     use crate::views::modal::ActiveModal;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+
+    #[test]
+    fn native_reference_picker_inserts_without_submitting_and_cancel_preserves_draft() {
+        let mut agent = make_agent();
+        agent.prompt.textarea.insert_str("Review ");
+        for code in [KeyCode::Esc, KeyCode::Enter] {
+            let item = crate::slash::command::ArgItem {
+                display: "Prior work".into(),
+                match_text: "prior".into(),
+                insert_text: "@[Prior work](dsh-session:prior)".into(),
+                description: "/repo".into(),
+            };
+            agent.active_modal = Some(ActiveModal::ArgPicker {
+                command: "reference".into(),
+                args_query: "request-1".into(),
+                items: vec![item.clone()],
+                original_items: vec![item],
+                state: crate::views::picker::PickerState::input_active(),
+                previous_palette: None,
+                window: crate::views::modal_window::ModalWindowState::new(),
+            });
+            let outcome =
+                agent.handle_arg_picker_input(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+            assert!(matches!(outcome, InputOutcome::Changed));
+            assert!(agent.active_modal.is_none());
+            if code == KeyCode::Esc {
+                assert_eq!(agent.prompt.text(), "Review ");
+            }
+        }
+        assert_eq!(
+            agent.prompt.text(),
+            "Review @[Prior work](dsh-session:prior) "
+        );
+    }
 
     fn entry(id: &str) -> SessionPickerEntry {
         SessionPickerEntry {

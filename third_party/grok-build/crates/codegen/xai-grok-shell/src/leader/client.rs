@@ -443,6 +443,7 @@ async fn register(
     let cancel_read = cancel.clone();
     let disconnect_tx_read = disconnect_tx.clone();
     let pending_control_read = pending_control.clone();
+    let local_errors = from_server_tx.clone();
     tokio::spawn(async move {
         let reason = loop {
             tokio::select! {
@@ -519,8 +520,26 @@ async fn register(
                     break DisconnectReason::ClientInitiated;
                 }
                 Some(msg) = outbound_rx.recv() => {
-                    if write_message(&mut writer, &msg).await.is_err() {
-                        break DisconnectReason::ConnectionLost;
+                    match write_message(&mut writer, &msg).await {
+                        Ok(()) => {},
+                        Err(error @ ProtocolError::MessageTooLarge(_)) => {
+                            // Framing rejects before writing any bytes. Return a
+                            // request error without tearing down the live session.
+                            if let ClientMessage::Acp { payload } = &msg {
+                                if let Ok(request) = serde_json::from_str::<serde_json::Value>(payload) {
+                                    if let Some(id) = request.get("id") {
+                                        let _ = local_errors.send(serde_json::json!({
+                                            "jsonrpc": "2.0", "id": id,
+                                            "error": { "code": -32602, "message": format!("{error}; reduce the prompt or attached images") }
+                                        }).to_string());
+                                    }
+                                }
+                            } else if let ClientMessage::Control { request_id, .. } = &msg {
+                                pending_control.lock().await.remove(request_id);
+                            }
+                            warn!(%error, "Rejected oversized outgoing request");
+                        },
+                        Err(_) => break DisconnectReason::ConnectionLost,
                     }
                 }
                 _ = keepalive.tick() => {
@@ -1065,6 +1084,66 @@ mod tests {
 
         client_b.cancel();
         handle.cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn oversized_request_preserves_connection() {
+        let temp = TempDir::new().unwrap();
+        let sock_path = temp.path().join("oversized.sock");
+        let mut server = spawn_leader_server(sock_path.clone()).await.unwrap();
+        let mut client = LeaderClient::connect(
+            sock_path,
+            "test",
+            ClientMode::Stdio,
+            ClientCapabilities::default(),
+        )
+        .await
+        .unwrap();
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0", "id": 7, "method": "session/prompt",
+            "params": { "text": "x".repeat(64 * 1024 * 1024) },
+        })
+        .to_string();
+        client.send(payload).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(10), client.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["error"]["code"], -32602);
+        assert_eq!(
+            *client.disconnect_reason().borrow(),
+            DisconnectReason::Connected
+        );
+
+        client
+            .send(r#"{"jsonrpc":"2.0","id":8,"method":"test"}"#.into())
+            .unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(5), server.acp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let request: serde_json::Value = serde_json::from_str(&received).unwrap();
+        server
+            .response_tx
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": request["id"], "result": "still connected",
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), client.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response).unwrap()["result"],
+            "still connected"
+        );
+        client.cancel();
+        server.cancel.cancel();
     }
 
     #[tokio::test]

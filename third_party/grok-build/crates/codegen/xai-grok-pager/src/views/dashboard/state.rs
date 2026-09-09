@@ -4572,6 +4572,7 @@ fn dashboard_action_for_id(
         ActionId::SendPrompt
         | ActionId::InterjectPrompt
         | ActionId::SteerPrompt
+        | ActionId::StashPrompt
         | ActionId::ScrollUp
         | ActionId::ScrollDown
         | ActionId::PageUp

@@ -54,18 +54,6 @@ fn transcript_target(
 }
 
 impl AgentView {
-    pub(crate) fn open_workflow_detail(&mut self, name: &str) {
-        let Some(run_id) = self
-            .workflow_runs
-            .iter()
-            .find(|r| r.name == name)
-            .map(|r| r.run_id.clone())
-        else {
-            return;
-        };
-        self.open_workflow_detail_by_run_id(&run_id);
-    }
-
     pub(crate) fn open_workflow_detail_by_run_id(&mut self, run_id: &str) {
         if !self.workflow_runs.iter().any(|r| r.run_id == run_id) {
             return;
@@ -85,7 +73,9 @@ impl AgentView {
                 if key!('q', CONTROL).matches(key) {
                     return Some(InputOutcome::Unchanged);
                 }
-                if !key.modifiers.is_empty() {
+                if !key.modifiers.is_empty()
+                    && !(key.code == KeyCode::BackTab && key.modifiers == crossterm::event::KeyModifiers::SHIFT)
+                {
                     return Some(InputOutcome::Changed);
                 }
                 let runs = self.workflow_runs_newest_first();
@@ -110,9 +100,10 @@ impl AgentView {
                         self.show_workflows = false;
                         InputOutcome::Changed
                     }
-                    KeyCode::Tab if in_detail && runs.len() > 1 => {
-                        view.detail_run_id = None;
-                        view.phase_pinned = false;
+                    KeyCode::Tab | KeyCode::BackTab if in_detail => {
+                        if let Some(run) = view.detail_run(&runs) {
+                            view.select_next_agent(run, key.code == KeyCode::BackTab);
+                        }
                         self.workflows_view = view;
                         InputOutcome::Changed
                     }
@@ -142,8 +133,22 @@ impl AgentView {
                     }
                     KeyCode::Enter if in_detail => {
                         if let Some(run) = view.detail_run(&runs)
-                            && let Some(agent_id) =
-                                transcript_target(run, view.selected_phase_name.as_deref())
+                            && let Some(agent_id) = view
+                                .selected_agent_id
+                                .as_ref()
+                                .filter(|id| {
+                                    run.agents_in_phase(
+                                        view.selected_phase_name
+                                            .as_deref()
+                                            .filter(|name| *name != "All agents"),
+                                    )
+                                    .iter()
+                                    .any(|agent| agent.agent_id == **id)
+                                })
+                                .cloned()
+                                .or_else(|| {
+                                    transcript_target(run, view.selected_phase_name.as_deref())
+                                })
                         {
                             self.open_subagent_fullscreen(agent_id);
                         }
@@ -345,6 +350,46 @@ mod workflows_overlay_key_tests {
         }
         agent.show_workflows = true;
         agent
+    }
+
+    #[test]
+    fn native_workflow_keyboard_selects_each_child_of_the_requested_run() {
+        let mut agent = workflows_agent(&["first", "second"]);
+        let run = agent.workflow_runs.last_mut().unwrap();
+        run.management_available = false;
+        run.phases = vec![("Read".into(), "complete".into())];
+        run.agents = ["child-a", "child-b"]
+            .into_iter()
+            .map(|id| crate::views::workflows::WorkflowAgentRowView {
+                agent_id: id.into(),
+                label: id.into(),
+                phase: Some("Read".into()),
+                model: None,
+                state: "completed".into(),
+                tokens_used: 0,
+                duration_ms: 10,
+            })
+            .collect();
+        for id in ["child-a", "child-b"] {
+            agent
+                .subagent_views
+                .insert(id.into(), Box::new(make_agent()));
+        }
+        agent.open_workflow_detail_by_run_id("second");
+        let reg = ActionRegistry::defaults();
+        for id in ["child-a", "child-b"] {
+            agent.handle_input(&key(KeyCode::Tab), &reg);
+            assert_eq!(agent.workflows_view.selected_agent_id.as_deref(), Some(id));
+        }
+        agent.handle_input(&modified_key(KeyCode::BackTab, KeyModifiers::SHIFT), &reg);
+        assert_eq!(agent.workflows_view.selected_agent_id.as_deref(), Some("child-a"));
+        agent.handle_input(&key(KeyCode::Tab), &reg);
+        agent.handle_input(&key(KeyCode::Enter), &reg);
+        assert_eq!(agent.active_subagent.as_deref(), Some("child-b"));
+        assert_eq!(
+            agent.workflows_view.detail_run_id.as_deref(),
+            Some("second")
+        );
     }
 
     #[test]

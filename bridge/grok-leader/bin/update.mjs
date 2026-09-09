@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { accessSync, chmodSync, constants, cpSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { accessSync, chmodSync, closeSync, constants, cpSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import { createGunzip } from 'node:zlib'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -156,15 +158,49 @@ export const validateRuntime = (runtime, metadata, platform = process.platform, 
     || descriptor.sourceCommit !== metadata.dsh.sourceCommit || descriptor.dshVersion !== metadata.dsh.testedVersion) throw new Error('runtime provenance/platform mismatch')
   if (!existsSync(join(runtime, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))) throw new Error('runtime CLI entrypoint missing')
   if (platform === 'linux') {
-    const native = join(runtime, 'node_modules', `@deepseek-ai/node-addon-landlock-run-${platform}-${arch}`)
+    // Both native families exist in released dscode runtimes; rollback keeps the old one valid.
+    const system = existsSync(join(runtime, 'node_modules', '@deepseek-ai/node-addon-system'))
+    const native = join(runtime, 'node_modules', `@deepseek-ai/node-addon-${system ? 'system' : 'landlock-run'}-${platform}-${arch}`)
     const prebuilds = json(join(native, 'prebuilds.json'))
     if (prebuilds.platform !== `${platform}-${arch}` || !prebuilds.binaries?.some(binary => binary.tool === 'landlock-run' && binary.kind === 'static-musl' && binary.path === 'bin/landlock-run')) throw new Error('runtime native helper metadata mismatch')
     accessSync(join(native, 'bin', 'landlock-run'), constants.X_OK)
+    if (system) for (const libc of ['glibc', 'musl']) {
+      const path = `bin/${libc}/system.node`
+      if (!prebuilds.binaries.some(binary => binary.tool === 'flock' && binary.kind === 'node-api' && binary.libc === libc && binary.path === path)) throw new Error('runtime native flock metadata missing')
+      accessSync(join(native, path), constants.R_OK)
+    }
   }
   if (binaryVersion(join(runtime, 'bin', 'dsh')) !== metadata.dsh.testedVersion) throw new Error('runtime CLI version mismatch')
 }
+/** Use the pinned runtime's existing POSIX lock binding. The persistent inode
+ * lives outside the replaceable profile; process death releases its lock. */
+export const withProfileLock = async (profile, action, runtime = join(profile, 'runtime')) => {
+  mkdirSync(dirname(profile), { recursive: true })
+  const canonical = existsSync(profile) ? realpathSync(profile) : join(realpathSync(dirname(profile)), basename(profile))
+  const locations = [join(runtime, 'package.json'), join(canonical, 'runtime/package.json'), import.meta.url]
+  if (process.env.DSH_BIN && existsSync(process.env.DSH_BIN)) locations.push(realpathSync(process.env.DSH_BIN))
+  let binding
+  for (const location of locations) {
+    try { binding = createRequire(location).resolve('@deepseek-ai/node-addon-system/flock'); break } catch (error) {
+      if (error.code !== 'MODULE_NOT_FOUND') throw error
+    }
+  }
+  if (!binding) throw new Error('cannot lock dscode profile: the pinned runtime system addon is unavailable')
+  const { tryLockExclusive } = await import(pathToFileURL(binding).href)
+  const fd = openSync(join(dirname(canonical), `.${basename(canonical)}.install.lock`), constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600)
+  try {
+    try { await tryLockExclusive(fd) } catch (error) {
+      if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) throw new Error('another dscode installation is updating this profile; retry after it finishes', { cause: error })
+      throw error
+    }
+    return await action()
+  } finally { closeSync(fd) }
+}
+
+export const commitInstallation = (profile, stage, entries) => withProfileLock(profile, () => commit(profile, stage, entries))
+
 /** Config commits last; ordinary failures restore every moved entry. Missing staged entries are deletions. */
-export const commitInstallation = (profile, stage, entries) => {
+const commit = (profile, stage, entries) => {
   const backup = join(stage, 'backup')
   mkdirSync(backup)
   const moved = []
@@ -215,6 +251,9 @@ export const installRelease = async ({ profile, packageName, version, channel, a
       run('npm', ['install', '--global', '--prefix', runtime, `@deepseek-ai/dsh@${metadata.dsh.testedVersion}`, '--omit=dev', '--no-audit', '--no-fund'])
       if (binaryVersion(join(runtime, 'bin', 'dsh')) !== metadata.dsh.testedVersion) throw new Error('runtime CLI version mismatch')
     }
+    // Downloads are private. Lock before reading/copying ANY active component,
+    // and retain ownership through commit or rollback.
+    await withProfileLock(profile, async () => {
     const manifestPath = join(profile, 'package.json')
     const manifest = existsSync(manifestPath) ? json(manifestPath) : { name: 'dsh-profile-dscode', private: true }
     manifest.dependencies = { ...manifest.dependencies, [packageName]: source ? `${base}/dscode-plugin.tgz` : version }
@@ -242,11 +281,14 @@ export const installRelease = async ({ profile, packageName, version, channel, a
     config.cli = { ...config.cli, channel, channel_format: 1 }
     writeFileSync(join(prepared, 'config.toml'), stringify(config))
     const entries = ['node_modules', 'package.json', 'runtime', 'bin/dscode', 'package-lock.json', 'npm-shrinkwrap.json']
-    if (!existsSync(join(profile, 'cordis.patch.yml'))) {
-      writeFileSync(join(prepared, 'cordis.patch.yml'), '# Your patch layer for this dsh profile\n')
+    const patchPath = join(profile, 'cordis.patch.yml')
+    const emptyLegacyPatch = '# Your patch layer for this dsh profile'
+    if (!existsSync(patchPath) || readFileSync(patchPath, 'utf8').trim() === emptyLegacyPatch) {
+      writeFileSync(join(prepared, 'cordis.patch.yml'), emptyLegacyPatch + '\n[]\n')
       entries.push('cordis.patch.yml')
     }
     entries.push('config.toml')
-    commitInstallation(profile, stage, entries)
+    commit(profile, stage, entries)
+    }, runtime)
   } finally { rmSync(stage, { recursive: true, force: true }) }
 }

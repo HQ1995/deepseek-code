@@ -15,7 +15,22 @@ export function goalReply(body) {
   const messages = body.messages ?? [];
   const userIndex = messages.findLastIndex(message => message.role === 'user');
   const prompt = textOf(messages[userIndex]);
-  const scenario = prompt.match(/\bNATIVE_GOAL_E2E_(LIFECYCLE|ROUNDS|COMPLETE)\b/)?.[1];
+  if (prompt.includes('NATIVE_GOAL_PAUSED_GUARD')) {
+    const suffix = messages.slice(userIndex + 1);
+    const calls = new Map(suffix.flatMap(message => message.tool_calls ?? []).map(call => [call.id, call.function]));
+    const results = suffix.filter(message => message.role === 'tool');
+    const updated = results.find(message => calls.get(message.tool_call_id)?.name === 'update_goal');
+    if (updated) {
+      assert.match(textOf(updated), /paused|human|resume/i, 'Paused goal rejection must reach the model');
+      return { text: 'NATIVE_GOAL_PAUSED_GUARD_DONE' };
+    }
+    const read = results.findLast(message => calls.get(message.tool_call_id)?.name === 'get_goal');
+    if (!read) return { name: 'get_goal', arguments: {} };
+    const { goal } = JSON.parse(textOf(read));
+    assert.equal(goal.phase, 'paused');
+    return { name: 'update_goal', arguments: { goal_id: goal.id, revision: goal.revision, action: 'resume' } };
+  }
+  const scenario = prompt.match(/\bNATIVE_GOAL_E2E_(LIFECYCLE|ROUNDS|COMPLETE|STREAM)\b/)?.[1];
   if (!scenario) return undefined;
   const round = Number(prompt.match(/\bRound: (\d+)\//)?.[1] ?? 0);
   if (round > MAX_ROUNDS) throw new Error(`Goal ${scenario} exceeded ${MAX_ROUNDS} admitted rounds`);
@@ -25,6 +40,13 @@ export function goalReply(body) {
   }
   if (!prompt.includes('<goal_round>')) return undefined;
   assert.ok(round > 0, 'Native goal prompt must contain a positive round number');
+  if (scenario === 'STREAM') {
+    const mode = prompt.match(/NATIVE_GOAL_E2E_STREAM (minimal|fullscreen)\b/)?.[1];
+    assert.ok(mode, 'Stream scenario must identify its starting mode');
+    return round === 1
+      ? { text: `NATIVE_STREAM_${mode}_START`, hold: true, releaseText: `\nNATIVE_STREAM_${mode}_END` }
+      : { text: '', hold: true };
+  }
   if (scenario === 'LIFECYCLE') return { text: `NATIVE_GOAL_LIFECYCLE_HELD_${round}`, hold: true };
   if (round === 1) return { text: `NATIVE_GOAL_${scenario}_ROUND_ONE_FINISHED` };
   if (scenario === 'ROUNDS') return { text: `NATIVE_GOAL_ROUNDS_HELD_${round}`, hold: true };
@@ -46,6 +68,40 @@ export function goalReply(body) {
   assert.ok(goal.objective.includes(`${PREFIX}COMPLETE`), 'get_goal returned another scenario objective');
   assert.equal(goal.phase, 'active', 'Completion requires the actual active goal');
   return { name: 'update_goal', arguments: { goal_id: goal.id, revision: goal.revision, action: 'complete' } };
+}
+
+export async function goalStreamAcceptance(ui) {
+  for (const mode of ['minimal', 'fullscreen']) {
+    if (mode === 'minimal') {
+      await ui.send('/minimal');
+      await ui.wait(/Switched to minimal mode/);
+    }
+    await ui.send(`/goal ${PREFIX}STREAM ${mode}`);
+    const start = `NATIVE_STREAM_${mode}_START`, end = `NATIVE_STREAM_${mode}_END`;
+    await ui.wait(new RegExp(start), DEADLINE);
+    await ui.waitState(state => state.status === 'running' && state.goal?.roundsStarted === 1, `native-stream-${mode}-running`, DEADLINE);
+    if (mode === 'fullscreen') {
+      await ui.send('/minimal');
+      await ui.wait(/Switched to minimal mode/);
+    }
+    // Let multiple frames paint the first chunk before delivering the second.
+    await ui.settle(500);
+    await ui.artifact(`native-stream-${mode}-held`, { state: await ui.state(), screen: await ui.captureHistory() });
+    await ui.releaseModel();
+    await ui.wait(new RegExp(end), DEADLINE);
+    await ui.waitState(state => state.status === 'running' && state.goal?.roundsStarted === 2, `native-stream-${mode}-silent-round`, DEADLINE);
+    await ui.send('/goal pause');
+    await ui.waitState(state => state.status === 'idle' && state.goal?.phase === 'paused' && state.goal.activation === 'disarmed', `native-stream-${mode}-paused`, DEADLINE);
+    await ui.settle(300);
+    const screen = await ui.captureHistory();
+    assert.equal(screen.split(start).length - 1, 1, 'First native chunk must be printed exactly once');
+    assert.equal(screen.split(end).length - 1, 1, 'Later native chunk must remain visible exactly once');
+    await ui.artifact(`native-stream-${mode}-complete`, { state: await ui.state(), screen });
+    await ui.send('/goal clear');
+    await ui.waitState(state => state.status === 'idle' && !state.goal, `native-stream-${mode}-cleared`, DEADLINE);
+    await ui.send('/fullscreen');
+    await ui.wait(/Switched to fullscreen mode/);
+  }
 }
 
 export async function goalAcceptance(ui) {
@@ -97,6 +153,10 @@ export async function goalAcceptance(ui) {
   await ui.key('C-c');
   await observed('paused-cancelled', state => state.status === 'idle' && state.goal?.phase === 'paused');
   await quiet('paused-no-continuation', paused.goal);
+  await ui.send('NATIVE_GOAL_PAUSED_GUARD');
+  await visible(/NATIVE_GOAL_PAUSED_GUARD_DONE/, 'Native model tool must not rearm a paused goal');
+  const guarded = await observed('paused-model-resume-refused', state => state.status === 'idle' && state.goal?.phase === 'paused');
+  assert.deepEqual(guarded.goal, paused.goal, 'Model resume must preserve the paused goal revision and activation');
 
   await ui.send(`/goal edit ${PREFIX}LIFECYCLE edited`);
   await visible(/Goal updated/, 'Edit command must report success');

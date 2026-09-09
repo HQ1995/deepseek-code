@@ -12,6 +12,52 @@ use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 /// List background tasks, subagents, and scheduled tasks.
 pub struct TasksCommand;
 
+pub struct NativeControlsCommand {
+    pub reminders: bool,
+}
+
+impl SlashCommand for NativeControlsCommand {
+    fn name(&self) -> &str {
+        if self.reminders { "reminders" } else { "inbox" }
+    }
+    fn usage(&self) -> &str {
+        if self.reminders {
+            "/reminders"
+        } else {
+            "/inbox"
+        }
+    }
+    fn description(&self) -> &str {
+        if self.reminders {
+            "Manage session reminders"
+        } else {
+            "Manage child conversation input queues"
+        }
+    }
+    fn session_scoped(&self) -> bool {
+        true
+    }
+    fn visible(&self, ctx: &crate::slash::command::AppCtx) -> bool {
+        ctx.capabilities.as_ref().map_or(true, |caps| {
+            caps.contains(if self.reminders {
+                "schedule"
+            } else {
+                "subagents"
+            })
+        })
+    }
+    fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
+        if ctx.session_id.is_none() {
+            return CommandResult::Error("No active session".into());
+        }
+        CommandResult::Action(Action::OpenNativeControls(if self.reminders {
+            crate::views::native_controls::NativeControlTarget::Reminders
+        } else {
+            crate::views::native_controls::NativeControlTarget::Inbox { child_id: None }
+        }))
+    }
+}
+
 impl SlashCommand for TasksCommand {
     fn name(&self) -> &str {
         "tasks"
@@ -26,14 +72,20 @@ impl SlashCommand for TasksCommand {
     }
 
     fn usage(&self) -> &str {
-        "/tasks"
+        "/tasks [terminals]"
     }
 
-    fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
+    fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         if ctx.session_id.is_none() {
             return CommandResult::Error("No active session".to_string());
         }
-        CommandResult::Action(Action::ShowTasks)
+        match args.trim() {
+            "" => CommandResult::Action(Action::ShowTasks),
+            "terminals" => CommandResult::Action(Action::OpenNativeControls(
+                crate::views::native_controls::NativeControlTarget::Terminals,
+            )),
+            _ => CommandResult::Error("Usage: /tasks [terminals]".into()),
+        }
     }
 }
 

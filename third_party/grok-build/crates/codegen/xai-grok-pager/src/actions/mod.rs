@@ -40,6 +40,8 @@ pub enum ActionId {
     /// Merge the composer text into the running turn WITHOUT cancelling it
     /// (steer). Idle sessions fall back to a plain send.
     SteerPrompt,
+    /// Set aside the composer draft, or restore it when the composer is empty.
+    StashPrompt,
     /// Enable voice mode and start recording (`/voice`). Not a toggle — it
     /// never turns voice mode off; capture is controlled by [`Self::VoiceToggle`].
     EnableVoiceMode,

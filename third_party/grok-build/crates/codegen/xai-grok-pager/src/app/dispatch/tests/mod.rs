@@ -271,6 +271,7 @@ fn test_app() -> AppView {
         import_claude_modal: None,
         welcome_doc_viewer: None,
         screen_mode: crate::app::ScreenMode::Inline,
+        pending_screen_mode_switch: None,
         pending_effects: Vec::new(),
         pending_editor: None,
         pending_pager_path: None,
@@ -430,6 +431,7 @@ fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::Sub
         child_cwd: None,
         worktree_path: None,
         transcript: Default::default(),
+        native: None,
     }
 }
 fn cta_entry(name: &str, status: &str) -> xai_hooks_plugins_types::MarketplacePluginEntry {

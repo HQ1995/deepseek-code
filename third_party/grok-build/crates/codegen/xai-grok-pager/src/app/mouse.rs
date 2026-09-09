@@ -270,20 +270,7 @@ impl AgentView {
                             .map(str::to_owned)
                     {
                         self.prompt.history_search.deactivate();
-                        if self.prompt_input_mode != PromptInputMode::Remember
-                            && let Some(cmd) = text.strip_prefix("! ")
-                        {
-                            self.prompt_input_mode = PromptInputMode::Bash;
-                            self.prompt.set_text(cmd);
-                        } else if self.prompt_input_mode == PromptInputMode::Bash {
-                            self.prompt_input_mode = PromptInputMode::Normal;
-                            self.prompt.set_text(&text);
-                        } else {
-                            self.prompt.set_text(&text);
-                        }
-                        let len = self.prompt.textarea.text().len();
-                        self.prompt.textarea.set_cursor(len);
-                        self.prompt.file_search.clear_context();
+                        self.accept_history_entry(&text);
                     }
                     self.set_active_pane(AgentPane::Prompt, false);
                     return InputOutcome::Changed;
@@ -542,10 +529,18 @@ impl AgentView {
                                             tid.clone(),
                                         ));
                                     }
-                                    TaskEntryId::Workflow(name) => {
+                                    TaskEntryId::Workflow(run_id) => {
+                                        let Some(run) = self
+                                            .workflow_runs
+                                            .iter()
+                                            .find(|run| run.run_id == *run_id && run.can_stop())
+                                        else {
+                                            return InputOutcome::Changed;
+                                        };
                                         return InputOutcome::Action(
                                             Action::SendSlashCommandPreservingDraft(format!(
-                                                "/workflow stop {name}"
+                                                "/workflow stop {}",
+                                                run.name
                                             )),
                                         );
                                     }
@@ -562,27 +557,12 @@ impl AgentView {
                                             .and_then(|v| v.bg_task_id.as_deref())
                                             == Some(tid);
                                         if already_open {
-                                            self.block_viewer = None;
+                                            self.dismiss_block_viewer();
                                             return InputOutcome::Changed;
                                         }
-                                        if let Some(task) = self.session.bg_tasks.get(tid) {
-                                            let entry_id =
-                                                task.scrollback_entry_id.unwrap_or_else(|| {
-                                                    crate::scrollback::entry::EntryId::new(0)
-                                                });
-                                            let is_running = task.status
-                                                == crate::app::agent::BgTaskStatus::Running;
-                                            self.block_viewer = Some(
-                                                crate::views::block_viewer::BlockViewerPane::for_bg_task(
-                                                    entry_id,
-                                                    tid,
-                                                    &task.stdout,
-                                                    is_running,
-                                                ),
-                                            );
-                                            self.set_active_pane(AgentPane::Scrollback, true);
-                                            return InputOutcome::Changed;
-                                        }
+                                        let task_id = tid.clone();
+                                        self.show_bg_task_viewer(&task_id);
+                                        return InputOutcome::Changed;
                                     }
                                     TaskEntryId::Agent(sid) => {
                                         if let Some(child_sid) = self
@@ -637,21 +617,8 @@ impl AgentView {
                         {
                             if let Some(task_id) =
                                 self.tasks.selected_task_id().map(|s| s.to_string())
-                                && let Some(task) = self.session.bg_tasks.get(&task_id)
+                                && self.show_bg_task_viewer(&task_id)
                             {
-                                let entry_id = task
-                                    .scrollback_entry_id
-                                    .unwrap_or_else(|| crate::scrollback::entry::EntryId::new(0));
-                                let is_running =
-                                    task.status == crate::app::agent::BgTaskStatus::Running;
-                                self.block_viewer =
-                                    Some(crate::views::block_viewer::BlockViewerPane::for_bg_task(
-                                        entry_id,
-                                        &task_id,
-                                        &task.stdout,
-                                        is_running,
-                                    ));
-                                self.set_active_pane(AgentPane::Scrollback, true);
                                 self.last_bg_click = None;
                                 return InputOutcome::Changed;
                             }
@@ -663,12 +630,12 @@ impl AgentView {
                                 return InputOutcome::Changed;
                             }
                             if let Some(crate::views::tasks_pane::TaskEntry::Workflow {
-                                name,
+                                run_id,
                                 ..
                             }) = self.tasks.selected_entry()
                             {
-                                let name = name.clone();
-                                self.open_workflow_detail(&name);
+                                let run_id = run_id.clone();
+                                self.open_workflow_detail_by_run_id(&run_id);
                                 self.last_bg_click = None;
                                 return InputOutcome::Changed;
                             }

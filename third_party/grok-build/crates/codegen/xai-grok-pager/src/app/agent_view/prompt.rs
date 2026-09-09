@@ -32,29 +32,34 @@ impl AgentView {
         use crate::views::history_search::HistoryEntry;
         use std::collections::HashSet;
 
+        fn push_unique(out: &mut Vec<HistoryEntry>, seen: &mut HashSet<String>, text: String) {
+            let key = text.trim().to_string();
+            if !key.is_empty() && seen.insert(key) {
+                out.push(HistoryEntry { text });
+            }
+        }
+
         let mut seen: HashSet<String> = HashSet::new();
         let mut history = Vec::new();
+
+        if let Some(entry) = &self.prompt_stash {
+            push_unique(&mut history, &mut seen, entry.history_text());
+        }
+
+        for text in &self.prompt_stash_evicted {
+            push_unique(&mut history, &mut seen, text.clone());
+        }
 
         for i in (0..self.scrollback.len()).rev() {
             if let Some(entry) = self.scrollback.entry(i)
                 && let RenderBlock::UserPrompt(block) = &entry.block
             {
-                let key = block.text.trim().to_string();
-                if !key.is_empty() && seen.insert(key) {
-                    history.push(HistoryEntry {
-                        text: block.text.clone(),
-                    });
-                }
+                push_unique(&mut history, &mut seen, block.text.clone());
             }
         }
 
         for prompt in &self.session.prompt_history {
-            let key = prompt.trim().to_string();
-            if !key.is_empty() && seen.insert(key) {
-                history.push(HistoryEntry {
-                    text: prompt.clone(),
-                });
-            }
+            push_unique(&mut history, &mut seen, prompt.clone());
         }
 
         history
@@ -721,6 +726,7 @@ impl AgentView {
                             // Drain images BEFORE set_text("") wipes the chip elements.
                             let images = self.prompt.drain_images();
                             self.prompt.set_text("");
+                            self.note_draft_consumed();
                             return InputOutcome::Action(Action::SendPromptNow { text, images });
                         }
                     } else if turn_running
@@ -753,20 +759,32 @@ impl AgentView {
                             When::PromptFocused.telemetry_name(),
                         );
                         // Paste-then-steer: an image probe is still off-thread.
-                        // The deferred interject re-issues the same
-                        // `Action::Interject` this arm produces, so reuse it.
+                        // Preserve steer semantics when the attachment lands.
                         if self.paste_probe_in_flight > 0 {
-                            self.deferred_send = Some(AgentDeferredSend::Interject);
+                            self.deferred_send = Some(AgentDeferredSend::Steer);
                             return InputOutcome::Changed;
                         }
                         // Drain images BEFORE set_text("") wipes the chip elements.
                         let images = self.prompt.drain_images();
                         self.prompt.set_text("");
+                        self.note_draft_consumed();
                         return InputOutcome::Action(Action::Interject { text, images });
                     }
                 }
                 ActionId::ToggleMultiline => {
                     return InputOutcome::Action(Action::SetMultilineMode(!self.multiline_mode));
+                }
+                ActionId::StashPrompt => {
+                    let outcome = self.handle_stash_prompt_key();
+                    // A declined chord falls through like an unclaimed key.
+                    if !matches!(outcome, InputOutcome::Unchanged) {
+                        crate::actions::log_shortcut_used(
+                            key,
+                            ActionId::StashPrompt,
+                            When::PromptFocused.telemetry_name(),
+                        );
+                        return outcome;
+                    }
                 }
                 other => {
                     if let Some(outcome) = resolve_action(Some(other)) {
@@ -1076,6 +1094,29 @@ impl AgentView {
         }
     }
 
+    /// Commit a recalled history entry into the composer. Shared by the keyboard accept and the
+    /// mouse click, which drifted apart once and left the mouse path holding a duplicate draft.
+    pub(in crate::app) fn accept_history_entry(&mut self, text: &str) {
+        // Restore bash mode from a `! ` history entry unless Remember is active.
+        if self.prompt_input_mode != PromptInputMode::Remember
+            && let Some(cmd) = text.strip_prefix("! ")
+        {
+            self.prompt_input_mode = PromptInputMode::Bash;
+            self.prompt.set_text(cmd);
+        } else if self.prompt_input_mode == PromptInputMode::Bash {
+            self.prompt_input_mode = PromptInputMode::Normal;
+            self.prompt.set_text(text);
+        } else {
+            self.prompt.set_text(text);
+        }
+
+        let len = self.prompt.textarea.text().len();
+        self.prompt.textarea.set_cursor(len);
+        self.reclaim_stash_recalled_into_composer();
+        // Drop the recomputed `@`-completion context (same suppression as populate).
+        self.prompt.file_search.clear_context();
+    }
+
     /// Close the history panel and restore the pre-open composer (Esc, and
     /// browse-mode Down past the newest entry).
     fn close_history_restoring_saved(&mut self) {
@@ -1115,24 +1156,7 @@ impl AgentView {
                 .map(str::to_owned)
             {
                 self.prompt.history_search.deactivate();
-                // Restore bash mode from a `! ` history entry unless Remember is active.
-                if self.prompt_input_mode != PromptInputMode::Remember
-                    && let Some(cmd) = text.strip_prefix("! ")
-                {
-                    self.prompt_input_mode = PromptInputMode::Bash;
-                    self.prompt.set_text(cmd);
-                } else if self.prompt_input_mode == PromptInputMode::Bash {
-                    self.prompt_input_mode = PromptInputMode::Normal;
-                    self.prompt.set_text(&text);
-                } else {
-                    self.prompt.set_text(&text);
-                }
-                // Move cursor to end of text.
-                let len = self.prompt.textarea.text().len();
-                self.prompt.textarea.set_cursor(len);
-                // Drop the recomputed `@`-completion context (same
-                // suppression as populate).
-                self.prompt.file_search.clear_context();
+                self.accept_history_entry(&text);
             } else {
                 // No results — just deactivate.
                 self.close_history_restoring_saved();
@@ -1186,6 +1210,7 @@ impl AgentView {
         // keep the populated text, and apply the key as a normal edit.
         if browse {
             self.prompt.history_search.deactivate();
+            self.reclaim_stash_recalled_into_composer();
             self.prompt.textarea.input(*key);
             // The populated text may be a slash command — refresh completion.
             self.prompt.refresh_slash(&self.session.models);
@@ -1340,11 +1365,11 @@ mod slash_menu_enter_tests {
 
     #[test]
     fn enter_sends_highlighted_command_not_typed_prefix() {
-        let mut agent = agent_with_slash("/log");
-        select_display(&mut agent, "/login");
+        let mut agent = agent_with_slash("/min");
+        select_display(&mut agent, "/minimal");
         let outcome = agent.handle_prompt_key_for_test(&enter());
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::SendPrompt(ref text)) if text == "/login"),
+            matches!(outcome, InputOutcome::Action(Action::SendPrompt(ref text)) if text == "/minimal"),
             "got {outcome:?}; prompt={:?}",
             agent.prompt.text()
         );

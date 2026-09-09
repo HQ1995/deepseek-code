@@ -617,6 +617,8 @@ pub enum ButtonAction {
     },
     /// Remove the selected MCP server from config.toml.
     RemoveSelectedMcpServer,
+    /// Insert the selected user-invocable skill into the composer.
+    UseSelectedSkill,
     /// Reload the skills list (re-fetch from shell).
     ReloadSkills,
     /// Refresh MCP server list (re-fetch from shell).
@@ -1121,7 +1123,7 @@ pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
             ('d', "uninstall"),
             ('x', "remove source"),
         ],
-        ExtensionsTab::Skills => vec![('f', "filter"), ('r', "reload")],
+        ExtensionsTab::Skills => vec![('u', "use"), ('f', "filter"), ('r', "reload")],
         ExtensionsTab::McpServers => MCP_SERVERS_ACTION_KEYS.to_vec(),
     }
 }
@@ -1344,6 +1346,7 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
             }],
         }),
         (ExtensionsTab::Marketplace, 'x') => Some(ButtonAction::RemoveSelectedMarketplaceSource),
+        (ExtensionsTab::Skills, 'u') => Some(ButtonAction::UseSelectedSkill),
         (ExtensionsTab::Skills, 'r') => Some(ButtonAction::ReloadSkills),
         (ExtensionsTab::Skills, 'f') => Some(ButtonAction::CycleFilter),
         (ExtensionsTab::McpServers, 'a') => Some(ButtonAction::StartInput {
@@ -4225,7 +4228,10 @@ mod tests {
                     ('x', "remove_source"),
                 ],
             ),
-            (ExtensionsTab::Skills, &[('f', "filter"), ('r', "reload")]),
+            (
+                ExtensionsTab::Skills,
+                &[('u', "use"), ('f', "filter"), ('r', "reload")],
+            ),
             (ExtensionsTab::McpServers, &[('r', "refresh")]),
         ];
         assert_eq!(expected.len(), ExtensionsTab::ALL.len());

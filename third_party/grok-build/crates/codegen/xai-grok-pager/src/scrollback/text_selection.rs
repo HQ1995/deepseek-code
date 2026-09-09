@@ -9,9 +9,10 @@ use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::scrollback::table_geometry::{CellRef, TableGeometry};
+use crate::scrollback::table_geometry::{CellRef, TableGeometry, WrappedCellJoiner};
 use crate::scrollback::types::SelectionBoundary;
 use crate::theme::Theme;
+use xai_grok_markdown::{CellJoin, TableCopyMeta};
 
 // ---------------------------------------------------------------------------
 // Auto-scroll types
@@ -679,9 +680,9 @@ fn table_cell_span(
     let clamp = |ep: SelectionEndpoint| {
         (
             ep.block_line_idx
-                .clamp(lines.start, lines.end.saturating_sub(1)),
+                .clamp(lines.start, lines.end.saturating_sub(1).max(lines.start)),
             ep.col_within_range
-                .clamp(band.start, band.end.saturating_sub(1)),
+                .clamp(band.start, band.end.saturating_sub(1).max(band.start)),
         )
     };
     let a = clamp(anchor);
@@ -764,7 +765,10 @@ fn table_selected_cols_for_line(
             if row < r0 || row > r1 {
                 return Vec::new();
             }
-            (c0..=c1).map(|c| geom.band(c)).collect()
+            (c0..=c1)
+                .filter(|&c| c < geom.n_cols())
+                .map(|c| geom.band(c))
+                .collect()
         }
     }
 }
@@ -804,6 +808,15 @@ pub fn reconstruct_table_selection_text(
     drag: &ActiveTextDrag,
     text_at: impl Fn(usize) -> Option<String>,
 ) -> Option<String> {
+    reconstruct_table_selection_text_with_meta(geom, drag, text_at, None)
+}
+
+pub fn reconstruct_table_selection_text_with_meta(
+    geom: &TableGeometry,
+    drag: &ActiveTextDrag,
+    text_at: impl Fn(usize) -> Option<String>,
+    meta: Option<&TableCopyMeta>,
+) -> Option<String> {
     let anchor = SelectionEndpoint {
         block_line_idx: drag.anchor.block_line_idx,
         col_within_range: drag.anchor.col_within_range,
@@ -816,11 +829,24 @@ pub fn reconstruct_table_selection_text(
         SelectionKind::Linear => None,
         SelectionKind::TableCell => {
             let cell = geom.cell_at(anchor.block_line_idx, anchor.col_within_range)?;
+            let Some(n_cols) = geom.checked_n_cols() else {
+                return Some(String::new());
+            };
+            if cell.row >= geom.n_rows() || cell.col >= n_cols {
+                return Some(String::new());
+            }
             let band = geom.band(cell.col);
             let ((l0, c0), (l1, c1)) = table_cell_span(geom, cell, anchor, head);
-            let mut out = String::new();
+            if l0 > l1 {
+                return Some(String::new());
+            }
+            let row_start = geom.row_lines(cell.row).start;
+            let mut joined = String::new();
+            let mut prev_vis = None;
+            let mut joiner = WrappedCellJoiner::new(band.end.saturating_sub(band.start));
+            let copy = geom.cell_copy(cell, meta);
             for line in l0..=l1 {
-                let text = text_at(line)?;
+                let Some(text) = text_at(line) else { continue };
                 let start = if line == l0 {
                     endpoint_start_col(&text, c0).max(band.start)
                 } else {
@@ -831,19 +857,37 @@ pub fn reconstruct_table_selection_text(
                 } else {
                     band.end
                 };
-                let slice = crate::scrollback::types::slice_display_cols(&text, start, end);
-                let fragment = slice.trim();
-                if fragment.is_empty() {
-                    continue;
+                let copied = crate::scrollback::types::slice_display_cols(&text, start, end);
+                if let Some(copy) = copy {
+                    let fragment = copied.trim();
+                    if fragment.is_empty() {
+                        continue;
+                    }
+                    let vis = line.saturating_sub(row_start);
+                    if let Some(prev) = prev_vis {
+                        for i in prev..vis {
+                            if let Some(CellJoin::Gap(s)) = copy.joins.get(i) {
+                                joined.push_str(s);
+                            }
+                        }
+                    }
+                    joined.push_str(fragment);
+                    prev_vis = Some(vis);
+                } else {
+                    let full_band =
+                        crate::scrollback::types::slice_display_cols(&text, band.start, band.end);
+                    joiner.push(&full_band, copied.trim());
                 }
-                if !out.is_empty() {
-                    out.push(' ');
-                }
-                out.push_str(fragment);
             }
-            Some(out)
+            if copy.is_some() {
+                Some(joined)
+            } else {
+                Some(joiner.into_string())
+            }
         }
-        SelectionKind::TableGrid { anchor, head } => Some(geom.grid_tsv(anchor, head, text_at)),
+        SelectionKind::TableGrid { anchor, head } => {
+            Some(geom.grid_tsv_with_meta(anchor, head, text_at, meta))
+        }
     }
 }
 
@@ -1539,6 +1583,7 @@ fn map_inclusive_concat_col(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xai_grok_markdown::TableCellCopy;
 
     fn single_line_drag(block_line_idx: usize, width: u16) -> ActiveTextDrag {
         ActiveTextDrag {
@@ -3982,6 +4027,50 @@ mod tests {
         assert_eq!(
             reconstruct_table_selection_text(&geom, &drag, table_text_at),
             Some("Ali".to_string())
+        );
+    }
+
+    #[test]
+    fn reconstruct_out_of_bounds_grid_does_not_panic() {
+        let geom = table_geometry();
+        let drag = table_drag(
+            (1, 3),
+            (1, 3),
+            SelectionKind::TableGrid {
+                anchor: CellRef { row: 99, col: 99 },
+                head: CellRef { row: 99, col: 99 },
+            },
+        );
+        assert_eq!(
+            reconstruct_table_selection_text(&geom, &drag, table_text_at),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn reconstruct_cell_selection_keeps_joins_across_skipped_blanks() {
+        const LINES: &[&str] = &[
+            "┌────────┐",
+            "│ foo    │",
+            "│        │",
+            "│ bar    │",
+            "└────────┘",
+        ];
+        let text_at = |i: usize| LINES.get(i).map(|s| s.to_string());
+        let geom = TableGeometry::detect(text_at, 1).expect("grid");
+        let meta = TableCopyMeta {
+            line_index: 0,
+            line_count: LINES.len(),
+            n_cols: 1,
+            cells: vec![TableCellCopy {
+                text: "foo\n\nbar".into(),
+                joins: vec![CellJoin::Tight, CellJoin::Gap("\n\n".into())],
+            }],
+        };
+        let drag = table_drag((1, 2), (3, 5), SelectionKind::TableCell);
+        assert_eq!(
+            reconstruct_table_selection_text_with_meta(&geom, &drag, text_at, Some(&meta)),
+            Some("foo\n\nbar".to_string())
         );
     }
 

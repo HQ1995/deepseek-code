@@ -5,66 +5,88 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
 permissions:
   contents: read
 jobs:
   check:
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Use the product version for all Rust checks and builds
+        run: echo "GROK_VERSION=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_ENV"
       - name: Install source runtime toolchains
         run: |
           npm install --global corepack
           corepack enable
-          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update && sudo apt-get install -y musl-tools; fi
+          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update && sudo apt-get install -y musl-tools tmux; fi
       - name: Scripts (bash 3.2-safe on macOS)
-        run: bash scripts/check.sh
+        run: |
+          bash scripts/check.sh
+          node --test scripts/release-payload.test.mjs
       - name: Build pinned source SDK and runtime
         run: |
           node scripts/build-release-payload.mjs --out "$RUNNER_TEMP/dscode-payload"
           mkdir -p "$RUNNER_TEMP/dscode-runtime"
           tar -xzf "$RUNNER_TEMP"/dscode-payload/dscode-runtime-*.tar.gz -C "$RUNNER_TEMP/dscode-runtime"
           ln -s "$RUNNER_TEMP/dscode-runtime/node_modules" bridge/grok-leader/node_modules
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: third_party/grok-build
+      - name: Install dotslash
+        run: cargo install --locked dotslash --version 0.5.7
+      - name: Rust product contracts
+        run: bash scripts/check-rust.sh
+      - name: Build product TUI
+        run: bash scripts/build-deepseek-tui.sh
       - name: Bridge tests
         working-directory: bridge/grok-leader
         env:
           DSCODE_E2E_DSH_BIN: ${{ runner.temp }}/dscode-runtime/bin/dsh
           DSCODE_E2E_PLUGIN_TGZ: ${{ runner.temp }}/dscode-payload/dscode-plugin.tgz
+          DSCODE_TUI_BIN: ${{ github.workspace }}/third_party/grok-build/target/release/dscode
         run: |
           # Use the exact source-built SDK, including its compiler and test runner.
           node node_modules/typescript/bin/tsc -b tsconfig.json
-          node node_modules/vitest/vitest.mjs run
-  rust-check:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+          node node_modules/vitest/vitest.mjs run --maxWorkers 2
+      - name: Managed update E2E
+        env:
+          DSCODE_E2E_PLUGIN_TGZ: ${{ runner.temp }}/dscode-payload/dscode-plugin.tgz
+          DSCODE_E2E_OUT_DIR: ${{ runner.temp }}/dscode-update-e2e
+          DSCODE_TUI_BIN: ${{ github.workspace }}/third_party/grok-build/target/release/dscode
+        run: |
+          export DSCODE_E2E_RUNTIME_TGZ="$(echo "$RUNNER_TEMP"/dscode-payload/dscode-runtime-*.tar.gz)"
+          node scripts/e2e-update.mjs
+      - name: Install LSP fixture
+        if: runner.os == 'Linux'
+        run: npm install --global typescript@6.0.3 typescript-language-server@5.0.0
+      - name: Real TUI and runtime E2E
+        if: runner.os == 'Linux'
+        env:
+          DSCODE_E2E_DSH_BIN: ${{ runner.temp }}/dscode-runtime/bin/dsh
+          DSCODE_E2E_PLUGIN_TGZ: ${{ runner.temp }}/dscode-payload/dscode-plugin.tgz
+          DSCODE_E2E_OUT_DIR: ${{ runner.temp }}/dscode-e2e
+          DSCODE_TUI_BIN: ${{ github.workspace }}/third_party/grok-build/target/release/dscode
+        run: bash scripts/e2e-tui-bridge.sh
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Linux'
         with:
-          workspaces: third_party/grok-build
-      - name: Install dotslash
-        # bin/protoc is a checked, cross-platform DotSlash launcher pinned to
-        # protoc 29.3. Avoid distro protobuf versions, which differ by runner.
-        run: cargo install --locked dotslash --version 0.5.7
-      - name: Check dscode TUI
-        working-directory: third_party/grok-build
-        run: cargo check -p xai-grok-pager-bin
-      - name: Test leader protocol gate
-        working-directory: third_party/grok-build
-        run: cargo test -p xai-grok-shell wrong_protocol_version_fails_registration --lib
-      - name: Test TUI CLI metadata contracts
-        # Release-only E2E runs the full `to_meta_` suite (e2e-product.sh
-        # [4/5]); surface it on every PR so CLI/contract drift is caught
-        # before a tag, not by the release pipeline.
-        working-directory: third_party/grok-build
-        run: cargo test --manifest-path crates/codegen/xai-grok-pager/Cargo.toml to_meta_
+          name: product-e2e
+          path: ${{ runner.temp }}/dscode-e2e

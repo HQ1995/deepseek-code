@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { FrameDecoder, FrameError, MAX_MESSAGE_SIZE, MAX_PENDING_BUFFER, encodeFrame, encodeJsonFrame } from '../src/codec.ts'
+import { FrameDecoder, FrameError, MAX_MESSAGE_SIZE, encodeFrame, encodeJsonFrame } from '../src/codec.ts'
 import { decodeClientMessage, encodeServerMessage, type ServerMessage } from '../src/protocol.ts'
 
 interface CaptureLine {
@@ -123,14 +123,6 @@ describe('grok leader frame codec', () => {
     expect(() => new FrameDecoder().push(header)).toThrow(FrameError)
   })
 
-  it('drops a peer whose incomplete frame exceeds the pending cap', () => {
-    const header = new Uint8Array(4)
-    new DataView(header.buffer).setUint32(0, MAX_MESSAGE_SIZE)
-    const decoder = new FrameDecoder()
-    expect(() => decoder.push(header)).not.toThrow()
-    expect(() => decoder.push(new Uint8Array(MAX_PENDING_BUFFER))).toThrow(FrameError)
-  })
-
   it('rejects encoding a payload larger than MAX_MESSAGE_SIZE', () => {
     expect(() => encodeFrame(new Uint8Array(MAX_MESSAGE_SIZE + 1))).toThrow(FrameError)
   })
@@ -155,4 +147,18 @@ describe('grok leader frame codec', () => {
     expect(payload.method).toBe('_x.ai/log')
     expect(payload.id).toBeUndefined()
   })
+})
+
+
+it('accepts a valid 9 MiB frame across ordinary socket-sized chunks', () => {
+  const payload = new Uint8Array(9 * 1024 * 1024)
+  const frame = encodeFrame(payload)
+  expect(Buffer.from(new FrameDecoder().push(frame)[0]!).equals(Buffer.from(payload))).toBe(true)
+  const decoder = new FrameDecoder()
+  const frames: Uint8Array[] = []
+  for (let begin = 0; begin < frame.length; begin += 64 * 1024) {
+    frames.push(...decoder.push(frame.subarray(begin, begin + 64 * 1024)))
+  }
+  expect(frames).toHaveLength(1)
+  expect(Buffer.from(frames[0]!).equals(Buffer.from(payload))).toBe(true)
 })

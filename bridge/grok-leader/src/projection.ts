@@ -224,6 +224,17 @@ export function sessionEventToUpdates(
   },
 ): Array<GrokSessionUpdate> {
   if (!options.replay && event.type === 'user/message') return []
+  // The native todos projection resets at turn/start and retains turn/end.
+  // All consumers (live, resume and child history) must see the same state.
+  if (event.type === 'turn/start') return [{ sessionUpdate: 'plan', entries: [] }]
+  if (String(event.type) === 'todo/write') {
+    const data = event.data as { todos: Array<{ content: string; status: string }> }
+    return [{ sessionUpdate: 'plan', entries: data.todos.map(todo => ({
+      content: todo.content,
+      priority: 'medium',
+      status: todo.status === 'in_progress' || todo.status === 'completed' ? todo.status : 'pending',
+    })) }]
+  }
   switch (event.type) {
     case 'user/message': {
       const source = event.data.source as { kind?: unknown }

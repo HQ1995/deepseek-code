@@ -136,7 +136,7 @@ use crate::scrollback::text_selection::{
 };
 use crate::theme::Theme;
 pub use crate::views::agent::{ActivePane, AgentViewLayout, InputMode, PaneAreas};
-use crate::views::block_viewer::BlockViewerPane;
+use crate::views::block_viewer::{BlockViewerPane, ViewerKind};
 use crate::views::extensions_modal::ExtensionsModalState;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::modal::{self, ActiveModal, ModalButtonHit};
@@ -170,6 +170,9 @@ mod panes;
 mod paste;
 mod plan;
 mod prompt;
+mod prompt_stash;
+pub(in crate::app) use prompt_stash::prompt_history_text;
+pub use prompt_stash::{PromptStashEntry, StashCause};
 mod queue;
 mod render;
 pub use render::AppRenderParams;
@@ -197,6 +200,16 @@ pub(super) fn active_contexts_for_pane(pane: ActivePane) -> Vec<crate::actions::
 ///
 /// This will grow as we add more panes (tasks, review files, etc.).
 pub type AgentPane = ActivePane;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BlockViewerResume {
+    entry_id: crate::scrollback::EntryId,
+    kind: ViewerKind,
+    source: Option<String>,
+    selected_id: Option<u64>,
+    scroll_offset: usize,
+    follow_mode: bool,
+}
 /// Per-agent view-model.
 ///
 /// Owns both business state (session, entries) and UI state (scroll,
@@ -787,7 +800,7 @@ pub(crate) struct FollowUps {
 /// A prompt submit stashed while a clipboard attachment probe is off-thread.
 ///
 /// Kind-only: the payload is re-derived from the live widget when the send is
-/// re-issued (see [`AgentView::build_deferred_send_action`]), so the freshly
+/// re-issued (see [`AgentView::resume_deferred_send`]), so the freshly
 /// attached image chip (and its aligned chip range) travels with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentDeferredSend {
@@ -795,6 +808,10 @@ pub(crate) enum AgentDeferredSend {
     SendPrompt,
     /// Ctrl+Enter — a mid-turn interjection.
     Interject,
+    /// Alt+Enter — merge into the current turn without cancelling it.
+    Steer,
+    /// Stash or restore once a pending attachment has landed.
+    Stash,
 }
 pub struct AgentView {
     pub session: AgentSession,
@@ -937,6 +954,12 @@ pub struct AgentView {
     /// Stashed normal prompt state while editing a queued prompt.
     /// Restored when editing ends.
     pub stashed_prompt: Option<StashedPrompt>,
+    /// One draft set aside for later; see [`prompt_stash`].
+    pub prompt_stash: Option<PromptStashEntry>,
+    /// Set by the send that consumed the user's draft this dispatch; see `note_draft_consumed`.
+    pub(crate) draft_consumed: bool,
+    /// Drafts a newer stash pushed out of the slot. Held apart from `session.prompt_history`, which a late `PromptHistoryLoaded` replaces wholesale.
+    pub prompt_stash_evicted: Vec<String>,
     /// Complete prompt stashed from a credit-limit-blocked turn. Used by
     /// `CreditLimitRecheckComplete` to retry the prompt after a tier
     /// upgrade instead of showing a stale upsell.
@@ -1352,6 +1375,7 @@ pub struct AgentView {
     pub(crate) pinned_upgrade_cta_live: bool,
     /// Fullscreen block viewer. When `Some`, replaces the scrollback area.
     pub(crate) block_viewer: Option<BlockViewerPane>,
+    pub(crate) block_viewer_resume: Option<BlockViewerResume>,
     /// Active scrollback search session. When `Some`, vim `/` (or `/find`) is
     /// searching the scrollback. Inert until input wiring opens it.
     pub(crate) scrollback_search: Option<ScrollbackSearchState>,
@@ -2181,6 +2205,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::ToggleMultiline => return None,
         ActionId::InterjectPrompt => return None,
         ActionId::SteerPrompt => return None,
+        ActionId::StashPrompt => return None,
         ActionId::EnableVoiceMode => Action::EnableVoiceMode,
         ActionId::VoiceToggle => {
             if !crate::app::voice_keybind_enabled() {
@@ -2555,6 +2580,7 @@ pub(crate) mod test_fixtures {
             child_cwd: None,
             worktree_path: None,
             transcript: Default::default(),
+            native: None,
         }
     }
     /// Count of "Worked for X" (`TurnCompleted`) marker blocks in the

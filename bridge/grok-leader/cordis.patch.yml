@@ -5,8 +5,8 @@
 
 - id: system-prompt
   config:
-    persona: >-
-      You are a coding agent. Your working directory is {{cwd}}.
+    personaPrefix: You are a coding agent.
+    personaSuffix: Your working directory is {{cwd}}.
 
 # dscode is provider-neutral. A fresh profile starts with no provider or
 # model; users add any route they want through /provider. Keep the default
@@ -45,8 +45,6 @@
 - id: tool-fs
   disabled: true
 - id: tool-fs-search
-  disabled: true
-- id: tool-str-replace-editor
   disabled: true
 - id: skill-filesystem
   disabled: true
@@ -88,6 +86,18 @@
 # Keep the released official presets and writable user root. The installed
 # dscode bundle adds an opt-in history preset without changing standard.
 - insert:
+    - id: session-reference
+      name: '@deepseek-ai/dsh-session-reference'
+
+    - id: schedule
+      name: '@deepseek-ai/dsh-schedule'
+
+    # The host owns PTY cleanup; only the terminal preset exposes its tools.
+    - id: terminals
+      name: '@deepseek-ai/dsh-terminal'
+    - id: terminal-bash
+      name: '@deepseek-ai/dsh-terminal-bash'
+
     # Host-owned subagent model selection sampled by preset-scoped tools.
     - id: subagent-model-selection-settings
       name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
