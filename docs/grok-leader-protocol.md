@@ -216,6 +216,13 @@ editor from a stale reply. Copies and file edits leave live compositions intact.
 
 ## Persistent terminal controls and runtime diagnostics
 
+`deliverables/presented` events project to Markdown file links through the
+existing `agent_message_chunk` update. Projection covers live events, session
+resume and child-history pages; relative paths resolve against the viewed
+session's workspace, including forks. It neither copies nor opens file contents.
+Native configurable-provider diagnostics use the existing provider `note` field,
+including providers with no serviceable models, without hiding healthy routes.
+
 `x.ai/terminals` requires an owned `sessionId`. `action` defaults to `list`;
 `terminalId` optionally selects a non-consuming preview of the latest 1000
 retained lines. `interrupt` sends native SIGINT, while `close` awaits native

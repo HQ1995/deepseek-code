@@ -12,6 +12,10 @@ export function nativeControlsReply(body) {
   if (prompt?.includes('DSCODE_LOG_') && prompt.includes('background job')) return { text: 'DSCODE_CONTROLS_JOB_NOTICE' }
   if (!prompt?.includes('DSCODE_CONTROLS_')) return
   const results = messages.slice(start + 1).filter(message => message.role === 'tool')
+  if (prompt.includes('DSCODE_CONTROLS_PRESENT')) {
+    if (!results.length) return { name: 'present', arguments: { files: [{ path: 'delivered report.md', description: 'DSCODE delivered artifact' }] } }
+    return { text: 'DSCODE_CONTROLS_PRESENT_DONE' }
+  }
   if (prompt.includes('DSCODE_CONTROLS_REMINDER_DUE')) return { text: 'DSCODE_CONTROLS_REMINDER_DELIVERED' }
   if (prompt.includes('DSCODE_CONTROLS_CHILD_HOLD')) return { text: 'DSCODE_CONTROLS_CHILD_RUNNING', hold: true, releaseKey: 'controls-child', releaseText: ' CHILD_END' }
   if (prompt.includes('DSCODE_CONTROLS_JOB_START')) {
@@ -154,6 +158,27 @@ export async function nativeControlsAcceptance(ui) {
   await wait(/DSCODE_CONTROLS_JOB_CURSOR_INTACT/)
   await waitState(value => value.status === 'idle', 'passive-log-read-idle')
 
+  const delivered = join(cwd, 'delivered report.md')
+  await writeFile(delivered, '# Native DSH delivery\n')
+  const openedBefore = await readFile(mediaOpenerLog, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error })
+  await send('DSCODE_CONTROLS_PRESENT'); await wait(/DSCODE_CONTROLS_PRESENT_DONE/)
+  const presented = await waitState(value => value.status === 'idle' && value.deliveries.length === 1, 'native-present-delivery')
+  await wait(/Delivered files/)
+  assert.equal(presented.deliveries[0].data.files[0].path, 'delivered report.md')
+  assert.ok(presented.projections.values.subagentCatalog.some(row => row.id === childId), 'Native parent catalog must retain the completed child')
+  assert.equal(await readFile(mediaOpenerLog, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error }), openedBefore, 'Present must not open files automatically')
+  await artifact('controls-delivery-live', { state: presented, screen: await capture() })
+  await restart()
+  await wait(/Delivered files/)
+  const replayed = await waitState(value => value.status === 'idle' && value.deliveries.length === 1, 'native-present-replay')
+  assert.deepEqual(replayed.deliveries, presented.deliveries)
+  assert.deepEqual(replayed.projections.values.subagentCatalog, presented.projections.values.subagentCatalog)
+  await artifact('controls-delivery-replayed', { state: replayed, screen: await capture() })
+  const requestsBeforeFeedback = (await readRequests()).length
+  await send('/feedback DSCODE_CONTROLS_FEEDBACK')
+  await waitState(value => value.feedback.some(event => event.data.text === 'DSCODE_CONTROLS_FEEDBACK'), 'native-feedback-recorded')
+  assert.equal((await readRequests()).length, requestsBeforeFeedback, 'Feedback must not start a model turn')
+
   const path = join(cwd, 'controls-image.png')
   await writeFile(path, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'))
   const imagePrompt = `DSCODE_CONTROLS_IMAGE:${Buffer.from(path).toString('base64url')}`
@@ -185,5 +210,5 @@ export async function nativeControlsAcceptance(ui) {
   await wait(new RegExp(basename(stored.path).replaceAll('.', '\\.')))
   await artifact('controls-image-child-history', { screen: await capture() })
   await key('Escape'); await key('C-g')
-  return { childId, jobId: job.id, dueReminderId: dueId, image: stored.attachment }
+  return { childId, jobId: job.id, dueReminderId: dueId, image: stored.attachment, deliveries: true, parentCatalog: true, feedbackWithoutTurn: true }
 }

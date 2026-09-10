@@ -8,6 +8,9 @@
  */
 import type { TurnEndReason, SessionEvent } from '@deepseek-ai/dsh-session'
 import { expandAssistantStream, type StreamChunk, type TokenUsage } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-tool-present/types'
+import { isAbsolute, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 /** The grok StopReason vocabulary (agent.rs StopReason). */
 export type StopReasonWire = 'end_turn' | 'max_tokens' | 'cancelled'
@@ -219,6 +222,7 @@ export function sessionEventToUpdates(
   event: SessionEvent,
   options: {
     replay: boolean
+    cwd?: string
     streamedChunks?: ReadonlySet<number>
     toolCall?: (callId: string) => { name: string; arguments: unknown } | undefined
   },
@@ -236,6 +240,18 @@ export function sessionEventToUpdates(
     })) }]
   }
   switch (event.type) {
+    case 'deliverables/presented': {
+      // Render declarations only: opening a link remains an explicit user action.
+      // The viewed session's cwd also gives forked and child history its own paths.
+      const literal = (value: string): string => value.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/[\\`*_[\]<>]/g, '\\$&')
+      const files = event.data.files.map(file => {
+        const label = literal(file.path)
+        const path = options.cwd !== undefined || isAbsolute(file.path) ? resolve(options.cwd ?? '/', file.path) : undefined
+        const link = path === undefined ? label : `[${label}](<${pathToFileURL(path).href}>)`
+        return `- ${link}${file.description === undefined ? '' : ': ' + literal(file.description)}`
+      })
+      return [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `\n\n**Delivered files**\n${files.join('\n')}\n\n` } }]
+    }
     case 'user/message': {
       const source = event.data.source as { kind?: unknown }
       if (source.kind !== 'user') return []
@@ -289,9 +305,7 @@ export function sessionEventToUpdates(
       }]
     }
     default:
-      // Documented gap (README "Transcript projection incomplete"): grok plan
-      // updates (SessionUpdate::Plan) and titles stay off the wire until dsh
-      // defines plan/title session events to map from.
+      // Other durable events belong to native state projections or diagnostics.
       return []
   }
 }

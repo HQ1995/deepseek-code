@@ -26,6 +26,21 @@ import { assistantEventUsage, contextInfoFromProjection, goalUpdateFromView, typ
 const packageVersion = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
 
 describe('native assistant settlement projection', () => {
+  it('renders native deliveries live and on replay in the viewed workspace, including nested tool declarations', () => {
+    const event = { type: 'deliverables/presented', data: {
+      turn: 1, callId: ToolCallId('nested-present'), files: [
+        { path: 'report [final].md', description: '*ready*\nfor review' },
+        { path: '/tmp/image.png' },
+      ],
+    } } as SessionEvent
+    const project = (replay: boolean, cwd: string) => GrokLeader.sessionEventToUpdates(event, { replay, cwd })
+    expect(project(false, '/parent')).toEqual(project(true, '/parent'))
+    expect(project(true, '/child')).toEqual([{ sessionUpdate: 'agent_message_chunk', content: {
+      type: 'text', text: '\n\n**Delivered files**\n- [report \\[final\\].md](<file:///child/report%20%5Bfinal%5D.md>): \\*ready\\* for review\n- [/tmp/image.png](<file:///tmp/image.png>)\n\n',
+    } }])
+    expect(project(true, '/parent')).not.toEqual(project(true, '/child'))
+  })
+
   it('preserves interrupted reasoning and whitespace from the embedded stream, not only safe message blocks', () => {
     const event = { type: 'assistant/message', data: {
       turn: 0, step: 0, interrupted: true,
@@ -2752,7 +2767,7 @@ describe('grok leader over a unix socket', () => {
       personaDetails: [
         { name: 'Standard mode', description: 'Full coding agent with file editing, shell, file and web search, skills, planning, goals, subagents, and workflows.', hasInputs: false, hasOutputs: false },
         { name: 'PTC mode', description: 'Full coding agent without the workflow tool; other tools are exposed through the PTC mode SDK so the model can combine multi-step operations in one TypeScript program.', hasInputs: false, hasOutputs: false },
-        { name: 'Minimal mode', description: 'Two-tool coding agent with persistent bash and str_replace_editor.', hasInputs: false, hasOutputs: false },
+        { name: 'Minimal mode', description: 'Minimal coding agent with a persistent shell.', hasInputs: false, hasOutputs: false },
         { name: 'Creator mode', description: 'Built for creating custom agent presets, with all Standard mode capabilities plus runtime inspection, plugin experiments, and preset-authoring guidance.', hasInputs: false, hasOutputs: false },
       ],
       roleDetails: [],
@@ -4439,6 +4454,32 @@ describe('grok leader over a unix socket', () => {
     ])
   })
 
+  it('keeps broken provider settings visible with native diagnostics and serves healthy models', async () => {
+    const { client: c } = await start({ llm: {
+      listProviders: () => [{ id: 'healthy' }],
+      listModels: async (id: string) => {
+        expect(id).toBe('healthy')
+        return [{ id: 'working', name: 'Working model' }]
+      },
+      listConfigurableProviders: () => [
+        { provider: 'healthy', displayName: 'Healthy', settingsNs: 'llm-pi-ai', error: 'Removed model retired; working remains usable' },
+        { provider: 'broken', displayName: 'Broken route', settingsNs: 'llm-pi-ai', error: 'Unknown model old-id; repair its settings' },
+        { provider: 'dormant', displayName: 'Not configured', settingsNs: 'llm-pi-ai' },
+      ],
+    } })
+    register(c)
+    await c.next()
+    const response = await c.request(1, 'x.ai/models/list', {})
+    expect(response.error).toBeUndefined()
+    expect(response.result).toMatchObject({
+      availableModels: [{ modelId: 'working' }],
+      _meta: { providers: [
+        { id: 'healthy', note: 'Removed model retired; working remains usable' },
+        { id: 'broken', name: 'Broken route', note: 'Unknown model old-id; repair its settings' },
+      ] },
+    })
+  })
+
   it('dedupes colliding model ids and falls back to a catalog entry', async () => {
     const { client: c } = await start({ llm: collidingLlm, model: 'not-in-catalog' })
     register(c)
@@ -5057,7 +5098,7 @@ describe('x.ai/providers/add', () => {
       displayName: 'Acme Gateway',
       apiKeyEnv: 'ACME_KEY',
       api: 'openai-completions',
-      baseURL: 'https://acme.test/v1',
+      baseURL: '  https://acme.test/v1  ',
     })
     expect(res.error).toBeUndefined()
     expect(res.result).toEqual({

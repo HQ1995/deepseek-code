@@ -613,7 +613,7 @@ completion_count_after="$(grep -c 'POST /v1/chat/completions' "$MOCK_LOG" 2>/dev
   const expected = [
     "ask_user_question", "bash", "create_goal", "edit", "exit_plan_mode",
     "get_goal", "glob", "grep", "interrupt_agent", "job_kill", "job_list",
-    "job_output", "list_agents", "ralph", "read", "read_image", "schedule_create", "schedule_delete", "schedule_list", "send_message",
+    "job_output", "list_agents", "present", "ralph", "read", "read_image", "schedule_create", "schedule_delete", "schedule_list", "send_message",
     "skill", "subagent", "subagent_fork", "todo_write", "update_goal",
     "web_fetch", "web_search", "workflow", "write",
   ].sort()
@@ -669,12 +669,12 @@ audit_responses_preset() {
     const standard = [
       "ask_user_question", "bash", "create_goal", "edit", "exit_plan_mode",
       "get_goal", "glob", "grep", "interrupt_agent", "job_kill", "job_list",
-      "job_output", "list_agents", "ralph", "read", "read_image", "schedule_create", "schedule_delete", "schedule_list", "send_message",
+      "job_output", "list_agents", "present", "ralph", "read", "read_image", "schedule_create", "schedule_delete", "schedule_list", "send_message",
       "skill", "subagent", "subagent_fork", "todo_write", "update_goal",
       "web_fetch", "web_search", "workflow", "write",
     ].sort()
     const expected = {
-      minimal: ["bash", "schedule_create", "schedule_delete", "schedule_list", "str_replace_editor"],
+      minimal: ["bash", "schedule_create", "schedule_delete", "schedule_list"],
       standard,
       history: [...standard, "session_search", "session_event_search", "session_trace", "session_event_trace", "session_event_read"].sort(),
       ptc: ["run_code"],
@@ -683,7 +683,7 @@ audit_responses_preset() {
         "cordis_define", "cordis_inspect_list", "cordis_inspect_query",
         "cordis_inspect_self", "cordis_run", "cordis_stop", "cordis_undefine",
       ].sort(),
-      "fixture-custom": ["bash", "fixture_echo", "schedule_create", "schedule_delete", "schedule_list", "str_replace_editor"],
+      "fixture-custom": ["bash", "fixture_echo", "schedule_create", "schedule_delete", "schedule_list"],
     }
     const wanted = expected[preset]
     if (JSON.stringify(names) !== JSON.stringify(wanted)) {

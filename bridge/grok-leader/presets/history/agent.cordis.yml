@@ -1,4 +1,4 @@
-# dscode-owned snapshot of @deepseek-ai/dsh-agent-presets@0.1.3-alpha.2 standard.
+# dscode-owned snapshot of @deepseek-ai/dsh-agent-presets@0.1.5-rc.2 standard.
 # Upgrade this snapshot deliberately with the supported DSH release.
 # The `standard` agent preset: the full coding agent, mounted once per process.
 #
@@ -255,3 +255,6 @@
 # Official workspace-scoped history tools, available only in this preset.
 - id: tool-session-query
   name: '@deepseek-ai/dsh-tool-session-query'
+
+- id: present
+  name: '@deepseek-ai/dsh-tool-present'

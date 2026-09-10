@@ -1,4 +1,4 @@
-# Standard snapshot: @deepseek-ai/dsh-agent-presets@0.1.5-alpha.1.
+# Standard snapshot: @deepseek-ai/dsh-agent-presets@0.1.5-rc.2.
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
@@ -194,3 +194,6 @@
               '.cjs': javascript
     - id: tool-lsp
       name: '@deepseek-ai/dsh-tool-lsp'
+
+- id: present
+  name: '@deepseek-ai/dsh-tool-present'

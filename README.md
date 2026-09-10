@@ -66,10 +66,16 @@ unless `--force` is explicit. Headless formats are `plain`, `json`,
 Paste or drag PNG, JPEG, WebP, or GIF images when the model supports image input.
 Completed child transcripts remain readable after restart. Reminder delivery
 requires the owning session to be open. Session ZIP export refuses existing files.
+Native `present` deliveries appear as file links and survive transcript replay;
+links open the current source file. `/feedback <text>` records native feedback
+without a model turn and may share session context under DSH's telemetry policy.
 
 Optional presets: `history` adds workspace-scoped session search tools;
 `terminal` adds persistent shell/REPL tools; `lsp` adds code navigation and needs
 `typescript-language-server` and `typescript` on `PATH`.
+Minimal follows DSH's shell-only configuration. See the
+[DSH feature coverage](docs/upgrade-strategy.md#dsh-015-feature-coverage) for
+native DeepSeek-V41-Flash setup and platform/UI limits.
 
 ## Per-run configuration
 

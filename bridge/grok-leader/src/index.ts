@@ -379,7 +379,7 @@ const SHIPPED_PRESET_DISPLAY: Readonly<Record<string, { name: string; descriptio
   },
   minimal: {
     name: 'Minimal mode',
-    description: 'Two-tool coding agent with persistent bash and str_replace_editor.',
+    description: 'Minimal coding agent with a persistent shell.',
   },
   cordis: {
     name: 'Creator mode',
@@ -550,6 +550,7 @@ interface CommandsLike {
 /** Structural read of the llm service: provider and model catalogs only. */
 interface LlmLike {
   listProviders(): Array<{ id: string; name?: string }>
+  listConfigurableProviders?(): Array<{ provider: string; displayName: string; settingsNs: string; error?: string }>
   listModels(provider: string): Promise<Array<{ id: string; name: string; description?: string; inputModalities?: readonly string[] }>>
   /** Exact-route model metadata (used for adapter-configured effort and modality metadata). */
   resolveModelInfo?(
@@ -1057,9 +1058,17 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const refreshCatalog = async (): Promise<ModelCatalog> => {
     const llmService = llm()
     const userSection = providerUserSection(settings())
+    const activeProviders = llmService?.listProviders() ?? []
+    const configured = new Map((llmService?.listConfigurableProviders?.() ?? []).map(row => [row.provider, row]))
+    const providerRows = new Map(activeProviders.map(row => [row.id, row]))
+    for (const row of configured.values()) {
+      if (row.error !== undefined && !providerRows.has(row.provider)) {
+        providerRows.set(row.provider, { id: row.provider, name: row.displayName })
+      }
+    }
     const rows = llmService === undefined
       ? []
-      : await Promise.all(llmService.listProviders().map(async provider => {
+      : await Promise.all(activeProviders.map(async provider => {
         const staticModels = await llmService.listModels(provider.id)
         const discovered = discoveredModels.get(provider.id)
         const models: Array<{ id: string; name: string; description?: string; inputModalities?: readonly string[] }> = discovered === undefined
@@ -1071,15 +1080,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return { provider: provider.id, models }
       }))
     const modelCount = new Map(rows.map(row => [row.provider, row.models.length]))
-    const providers = llmService === undefined ? [] : await Promise.all(llmService.listProviders().map(async p => {
+    const providers = await Promise.all([...providerRows.values()].map(async p => {
       const profile = providerUserProfile(userSection, p.id)
       const apiKeyEnv = typeof profile.apiKeyEnv === 'string' ? profile.apiKeyEnv : undefined
       const credential = await describeCredential(apiKeyEnv)
       // Display-only status for an empty provider; generic on purpose (the
       // TUI relays notes verbatim, and the bridge carries no plugin-specific
       // knowledge of WHICH login or key a given provider wants).
-      const note = (modelCount.get(p.id) ?? 0) > 0 ? undefined
-        : 'no models yet — the provider may need a login or API key (its plugin may register a /login command)'
+      const note = configured.get(p.id)?.error ?? ((modelCount.get(p.id) ?? 0) > 0 ? undefined
+        : 'no models yet — the provider may need a login or API key (its plugin may register a /login command)')
       return {
         id: p.id,
         ...p.name === undefined ? {} : { name: p.name },
@@ -1574,6 +1583,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     for (const item of sessionEventToUpdates(event, {
       replay,
       streamedChunks,
+      cwd: record.agent.session.header.cwd,
       toolCall: (callId) => record.pendingToolCalls.get(callId),
     })) {
       if (item.sessionUpdate === 'agent_message_chunk') {
@@ -3649,7 +3659,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       || (api.length > 0 && !PROVIDER_APIS.includes(api as (typeof PROVIDER_APIS)[number])))) {
       throw invalidParams('api must be one of ' + PROVIDER_APIS.join(', '))
     }
-    const baseURL = p.baseURL
+    const baseURL = typeof p.baseURL === 'string' ? p.baseURL.trim() : p.baseURL
     if (typeof baseURL === 'string' && baseURL.length > 0) {
       let parsed: URL
       try {
@@ -3661,6 +3671,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         throw invalidParams('baseURL must be http/https with no userinfo: ' + baseURL)
       }
     }
+    if (typeof baseURL === 'string') p.baseURL = baseURL
   }
 
   // An empty optional field means "unset": the official schema resolves an
@@ -5625,7 +5636,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (event.type === 'turn/start') turnStartMs = event.time
       if (event.type === 'tool/call') calls.set(String(event.data.callId), { name: event.data.name, arguments: parseJsonObject(event.data.arguments) })
       if (event.seq < after) continue
-      const updates = await projectImages(event, sessionEventToUpdates(event, { replay: true, toolCall: id => calls.get(id) }))
+      const updates = await projectImages(event, sessionEventToUpdates(event, { replay: true, cwd: inspection.meta.cwd, toolCall: id => calls.get(id) }))
       for (const update of updates) entries.push({ update, meta: { isReplay: true, agentTimestampMs: event.time, turnStartMs, streamStartMs: turnStartMs } })
       if (event.type === 'turn/end') entries.push({ turnEnded: true })
     }

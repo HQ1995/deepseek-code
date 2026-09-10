@@ -1,4 +1,4 @@
-# Standard snapshot: @deepseek-ai/dsh-agent-presets@0.1.5-alpha.1.
+# Standard snapshot: @deepseek-ai/dsh-agent-presets@0.1.5-rc.2.
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
@@ -169,3 +169,6 @@
 # The host owns the registry/backend and exact-Agent cleanup.
 - id: tool-terminal
   name: '@deepseek-ai/dsh-tool-terminal'
+
+- id: present
+  name: '@deepseek-ai/dsh-tool-present'

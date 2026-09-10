@@ -7,7 +7,7 @@ const PREFIX = 'DSCODE_HISTORY_ACCEPTANCE ';
 const STANDARD = [
   'ask_user_question', 'bash', 'create_goal', 'edit', 'exit_plan_mode',
   'get_goal', 'glob', 'grep', 'interrupt_agent', 'job_kill', 'job_list',
-  'job_output', 'list_agents', 'ralph', 'read', 'read_image',
+  'job_output', 'list_agents', 'present', 'ralph', 'read', 'read_image',
   'schedule_create', 'schedule_delete', 'schedule_list', 'send_message',
   'skill', 'subagent', 'subagent_fork', 'todo_write', 'update_goal',
   'web_fetch', 'web_search', 'workflow', 'write',

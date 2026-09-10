@@ -28,6 +28,8 @@ export function apply(ctx) {
           goal: ctx.goals.get(agent) ?? null,
           workflows: agent.session.snapshotEvents().filter(event => String(event.type).startsWith('tool-workflow/')),
           schedules: agent.session.ownEvents().filter(event => event.type === 'schedule/change'),
+          deliveries: agent.session.snapshotEvents().filter(event => event.type === 'deliverables/presented'),
+          feedback: agent.session.ownEvents().filter(event => event.type === 'feedback/record'),
           images: agent.session.snapshotEvents().flatMap(event => event.type !== 'tool/result' ? [] :
             event.data.message.content.flatMap(result => result.type !== 'tool-result' ? [] :
               result.content.filter(block => block.type === 'image').map(block => ({
@@ -35,7 +37,7 @@ export function apply(ctx) {
                 path: ctx.get('attachments')?.imageHostPath(block.attachment),
               })))),
           projections: ctx.sessionProjections.snapshot(agent.session,
-            ['contextPressure', 'tokenUsage', 'contextBreakdown', 'goal', 'permissions', 'schedule']),
+            ['contextPressure', 'tokenUsage', 'contextBreakdown', 'goal', 'permissions', 'schedule', 'subagentCatalog']),
           jobs: ctx.jobs.list(agent),
           terminals: ctx.get('terminals')?.list(agent) ?? [],
           descendants: descendants.map(child => ({ ...child,

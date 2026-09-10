@@ -41,8 +41,8 @@ To upgrade dsh:
    metadata, but never install or switch the user's Node runtime;
 4. rebuild the bridge and run the complete E2E suite;
 
-The current source pin is `0.1.5-alpha.1` at
-`5dda764ed3aa172535a7967b06ff95d9cbfe536a`. The builder uses the official upstream
+The current source pin is `0.1.5-rc.2` at
+`fb2c4b9e698e30edb738bca4cf0618587db7d203`. The builder uses the official upstream
 package build, compiles the bridge against that installed SDK, bundles ordinary
 plugin dependencies without duplicating host peers, and packages the private
 runtime including native helpers. Users install those artifacts as a complete
@@ -55,6 +55,9 @@ provider; the native migrator performs validation and generation publication.
 V0/V1/V2 originals remain intact. An older runtime refuses the newer generation:
 rolling back the executable is possible, but does not downgrade session data or
 resume a stale copy. Use a matching runtime to continue migrated conversations.
+The same rule applies to new required events within V3, including parent-owned
+subagent catalogs and file deliveries: an older runtime may refuse these logs
+even though their numeric format version is still 3.
 Linux runtime payloads now include `node-addon-system` 0.1.2 flock and Landlock
 artifacts, built with the official `native/system` scripts.
 
@@ -68,6 +71,74 @@ include their own prereleases plus stable releases. Unmarked historical
 `channel = "alpha"` resolves beta; canonical settings carry `channel_format = 1`.
 Checks never write that migration. The installer commits the channel only after
 the exact tuple is ready, restoring moved entries after ordinary commit errors.
+
+### DSH 0.1.5 feature coverage
+
+The [rc.2 release](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.5-rc.2)
+and [rc.1 feature summary](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.5-rc.1)
+describe the target. Runtime features use official implementations. Browser
+presentation does not automatically become a TUI feature.
+
+| Upstream capability | dscode integration |
+|---|---|
+| V3 logs, immutable migration, SessionHandle and process locks | Native persistence; existing legacy model-selection adapter; resume/fork/archive tests |
+| Parent-owned subagent catalog and ordered discovery | Native `listDescendants`; `/subagents`, Tasks and child history; catalog survives restart |
+| Continuable children, queue/edit/remove/steer/stop | Existing native inbox adapters and TUI controls; terminal states retain readable history |
+| Agent Team messaging changes | Included in the runtime; experimental Team composition remains opt-in (see below) |
+| Goals, explicit pause/resume and turn cancellation | `/goal` and native controls; pausing does not let the model resume itself |
+| Reminder scheduling | `/reminders`; native durable schedules, delivered while the owning session is open |
+| Jobs, retained output and subprocess cleanup | `/tasks`, passive output and cancellation; host PID validation remains enforced |
+| Persistent shell and REPL | `terminal` preset and `/tasks terminals`; native interrupt/close and per-session ownership |
+| Minimal preset | Follows upstream's persistent shell; `str_replace_editor` is now an explicit opt-in |
+| Standard read/write/edit, FS_NOT_OBSERVED and scoped tool guidance | Native tools and permissions; structured errors remain visible |
+| PTC execution and nested output | `ptc`; existing command/output and image projection; nested file deliveries use durable events |
+| Workflows and Ralph | `/workflows`, task phases, history and native workflow tools |
+| LSP navigation | Opt-in `lsp` preset; installed language server required |
+| Session search and long references | `/resume`, `/reference`, `history` tools and native on-demand event reads |
+| Long-session performance and projection hydration | Native runtime fixes; bridge keeps its bounded session index and paginated child history |
+| New DeepSeek-V41-Flash model | Official native adapter is packaged, including text/image and in-history system-prompt capabilities; enable it explicitly as described below |
+| Existing DeepSeek V4 models | Retained by upstream; saved provider/model selections are preserved |
+| Dynamic system prompts | Native request reconstruction follows the selected adapter/model's declared capability |
+| Model discovery and reasoning/image metadata | `/provider` and `/model`; native discovery plus the existing bounded endpoint capability reader |
+| Invalid pi-ai configurations | Provider remains visible with its native diagnostic; working models remain selectable and saved routes remain editable/removable |
+| Provider Base URL validation | Shared add/edit validation runs before writes; surrounding whitespace is normalized |
+| HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY | Native runtime proxy support; environment is inherited by the managed runtime |
+| Streaming tool-call continuation | Native DeepSeek fix preserves call identifiers and names |
+| MCP tool pagination | Native repeated-cursor rejection; `/mcps` and bridge initialization keep diagnostic behavior |
+| Skills and commands | `/skills`, skill insertion and native command discovery; TUI search uses its existing picker |
+| Preset editing and plugin composition | `/preset manage`, `/dsh`; host service identities remain shared |
+| `present` file delivery | Clickable transcript links from `deliverables/presented`, live and after resume; child/fork paths use the viewed workspace |
+| Standard-derived custom presets | `history`, `terminal` and `lsp` snapshots also mount `present`; user copies remain user-owned snapshots |
+| General file input | Existing local file references let native file tools read paths; browser upload/progress UI has no terminal transport equivalent |
+| Images and read_image | Existing input admission, top-level/nested tool image display and explicit image opening |
+| Markdown/ZIP export | `/export`; ZIP includes logs and attachments, while `present` stores source-file references rather than copies |
+| Independent text feedback | Native `/feedback <text>` appends feedback without a model turn; upstream telemetry policy may include session context |
+| Feedback rating/category dialogs | Web-only controls; no new TUI rating or category dialog |
+| Sidebar tabs, splits, PDF/HTML previews, file icons | Browser UI is not ported; TUI uses transcript links, existing viewers and explicit external opening |
+| Workspace editor/file-manager actions | Existing TUI links/editor handoff; no browser desktop toolbar |
+| Web layout, localization, scrolling and reconnect fixes | Browser-only changes; TUI keeps its own tested rendering and reconnect paths |
+| Windows UI and Python SDK fixes | Included upstream; dscode's supported targets remain Linux x86-64 and macOS ARM64 |
+
+To use the official DeepSeek adapter, add this override to the existing
+`~/.dsh/profiles/dscode/cordis.patch.yml`, provide `DEEPSEEK_API_KEY`, restart,
+then choose `deepseek-official` / `deepseek-flash` in `/model`:
+
+```yaml
+- id: llm-deepseek
+  disabled: false
+```
+
+The default profile remains provider-neutral. OpenAI-compatible gateway routes
+use their own discovered metadata; they do not inherit the native adapter's
+vision or system-prompt capabilities just because model names match. Model
+catalog and transport tests do not certify a live provider account.
+
+Experimental Agent Teams are published upstream but are not enabled in our
+shipped presets. Their profile only disables global legacy controls; Standard
+still mounts those controls in its preset scope. A safe future integration
+needs a Team-aware preset plus a Team roster/task-board adapter, rather than
+mounting both sets of overlapping tools. No Team-specific TUI board, task claims
+or membership controls are claimed here.
 
 ## Bridge changes
 
