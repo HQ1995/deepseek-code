@@ -10,6 +10,25 @@ import { gzipSync } from 'node:zlib';
 import { copyClosure, releaseAssets, releaseChannel, sourceBuildEnvironment } from './build-release-payload.mjs';
 import { assertReleaseRun, verifyReleaseAssets } from './verify-release-assets.mjs';
 
+test('terminal acceptance rejects old tmux before creating a test profile', () => {
+  const work = mkdtempSync(join(tmpdir(), 'dscode-old-tmux-'));
+  try {
+    const bin = join(work, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'tmux'), '#!/bin/sh\n[ "$1" != -V ] || echo "tmux 3.2a"\n', { mode: 0o755 });
+    const output = join(work, 'output');
+    const result = spawnSync('bash', [fileURLToPath(new URL('./e2e-tui-bridge.sh', import.meta.url))], {
+      encoding: 'utf8', timeout: 15000,
+      env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, DSCODE_E2E_NODE_BIN: process.execPath,
+        DSCODE_TUI_BIN: process.execPath, DSCODE_E2E_OUT_DIR: output },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /requires tmux >=3\.4/);
+    assert.equal(existsSync(output), false);
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
+
 test('Linux Rust test launcher restores signals ignored by its parent', { skip: process.platform !== 'linux' }, () => {
   const work = mkdtempSync(join(tmpdir(), 'dscode-rust-signals-'));
   try {

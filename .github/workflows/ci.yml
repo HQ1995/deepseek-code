@@ -14,7 +14,7 @@ permissions:
   contents: read
 jobs:
   check:
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -36,7 +36,18 @@ jobs:
         run: |
           npm install --global corepack
           corepack enable
-          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update && sudo apt-get install -y musl-tools tmux; fi
+          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update && sudo apt-get install -y musl-tools libevent-dev libncurses-dev; fi
+      - name: Install tmux with OSC 8 support
+        if: runner.os == 'Linux'
+        run: |
+          curl --fail --location --retry 3 https://github.com/tmux/tmux/releases/download/3.4/tmux-3.4.tar.gz -o "$RUNNER_TEMP/tmux-3.4.tar.gz"
+          echo "551ab8dea0bf505c0ad6b7bb35ef567cdde0ccb84357df142c254f35a23e19aa  $RUNNER_TEMP/tmux-3.4.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/tmux-3.4.tar.gz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/tmux-3.4"
+          ./configure --prefix="$RUNNER_TEMP/tmux"
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/tmux/bin" >> "$GITHUB_PATH"
       - name: Scripts (bash 3.2-safe on macOS)
         run: |
           bash scripts/check.sh
@@ -50,6 +61,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: third_party/grok-build
+          cache-on-failure: true
       - name: Install dotslash
         run: cargo install --locked dotslash --version 0.5.7
       - name: Rust product contracts

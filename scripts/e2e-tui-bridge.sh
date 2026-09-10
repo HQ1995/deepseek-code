@@ -113,6 +113,10 @@ trap cleanup EXIT
 [[ -x "$TUI_BIN" ]] || fail "TUI binary is missing: $TUI_BIN"
 [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || fail "Node is unavailable"
 command -v tmux >/dev/null 2>&1 || fail "tmux is required"
+"$NODE_BIN" -e '
+  const v = process.argv[1].match(/^tmux (\d+)\.(\d+)/)
+  process.exit(v && (+v[1] > 3 || (+v[1] === 3 && +v[2] >= 4)) ? 0 : 1)
+' "$(tmux -V)" || fail "TUI acceptance requires tmux >=3.4 for OSC8 hyperlinks"
 command -v typescript-language-server >/dev/null 2>&1 \
   || fail "LSP acceptance requires typescript-language-server and typescript on PATH (see bridge/grok-leader/README.md)"
 "$NODE_BIN" -e 'const a=process.versions.node.split(".").map(Number), b=[22,19,0]; process.exit(a[0]>b[0] || (a[0]===b[0] && (a[1]>b[1] || (a[1]===b[1] && a[2]>=b[2]))) ? 0 : 1)' \
