@@ -13,6 +13,15 @@ export function assertReleaseRun(run, sha, tag) {
   }
 }
 
+/** The manifest of the commit being released, never the live working tree.
+ * A release waits hours for CI, and a version bump landing in that window used
+ * to fail provenance verification for payloads that were correctly built. */
+export function releasedManifest(sha, root = fileURLToPath(new URL('..', import.meta.url))) {
+  const result = spawnSync('git', ['-C', root, 'show', `${sha}:bridge/grok-leader/package.json`], { encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(`cannot read the manifest of ${sha}: ${result.stderr.trim()}`)
+  return JSON.parse(result.stdout)
+}
+
 const hashFile = async (path, gzip = false) => {
   const hash = createHash('sha256')
   const streams = [createReadStream(path), ...(gzip ? [createGunzip()] : []), hash]
@@ -50,6 +59,6 @@ export async function verifyReleaseAssets(directory, manifest) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [directory, runFile, sha, tag] = process.argv.slice(2)
   assertReleaseRun(JSON.parse(readFileSync(runFile, 'utf8')), sha, tag)
-  await verifyReleaseAssets(directory, JSON.parse(readFileSync(new URL('../bridge/grok-leader/package.json', import.meta.url), 'utf8')))
+  await verifyReleaseAssets(directory, releasedManifest(sha))
   console.log('PASS release checks, checksums, compressed binaries, and product provenance')
 }

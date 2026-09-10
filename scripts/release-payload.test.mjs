@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { copyClosure, releaseAssets, releaseChannel, sourceBuildEnvironment } from './build-release-payload.mjs';
-import { assertReleaseRun, verifyReleaseAssets } from './verify-release-assets.mjs';
+import { assertReleaseRun, releasedManifest, verifyReleaseAssets } from './verify-release-assets.mjs';
 
 test('terminal acceptance rejects old tmux before creating a test profile', () => {
   const work = mkdtempSync(join(tmpdir(), 'dscode-old-tmux-'));
@@ -111,6 +111,27 @@ test('release gate requires successful checks for the exact commit and tag', () 
   for (const change of [{ headSha: 'b'.repeat(40) }, { headBranch: 'main' }, { status: 'in_progress' }, { conclusion: 'failure' }, { conclusion: 'cancelled' }]) {
     assert.throws(() => assertReleaseRun({ ...run, ...change }, run.headSha, run.headBranch), /have not succeeded/);
   }
+});
+
+test('release provenance reads the tagged commit, not a later working-tree bump', () => {
+  const work = mkdtempSync(join(tmpdir(), 'dscode-release-manifest-'));
+  try {
+    const manifest = join(work, 'bridge/grok-leader/package.json');
+    mkdirSync(join(work, 'bridge/grok-leader'), { recursive: true });
+    const git = (...args) => execFileSync('git', ['-C', work, ...args], { encoding: 'utf8' });
+    git('init', '-q');
+    git('config', 'user.email', 'release@example.test');
+    git('config', 'user.name', 'release test');
+    writeFileSync(manifest, JSON.stringify({ name: '@hqzhao95/dscode', version: '1.2.3' }));
+    git('add', '.');
+    git('commit', '-qm', 'release 1.2.3');
+    const sha = git('rev-parse', 'HEAD').trim();
+    // A release waits hours for CI; bumping VERSION meanwhile must not change
+    // what the released payloads are verified against.
+    writeFileSync(manifest, JSON.stringify({ name: '@hqzhao95/dscode', version: '1.2.4' }));
+    assert.equal(releasedManifest(sha, work).version, '1.2.3');
+    assert.throws(() => releasedManifest('f'.repeat(40), work), /cannot read the manifest/);
+  } finally { rmSync(work, { recursive: true, force: true }); }
 });
 
 test('draft validation detects missing, corrupted, mixed-version and mismatched compressed assets', async () => {
