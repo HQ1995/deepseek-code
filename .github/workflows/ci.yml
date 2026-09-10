@@ -51,7 +51,7 @@ jobs:
       - name: Scripts (bash 3.2-safe on macOS)
         run: |
           bash scripts/check.sh
-          node --test scripts/release-payload.test.mjs
+          node --test scripts/release-payload.test.mjs scripts/e2e-gateway-hold.test.mjs
       - name: Build pinned source SDK and runtime
         run: |
           node scripts/build-release-payload.mjs --out "$RUNNER_TEMP/dscode-payload"

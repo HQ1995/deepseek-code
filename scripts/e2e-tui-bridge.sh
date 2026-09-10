@@ -386,14 +386,25 @@ http.createServer((request, response) => {
     const path = request.url?.split('?')[0] ?? ''
     if (request.method === 'POST' && path.endsWith('/preset-probe/release')) {
       const key = new URL(request.url, 'http://localhost').searchParams.get('key') ?? 'preset'
-      const finishPresetProbe = heldStreams.get(key)
-      if (!finishPresetProbe) {
-        response.writeHead(409)
-        response.end('No active preset probe')
-        return
+      // The client observes a held turn through the UI before the model request
+      // registers the hold, so wait for the stream instead of racing it. A hold
+      // that never arrives still fails the release once the deadline passes.
+      const deadline = Date.now() + 30000
+      const releaseHeld = () => {
+        const finishPresetProbe = heldStreams.get(key)
+        if (finishPresetProbe) {
+          finishPresetProbe()
+          response.end('released')
+          return
+        }
+        if (Date.now() > deadline) {
+          response.writeHead(409)
+          response.end('No active preset probe')
+          return
+        }
+        setTimeout(releaseHeld, 50)
       }
-      finishPresetProbe()
-      response.end('released')
+      releaseHeld()
       return
     }
     if (request.method === 'GET' && path.endsWith('/models')) {
