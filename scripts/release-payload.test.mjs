@@ -237,8 +237,9 @@ test('actual publish script authenticates historical and source assets before se
   const script = fileURLToPath(new URL('./publish-npm.sh', import.meta.url));
   const bin = join(work, 'bin');
   mkdirSync(bin);
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: work };
-  for (const name of Object.keys(env)) if (/npm.*(?:token|otp|auth)|^(?:NPM_TOKEN|NPM_OTP)$/i.test(name)) delete env[name];
+  // Hermetic child environment: only PATH and HOME, so no ambient npm credential
+  // variable can decide whether the publish script authenticated itself.
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: work };
   // These wrappers never delegate: unexpected commands/URLs fail closed.
   writeFileSync(join(bin, 'curl'), `#!${process.execPath}
 const fs = require('node:fs');
@@ -265,14 +266,15 @@ else if (status !== 200) process.exit(22);
 const fs = require('node:fs');
 const c = JSON.parse(fs.readFileSync(process.env.PUBLISH_CASE, 'utf8'));
 const args = process.argv.slice(2);
-if (args.some(arg => /authToken|otp/.test(arg))) process.exit(94);
+const reject = why => { process.stderr.write('npm fixture rejected: ' + why + '\\n'); process.exit(94); };
+if (args.some(arg => /authToken|otp/.test(arg))) reject('credential in argv: ' + args.join(' '));
 if (c.token) {
-  if (process.env.NPM_TOKEN !== c.token || !process.env.NPM_CONFIG_USERCONFIG) process.exit(94);
+  if (process.env.NPM_TOKEN !== c.token || !process.env.NPM_CONFIG_USERCONFIG) reject('token was not exported with its userconfig');
   const config = fs.readFileSync(process.env.NPM_CONFIG_USERCONFIG, 'utf8');
   if (!config.includes('$' + '{NPM_TOKEN}') || config.includes(c.token)
-    || (fs.statSync(process.env.NPM_CONFIG_USERCONFIG).mode & 0o077)) process.exit(94);
-} else if (process.env.NPM_TOKEN) process.exit(94);
-if (c.otp && process.env.NPM_CONFIG_OTP !== c.otp) process.exit(94);
+    || (fs.statSync(process.env.NPM_CONFIG_USERCONFIG).mode & 0o077)) reject('npmrc leaks the literal token or is world readable');
+} else if (process.env.NPM_TOKEN) reject('inherited NPM_TOKEN without a pinned case token');
+if (c.otp && process.env.NPM_CONFIG_OTP !== c.otp) reject('otp was not exported for the pinned case');
 if (args[0] === 'publish') {
   if (!fs.existsSync(args[1]) || !args.includes('--tag')) process.exit(95);
   fs.writeFileSync(c.published, args[args.indexOf('--tag') + 1]);
@@ -305,7 +307,7 @@ else process.exit(96);
       assert.ifError(result.error);
       const requests = readFileSync(fixture.requests, 'utf8').trim().split('\n');
       if (scenario.tag) {
-        assert.equal(result.status, 0, `${scenario.label}: ${result.stderr}`);
+        assert.equal(result.status, 0, `${scenario.label}: exit ${result.status} ${result.stderr}${result.stdout}`);
         assert.equal(readFileSync(fixture.published, 'utf8'), scenario.tag);
         if (scenario.source) {
           for (const platform of ['linux-x86_64', 'macos-aarch64']) {
