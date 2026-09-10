@@ -304,6 +304,40 @@ export function sessionEventToUpdates(
         ...event.data.error === undefined ? {} : { error: { name: event.data.error.name, code: event.data.error.code } },
       }]
     }
+    // PTC mode runs tools inside a `run_code` program. These two durable events
+    // are the only carrier of those nested calls (log-only: `deriveMessages()`
+    // ignores them, so they never re-enter model context), and each started
+    // sub-call settles exactly once — aborts included. Rendering them through
+    // the native call/result path keeps one card vocabulary for both planes.
+    case 'tool/ptc-dispatch-start': {
+      const args = event.data.arguments
+      return [{
+        sessionUpdate: 'tool_call',
+        toolCallId: String(event.data.subCallId),
+        title: event.data.name,
+        kind: toolKindForName(event.data.name, args),
+        status: 'in_progress',
+        rawInput: rawInputForTool(event.data.name, args),
+      }]
+    }
+    case 'tool/ptc-dispatch': {
+      const callId = String(event.data.subCallId)
+      const prior = options.toolCall?.(callId)
+      const contents: ToolResultContentBlock[] = [
+        ...textBlocks(event.data.content).map(block => ({ type: 'content' as const, content: block })),
+        ...(event.data.isError ? [] : diffBlocksFromCall(prior)),
+      ]
+      // Sub-calls carry no tool-private presentation meta, so only the
+      // argument-derived raw shapes (execute/edit) can be reconstructed.
+      const rawOutput = typedRawOutput(prior, undefined, contents, event.data.isError)
+      return [{
+        sessionUpdate: 'tool_call_update',
+        toolCallId: callId,
+        status: event.data.isError ? 'error' : 'completed',
+        ...contents.length > 0 ? { content: contents } : {},
+        ...rawOutput === undefined ? {} : { rawOutput },
+      }]
+    }
     default:
       // Other durable events belong to native state projections or diagnostics.
       return []

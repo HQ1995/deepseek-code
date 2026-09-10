@@ -1560,6 +1560,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         name: event.data.name,
         arguments: parseJsonObject(event.data.arguments),
       })
+    } else if (event.type === 'tool/ptc-dispatch-start') {
+      // Nested PTC calls resolve their raw shapes and fallback diffs from the
+      // same map; the dispatch arguments are already JSON-normalized.
+      record.pendingToolCalls.set(String(event.data.subCallId), {
+        name: event.data.name,
+        arguments: event.data.arguments,
+      })
     } else if (event.type === 'user/message' && (event.data.source as { kind?: unknown }).kind === 'user') {
       record.messageCount += 1
     } else if (String(event.type) === 'compaction/end') {
@@ -1608,6 +1615,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       const block = event.data.message.content[0] as { toolCallId?: unknown } | undefined
       if (block !== undefined) record.pendingToolCalls.delete(String(block.toolCallId))
     }
+    if (event.type === 'tool/ptc-dispatch') {
+      record.pendingToolCalls.delete(String(event.data.subCallId))
+    }
     return updates
   }
 
@@ -1655,8 +1665,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         }
         const updates = mapEvent(record, event, false)
         const result = event.type === 'tool/result' ? event.data.message.content[0] : undefined
-        const projected = result?.type === 'tool-result' && result.content.some(block => block.type === 'image')
-          ? projectImages(event, updates) : undefined
+        const carriesImage = result !== undefined && result.type === 'tool-result'
+          ? result.content.some(block => block.type === 'image')
+          : event.type === 'tool/ptc-dispatch' && event.data.content.some(block => block.type === 'image')
+        const projected = carriesImage ? projectImages(event, updates) : undefined
         updates.forEach((item, index) => emitUpdate(conn, record,
           projected === undefined ? item : projected.then(items => items[index]!), false, event.time))
       }
@@ -5635,6 +5647,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (event.seq >= nextSeq) break
       if (event.type === 'turn/start') turnStartMs = event.time
       if (event.type === 'tool/call') calls.set(String(event.data.callId), { name: event.data.name, arguments: parseJsonObject(event.data.arguments) })
+      if (event.type === 'tool/ptc-dispatch-start') calls.set(String(event.data.subCallId), { name: event.data.name, arguments: event.data.arguments })
       if (event.seq < after) continue
       const updates = await projectImages(event, sessionEventToUpdates(event, { replay: true, cwd: inspection.meta.cwd, toolCall: id => calls.get(id) }))
       for (const update of updates) entries.push({ update, meta: { isReplay: true, agentTimestampMs: event.time, turnStartMs, streamStartMs: turnStartMs } })

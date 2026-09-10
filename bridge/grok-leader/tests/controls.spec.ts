@@ -107,6 +107,24 @@ it('verifies each tool attachment and preserves explicit errors in live and repl
   await ctx.fiber.dispose()
 })
 
+it('resolves PTC sub-call images through the same attachment authority', async () => {
+  const ctx = new Context()
+  ctx.provide('attachments', {
+    async readImage(ref: { attachmentId: string }) { return { ref, data: new Uint8Array([1]) } },
+    imageHostPath(ref: { attachmentId: string }) { return '/private/' + ref.attachmentId + '.png' },
+  } as never)
+  let project!: ReturnType<typeof createImageOutputProjector>
+  await ctx.plugin({ name: 'ptc-image-projector-test', apply(scope) { project = createImageOutputProjector(scope) } })
+  const event = { type: 'tool/ptc-dispatch', data: { rootCallId: 'code', parentCallId: 'code', subCallId: 'code:ptc:1', name: 'read_image', arguments: {}, isError: false, content: [{ type: 'image', attachment: { attachmentId: 'nested' } }] } } as never
+  expect(await project(event, [{ sessionUpdate: 'tool_call_update', toolCallId: 'code:ptc:1', status: 'completed' }]))
+    .toMatchObject([{ toolCallId: 'code:ptc:1', rawOutput: { dscodeImages: ['/private/nested.png'] } }])
+  // A sub-call without images never rewrites the projected update.
+  const plain = await project({ type: 'tool/ptc-dispatch', data: { content: [{ type: 'text', text: 'ok' }] } } as never,
+    [{ sessionUpdate: 'tool_call_update', toolCallId: 'code:ptc:2', status: 'completed' }])
+  expect(plain[0]).toEqual({ sessionUpdate: 'tool_call_update', toolCallId: 'code:ptc:2', status: 'completed' })
+  await ctx.fiber.dispose()
+})
+
 it('parses reminder input without rewriting message text or admitting unsafe durations', () => {
   expect(parseReminder('after 10m check\nthe build')).toEqual({ after_seconds: 600, prompt: 'check\nthe build' })
   expect(parseReminder('every 5m check')).toEqual({ every_seconds: 300, prompt: 'check' })

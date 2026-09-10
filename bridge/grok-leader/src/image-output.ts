@@ -8,6 +8,22 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProjectedUpdate } from './projection.ts'
 
+/**
+ * Image blocks of one tool outcome. Native results and PTC sub-dispatches
+ * share the model-facing content vocabulary, so both resolve identically.
+ */
+function imageBlocksOf(event: SessionEvent): Array<{ attachment?: unknown }> {
+  if (event.type === 'tool/result') {
+    const content = event.data.message.content[0]
+    if (content?.type !== 'tool-result') return []
+    return content.content.filter(block => block.type === 'image') as Array<{ attachment?: unknown }>
+  }
+  if (event.type === 'tool/ptc-dispatch') {
+    return event.data.content.filter(block => block.type === 'image') as Array<{ attachment?: unknown }>
+  }
+  return []
+}
+
 export function createImageOutputProjector(ctx: Context) {
   let directory: Promise<string> | undefined
   let closed = false
@@ -16,10 +32,7 @@ export function createImageOutputProjector(ctx: Context) {
     if (directory !== undefined) await rm(await directory, { recursive: true, force: true })
   })
   return async (event: SessionEvent, updates: ProjectedUpdate[]): Promise<ProjectedUpdate[]> => {
-    if (event.type !== 'tool/result') return updates
-    const content = event.data.message.content[0]
-    if (content?.type !== 'tool-result') return updates
-    const images = content.content.filter(block => block.type === 'image')
+    const images = imageBlocksOf(event)
     if (images.length === 0) return updates
     const paths: string[] = []
     const errors: string[] = []

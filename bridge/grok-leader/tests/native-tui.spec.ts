@@ -46,3 +46,35 @@ it('keeps same-named native runs distinct and never treats an incomplete cold lo
   expect(cold[1]).toMatchObject({ status: 'interrupted', elapsed_ms: 10, active_agents: 0, agent_budget: null, agent_usage_incomplete: true, agents: [{ agent_id: 'child-b', state: 'interrupted' }] })
   expect(cold[1]!.agents[0]).not.toHaveProperty('tokens_used')
 })
+
+it('renders PTC sub-dispatches as their own rows in live and replayed transcripts', () => {
+  const args = { command: 'echo CODE_ROUND_OK' }
+  const start = { type: 'tool/ptc-dispatch-start', time: 10, data: { rootCallId: 'code', parentCallId: 'code', subCallId: 'code:ptc:1', name: 'bash', arguments: args } } as unknown as SessionEvent
+  const settled = { type: 'tool/ptc-dispatch', time: 20, data: { rootCallId: 'code', parentCallId: 'code', subCallId: 'code:ptc:1', name: 'bash', arguments: args, isError: false, content: [{ type: 'text', text: 'CODE_ROUND_OK\n' }] } } as unknown as SessionEvent
+  for (const replay of [false, true]) {
+    expect(sessionEventToUpdates(start, { replay })).toEqual([{
+      sessionUpdate: 'tool_call', toolCallId: 'code:ptc:1', title: 'bash', kind: 'execute', status: 'in_progress', rawInput: args,
+    }])
+    const updates = sessionEventToUpdates(settled, { replay, toolCall: id => id === 'code:ptc:1' ? { name: 'bash', arguments: args } : undefined })
+    expect(updates[0]).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'code:ptc:1',
+      status: 'completed',
+      content: [{ type: 'content', content: { type: 'text', text: 'CODE_ROUND_OK\n' } }],
+      rawOutput: { type: 'Bash', command: 'echo CODE_ROUND_OK', exit_code: 0 },
+    })
+  }
+})
+
+it('keeps failed sub-calls errors and gives nested edits their diff block', () => {
+  const failed = { type: 'tool/ptc-dispatch', time: 10, data: { rootCallId: 'code', parentCallId: 'code', subCallId: 'code:ptc:2', name: 'read', arguments: { path: 'missing.txt' }, isError: true, content: [{ type: 'text', text: 'ENOENT: no such file' }] } } as unknown as SessionEvent
+  expect(sessionEventToUpdates(failed, { replay: false })).toMatchObject([{
+    status: 'error', toolCallId: 'code:ptc:2', content: [{ content: { text: 'ENOENT: no such file' } }],
+  }])
+  const editArgs = { file_path: '/w/a.txt', old_string: 'a', new_string: 'b' }
+  const edit = { type: 'tool/ptc-dispatch', time: 20, data: { rootCallId: 'code', parentCallId: 'code', subCallId: 'code:ptc:3', name: 'edit', arguments: editArgs, isError: false, content: [{ type: 'text', text: 'edited' }] } } as unknown as SessionEvent
+  expect(sessionEventToUpdates(edit, { replay: false, toolCall: () => ({ name: 'edit', arguments: editArgs }) })[0])
+    .toMatchObject({ status: 'completed', content: [{ type: 'content' }, { type: 'diff', path: '/w/a.txt', oldText: 'a', newText: 'b' }] })
+  // Without the start event's arguments there is nothing to synthesize from.
+  expect(sessionEventToUpdates(edit, { replay: false })[0]).toMatchObject({ content: [{ type: 'content' }] })
+})

@@ -91,7 +91,7 @@ presentation does not automatically become a TUI feature.
 | Persistent shell and REPL | `terminal` preset and `/tasks terminals`; native interrupt/close and per-session ownership |
 | Minimal preset | Follows upstream's persistent shell; `str_replace_editor` is now an explicit opt-in |
 | Standard read/write/edit, FS_NOT_OBSERVED and scoped tool guidance | Native tools and permissions; structured errors remain visible |
-| PTC execution and nested output | `ptc`; existing command/output and image projection; nested file deliveries use durable events |
+| PTC execution and nested output | `ptc`; every nested sub-dispatch becomes its own transcript row (name, arguments, output, execute/edit raw shapes, diff fallback) in live and replayed history |
 | Workflows and Ralph | `/workflows`, task phases, history and native workflow tools |
 | LSP navigation | Opt-in `lsp` preset; installed language server required |
 | Session search and long references | `/resume`, `/reference`, `history` tools and native on-demand event reads |
@@ -110,7 +110,7 @@ presentation does not automatically become a TUI feature.
 | `present` file delivery | Clickable transcript links from `deliverables/presented`, live and after resume; child/fork paths use the viewed workspace |
 | Standard-derived custom presets | `history`, `terminal` and `lsp` snapshots also mount `present`; user copies remain user-owned snapshots |
 | General file input | Existing local file references let native file tools read paths; browser upload/progress UI has no terminal transport equivalent |
-| Images and read_image | Existing input admission, top-level/nested tool image display and explicit image opening |
+| Images and read_image | Existing input admission; top-level results and PTC sub-call results both resolve images to viewer paths, plus explicit image opening |
 | Markdown/ZIP export | `/export`; ZIP includes logs and attachments, while `present` stores source-file references rather than copies |
 | Independent text feedback | Native `/feedback <text>` appends feedback without a model turn; upstream telemetry policy may include session context |
 | Feedback rating/category dialogs | Web-only controls; no new TUI rating or category dialog |
