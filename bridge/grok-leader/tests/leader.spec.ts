@@ -3282,6 +3282,11 @@ describe('grok leader over a unix socket', () => {
     expect(forked.result).toEqual({ newSessionId: forkId })
     expect(registry.byId.has(forkId)).toBe(true)
     expect(registry.created.at(-1)).toEqual({ sessionId: forkId, cwd: process.cwd(), agentPreset: 'standard' })
+
+    // Extension-modal tabs the pager always offers: an unimplemented method
+    // shows up as "couldn't load hooks/plugins: method not found".
+    expect((await c.request(15, 'x.ai/hooks/list', {})).result).toEqual({ hooks: [], projectTrusted: false, loadErrors: [] })
+    expect((await c.request(16, 'x.ai/plugins/list', {})).result).toEqual({ plugins: [] })
   })
 
   it('rewinds by forking at a user-prompt boundary and preserves the source session', async () => {

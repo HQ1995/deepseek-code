@@ -984,6 +984,30 @@ clear_prompt
 send_line "/model"
 wait_frame "model selection" 'Already on|Fake Model'
 
+echo "[tui] extension modal hook and plugin tabs"
+# The modal always offers these tabs; an unimplemented bridge method rendered as
+# "couldn't load hooks: method not found: x.ai/hooks/list".
+clear_prompt
+send_line "/hooks"
+wait_frame "hooks tab" 'Hooks  Plugins' 100
+sleep 2
+capture
+if grep -q 'method not found' "$FRAME"; then
+  fail "hooks tab reported an unimplemented bridge method"
+fi
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Escape
+sleep 0.5
+clear_prompt
+send_line "/plugins"
+wait_frame "plugins tab" 'Hooks  Plugins' 100
+sleep 2
+capture
+if grep -q 'method not found' "$FRAME"; then
+  fail "plugins tab reported an unimplemented bridge method"
+fi
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Escape
+sleep 0.5
+
 echo "[tui] bridge-owned plugin lifecycle"
 clear_prompt
 send_line "/dsh plugins"

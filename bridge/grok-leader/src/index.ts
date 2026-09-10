@@ -4598,6 +4598,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return promptHistory(clientId, params)
       case 'x.ai/marketplace/list':
         return { sources: [] }
+      // The extension modal always offers these tabs; an unimplemented method
+      // renders as "couldn't load hooks/plugins: method not found". No config
+      // is loaded in the dsh-backed leader, so answer with the empty shape.
+      case 'x.ai/hooks/list':
+        return { hooks: [], projectTrusted: false, loadErrors: [] }
+      case 'x.ai/plugins/list':
+        return { plugins: [] }
       case 'x.ai/doctor':
         return await runtimeDoctor(clientId, params)
       case 'x.ai/terminals':
