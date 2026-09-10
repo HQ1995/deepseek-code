@@ -10,6 +10,30 @@ import { gzipSync } from 'node:zlib';
 import { copyClosure, releaseAssets, releaseChannel, sourceBuildEnvironment } from './build-release-payload.mjs';
 import { assertReleaseRun, verifyReleaseAssets } from './verify-release-assets.mjs';
 
+test('Linux Rust test launcher restores signals ignored by its parent', { skip: process.platform !== 'linux' }, () => {
+  const work = mkdtempSync(join(tmpdir(), 'dscode-rust-signals-'));
+  try {
+    mkdirSync(join(work, 'scripts'));
+    mkdirSync(join(work, 'bin'));
+    mkdirSync(join(work, 'third_party/grok-build'), { recursive: true });
+    cpSync(fileURLToPath(new URL('./check-rust.sh', import.meta.url)), join(work, 'scripts/check-rust.sh'));
+    writeFileSync(join(work, 'bin/cargo'), `#!/bin/sh
+for sig in TERM INT; do
+  /bin/sh -c 'kill -s "$1" "$$"; exit 99' sh "$sig"
+  result=$?
+  case "$sig:$result" in TERM:143|INT:130) ;; *) exit 91 ;; esac
+done
+`, { mode: 0o755 });
+    const result = spawnSync('env', ['--ignore-signal=INT,TERM', 'bash', join(work, 'scripts/check-rust.sh')], {
+      encoding: 'utf8', timeout: 15000,
+      env: { ...process.env, PATH: `${join(work, 'bin')}${delimiter}${process.env.PATH}`, DSCODE_RUST_TESTS_ISOLATED: '' },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /PASS Rust product contracts/);
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
+
 test('local bridge runner preserves absent, linked, and installed dependencies on success and failure', () => {
   const work = mkdtempSync(join(tmpdir(), 'dscode-dev-runner-'));
   const bridge = join(work, 'bridge/grok-leader');
@@ -201,7 +225,14 @@ else if (status !== 200) process.exit(22);
 const fs = require('node:fs');
 const c = JSON.parse(fs.readFileSync(process.env.PUBLISH_CASE, 'utf8'));
 const args = process.argv.slice(2);
-if (process.env.NPM_TOKEN || process.env.NPM_OTP || args.some(arg => /authToken|otp/.test(arg))) process.exit(94);
+if (args.some(arg => /authToken|otp/.test(arg))) process.exit(94);
+if (c.token) {
+  if (process.env.NPM_TOKEN !== c.token || !process.env.NPM_CONFIG_USERCONFIG) process.exit(94);
+  const config = fs.readFileSync(process.env.NPM_CONFIG_USERCONFIG, 'utf8');
+  if (!config.includes('$' + '{NPM_TOKEN}') || config.includes(c.token)
+    || (fs.statSync(process.env.NPM_CONFIG_USERCONFIG).mode & 0o077)) process.exit(94);
+} else if (process.env.NPM_TOKEN) process.exit(94);
+if (c.otp && process.env.NPM_CONFIG_OTP !== c.otp) process.exit(94);
 if (args[0] === 'publish') {
   if (!fs.existsSync(args[1]) || !args.includes('--tag')) process.exit(95);
   fs.writeFileSync(c.published, args[args.indexOf('--tag') + 1]);
@@ -212,6 +243,7 @@ else process.exit(96);
     { label: 'historical beta digest', version: '0.0.13-beta.13', sidecarStatus: 404, tag: 'beta' },
     { label: 'stable latest', version: '1.0.0', sidecarStatus: 200, tag: 'latest' },
     { label: 'source alpha', version: '1.0.1-alpha.1', source: true, sidecarStatus: 200, tag: 'alpha' },
+    { label: 'environment publish credentials', version: '1.0.1-alpha.1', source: true, sidecarStatus: 200, tag: 'alpha', token: 'fixture-publish-token', otp: '123456' },
     { label: 'source missing Linux runtime', version: '1.0.1-alpha.1', source: true, sidecarStatus: 200, missing: 'dscode-runtime-linux-x86_64.tar.gz' },
     { label: 'source missing macOS runtime', version: '1.0.1-alpha.1', source: true, sidecarStatus: 200, missing: 'dscode-runtime-macos-aarch64.tar.gz' },
     { label: 'wrong authenticated package', version: '1.0.0', sidecarStatus: 200, wrongName: true },
@@ -229,7 +261,7 @@ else process.exit(96);
       const fixture = { ...scenario, archive, digest: scenario.corruptDigest ? '0'.repeat(64) : createHash('sha256').update(readFileSync(archive)).digest('hex'), requests: join(dir, 'requests'), published: join(dir, 'published') };
       const input = join(dir, 'case.json');
       writeFileSync(input, JSON.stringify(fixture));
-      const result = spawnSync('bash', [script, '--pin', scenario.version], { env: { ...env, PUBLISH_CASE: input }, encoding: 'utf8', timeout: 30000 });
+      const result = spawnSync('bash', [script, '--pin', scenario.version], { env: { ...env, PUBLISH_CASE: input, ...(scenario.token ? { NPM_TOKEN: scenario.token, NPM_OTP: scenario.otp } : {}) }, encoding: 'utf8', timeout: 30000 });
       assert.ifError(result.error);
       const requests = readFileSync(fixture.requests, 'utf8').trim().split('\n');
       if (scenario.tag) {

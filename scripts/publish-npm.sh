@@ -90,6 +90,11 @@ if [[ ${#missing[@]} -gt 0 ]]; then
   echo "error: release v$PIN is missing required assets: ${missing[*]}" >&2
   exit 1
 fi
-npm publish "$stage/dscode-plugin.tgz" --access public --tag "$NPM_TAG" ${OTP:+--otp="$OTP"} \
-    ${NPM_TOKEN:+--//registry.npmjs.org/:_authToken="$NPM_TOKEN"}
+if [[ -n "${NPM_TOKEN:-}" ]]; then
+  # npm expands the token from its environment; never put it in process arguments.
+  (umask 077; printf '%s\n' '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > "$stage/.npmrc")
+  export NPM_CONFIG_USERCONFIG="$stage/.npmrc"
+fi
+[[ -z "$OTP" ]] || export NPM_CONFIG_OTP="$OTP"
+npm publish "$stage/dscode-plugin.tgz" --access public --tag "$NPM_TAG"
 echo "published: npm view @hqzhao95/dscode@$NPM_TAG version -> $(npm view "@hqzhao95/dscode@$NPM_TAG" version)"

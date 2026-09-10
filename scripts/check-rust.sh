@@ -3,8 +3,9 @@
 set -euo pipefail
 # Process-lifecycle tests must not be able to signal unrelated host processes.
 if [[ "$(uname -s)" == Linux && "${DSCODE_RUST_TESTS_ISOLATED:-}" != 1 ]]; then
+  # util-linux 2.37 leaves SIGINT/SIGTERM ignored in its forked child.
   exec unshare --user --map-root-user --pid --fork --mount-proc \
-    env DSCODE_RUST_TESTS_ISOLATED=1 bash "$0" "$@"
+    env --default-signal=INT,TERM DSCODE_RUST_TESTS_ISOLATED=1 bash "$0" "$@"
 fi
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

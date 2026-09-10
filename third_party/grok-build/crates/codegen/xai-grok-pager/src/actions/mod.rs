@@ -347,6 +347,10 @@ impl ActionRegistry {
                 def.default_key = key!(Enter, CONTROL);
                 def.alt_keys = vec![key!('i', CONTROL)];
             }
+            if def.id == ActionId::SteerPrompt {
+                def.default_key = key!(Enter, ALT);
+                def.alt_keys = vec![];
+            }
             if def.id == ActionId::OpenExtensions {
                 def.default_key = key!('l', CONTROL);
                 def.alt_keys = vec![];

@@ -10,6 +10,10 @@ Every intentional difference between this tree and upstream grok-build.
 Class: patch (generic fix, should be offered upstream) / feature (product) /
 branding (our identity). Keep this list current on every sync.
 
+The shared test registry pins the steering key so headless terminal detection
+cannot change its input contract. Linux test isolation resets SIGINT/SIGTERM
+after entering the namespace to handle older util-linux launchers.
+
 ## Upstream baseline
 
 - Source baseline: xai-org/grok-build
