@@ -128,7 +128,9 @@ async function runHeadless({ cwd: workdir, preset, prompt, sessionId, resume }) 
   }
 }
 async function packaging() {
-  const profile = join(scratch, 'profiles/dscode')
+  // Canonicalize both sides of the containment check; the scratch tree may sit
+  // behind a symlinked prefix (for example /home/<user>/sort-tmp).
+  const profile = await realpath(join(scratch, 'profiles/dscode'))
   const require = createRequire(join(profile, 'package.json'))
   const entry = await realpath(require.resolve('@hqzhao95/dscode'))
   assert.ok(!relative(profile, entry).startsWith('..'), 'Bridge must resolve inside the isolated profile, never the checkout')
