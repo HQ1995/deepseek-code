@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { createReadStream } from 'node:fs'
-import { mkdtemp, mkdir, readFile, writeFile, rm, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, readdir, readFile, writeFile, rm, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -73,9 +73,20 @@ try {
   await writeFile(join(profile, 'user-kept.txt'), 'preserved')
   // Repair the invalid empty overlay produced by older installRelease builds.
   await writeFile(join(profile, 'cordis.patch.yml'), '# Your patch layer for this dsh profile\n')
-  const helper = process.platform === 'linux'
-    ? join(profile, `runtime/node_modules/@deepseek-ai/node-addon-system-linux-${process.arch}/bin/landlock-run`)
-    : join(profile, 'runtime/bin/dsh')
+  // Discover the native helper from what the installed package declares, so a
+  // future upstream rename (landlock-run -> system) cannot break this check.
+  const nativeHelper = async () => {
+    const scope = join(profile, 'runtime/node_modules/@deepseek-ai')
+    for (const name of (await readdir(scope)).filter(entry => entry.startsWith('node-addon-'))) {
+      try {
+        const prebuilds = JSON.parse(await readFile(join(scope, name, 'prebuilds.json'), 'utf8'))
+        const binary = prebuilds.binaries?.find(entry => typeof entry?.path === 'string')
+        if (binary) return join(scope, name, binary.path)
+      } catch {}
+    }
+    throw new Error('no native helper declared by the installed runtime')
+  }
+  const helper = process.platform === 'linux' ? await nativeHelper() : join(profile, 'runtime/bin/dsh')
   await rm(join(profile, 'bin/dscode'))
   await rm(helper)
   await run(installed, update)
