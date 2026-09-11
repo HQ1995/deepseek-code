@@ -564,6 +564,15 @@ text, so the status cannot stay one turn behind.
 `views/agent_status.rs` accepts borrowed dynamic lines so the percentage is
 rendered without formatting or allocating a new status string every frame.
 
+### dsh decode speed is shown in the status row
+
+`acp/meta.rs` parses the bridge-owned `tokensPerSecond` notification metadata
+and `app/acp_handler/mod.rs` stores it on `AgentView`; `app/agent_view/render.rs`
+renders `tok/s N` beside the cache pill. The bridge folds decode speed exactly
+as the upstream `sessionStats` projection does (first token of a step to its
+assembled message, over that message's provider output tokens) and sends it
+with the same terminal-usage update as the cache percentage.
+
 ### Image input capability fails closed
 
 `acp/model_state.rs` now defaults `current_model_accepts_images()` to false

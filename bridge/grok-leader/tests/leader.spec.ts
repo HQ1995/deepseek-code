@@ -1573,6 +1573,33 @@ describe('grok leader over a unix socket', () => {
     expect(await c.next()).toMatchObject({ params: { _meta: { cumulativeTokens: 1006, cacheHitPercent: '99.8' } } })
   })
 
+  it('reports whole-session decode speed from the settled steps', async () => {
+    const { registry, pluginCtx, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const settle = (seq: number, step: number, startTime: number, firstToken: number, messageTime: number, outputTokens: number) => {
+      pluginCtx.emit('session/event', agent.session, {
+        type: 'step/start', seq, time: startTime, data: { turn: 1, step },
+      } as never)
+      pluginCtx.emit('session/event', agent.session, {
+        type: 'assistant/message', seq: seq + 1, time: messageTime, data: {
+          turn: 1, step,
+          stream: [{ type: 'chunk', time: firstToken, chunk: { type: 'text-delta', index: 0, text: 'ok' } }],
+          message: createAssistantMessage({ content: [{ type: 'text', text: 'ok' }], source: { provider: 'deepseek', model: 'chat' } }),
+          usage: { inputTokens: 1, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        },
+      } as never)
+    }
+    // 40 tokens over the 800ms after the first token, then 10 over the next 1000ms.
+    settle(1, 0, 1000, 1200, 2000, 40)
+    expect(await c.next()).toMatchObject({ params: { _meta: { tokensPerSecond: '50' } } })
+    settle(3, 1, 2100, 3000, 4000, 10)
+    expect(await c.next()).toMatchObject({ params: { _meta: { tokensPerSecond: '28' } } })
+  })
+
   it('streams native goal output before settlement and reconciles missing durable chunks once', async () => {
     const { registry, pluginCtx, client: c } = await start()
     register(c)
@@ -5918,6 +5945,18 @@ describe('cacheHitPercent', () => {
     expect(GrokLeader.cacheHitPercent(5, 995, 0)).toBe('99.5')
     expect(GrokLeader.cacheHitPercent(1, 999, 0)).toBe('99.9')
     expect(GrokLeader.cacheHitPercent(1, 9999, 0)).toBe('99.99')
+  })
+})
+
+describe('decodeTokensPerSecond', () => {
+  it('is silent before a timed step and formats by the upstream client rule', () => {
+    const speed = GrokLeader.emptyDecodeSpeed()
+    expect(GrokLeader.decodeTokensPerSecond(speed)).toBeUndefined()
+    speed.decodeMs = 12_000
+    speed.decodeTokens = 100
+    expect(GrokLeader.decodeTokensPerSecond(speed)).toBe('8.3')
+    speed.decodeTokens = 240
+    expect(GrokLeader.decodeTokensPerSecond(speed)).toBe('20')
   })
 })
 

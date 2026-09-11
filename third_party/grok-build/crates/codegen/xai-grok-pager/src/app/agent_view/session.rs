@@ -161,6 +161,7 @@ impl AgentView {
             modal_hovered_key: None,
             context_state: None,
             cache_hit_percent: None,
+            tokens_per_second: None,
             status_context: None,
             last_status_line_size: None,
             chat_kind: false,

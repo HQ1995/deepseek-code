@@ -7,7 +7,7 @@
  * @module dscode/projection
  */
 import type { TurnEndReason, SessionEvent } from '@deepseek-ai/dsh-session'
-import { expandAssistantStream, type StreamChunk, type TokenUsage } from '@deepseek-ai/dsh-llm'
+import { assistantStreamFirstTokenTime, expandAssistantStream, type StreamChunk, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-tool-present/types'
 import { isAbsolute, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -27,6 +27,7 @@ export type GrokSessionUpdate =
 export type ProjectedUpdate = GrokSessionUpdate & {
   totalTokens?: number
   cacheHitPercent?: string
+  tokensPerSecond?: string
 }
 
 /** Released token-meter values: usage is cumulative; pressure is next-request occupancy. */
@@ -210,6 +211,53 @@ export function assistantEventUsage(event: SessionEvent): TokenUsage | undefined
     if (record.type === 'chunk' && record.chunk.type === 'usage') return record.chunk.usage
   }
   return undefined
+}
+
+/**
+ * Whole-session decode fold, field for field the upstream `sessionStats`
+ * decode pair: the first token of a step's stream to its assembled message,
+ * and that message's provider output tokens over the same span. Retries
+ * re-enter the fold through the attempt that produced the first token.
+ */
+export interface DecodeSpeed {
+  openStep: { turn: number; step: number; firstTokenTime: number | null } | null
+  decodeMs: number
+  decodeTokens: number
+}
+
+export const emptyDecodeSpeed = (): DecodeSpeed => ({ openStep: null, decodeMs: 0, decodeTokens: 0 })
+
+/** Fold one session event into the decode pair, mirroring `sessionStats`. */
+export function noteDecodeSpeed(speed: DecodeSpeed, event: SessionEvent): void {
+  if (event.type === 'step/start') {
+    speed.openStep = { turn: event.data.turn, step: event.data.step, firstTokenTime: null }
+    return
+  }
+  const open = speed.openStep
+  if (open === null) return
+  if (event.type === 'assistant/attempt') {
+    if (open.turn !== event.data.turn || open.step !== event.data.step || open.firstTokenTime !== null) return
+    open.firstTokenTime = assistantStreamFirstTokenTime(event.data.stream) ?? null
+    return
+  }
+  if (event.type !== 'assistant/message') return
+  if (open.turn !== event.data.turn || open.step !== event.data.step) return
+  speed.openStep = null
+  const firstTokenTime = open.firstTokenTime ?? assistantStreamFirstTokenTime(event.data.stream) ?? null
+  const outputTokens = event.data.usage?.outputTokens
+  if (firstTokenTime === null || typeof outputTokens !== 'number' || !Number.isFinite(outputTokens) || outputTokens < 0) return
+  speed.decodeMs += Math.max(0, event.time - firstTokenTime)
+  speed.decodeTokens += outputTokens
+}
+
+/**
+ * Display-ready decode speed by the upstream client rule (integer at or above
+ * 10, one decimal below), or undefined before one timed step has landed.
+ */
+export function decodeTokensPerSecond(speed: DecodeSpeed): string | undefined {
+  if (speed.decodeMs <= 0 || speed.decodeTokens <= 0) return undefined
+  const value = speed.decodeTokens / speed.decodeMs * 1000
+  return value >= 10 ? String(Math.round(value)) : String(Math.round(value * 10) / 10)
 }
 
 /**

@@ -475,12 +475,16 @@ http.createServer((request, response) => {
       }
       const text = titleRequest ? 'E2E Session' : answeredAsk ? 'ASK_USER_QUESTION_OK' : 'E2E_STREAM_OK'
       response.write('data: ' + chunk(text) + '\n\n')
-      response.write('data: ' + chunk('', 'stop', {
-        prompt_tokens: 1000,
-        completion_tokens: 5,
-        prompt_tokens_details: { cached_tokens: 999 },
-      }) + '\n\n')
-      response.end('data: [DONE]\n\n')
+      // Settle after a real decode span so the status row's decode speed has a
+      // non-zero window; an instant stream would divide 5 tokens by 0ms.
+      setTimeout(() => {
+        response.write('data: ' + chunk('', 'stop', {
+          prompt_tokens: 1000,
+          completion_tokens: 5,
+          prompt_tokens_details: { cached_tokens: 999 },
+        }) + '\n\n')
+        response.end('data: [DONE]\n\n')
+      }, 150)
       return
     }
     if (request.method === 'POST' && path.endsWith('/responses')) {
@@ -1065,6 +1069,7 @@ clear_prompt
 send_line "reply with the test marker"
 wait_frame "streamed prompt" 'E2E_STREAM_OK' 300
 wait_frame "cache hit status" 'cache 99\.9%' 300
+wait_frame "decode speed status" 'tok/s [0-9]' 300
 grep -q 'POST /v1/chat/completions' "$MOCK_LOG" \
   || fail "the mock gateway never received a completion request"
 

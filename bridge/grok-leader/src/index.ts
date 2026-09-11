@@ -58,11 +58,11 @@ import { TerminalSessionId, type TerminalSessionService } from '@deepseek-ai/dsh
 import { exportSessionArchive } from './session-export.ts'
 import { foldScheduleEvents } from '@deepseek-ai/dsh-schedule'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
-import { acpPromptToText, assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, parseJsonObject, promptHasUnsupportedContent, sessionEventToUpdates, textBlocks, toolKindForName, turnEndToStopReason, type GrokSessionUpdate, type ProjectedUpdate, type StopReasonWire, type ToolKindWire, type ToolResultContentBlock } from './projection.ts'
+import { acpPromptToText, assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, parseJsonObject, promptHasUnsupportedContent, sessionEventToUpdates, textBlocks, toolKindForName, turnEndToStopReason, type DecodeSpeed, type GrokSessionUpdate, type ProjectedUpdate, type StopReasonWire, type ToolKindWire, type ToolResultContentBlock } from './projection.ts'
 import { contextInfoFromProjection, goalUpdateFromView, type ContextProjectionValues, type NativeGoalView } from './projection.ts'
 
-export { acpPromptToText, cacheHitPercent, promptHasUnsupportedContent, sessionEventToUpdates, toolKindForName, turnEndToStopReason }
-export type { GrokSessionUpdate, ProjectedUpdate, StopReasonWire, ToolKindWire, ToolResultContentBlock }
+export { acpPromptToText, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, promptHasUnsupportedContent, sessionEventToUpdates, toolKindForName, turnEndToStopReason }
+export type { DecodeSpeed, GrokSessionUpdate, ProjectedUpdate, StopReasonWire, ToolKindWire, ToolResultContentBlock }
 
 interface DscodeModelSelectionEvent {
   provider: string
@@ -461,6 +461,8 @@ interface SessionRecord {
   /** Disjoint prompt-side cache token buckets from dsh TokenUsage. */
   cacheReadTokens: number
   cacheWriteTokens: number
+  /** Decode-speed fold mirrored from the upstream sessionStats projection. */
+  decodeSpeed: DecodeSpeed
   /** Counters the grok x.ai/session/info context reads. */
   turnCount: number
   toolCallCount: number
@@ -1459,7 +1461,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const inflight = record.inflight
     const send = (item: ProjectedUpdate) => {
       const eventSeq = record.eventSeq++
-      const { totalTokens, cacheHitPercent, ...update } = item
+      const { totalTokens, cacheHitPercent, tokensPerSecond, ...update } = item
       sendNotification(conn, WIRE.sessionUpdate, {
         sessionId: record.agent.session.id,
         update,
@@ -1470,6 +1472,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           contextInfo: contextSnapshot(record),
           ...totalTokens === undefined ? {} : { cumulativeTokens: totalTokens },
           ...cacheHitPercent === undefined ? {} : { cacheHitPercent },
+          ...tokensPerSecond === undefined ? {} : { tokensPerSecond },
           ...agentTimestampMs === undefined ? {} : { agentTimestampMs },
           ...record.turnStartMs === undefined ? {} : { streamStartMs: record.turnStartMs, turnStartMs: record.turnStartMs },
         },
@@ -1538,6 +1541,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   /** Accumulate the token and counter facts one session event contributes. */
   const noteEvent = (record: SessionRecord, event: SessionEvent): void => {
+    noteDecodeSpeed(record.decodeSpeed, event)
     if (event.type === 'llm/retry-started') {
       const previous = lastUsage.get(record)
       if (previous !== undefined && previous.turn === event.data.turn && previous.step === event.data.step) lastUsage.delete(record)
@@ -1586,6 +1590,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     noteEvent(record, event)
     const totalTokens = record.inputTokens + record.cacheReadTokens + record.cacheWriteTokens + record.outputTokens
     const hitPercent = cacheHitPercent(record.inputTokens, record.cacheReadTokens, record.cacheWriteTokens)
+    const speed = decodeTokensPerSecond(record.decodeSpeed)
+    const meters = {
+      totalTokens,
+      ...hitPercent === undefined ? {} : { cacheHitPercent: hitPercent },
+      ...speed === undefined ? {} : { tokensPerSecond: speed },
+    }
     const updates: Array<ProjectedUpdate> = []
     for (const item of sessionEventToUpdates(event, {
       replay,
@@ -1594,7 +1604,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       toolCall: (callId) => record.pendingToolCalls.get(callId),
     })) {
       if (item.sessionUpdate === 'agent_message_chunk') {
-        updates.push({ ...item, totalTokens, ...hitPercent === undefined ? {} : { cacheHitPercent: hitPercent } })
+        updates.push({ ...item, ...meters })
       } else {
         updates.push(item)
       }
@@ -1607,8 +1617,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       updates.push({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: '' },
-        totalTokens,
-        ...hitPercent === undefined ? {} : { cacheHitPercent: hitPercent },
+        ...meters,
       })
     }
     if (event.type === 'tool/result') {
@@ -2158,6 +2167,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       outputTokens: 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      decodeSpeed: emptyDecodeSpeed(),
       turnCount: 0,
       toolCallCount: 0,
       messageCount: 0,
@@ -3287,6 +3297,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       outputTokens: 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      decodeSpeed: emptyDecodeSpeed(),
       turnCount: 0,
       toolCallCount: 0,
       messageCount: 0,
@@ -4140,6 +4151,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       outputTokens: 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      decodeSpeed: emptyDecodeSpeed(),
       turnCount: 0,
       toolCallCount: 0,
       messageCount: 0,

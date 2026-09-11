@@ -1575,6 +1575,17 @@ impl AgentView {
                 ]),
             );
         }
+        if let Some(speed) = self.tokens_per_second.as_deref() {
+            let label = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+            let value = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+            status.push(
+                "tokens_per_second",
+                Line::from(vec![
+                    Span::styled("tok/s ", label),
+                    Span::styled(speed, value),
+                ]),
+            );
+        }
         if let Some(ctx_line) = context_bar::context_bar_line_for_session(
             ctx_used,
             ctx_total,

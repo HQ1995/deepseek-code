@@ -20,6 +20,8 @@ pub struct NotificationMeta {
     pub session_running: Option<bool>,
     /// Display-ready cumulative prompt cache hit percentage (`cacheHitPercent`).
     pub cache_hit_percent: Option<String>,
+    /// Display-ready whole-session decode speed (`tokensPerSecond`).
+    pub tokens_per_second: Option<String>,
     /// UTC ms when this notification was sent (`agentTimestampMs`).
     pub agent_timestamp_ms: Option<i64>,
     /// UTC ms when the current LLM streaming response started (`streamStartMs`).
@@ -135,6 +137,10 @@ impl NotificationMeta {
                 .get("cacheHitPercent")
                 .and_then(|v| v.as_str())
                 .map(str::to_owned),
+            tokens_per_second: m
+                .get("tokensPerSecond")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
             agent_timestamp_ms: m.get("agentTimestampMs").and_then(|v| v.as_i64()),
             stream_start_ms: m.get("streamStartMs").and_then(|v| v.as_i64()),
             turn_start_ms: m.get("turnStartMs").and_then(|v| v.as_i64()),
@@ -171,6 +177,7 @@ mod tests {
         let meta_json = json!({
             "totalTokens": 5000u64,
             "cacheHitPercent": "99.9",
+            "tokensPerSecond": "42",
             "agentTimestampMs": 1700000000000i64,
             "streamStartMs": 1700000000000i64 - 3200,
             "turnStartMs": 1700000000000i64 - 5000,
@@ -181,6 +188,7 @@ mod tests {
 
         assert_eq!(meta.total_tokens, Some(5000));
         assert_eq!(meta.cache_hit_percent.as_deref(), Some("99.9"));
+        assert_eq!(meta.tokens_per_second.as_deref(), Some("42"));
         assert_eq!(meta.agent_timestamp_ms, Some(1700000000000));
         assert_eq!(meta.stream_start_ms, Some(1700000000000 - 3200));
         assert_eq!(meta.turn_start_ms, Some(1700000000000 - 5000));
@@ -203,6 +211,7 @@ mod tests {
         assert_eq!(meta.agent_timestamp_ms, Some(1700000000000));
         assert_eq!(meta.stream_start_ms, None);
         assert_eq!(meta.turn_start_ms, None);
+        assert_eq!(meta.tokens_per_second, None);
         assert!(!meta.is_replay);
     }
 

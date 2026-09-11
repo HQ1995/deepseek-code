@@ -273,6 +273,9 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         if let Some(percent) = meta.cache_hit_percent.as_ref() {
                             agent.cache_hit_percent = Some(percent.clone());
                         }
+                        if let Some(speed) = meta.tokens_per_second.as_ref() {
+                            agent.tokens_per_second = Some(speed.clone());
+                        }
                         if let Some(ts) = meta.turn_start_ms {
                             agent.turn_start_ms = Some(ts);
                             agent.turn_start_ms_prompt = meta.prompt_id.clone();
