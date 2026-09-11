@@ -164,6 +164,28 @@ esac
     expect(readFileSync(npmLog, 'utf8')).toContain(`@deepseek-ai/dsh@${dshVersion}`)
   })
 
+  it('sends an available GitHub token and falls back to anonymous when it is rejected', async () => {
+    const token = process.env.GITHUB_TOKEN
+    const seen: (string | null)[] = []
+    try {
+      process.env.GITHUB_TOKEN = 'test-token'
+      const ok = async (_url: string, init: { headers?: Record<string, string> }) => {
+        seen.push(init.headers?.authorization ?? null)
+        return new Response(JSON.stringify([{ tag_name: 'v1.0.1-alpha.10' }]))
+      }
+      expect(await resolveRelease({ channel: 'alpha' }, ok)).toBe('1.0.1-alpha.10')
+      const rejected = async (_url: string, init: { headers?: Record<string, string> }) => {
+        seen.push(init.headers?.authorization ?? null)
+        return new Response('rate limited', { status: init.headers?.authorization ? 403 : 200 })
+      }
+      await resolveRelease({ channel: 'alpha' }, rejected).catch(() => undefined)
+    } finally {
+      if (token === undefined) delete process.env.GITHUB_TOKEN
+      else process.env.GITHUB_TOKEN = token
+    }
+    expect(seen).toEqual(['Bearer test-token', 'Bearer test-token', null])
+  })
+
   it('keeps channel checks read-only and separates legacy alpha from explicit alpha', async () => {
     const profile = mkdtempSync(join(tmpdir(), 'dscode-channel-'))
     homes.push(profile)

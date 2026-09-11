@@ -99,6 +99,11 @@ after entering the namespace to handle older util-linux launchers.
   Missing or historical launchers bootstrap a known whole-product updater
   separately from the target version, preventing old beta launchers from
   delegating back into a newer cached TUI indefinitely.
+- GitHub release lookups send `GITHUB_TOKEN`/`GH_TOKEN` when the environment
+  provides one and fall back to the anonymous call when it is rejected or
+  limit-spent: the anonymous API allows 60 requests per hour per address, which
+  a release day or a shared egress address can exhaust. The Rust check and the
+  managed JS updater apply the same policy.
 - Environment namespace isolation: pager-bin maps DSCODE_CONFIG,
   DSCODE_CONFIG_PATH, and DSCODE_CONNECT_UI_TIMEOUT_SECS onto the upstream
   GROK_* implementation names before configuration loads. When a DSCODE alias

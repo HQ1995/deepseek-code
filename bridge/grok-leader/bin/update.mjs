@@ -11,6 +11,21 @@ import { parse, stringify } from 'smol-toml'
 import { list, extract as extractTar } from 'tar'
 
 const repo = 'HQ1995/deepseek-code'
+/** Anonymous GitHub API calls are capped at 60/hour per address, which a
+ *  release day or a shared egress address can exhaust; use a token when the
+ *  environment already provides one and stay anonymous otherwise. */
+const githubAuth = () => {
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
+  return token ? { headers: { authorization: `Bearer ${token}` } } : {}
+}
+/** GitHub answers 401 for a rejected token and 403 when that token's own limit
+ *  is spent; the anonymous call may still have headroom, so fall back to it. */
+const githubFetch = async (url, fetcher = fetch) => {
+  const auth = githubAuth()
+  const response = await fetcher(url, { signal: AbortSignal.timeout(120000), ...auth })
+  if (!auth.headers || ![401, 403].includes(response.status)) return response
+  return fetcher(url, { signal: AbortSignal.timeout(120000) })
+}
 const versionPattern = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/
 export const channelAccepts = (channel, version) => {
   const match = versionPattern.exec(version)
@@ -73,7 +88,7 @@ export const resolveRelease = async ({ channel, version }, fetcher = fetch) => {
   if (version !== undefined) return version
   const versions = []
   for (let page = 1; ; page++) {
-    const response = await fetcher(`https://api.github.com/repos/${repo}/releases?per_page=100&page=${page}`, { signal: AbortSignal.timeout(120000) })
+    const response = await githubFetch(`https://api.github.com/repos/${repo}/releases?per_page=100&page=${page}`, fetcher)
     if (!response.ok) throw new Error(`release lookup failed: ${response.status}`)
     const releases = await response.json()
     if (!Array.isArray(releases)) throw new Error('invalid release listing')
@@ -111,7 +126,7 @@ const downloadVerified = async (base, name, dest, fetcher, compressed = false) =
     const prefix = `https://github.com/${repo}/releases/download/v`
     const version = base.startsWith(prefix) ? base.slice(prefix.length) : ''
     if (checksum.status !== 404 || name !== 'dscode-plugin.tgz' || !versionPattern.test(version)) throw new Error(`missing checksum for ${name}`)
-    const releaseResponse = await fetcher(`https://api.github.com/repos/${repo}/releases/tags/v${version}`, { signal: AbortSignal.timeout(120000) })
+    const releaseResponse = await githubFetch(`https://api.github.com/repos/${repo}/releases/tags/v${version}`, fetcher)
     if (!releaseResponse.ok) throw new Error(`missing verifiable digest for ${name}: ${releaseResponse.status}`)
     const release = await releaseResponse.json()
     const asset = release.tag_name === `v${version}` && !release.draft && Array.isArray(release.assets)

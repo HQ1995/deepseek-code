@@ -305,6 +305,45 @@ fn dscode_release_api_base() -> String {
     DEEPSEEK_CODE_RELEASE_API.to_string()
 }
 
+/// Anonymous GitHub API calls are capped at 60/hour per address, which a
+/// release day or a shared egress address can exhaust. Send a token when the
+/// environment already provides one; stay anonymous otherwise.
+fn github_token() -> Option<String> {
+    ["GITHUB_TOKEN", "GH_TOKEN"]
+        .into_iter()
+        .find_map(|key| std::env::var(key).ok())
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+async fn dscode_release_request(
+    client: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+) -> reqwest::Result<reqwest::Response> {
+    let request = client.get(url).header("User-Agent", "dscode-updater");
+    let request = match token {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    };
+    request.send().await
+}
+
+/// The dscode release endpoint with the environment's token, if any. A
+/// rejected or limit-spent token falls back to the anonymous call, which may
+/// still have headroom.
+async fn dscode_release_get(
+    client: &reqwest::Client,
+    url: &str,
+) -> reqwest::Result<reqwest::Response> {
+    let token = github_token();
+    let response = dscode_release_request(client, url, token.as_deref()).await?;
+    if token.is_some() && matches!(response.status().as_u16(), 401 | 403) {
+        return dscode_release_request(client, url, None).await;
+    }
+    Ok(response)
+}
+
 /// Fetch the latest stable release version from the deepseek-code GitHub
 /// Releases API. Stable uses `/releases/latest`, which never returns a
 /// pre-release or draft.
@@ -352,11 +391,7 @@ async fn fetch_dscode_release_latest() -> Result<String> {
         .timeout(Duration::from_secs(15))
         .build()?;
     let url = format!("{}/latest", dscode_release_api_base());
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "dscode-updater")
-        .send()
-        .await?;
+    let resp = dscode_release_get(&client, &url).await?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -389,11 +424,7 @@ async fn fetch_dscode_releases() -> Result<Vec<GithubRelease>> {
         .timeout(Duration::from_secs(15))
         .build()?;
     let url = format!("{}?per_page=100", dscode_release_api_base());
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "dscode-updater")
-        .send()
-        .await?;
+    let resp = dscode_release_get(&client, &url).await?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
