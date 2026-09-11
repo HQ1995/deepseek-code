@@ -50,8 +50,11 @@ it('excludes a second process throughout tuple commit and releases locks after a
   }
 })
 
-it.each(['landlock-run', 'system'])('accepts a complete %s runtime and rejects a missing required native artifact', family => {
+it.each(['landlock-run', 'system', 'upstream-renamed'])('accepts a complete %s runtime and rejects a missing required native artifact', family => {
   const root = mkdtempSync(join(tmpdir(), 'dscode-native-runtime-'))
+  // The renamed family also renames every identifier inside prebuilds.json.
+  const renamed = family === 'upstream-renamed'
+  const artifact = renamed ? 'bin/system-exec' : 'bin/landlock-run'
   const metadata = { dsh: { sourceCommit: 'a'.repeat(40), testedVersion: '0.1.5-alpha.1' } }
   const native = join(root, `node_modules/@deepseek-ai/node-addon-${family}-linux-x64`)
   try {
@@ -61,10 +64,9 @@ it.each(['landlock-run', 'system'])('accepts a complete %s runtime and rejects a
     symlinkSync('../node_modules/@deepseek-ai/dsh/lib/bin.js', join(root, 'bin/dsh'))
     writeFileSync(join(root, 'dscode-runtime.json'), JSON.stringify({ schema: 1, platform: 'linux', arch: 'x64', sourceCommit: metadata.dsh.sourceCommit, dshVersion: metadata.dsh.testedVersion }))
     mkdirSync(join(native, 'bin'), { recursive: true })
-    writeFileSync(join(native, 'bin/landlock-run'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
-    const binaries: object[] = [{ tool: 'landlock-run', kind: 'static-musl', path: 'bin/landlock-run' }]
+    writeFileSync(join(native, artifact), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    const binaries: object[] = [{ tool: renamed ? 'system-exec' : 'landlock-run', kind: renamed ? 'executable' : 'static-musl', path: artifact }]
     if (family === 'system') {
-      mkdirSync(join(root, 'node_modules/@deepseek-ai/node-addon-system'))
       for (const libc of ['glibc', 'musl']) {
         mkdirSync(join(native, `bin/${libc}`))
         writeFileSync(join(native, `bin/${libc}/system.node`), 'fixture addon')
@@ -73,7 +75,7 @@ it.each(['landlock-run', 'system'])('accepts a complete %s runtime and rejects a
     }
     writeFileSync(join(native, 'prebuilds.json'), JSON.stringify({ platform: 'linux-x64', binaries }))
     expect(() => validateRuntime(root, metadata, 'linux', 'x64')).not.toThrow()
-    rmSync(join(native, family === 'system' ? 'bin/glibc/system.node' : 'bin/landlock-run'))
+    rmSync(join(native, family === 'system' ? 'bin/glibc/system.node' : artifact))
     expect(() => validateRuntime(root, metadata, 'linux', 'x64')).toThrow()
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

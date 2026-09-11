@@ -63,7 +63,10 @@ artifacts, built with the official `native/system` scripts.
 
 Source-runtime descriptors record the source revision, DSH version, platform,
 and architecture; the launcher validates them and the CLI/native helper before
-activation. An explicit `DSH_BIN` must report the exact pin. Registry-backed
+activation. The helper is discovered from the installed layout and checked
+against what its own `prebuilds.json` declares, so an upstream package rename or
+renamed identifier cannot block an update the installed launcher would
+otherwise refuse. An explicit `DSH_BIN` must report the exact pin. Registry-backed
 releases may reuse an exact PATH runtime. Neither path upgrades a global install.
 
 Stable, beta, and alpha are independent product channels. Beta and alpha each

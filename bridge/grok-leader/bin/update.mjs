@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { accessSync, chmodSync, closeSync, constants, cpSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { accessSync, chmodSync, closeSync, constants, cpSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
@@ -152,22 +152,35 @@ export const extractArchive = (archive, dest) => {
   mkdirSync(dest, { recursive: true })
   extractTar({ file: archive, cwd: dest, sync: true, strict: true, preservePaths: false, preserveOwner: false, chmod: true })
 }
+/** Installed `@deepseek-ai/node-addon-*` packages of the pinned runtime, the
+ *  current family first. Upstream has renamed this family once already
+ *  (landlock-run -> system), so the installer reads what a package declares
+ *  instead of matching a package name that a frozen release cannot update. */
+const nativePackages = (runtime) => {
+  const scope = join(runtime, 'node_modules', '@deepseek-ai')
+  const names = (existsSync(scope) ? readdirSync(scope) : []).filter(name => name.startsWith('node-addon-'))
+  return names.sort((a, b) => (a === 'node-addon-system' ? -1 : b === 'node-addon-system' ? 1 : a.localeCompare(b)))
+}
+
 export const validateRuntime = (runtime, metadata, platform = process.platform, arch = process.arch) => {
   const descriptor = json(join(runtime, 'dscode-runtime.json'))
   if (descriptor.schema !== 1 || descriptor.platform !== platform || descriptor.arch !== arch
     || descriptor.sourceCommit !== metadata.dsh.sourceCommit || descriptor.dshVersion !== metadata.dsh.testedVersion) throw new Error('runtime provenance/platform mismatch')
   if (!existsSync(join(runtime, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))) throw new Error('runtime CLI entrypoint missing')
   if (platform === 'linux') {
-    // Both native families exist in released dscode runtimes; rollback keeps the old one valid.
-    const system = existsSync(join(runtime, 'node_modules', '@deepseek-ai/node-addon-system'))
-    const native = join(runtime, 'node_modules', `@deepseek-ai/node-addon-${system ? 'system' : 'landlock-run'}-${platform}-${arch}`)
-    const prebuilds = json(join(native, 'prebuilds.json'))
-    if (prebuilds.platform !== `${platform}-${arch}` || !prebuilds.binaries?.some(binary => binary.tool === 'landlock-run' && binary.kind === 'static-musl' && binary.path === 'bin/landlock-run')) throw new Error('runtime native helper metadata mismatch')
-    accessSync(join(native, 'bin', 'landlock-run'), constants.X_OK)
-    if (system) for (const libc of ['glibc', 'musl']) {
-      const path = `bin/${libc}/system.node`
-      if (!prebuilds.binaries.some(binary => binary.tool === 'flock' && binary.kind === 'node-api' && binary.libc === libc && binary.path === path)) throw new Error('runtime native flock metadata missing')
-      accessSync(join(native, path), constants.R_OK)
+    // Assert what the native package declares instead of matching upstream's
+    // identifiers: an installed launcher cannot be updated once they are
+    // renamed, and the release build already gates the contract itself.
+    const helper = nativePackages(runtime)
+      .filter(name => name.endsWith(`-${platform}-${arch}`))
+      .map(name => join(runtime, 'node_modules', '@deepseek-ai', name))
+      .filter(directory => existsSync(join(directory, 'prebuilds.json')))
+      .map(directory => ({ directory, prebuilds: json(join(directory, 'prebuilds.json')) }))
+      .find(({ prebuilds }) => prebuilds.binaries?.length > 0)
+    if (!helper) throw new Error('runtime native helper metadata mismatch')
+    for (const binary of helper.prebuilds.binaries) {
+      if (typeof binary?.path !== 'string') throw new Error('runtime native helper metadata malformed')
+      accessSync(join(helper.directory, binary.path), binary.kind === 'static-musl' ? constants.X_OK : constants.R_OK)
     }
   }
   if (binaryVersion(join(runtime, 'bin', 'dsh')) !== metadata.dsh.testedVersion) throw new Error('runtime CLI version mismatch')
@@ -180,12 +193,19 @@ export const withProfileLock = async (profile, action, runtime = join(profile, '
   const locations = [join(runtime, 'package.json'), join(canonical, 'runtime/package.json'), import.meta.url]
   if (process.env.DSH_BIN && existsSync(process.env.DSH_BIN)) locations.push(realpathSync(process.env.DSH_BIN))
   let binding
+  // The lock guards the profile, so a flock binding from the runtime being
+  // installed or from the one already running is equally usable.
+  const families = new Set([...nativePackages(runtime), ...nativePackages(join(canonical, 'runtime'))])
+  const specifiers = ['@deepseek-ai/node-addon-system/flock', ...[...families].map(name => `@deepseek-ai/${name}/flock`)]
   for (const location of locations) {
-    try { binding = createRequire(location).resolve('@deepseek-ai/node-addon-system/flock'); break } catch (error) {
-      if (error.code !== 'MODULE_NOT_FOUND') throw error
+    for (const specifier of specifiers) {
+      try { binding = createRequire(location).resolve(specifier); break } catch (error) {
+        if (error.code !== 'MODULE_NOT_FOUND') throw error
+      }
     }
+    if (binding) break
   }
-  if (!binding) throw new Error('cannot lock dscode profile: the pinned runtime system addon is unavailable')
+  if (!binding) throw new Error('cannot lock dscode profile: the pinned runtime native addon is unavailable')
   const { tryLockExclusive } = await import(pathToFileURL(binding).href)
   const fd = openSync(join(dirname(canonical), `.${basename(canonical)}.install.lock`), constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600)
   try {
