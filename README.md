@@ -108,6 +108,11 @@ channel only after success. Failed validation or ordinary commit errors retain
 the previous installation. Fresh prerelease installs use
 `npx @hqzhao95/dscode@beta` or `npx @hqzhao95/dscode@alpha`.
 
+An installation older than `0.0.14-alpha.4` predates the dsh native helper
+package rename and cannot validate a current runtime; re-run
+`npx @hqzhao95/dscode@<channel>` once to re-bootstrap, then `dscode update`
+keeps working.
+
 Uninstall removes the owned profile, runtime, TUI, and launcher link; shared DSH
 sessions and attachment storage remain.
 
