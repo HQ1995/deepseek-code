@@ -21,7 +21,7 @@ import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server, type Socket } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { promisify } from 'node:util'
 import { symbols, type Context } from '@deepseek-ai/cordis'
@@ -50,6 +50,7 @@ import { encodeJsonFrame, FrameDecoder } from './codec.ts'
 import { AcpMcpConfigError, mountMcpConfigs, resolveAcpMcpConfigs, type McpClientConfig } from './mcp.ts'
 import { LEADER_PROTOCOL_VERSION, RpcError, decodeClientMessage, encodeServerMessage, type ClientMessage, type ServerMessage } from './protocol.ts'
 import { SessionListIndex } from './session-list.ts'
+import { ChildHistoryIndex, CHILD_HISTORY_PAGE_SIZE, type ChildEventReader } from './child-history.ts'
 import { workflowUpdates, type LiveWorkflow } from './workflows.ts'
 import { observeJobOutputs } from './job-output.ts'
 import { createImageOutputProjector } from './image-output.ts'
@@ -139,14 +140,6 @@ export const Config: Schema<GrokLeaderConfig> = Schema.object({
   idleExitMs: Schema.number().default(2000),
 })
 
-// The TUI evicts a leader only when leader_binary_version is a strictly-older
-// parseable semver than the client's own version (mod.rs should_evict). For the
-// dsh backend that rule cannot converge — eviction respawns the same plugin —
-// so the leader mirrors the client's advertised version back: equal versions
-// never evict, whatever build the TUI reports (release pin, -dev suffix, or a
-// bare cargo build). The fallback covers clients that omit a version.
-const LEADER_BINARY_VERSION = '0.0.0'
-
 const packageDirectory = (): string => {
   let dir = dirname(fileURLToPath(import.meta.url))
   for (;;) {
@@ -163,6 +156,10 @@ const packageDirectory = (): string => {
 
 const PACKAGE_DIRECTORY = packageDirectory()
 const PACKAGE_VERSION = (JSON.parse(readFileSync(join(PACKAGE_DIRECTORY, 'package.json'), 'utf8')) as { version: string }).version
+// Resolve from the package root in both source and compiled installations.
+const { withProfileLock } = await import(pathToFileURL(join(PACKAGE_DIRECTORY, 'bin/update.mjs')).href) as {
+  withProfileLock<T>(profile: string, action: () => Promise<T>): Promise<T>
+}
 
 /** How long an unregistered connection may sit before it is dropped (server.rs). */
 const REGISTRATION_TIMEOUT_MS = 30_000
@@ -531,7 +528,7 @@ interface PersistedHeader {
   cwd?: string
   agentPreset?: string
 }
-type PersistenceLike = Pick<SessionPersistence, 'list' | 'open'>
+type PersistenceLike = Pick<SessionPersistence, 'list' | 'open' | 'stat'>
 
 async function readPersistedSession(store: PersistenceLike, id: SessionId): Promise<SessionInspection> {
   const handle = await store.open(id, 'read')
@@ -1738,11 +1735,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
         { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
       ],
-    }, record.agent.session.id).then(permissionDecision).catch((error: unknown) => {
-      // A disconnect/cancel/timeout rejects the pending request; fail closed
-      // instead of surfacing an unhandled rejection.
+    }, record.agent.session.id, Infinity).then(permissionDecision).catch((error: unknown) => {
+      // Cancellation/disconnection is not a human rejection. Both fail closed.
       logger.warn('grok-leader: permission request failed: ' + errorChain(error))
-      return 'rejected'
+      return 'cancelled'
     })
   })
 
@@ -2821,7 +2817,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (dir === undefined) {
       return settle('dsh plugin management is unavailable: no installed leader profile was found (running from a source checkout?). Use: dsh plugin --profile dscode add <package>')
     }
-    try {
+    const execute = async (): Promise<PromptSettleResult> => {
       switch (verb) {
         case undefined:
         case 'plugins':
@@ -2925,6 +2921,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         default:
           return settle('Unknown /dsh subcommand "' + String(verb) + '". ' + usage)
       }
+    }
+    try {
+      return verb === 'add' || verb === 'remove' ? await withProfileLock(dir, execute) : await execute()
     } catch (error: unknown) {
       return settle('/dsh ' + String(verb) + ' failed: ' + (error instanceof Error ? error.message : String(error)))
     }
@@ -4672,17 +4671,17 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const limit = Math.min(requested, DEFAULT_SESSION_LIST_LIMIT)
         const store = persistence()
         if (store === undefined) throw internalError('session persistence is not configured')
-        const headers = (await store.list()).map(snapshot => snapshot.header)
+        const snapshots = await store.list()
         // The picker normally scopes to cwd. Filter headers before loading any
         // logs so unrelated repositories never enter the projection pipeline;
         // retain an exact-id query for cross-cwd resume.
-        const candidateHeaders = cwd === undefined
-          ? headers
-          : headers.filter(header => header.cwd === cwd
+        const candidates = cwd === undefined
+          ? snapshots
+          : snapshots.filter(({ header }) => header.cwd === cwd
             || (query !== undefined && header.id.toLowerCase() === query))
         // Backfill display titles BEFORE the text query so picker search can
         // match prompt text. Misses stay uncached and in-flight loads dedupe.
-        const projections = await Promise.all(candidateHeaders.map(header => sessionListIndex.inspect(header.id, header.createdAt, async () => {
+        const projections = await Promise.all(candidates.map(({ header, revision }) => sessionListIndex.inspect(header.id, header.createdAt, async () => {
           try {
             const inspection = await readPersistedSession(store, SessionId(header.id))
             return inspection.events
@@ -4692,8 +4691,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
               && !(error instanceof SessionPersistenceCorruptionError)
               && !(error instanceof SessionFormatUnsupportedError)) throw error
           }
-        })))
-        let rows = candidateHeaders.map((header, index) => {
+        }, revision)))
+        let rows = candidates.map(({ header }, index) => {
           const projection = projections[index]!
           const title = projection.title
           return {
@@ -5225,19 +5224,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           connections.set(conn.clientId, conn)
           cancelIdleExit()
           socket.setTimeout(0)
-          // Mirror the client's advertised version: the eviction rule compares
-          // this string against the client's own version, and equal versions
-          // never evict (see LEADER_BINARY_VERSION above).
-          const advertised = msg.capabilities?.clientVersion
-          const mirror = typeof advertised === 'string' && advertised.length > 0
-            ? advertised
-            : LEADER_BINARY_VERSION
           send({
             type: 'registered',
             clientId: conn.clientId,
             ready: true,
             leaderProtocolVersion: LEADER_PROTOCOL_VERSION,
-            leaderBinaryVersion: mirror,
+            leaderBinaryVersion: PACKAGE_VERSION,
             // controlV1 is false because every control command answers a
             // ControlResult error below (GetLeaderInfo/CpuProfileStatus are
             // unimplemented — protocol.rs ControlCommand); the TUI then never
@@ -5560,12 +5552,38 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           ? childTerminalStatus(end.data.reason.kind) : 'cancelled',
     }
   }
-  const inspectChild = async (id: string): Promise<SessionInspection> => {
-    const agent = agents.get(SessionId(id))
-    if (agent !== undefined) return { meta: agent.session.header, inheritedEventCount: agent.session.inheritedEventCount, events: agent.session.snapshotEvents() }
+  const childLogs = new WeakMap<SessionRecord, Map<string, { source: object; index: ChildHistoryIndex }>>()
+  const withChildLog = async <T>(record: SessionRecord, id: string,
+    action: (index: ChildHistoryIndex, meta: SessionInspection['meta'], read: ChildEventReader) => Promise<T> | T,
+  ): Promise<T> => {
+    const live = agents.get(SessionId(id))
     const store = persistence()
     if (store === undefined) throw internalError('session persistence is not configured')
-    return await readPersistedSession(store, SessionId(id))
+    let cache = childLogs.get(record)
+    if (cache === undefined) { cache = new Map(); childLogs.set(record, cache) }
+    const source = live?.session ?? store
+    let cached = cache.get(id)
+    if (cached?.source !== source) cached = { source, index: new ChildHistoryIndex() }
+    cache.delete(id)
+    cache.set(id, cached)
+    // ponytail: bound metadata to 64 children per root; evicted histories rebuild on demand.
+    if (cache.size > 64) cache.delete(cache.keys().next().value!)
+    const index = cached.index
+    return index.run(async () => {
+      if (live !== undefined) {
+        const count = live.session.seq
+        const read: ChildEventReader = async (offset, length) => live.session.snapshotEvents(SessionLogOffset(offset), SessionLogOffset(offset + length))
+        await index.sync(read, String(count), count)
+        return await action(index, live.session.header, read)
+      }
+      const snapshot = await store.stat(SessionId(id))
+      const handle = await store.open(SessionId(id), 'read')
+      try {
+        const read: ChildEventReader = async (offset, length) => (await handle.read(offset, length)).events
+        await index.sync(read, snapshot?.revision, snapshot?.eventCount)
+        return await action(index, handle.header, read)
+      } finally { await handle.close() }
+    })
   }
   const emitChildFinished = (record: SessionRecord, id: string, status: string, output?: unknown, attemptId?: string): void => {
     const state = childStates.get(record)?.get(id)
@@ -5596,10 +5614,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (known === undefined) { known = new Map(); childStates.set(record, known) }
     for (const row of rows) {
       if (row.kind !== 'child') continue
-      const inspection = await inspectChild(row.id)
+      const overview = await withChildLog(record, row.id, index => childOverview(row.id, index.overviewEvents, agents.get(SessionId(row.id))))
       if (sessions.get(record.agent.session.id) !== record || connections.get(record.clientId) !== conn) return
       const child = agents.get(SessionId(row.id))
-      const overview = childOverview(row.id, inspection.events, child)
       const previous = known.get(row.id)
       if (previous !== undefined && previous.agent === child && previous.attemptId === overview.attemptId) {
         if (overview.status !== 'running') emitChildFinished(record, row.id, overview.status, undefined, overview.attemptId)
@@ -5614,12 +5631,22 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (overview.status !== 'running') emitChildFinished(record, row.id, overview.status, undefined, overview.attemptId)
     }
   }
-  const childRefreshes = new WeakMap<SessionRecord, Promise<void>>()
+  const childRefreshes = new WeakMap<SessionRecord, { dirty: boolean }>()
   const refreshChildren = (record: SessionRecord): void => {
-    const refresh = (childRefreshes.get(record) ?? Promise.resolve()).then(() => emitChildrenForRecord(record))
-      .catch(error => logger.warn('grok-leader: subagent snapshot failed: ' + errorChain(error)))
-    childRefreshes.set(record, refresh)
-    void refresh.finally(() => { if (childRefreshes.get(record) === refresh) childRefreshes.delete(record) })
+    const pending = childRefreshes.get(record)
+    if (pending !== undefined) { pending.dirty = true; return }
+    const state = { dirty: true }
+    childRefreshes.set(record, state)
+    void (async () => {
+      try {
+        while (state.dirty && sessions.get(record.agent.session.id) === record) {
+          state.dirty = false
+          try { await emitChildrenForRecord(record) } catch (error) {
+            logger.warn('grok-leader: subagent snapshot failed: ' + errorChain(error))
+          }
+        }
+      } finally { childRefreshes.delete(record) }
+    })()
   }
   ctx.on('session/event', (session, event: SessionEvent) => {
     for (const record of sessions.values()) {
@@ -5649,39 +5676,40 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const childHistory = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'x.ai/subagent/history')
     if (!nonEmptyString(p.sessionId) || !nonEmptyString(p.childSessionId)) throw invalidParams('subagent history requires sessionId and childSessionId')
-    const record = ownedRecord(clientId, SessionId(p.sessionId))
-    if (record === undefined) throw invalidParams('unknown session: ' + p.sessionId)
+    const sessionId = SessionId(p.sessionId), childSessionId = SessionId(p.childSessionId)
+    const record = ownedRecord(clientId, sessionId)
+    if (record === undefined) throw invalidParams('unknown session: ' + sessionId)
     const rows = await subagentsService(record)?.listDescendants(record.agent.session.id)
     if (!rows?.some(row => row.kind === 'child' && row.id === p.childSessionId)) throw invalidParams('unknown subagent')
     const after = p.after ?? 0
     if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0) throw invalidParams('invalid child history cursor')
-    const inspection = await inspectChild(p.childSessionId)
-    if (ownedRecord(clientId, SessionId(p.sessionId)) !== record) throw invalidParams('unknown session')
-    if (after > inspection.events.length) throw invalidParams('child history cursor is ahead of the stored transcript')
-    const nextSeq = Math.min(after + 256, inspection.events.length)
-    const calls = new Map<string, { name: string; arguments: unknown }>()
-    const entries: Array<{ update?: GrokSessionUpdate; meta?: Record<string, unknown>; turnEnded?: boolean }> = []
-    let turnStartMs: number | undefined
-    for (const event of inspection.events) {
-      if (event.seq >= nextSeq) break
-      if (event.type === 'turn/start') turnStartMs = event.time
-      if (event.type === 'tool/call') calls.set(String(event.data.callId), { name: event.data.name, arguments: parseJsonObject(event.data.arguments) })
-      if (event.type === 'tool/ptc-dispatch-start') calls.set(String(event.data.subCallId), { name: event.data.name, arguments: event.data.arguments })
-      if (event.seq < after) continue
-      const updates = await projectImages(event, sessionEventToUpdates(event, { replay: true, cwd: inspection.meta.cwd, toolCall: id => calls.get(id) }))
-      for (const update of updates) entries.push({ update, meta: { isReplay: true, agentTimestampMs: event.time, turnStartMs, streamStartMs: turnStartMs } })
-      if (event.type === 'turn/end') entries.push({ turnEnded: true })
-    }
-    const live = agents.get(SessionId(p.childSessionId))
-    let durable = live === undefined
-    if (live !== undefined && live.status !== 'running') {
-      const store = ctx.get('sessions') as SessionsLike | undefined
-      await store?.flush(live.session)
-      const disk = await readPersistedSession(persistence()!, SessionId(p.childSessionId))
-      durable = disk.events.length >= inspection.events.length
-    }
-    if (ownedRecord(clientId, SessionId(p.sessionId)) !== record) throw invalidParams('unknown session')
-    return { nextSeq, totalSeq: inspection.events.length, entries, durable }
+    return withChildLog(record, childSessionId, async (index, meta, read) => {
+      if (ownedRecord(clientId, sessionId) !== record) throw invalidParams('unknown session')
+      if (after > index.nextSeq) throw invalidParams('child history cursor is ahead of the stored transcript')
+      const nextSeq = Math.min(after + CHILD_HISTORY_PAGE_SIZE, index.nextSeq)
+      const entries: Array<{ update?: GrokSessionUpdate; meta?: Record<string, unknown>; turnEnded?: boolean }> = []
+      let turnStartMs = index.turnStartAt(after)
+      for (const event of await read(after, nextSeq - after)) {
+        if (event.type === 'turn/start') turnStartMs = event.time
+        const updates = await projectImages(event, sessionEventToUpdates(event, { replay: true, cwd: meta.cwd, toolCall: id => index.toolCallAt(id, event.seq) }))
+        for (const update of updates) entries.push({ update, meta: { isReplay: true, agentTimestampMs: event.time, turnStartMs, streamStartMs: turnStartMs } })
+        if (event.type === 'turn/end') entries.push({ turnEnded: true })
+      }
+      const live = agents.get(childSessionId)
+      let durable = live === undefined
+      if (live !== undefined && live.status !== 'running' && index.durableSeq < index.nextSeq) {
+        const store = ctx.get('sessions') as SessionsLike | undefined
+        await store?.flush(live.session)
+        const handle = await persistence()!.open(childSessionId, 'read')
+        try {
+          const tail = (await handle.read(Math.max(0, index.nextSeq - 1), 1)).events
+          if (index.nextSeq === 0 || tail[0]?.seq === index.nextSeq - 1) index.durableSeq = index.nextSeq
+        } finally { await handle.close() }
+      }
+      durable ||= index.durableSeq >= index.nextSeq
+      if (ownedRecord(clientId, sessionId) !== record) throw invalidParams('unknown session')
+      return { nextSeq, totalSeq: index.nextSeq, entries, durable }
+    })
   }
 
   const cancelSubagent = async (clientId: number, params: unknown): Promise<unknown> => {

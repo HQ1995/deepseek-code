@@ -145,7 +145,7 @@ process.exit(result.status ?? 1);
 `, { mode: 0o755 })
     const legacyEnv = { ...env, HOME: legacyHome, DSH_HOME: join(legacyHome, '.dsh'), DSC_HOME: legacyProfile, DSCODE_HOME: legacyProfile, DSH_BIN: join(fakeBin, 'dsh'), PATH: `${fakeBin}:${env.PATH}` }
     await execute(join(legacyProfile, 'bin/dscode'), ['update', '--version', beta, '--beta'], { env: legacyEnv, timeout: 180000, maxBuffer: 4 * 1024 * 1024 })
-    assert.deepEqual(JSON.parse(await readFile(delegated, 'utf8')).slice(2), ['update', '--version', beta, '--beta'])
+    assert.deepEqual(JSON.parse(await readFile(delegated, 'utf8')).slice(2), ['update', '--version', beta, '--beta', '--trigger=user_command'])
     assert.equal(JSON.parse(await readFile(join(legacyPlugin, 'package.json'), 'utf8')).version, beta)
     assert.equal(parse(await readFile(join(legacyProfile, 'config.toml'), 'utf8')).cli.channel, 'beta')
     assert.equal(JSON.parse(await readFile(join(legacyProfile, 'runtime/dscode-runtime.json'), 'utf8')).sourceCommit, original.dsh.sourceCommit)
@@ -215,7 +215,7 @@ process.exit(result.status ?? 1);
     const checksum = assets.get(`${alpha}/dscode-plugin.tgz.sha256`)
     assets.delete(`${alpha}/dscode-plugin.tgz.sha256`)
     requests.length = 0
-    await invoke(['update', '--version', alpha, '--alpha'])
+    await invoke(['update', '--version', alpha, '--alpha', '--force'])
     assert.ok(requests.some(path => path.endsWith(`/releases/tags/v${alpha}`)))
     assert.equal(JSON.parse(await readFile(join(plugin, 'package.json'), 'utf8')).version, alpha)
     assets.set(`${alpha}/dscode-plugin.tgz.sha256`, checksum)

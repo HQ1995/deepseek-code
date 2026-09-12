@@ -26,7 +26,7 @@
 // cache → left alone (developer-managed).
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -34,7 +34,7 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { createGunzip } from 'node:zlib'
 import { installationReport, formatInstallationReport } from './doctor.mjs'
-import { compareVersions, installRelease, needsUpdateWithChannel, resolveRelease, updateOptions, validateRuntime, withProfileLock } from './update.mjs'
+import { compareVersions, installationMatches, installRelease, needsUpdateWithChannel, resolveRelease, saveUpdateChannel, updateOptions, validateRuntime, withProfileLock } from './update.mjs'
 
 const RELEASE_REPO = 'HQ1995/deepseek-code'
 const here = dirname(fileURLToPath(import.meta.url))
@@ -169,17 +169,25 @@ export const ensureDshCli = async () => {
 }
 
 /** Pull an old TUI home (sibling ~/.dsh/dsc-tui, or profile/tui/) into the profile. */
-export const migrateLegacyTuiHome = () => {
-  mkdirSync(profileDir, { recursive: true })
-  const destRoot = realpathSync(profileDir)
-  for (const from of [join(dshHome, 'dsc-tui'), join(profileDir, 'tui')]) {
-    if (!existsSync(from) || realpathSync(from) === destRoot) continue
+export const migrateLegacyTuiHome = (home = dshHome, profile = profileDir) => {
+  mkdirSync(profile, { recursive: true })
+  const destRoot = realpathSync(profile)
+  const merge = (from, to) => {
     for (const name of readdirSync(from)) {
       const src = join(from, name)
-      const dest = join(profileDir, name)
-      if (!existsSync(dest)) renameSync(src, dest)
+      const dest = join(to, name)
+      const existing = lstatSync(dest, { throwIfNoEntry: false })
+      if (!existing) renameSync(src, dest)
+      else if (existing.isDirectory() && lstatSync(src).isDirectory()) merge(src, dest)
     }
-    rmSync(from, { recursive: true, force: true })
+    if (readdirSync(from).length === 0) rmdirSync(from)
+  }
+  for (const from of [join(home, 'dsc-tui'), join(profile, 'tui')]) {
+    if (!lstatSync(from, { throwIfNoEntry: false })?.isDirectory()) continue
+    const source = realpathSync(from)
+    if (destRoot === source || destRoot.startsWith(source + '/')) continue
+    merge(from, profile)
+    if (existsSync(from)) console.error(`dscode: kept conflicting legacy files in ${from}; review them before removing that directory`)
   }
 }
 
@@ -507,7 +515,17 @@ const main = async () => {
         else console.log(`dscode ${current} [${options.channel}]: ${result.updateAvailable ? `update available: ${result.latestVersion}` : `latest release: ${result.latestVersion}`}`)
         return
       }
-      const version = await resolveRelease(options)
+      if (options.trigger === 'auto_background' && (options.autoUpdate === false || current.includes('-dev'))) return
+      let version = await resolveRelease(options)
+      const available = current.includes('-dev') || (options.version !== undefined && options.trigger !== 'auto_background'
+        ? compareVersions(version, current) !== 0
+        : needsUpdateWithChannel(current, version, options.channel))
+      if (!options.force && !available && installationMatches(profileDir, pkg.name, current)) {
+        await saveUpdateChannel(profileDir, options.channel)
+        console.log(`dscode ${current} [${options.channel}]: already up to date`)
+        return
+      }
+      if (!options.force && !available && (options.version === undefined || options.trigger === 'auto_background')) version = current
       if (!nodeVersionSupported(process.versions.node)) throw new Error('dscode requires node >=22.19.0')
       await installRelease({ profile: profileDir, packageName: pkg.name, version, channel: options.channel, asset: assetName() })
       healLauncherLink()
@@ -529,7 +547,7 @@ const main = async () => {
     throw new Error(`the pinned dsh runtime requires node >=22.19.0; found ${process.versions.node}. dscode will not install or switch node for you`)
   }
   if (process.env.DSCODE_BIN === undefined || process.env.DSCODE_BIN === '') {
-    if (pkg.dsh?.sourceCommit && pinnedRelease() && (!existsSync(pluginManifestPath) || (!process.env.DSH_BIN && !existsSync(dshRuntimeBin)))) {
+    if (pkg.dsh?.sourceCommit && pinnedRelease() && !installationMatches(profileDir, pkg.name, pinnedRelease(), pkg.dsh)) {
       const options = updateOptions([], profileDir, pkg.version)
       await installRelease({ profile: profileDir, packageName: pkg.name, version: pinnedRelease(), channel: options.channel, asset: assetName() })
       healLauncherLink()
@@ -539,7 +557,10 @@ const main = async () => {
   }
   const [dshBin, bin] = await withProfileLock(profileDir, async () => {
     if (!process.env.DSCODE_BIN) {
-      ensureProfilePlugin()
+      // Published source-backed installs are reconciled as one transaction above.
+      // Keep the npm bootstrap only for unpinned development/legacy packages.
+      if (!(pkg.dsh?.sourceCommit && pinnedRelease())) ensureProfilePlugin()
+      else { scaffoldProfile(); reconcileProfileManifest() }
       healLauncherLink()
       migrateLegacyTuiHome()
     }

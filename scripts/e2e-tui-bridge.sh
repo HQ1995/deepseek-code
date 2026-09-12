@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Real dscode product loop: TUI -> dsh profile -> bridge -> mock OpenAI gateway.
 set -euo pipefail
+# Keep acceptance on the supplied payload while exercising the real TUI/runtime.
+export GROK_DISABLE_AUTOUPDATER=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODE_BIN="${DSCODE_E2E_NODE_BIN:-$(command -v node || true)}"

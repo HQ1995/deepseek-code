@@ -131,7 +131,8 @@ function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry {
       session: {
         id: sessionId,
         header: { id: sessionId, version: 0, isSeeded: false, createdAt: 0, ...cwd === undefined ? {} : { cwd }, ...agentPreset === undefined ? {} : { agentPreset } },
-        snapshotEvents() { return [...events] },
+        get seq() { return events.length },
+        snapshotEvents(from = 0, to = events.length) { return events.slice(from, to) },
         ownEvents() { return [...events] },
         append(type: string, data: unknown) {
           const event = { type, data, seq: events.length, time: Date.now() }
@@ -248,6 +249,7 @@ function makeMockPersistence() {
     closed,
     events,
     list: async (): Promise<readonly SessionPersistenceSnapshot[]> => [{ header, revision: SessionPersistenceRevision('mock') }],
+    stat: async (id: SessionId) => (await persistence.list()).find(snapshot => snapshot.header.id === id),
     readEvents: async (_id: SessionId): Promise<readonly SessionEvent[]> => Object.freeze([...events]),
     open: async (id: SessionId, access: SessionAccess): Promise<SessionHandle> => {
       expect(access).toBe('read')
@@ -264,9 +266,9 @@ function makeMockPersistence() {
         header: Object.freeze({ ...(snapshot?.header ?? header) }),
         inheritedEventCount: SessionLogOffset(0),
         access,
-        read: async () => {
+        read: async (offset = 0, length = Number.MAX_SAFE_INTEGER) => {
           expect(isClosed).toBe(false)
-          return { eventState: 'detached', events: await persistence.readEvents(id) }
+          return { eventState: 'detached', events: (await persistence.readEvents(id)).slice(offset, offset + length) }
         },
         append: async () => { throw new Error('read handle must not append') },
         flush: async () => { throw new Error('read handle must not flush') },
@@ -577,8 +579,7 @@ describe('grok leader over a unix socket', () => {
 
   it('completes the probe-verified handshake with the captured reply shapes', async () => {
     const { registry, client: c } = await start()
-    // The registered reply mirrors the client's advertised version: the TUI
-    // evicts strictly-older leaders, and equal versions never evict.
+    // Report the loaded bridge, independently of the client's advertised build.
     c.send({
       type: 'register',
       client_type: 'grok-shell',
@@ -593,7 +594,7 @@ describe('grok leader over a unix socket', () => {
       client_id: 1,
       ready: true,
       leader_protocol_version: 1,
-      leader_binary_version: '1.0.4',
+      leader_binary_version: packageVersion,
       leader_capabilities: { control_v1: false, workspace_exposure: false, relaunch_v1: false },
     })
 
@@ -630,7 +631,7 @@ describe('grok leader over a unix socket', () => {
     expect(registry.created).toHaveLength(0)
   })
 
-  it('mirrors a -dev client version so dev TUI builds are never evicted', async () => {
+  it('reports the actual bridge version to a dev client', async () => {
     const { client: c } = await start()
     c.send({
       type: 'register',
@@ -640,16 +641,14 @@ describe('grok leader over a unix socket', () => {
     })
     const reply = await c.next() as { type: string; leader_binary_version?: string }
     expect(reply.type).toBe('registered')
-    // Strict semver: 0.0.13-beta.12-dev > 0.0.13-beta.12, so a leader reporting
-    // the plain package version would be evicted; mirroring keeps equality.
-    expect(reply.leader_binary_version).toBe('0.0.13-beta.12-dev')
+    expect(reply.leader_binary_version).toBe(packageVersion)
   })
 
-  it('falls back to the floor version when the client omits one', async () => {
+  it('reports the actual bridge version when the client omits one', async () => {
     const { client: c } = await start()
     register(c)
     const reply = await c.next() as { type: string; leader_binary_version?: string }
-    expect(reply.leader_binary_version).toBe('0.0.0')
+    expect(reply.leader_binary_version).toBe(packageVersion)
   })
 
   it('registers the dscode model-selected vocabulary in the dsh persistence gate', async () => {
@@ -1876,6 +1875,49 @@ describe('grok leader over a unix socket', () => {
     expect(owner.internals.cancelCalls).toBe(0)
   })
 
+  it.each([false, true])('coalesces pending child refreshes without losing a later refresh after failure=%s', async failFirst => {
+    const listDescendants = vi.fn(async (): Promise<Array<{ kind: string; id: string }>> => [])
+    const { pluginCtx, client: c } = await start({ subagents: { listDescendants, interrupt() {} } })
+    register(c); await c.next()
+    await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    const baseline = listDescendants.mock.calls.length
+    let release!: () => void, entered!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    const started = new Promise<void>(resolve => { entered = resolve })
+    listDescendants.mockImplementationOnce(async () => {
+      entered(); await held
+      if (failFirst) throw new Error('snapshot temporarily unavailable')
+      return []
+    })
+    pluginCtx.emit('subagent/start', { id: 'child' } as never)
+    await started
+    for (let i = 0; i < 30; i++) pluginCtx.emit('subagent/start', { id: 'child' } as never)
+    release()
+    await waitFor(() => listDescendants.mock.calls.length >= baseline + 2)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(listDescendants.mock.calls.length - baseline).toBe(2)
+  })
+
+  it('refreshes picker metadata after an external durable revision changes', async () => {
+    const { persistence, client: c } = await start()
+    register(c); await c.next()
+    let revision = 'r1'
+    persistence.list = async () => [{ header: persistence.header, revision: SessionPersistenceRevision(revision) }]
+    persistence.events.push(
+      { type: 'user/message', seq: SessionSeq(0), time: 1, data: createUserMessage({ content: [{ type: 'text', text: 'prompt' }], source: { kind: 'user' } }) },
+      { type: 'session/title', seq: SessionSeq(1), time: 2, data: { title: 'old' } },
+    )
+    const list = async (id: number) => (await c.request(id, 'x.ai/session/list', {})).result as { sessions: Array<{ title: string; updatedAt: string }> }
+    expect((await list(1)).sessions[0]?.title).toBe('old')
+    await list(2)
+    expect(persistence.loaded).toHaveLength(1)
+    persistence.events.push({ type: 'session/title', seq: SessionSeq(2), time: 3, data: { title: 'external change' } })
+    revision = 'r2'
+    expect((await list(3)).sessions[0]).toMatchObject({ title: 'external change', updatedAt: new Date(3).toISOString() })
+    expect(persistence.loaded).toHaveLength(2)
+  })
+
   it('paginates owned native child history and protects a newer attempt from late completion', async () => {
     const rows: Array<{ kind: string; id: string; mode: string }> = []
     const { registry, persistence, pluginCtx, client: c } = await start({ subagents: { listDescendants: async () => rows, interrupt() {} } })
@@ -1888,6 +1930,7 @@ describe('grok leader over a unix socket', () => {
     child.session.append('turn/start', { turn: 0 })
     for (let index = 0; index < 260; index++) child.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: `message-${index}` }], source: { kind: 'user' } }))
     rows.push({ kind: 'child', id: child.session.id, mode: 'continuable' })
+    const snapshots = vi.spyOn(child.session, 'snapshotEvents')
     pluginCtx.emit('subagent/start', { id: child.session.id } as never)
     await waitForNotification(() => c.all.find(msg => JSON.stringify(msg).includes('subagent_spawned')))
     const request = (id: number, after: unknown = 0, childSessionId: string = child.session.id, parent: string = sessionId) => c.request(id, 'x.ai/subagent/history', { sessionId: parent, childSessionId, after })
@@ -1901,6 +1944,8 @@ describe('grok leader over a unix socket', () => {
     expect(second).toMatchObject({ nextSeq: 261, totalSeq: 261 })
     expect(second.entries).toHaveLength(5)
     expect(JSON.stringify(second.entries)).toContain('message-259')
+    expect(snapshots.mock.calls.every(([from, to]) => from !== undefined && to !== undefined && to - from <= 256)).toBe(true)
+    expect(snapshots.mock.results.reduce((sum, result) => sum + (result.value as SessionEvent[]).length, 0)).toBe(522)
     const nextTurn = child.session.append('turn/start', { turn: 1 })
     pluginCtx.emit('session/event', child.session, nextTurn)
     await waitForNotification(() => c.all.find(msg => JSON.stringify(msg).includes('history-child:1')))
@@ -2515,8 +2560,8 @@ describe('grok leader over a unix socket', () => {
     sendRequest(c, 2, 'session/load', { sessionId, cwd: process.cwd(), mcpServers: [] })
     const loaded = await waitForId(c, 2)
     expect(loaded.error).toBeUndefined()
-    // The old owner's outstanding permission roundtrip is rejected by the reload.
-    await expect(decision).resolves.toBe('rejected')
+    // Reload cancels the old owner's outstanding permission without inventing a rejection.
+    await expect(decision).resolves.toBe('cancelled')
   })
 
   it('keeps yolo approval active when a session is resumed', async () => {
@@ -2589,7 +2634,7 @@ describe('grok leader over a unix socket', () => {
     const decision = waterfall('approval/request', { agent, callId: 'tool-plan', toolName: 'bash' }, async () => 'rejected' as const) as Promise<string>
     await waitFor(() => c.all.some(msg => msg.method === 'session/request_permission'))
     c.notify('session/cancel', { sessionId })
-    await expect(decision).resolves.toBe('rejected')
+    await expect(decision).resolves.toBe('cancelled')
   })
 
   it('targets live permission changes and restores approval in canonical ask mode', async () => {
@@ -2627,7 +2672,7 @@ describe('grok leader over a unix socket', () => {
     }, async () => 'rejected' as const)
     await waitFor(() => c.all.some(msg => msg.method === 'session/request_permission'))
     c.notify('session/cancel', { sessionId })
-    await expect(decision).resolves.toBe('rejected')
+    await expect(decision).resolves.toBe('cancelled')
   })
 
   it('chmods the socket 0600 once listening', async () => {
@@ -4291,6 +4336,17 @@ describe('grok leader over a unix socket', () => {
       const sessionId = (created.result as { sessionId: string }).sessionId
       const spec = 'file:' + pluginDir
 
+      const { withProfileLock } = await import('../bin/update.mjs')
+      const before = readFileSync(resolve(profileDir, 'package.json'), 'utf8')
+      await withProfileLock(profileDir, async () => {
+        for (const [rpc, command] of [[90, '/dsh add --trust ' + JSON.stringify(spec)], [91, '/dsh remove dsh-plugin-local-bundle']] as const) {
+          sendRequest(c, rpc, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: command }] })
+          await waitForId(c, rpc)
+        }
+        expect(readFileSync(resolve(profileDir, 'package.json'), 'utf8')).toBe(before)
+        expect(c.all.filter(message => JSON.stringify(message).includes('another dscode installation'))).toHaveLength(2)
+      })
+
       sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh add ' + JSON.stringify(spec) }] })
       const refused = await waitForId(c, 2)
       expect(refused.error).toBeUndefined()
@@ -5007,7 +5063,7 @@ describe('grok leader over a unix socket', () => {
     expect(c.all.some(msg => msg.method === '_x.ai/mcp_initialized')).toBe(false)
   })
 
-  it('rejects a reverse request the client never answers within 60s', async () => {
+  it('keeps a human approval pending beyond 60s and accepts the eventual answer', async () => {
     vi.useFakeTimers()
     try {
       const { registry, pluginCtx, client: c } = await start()
@@ -5018,14 +5074,20 @@ describe('grok leader over a unix socket', () => {
       const agent = registry.byId.get(sessionId)!
       const waterfall = pluginCtx.waterfall as unknown as (name: string, ...args: unknown[]) => unknown
       const decision = waterfall('approval/request', { agent, callId: 'tool-1', toolName: 'bash' }, async () => 'rejected' as const) as Promise<string>
-      vi.advanceTimersByTime(60_000)
-      await expect(decision).resolves.toBe('rejected')
+      const request = await c.next()
+      expect(request.method).toBe('session/request_permission')
+      let settled = false
+      void decision.then(() => { settled = true })
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(settled).toBe(false)
+      c.send({ type: 'acp', payload: JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { outcome: { outcome: 'selected', optionId: 'allow-once' } } }) })
+      await expect(decision).resolves.toBe('allowed-once')
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('session/cancel rejects a pending permission roundtrip', async () => {
+  it('session/cancel cancels a pending permission roundtrip', async () => {
     const { registry, pluginCtx, client: c } = await start()
     register(c)
     await c.next()
@@ -5041,7 +5103,7 @@ describe('grok leader over a unix socket', () => {
     await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
     expect(settled).toBe(false)
     c.notify('session/cancel', { sessionId })
-    await expect(decision).resolves.toBe('rejected')
+    await expect(decision).resolves.toBe('cancelled')
   })
 })
 

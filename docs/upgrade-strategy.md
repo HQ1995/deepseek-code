@@ -166,6 +166,10 @@ DSCODE_E2E_RELEASE_DIR=/path/to/payload scripts/dev-bridge-tests.sh
 The runner copies the bridge into a temporary workspace and uses the payload's
 SDK, leaving the checkout's dependency installation intact. `DSCODE_SOURCE_DIR`
 and `DSCODE_RUNTIME_CONSUMER` reuse an exact source checkout and installed SDK.
+Consumer reuse requires `dscode-consumer.json` from a completed source build;
+the builder verifies the commit, platform, and installed dependency bytes.
+An old consumer without this record must be rebuilt: omit the consumer override
+or point it at a new directory. Existing unverified caches are never relabeled.
 `DSCODE_TUI_BIN` selects the compiled TUI for CLI contracts.
 
 Product and release checks:

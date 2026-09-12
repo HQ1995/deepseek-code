@@ -22,12 +22,27 @@ pub const DSH_BIN_ENV: &str = "DSH_BIN";
 pub const DSCODE_SOCKET_ENV: &str = "DSCODE_SOCKET";
 /// Leader log path env; defaults to /tmp/dscode.log.
 pub const DSCODE_LOG_ENV: &str = "DSCODE_LOG";
-/// The leader socket path: DSCODE_SOCKET or /tmp/dscode-UID.sock.
+/// Explicit socket override, otherwise a profile- and build-specific leader.
 pub fn default_leader_socket() -> PathBuf {
     if let Some(socket) = std::env::var_os(DSCODE_SOCKET_ENV).filter(|v| !v.is_empty()) {
         return PathBuf::from(socket);
     }
-    PathBuf::from(format!("/tmp/dscode-{}.sock", uid()))
+    profile_leader_socket(
+        &dsh_profile_dir().unwrap_or_else(|| PathBuf::from(".dsh/profiles/dscode")),
+        xai_grok_version::full_version(),
+    )
+}
+
+fn profile_leader_socket(profile: &Path, version: &str) -> PathBuf {
+    let canonical = dunce::canonicalize(profile)
+        .or_else(|_| std::path::absolute(profile))
+        .unwrap_or_else(|_| profile.to_path_buf());
+    let mut identity = blake3::Hasher::new();
+    identity.update(canonical.as_os_str().as_encoded_bytes());
+    identity.update(b"\0");
+    identity.update(version.as_bytes());
+    let digest = identity.finalize().to_hex();
+    PathBuf::from(format!("/tmp/dscode-{}-{}.sock", uid(), &digest[..24]))
 }
 
 /// The leader log path: DSCODE_LOG or /tmp/dscode.log.
@@ -185,6 +200,27 @@ fn is_executable(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn sockets_isolate_profiles_and_builds_but_preserve_path_aliases() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a");
+        let b = root.path().join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&a, &alias).unwrap();
+        let old = profile_leader_socket(&a, "0.0.14-alpha.11");
+        assert_eq!(old, profile_leader_socket(&alias, "0.0.14-alpha.11"));
+        assert_ne!(old, profile_leader_socket(&b, "0.0.14-alpha.11"));
+        assert_ne!(old, profile_leader_socket(&a, "0.0.14-alpha.12"));
+        // Both versions can serve clients concurrently without replacing a listener.
+        let new = profile_leader_socket(&a, "0.0.14-alpha.12");
+        let _old_listener = std::os::unix::net::UnixListener::bind(&old).unwrap();
+        let _new_listener = std::os::unix::net::UnixListener::bind(&new).unwrap();
+        std::fs::remove_file(old).unwrap();
+        std::fs::remove_file(new).unwrap();
+    }
 
     /// Resolution ladder: env override wins verbatim; otherwise the first
     /// executable "dsh" on PATH wins.

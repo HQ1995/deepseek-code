@@ -11,10 +11,11 @@ export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT/third_party/grok-build"
 cargo check -p xai-grok-pager-bin
+cargo test -p xai-grok-pager-bin --bin dscode dsh_launch
 cargo test -p xai-grok-shell-base util::tests:: --lib
 cargo test -p xai-grok-shell --lib -- leader:: image_normalize
 cargo test -p xai-grok-update --lib
 cargo test -p xai-grok-pager --lib -- \
-  to_meta_ native_controls doctor tasks shortcuts_help subagent mode_switch prompt_stash overlay_post_flush \
+  to_meta_ native_controls dsh_leader doctor tasks shortcuts_help subagent mode_switch prompt_stash overlay_post_flush \
   presenter_ send_now_awaiting_current
 echo 'PASS Rust product contracts'

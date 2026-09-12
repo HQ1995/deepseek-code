@@ -200,6 +200,21 @@ export const validateRuntime = (runtime, metadata, platform = process.platform, 
   }
   if (binaryVersion(join(runtime, 'bin', 'dsh')) !== metadata.dsh.testedVersion) throw new Error('runtime CLI version mismatch')
 }
+/** Inspect the entire managed installation before deciding to skip or repair it. */
+export const installationMatches = (profile, packageName, version, expectedDsh) => {
+  try {
+    const plugin = join(profile, 'node_modules', ...packageName.split('/'))
+    const metadata = json(join(plugin, 'package.json'))
+    if (metadata.name !== packageName || metadata.version !== version
+      || !existsSync(join(plugin, 'bin/dscode.mjs'))
+      || binaryVersion(join(profile, 'bin/dscode')) !== version) return false
+    if (expectedDsh && ['testedVersion', 'sourceCommit', 'supportedRange'].some(key => metadata.dsh?.[key] !== expectedDsh[key])) return false
+    const runtime = join(profile, 'runtime')
+    if (metadata.dsh?.sourceCommit) validateRuntime(runtime, metadata)
+    else if (!metadata.dsh?.testedVersion || binaryVersion(join(runtime, 'bin/dsh')) !== metadata.dsh.testedVersion) return false
+    return true
+  } catch { return false }
+}
 /** Use the pinned runtime's existing POSIX lock binding. The persistent inode
  * lives outside the replaceable profile; process death releases its lock. */
 export const withProfileLock = async (profile, action, runtime = join(profile, 'runtime')) => {
@@ -233,6 +248,18 @@ export const withProfileLock = async (profile, action, runtime = join(profile, '
 }
 
 export const commitInstallation = (profile, stage, entries) => withProfileLock(profile, () => commit(profile, stage, entries))
+
+export const saveUpdateChannel = (profile, channel) => withProfileLock(profile, () => {
+  const { config } = readChannelConfig(profile)
+  if (config.cli?.channel === channel && config.cli?.channel_format === 1) return
+  const stage = mkdtempSync(join(dirname(profile), '.dscode-channel-'))
+  try {
+    config.cli = { ...config.cli, channel, channel_format: 1 }
+    const prepared = join(stage, 'config.toml')
+    writeFileSync(prepared, stringify(config))
+    renameSync(prepared, join(profile, 'config.toml'))
+  } finally { rmSync(stage, { recursive: true, force: true }) }
+})
 
 /** Config commits last; ordinary failures restore every moved entry. Missing staged entries are deletions. */
 const commit = (profile, stage, entries) => {

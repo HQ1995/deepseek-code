@@ -86,7 +86,8 @@ fn preview_channels_never_select_each_other() {
 
 #[test]
 fn product_delegate_carries_one_exact_target_and_channel() {
-    let command = dscode_update_command("0.0.14-alpha.1", "alpha").unwrap();
+    let command =
+        dscode_update_command("0.0.14-alpha.1", "alpha", CliUpdateTrigger::AutoBackground).unwrap();
     let args: Vec<_> = command
         .as_std()
         .get_args()
@@ -96,10 +97,11 @@ fn product_delegate_carries_one_exact_target_and_channel() {
         "update".into(),
         "--version".into(),
         "0.0.14-alpha.1".into(),
-        "--alpha".into()
+        "--alpha".into(),
+        "--trigger=auto_background".into()
     ]));
-    assert!(dscode_update_command("not-semver", "alpha").is_err());
-    assert!(dscode_update_command("0.0.14", "unknown").is_err());
+    assert!(dscode_update_command("not-semver", "alpha", CliUpdateTrigger::UserCommand).is_err());
+    assert!(dscode_update_command("0.0.14", "unknown", CliUpdateTrigger::UserCommand).is_err());
 }
 
 #[test]

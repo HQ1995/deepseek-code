@@ -97,11 +97,12 @@ try {
   const banner = await run(installed, ['--version'])
   assert.ok(banner.stdout.includes(manifest.version))
   corrupt = true
-  await assert.rejects(run(installed, update), /SHA-256 mismatch/)
+  assert.match((await run(installed, update)).stdout, /already up to date/)
+  await assert.rejects(run(installed, [...update, '--force']), /SHA-256 mismatch/)
   assert.equal(await readFile(join(profile, 'config.toml'), 'utf8'), config)
   assert.equal(await readFile(join(profile, 'user-kept.txt'), 'utf8'), 'preserved')
   await doctor()
-  const report = { version: manifest.version, sourceCommit: manifest.dsh.sourceCommit, installedAndRepaired: true, repairedLegacyOverlay: true, composedProfile: true, rejectedCorruptAsset: true, preservedUserFiles: true, installedLauncher: true }
+  const report = { version: manifest.version, sourceCommit: manifest.dsh.sourceCommit, installedAndRepaired: true, repairedLegacyOverlay: true, composedProfile: true, sameVersionNoop: true, rejectedCorruptAsset: true, preservedUserFiles: true, installedLauncher: true }
   if (process.env.DSCODE_E2E_OUT_DIR) {
     await mkdir(process.env.DSCODE_E2E_OUT_DIR, { recursive: true })
     await writeFile(join(process.env.DSCODE_E2E_OUT_DIR, 'update-PASS.json'), JSON.stringify(report, null, 2) + '\n')

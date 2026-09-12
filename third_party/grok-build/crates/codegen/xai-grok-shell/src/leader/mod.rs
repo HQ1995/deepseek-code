@@ -1521,7 +1521,7 @@ pub async fn connect_or_spawn_external(
     capabilities: ClientCapabilities,
     spawn: impl Fn(&Path) -> Result<u32, ConnectionError> + Send + Sync,
 ) -> Result<LeaderConnection, ConnectionError> {
-    connect_or_spawn_inner(
+    let conn = connect_or_spawn_inner(
         client_type,
         mode,
         env_urls,
@@ -1530,7 +1530,21 @@ pub async fn connect_or_spawn_external(
         EXTERNAL_SPAWN_WAIT_TIMEOUT,
         1,
     )
-    .await
+    .await?;
+    let reported = conn.registration().leader_binary_version.as_deref();
+    if !external_version_matches(reported, CLIENT_LEADER_VERSION) {
+        return Err(ConnectionError::SpawnFailed(format!(
+            "external bridge reports {}, expected {}; run dscode update or select the matching profile/socket",
+            reported.unwrap_or("no version"),
+            CLIENT_LEADER_VERSION,
+        )));
+    }
+    Ok(conn)
+}
+
+fn external_version_matches(reported: Option<&str>, client: &str) -> bool {
+    reported
+        .is_some_and(|version| version == client || Some(version) == client.strip_suffix("-dev"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1566,7 +1580,9 @@ async fn connect_or_spawn_inner(
         if !skip_connect {
             match connect_to_leader(&sock_path, client_type, mode, capabilities.clone()).await {
                 Ok(conn) => {
-                    if !should_evict_conn(&conn) {
+                    // An external runtime cannot be upgraded by respawning it.
+                    // Its caller checks compatibility without evicting another session.
+                    if matches!(spawn_spec, SpawnSpec::External(_)) || !should_evict_conn(&conn) {
                         info!(
                             elapsed_ms = start.elapsed().as_millis() as u64,
                             "Adopted leader"
@@ -1596,7 +1612,7 @@ async fn connect_or_spawn_inner(
                     && let Ok(conn) =
                         connect_to_leader(&sock_path, client_type, mode, capabilities.clone()).await
                 {
-                    if !should_evict_conn(&conn) {
+                    if matches!(spawn_spec, SpawnSpec::External(_)) || !should_evict_conn(&conn) {
                         if let Err(e) = lock.release() {
                             warn!(error = %e, "Failed to release lock after adopting leader");
                         }
@@ -1759,7 +1775,7 @@ async fn connect_or_spawn_inner(
         {
             Ok(conn) => {
                 zombie_timer = None;
-                if !should_evict_conn(&conn) {
+                if matches!(spawn_spec, SpawnSpec::External(_)) || !should_evict_conn(&conn) {
                     info!(
                         elapsed_ms = start.elapsed().as_millis() as u64,
                         "Adopted leader"
@@ -2422,6 +2438,68 @@ mod tests {
             "lock file survives the handoff (released, not cleaned)"
         );
         drop(conn);
+    }
+    #[test]
+    fn external_bridge_versions_are_truthful_and_development_suffix_is_compatible() {
+        assert!(external_version_matches(
+            Some("0.0.14-alpha.11"),
+            "0.0.14-alpha.11"
+        ));
+        assert!(external_version_matches(
+            Some("0.0.14-alpha.11"),
+            "0.0.14-alpha.11-dev"
+        ));
+        assert!(!external_version_matches(
+            Some("0.0.14-alpha.10"),
+            "0.0.14-alpha.11"
+        ));
+        assert!(!external_version_matches(
+            Some("0.0.14-alpha.12"),
+            "0.0.14-alpha.11"
+        ));
+        assert!(!external_version_matches(None, "0.0.14-alpha.11"));
+    }
+
+    #[tokio::test]
+    async fn mismatched_external_bridge_is_rejected_without_replacing_its_listener() {
+        let temp = TempDir::new().unwrap();
+        let socket = temp.path().join("old-bridge.sock");
+        let _env = crate::env::EnvVarGuard::set(LEADER_SOCKET_ENV, socket.to_str().unwrap());
+        let fake = spawn_fake_leader(
+            socket.clone(),
+            FakeLeaderBehavior::Normal {
+                versions: FakeVersions {
+                    protocol_version: Some(LEADER_PROTOCOL_VERSION),
+                    binary_version: Some("0.0.0-review".into()),
+                },
+                caps: fake_caps(false, false),
+            },
+        )
+        .await;
+        let urls = LeaderEnvUrls {
+            grok_ws_url: "wss://test.invalid".into(),
+            grok_ws_origin: "https://test.invalid".into(),
+        };
+        let result = connect_or_spawn_external(
+            "test",
+            ClientMode::Stdio,
+            &urls,
+            ClientCapabilities::default(),
+            |_| panic!("a version mismatch must not respawn the external runtime"),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ConnectionError::SpawnFailed(message)) if message.contains("external bridge reports"))
+        );
+        // The fake holds its first client until cancellation; probe the
+        // listener without waiting for a second protocol registration.
+        let probe = transport::LeaderStream::connect(&socket).await;
+        assert!(
+            probe.is_ok(),
+            "rejecting a mismatched client must leave the old listener bound"
+        );
+        drop(probe);
+        fake.cancel();
     }
     /// A hung external leader is not retried: exactly one spawn callback, one
     /// connectable wait, then SpawnFailed - and the flock is released so the

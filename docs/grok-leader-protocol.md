@@ -10,7 +10,8 @@ This document is the maintenance contract between the `dscode` TUI and
 
 ## Transport
 
-- macOS and Linux use a Unix domain socket selected by `DSCODE_SOCKET`.
+- macOS and Linux use a Unix domain socket selected by `DSCODE_SOCKET`, or
+  derived from the canonical profile path and TUI build when no override is set.
 - Each frame is a 4-byte big-endian payload length followed by one UTF-8 JSON
   object. Payloads are capped at 64 MiB.
 - The launcher starts `dsh --profile dscode`, waits for the socket, then
@@ -29,9 +30,12 @@ Registration must be the first message and complete within 30 seconds:
 | `2` | client registered twice |
 | `3` | registration timed out |
 
-`registered` carries the protocol version, a compatible leader binary version,
-and `ready: true`. Protocol mismatches fail before ACP traffic. Control commands
-are currently unsupported and return a structured error.
+`registered` carries the protocol version, the loaded bridge's actual package
+version, and `ready: true`. The TUI accepts its matching bridge version (also
+without a development TUI's trailing `-dev`); a different version fails with an
+update/profile diagnostic and does not evict another session's external leader.
+Protocol mismatches fail before ACP traffic. Control commands are currently
+unsupported and return a structured error.
 
 ## ACP lifecycle
 
@@ -45,7 +49,7 @@ ACP JSON-RPC objects travel as strings inside `acp` envelopes.
 | `session/cancel` | cancel the active turn and reconcile queued prompts |
 | `session/load`, `session/list`, `session/close` | resume, enumerate, and dispose durable dsh sessions |
 | `session/set_model`, `session/set_mode` | switch model/effort and plan mode |
-| `session/request_permission` | route tool approval to the owning TUI client |
+| `session/request_permission` | wait for the owning client's answer; disconnect/cancel cancels the request without inventing a user rejection |
 
 The bridge also implements the `x.ai/*` surfaces required by this TUI:
 

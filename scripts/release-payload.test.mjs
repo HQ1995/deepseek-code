@@ -7,8 +7,29 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
-import { copyClosure, releaseAssets, releaseChannel, sourceBuildEnvironment } from './build-release-payload.mjs';
+import { copyClosure, recordConsumerProvenance, validateConsumer, releaseAssets, releaseChannel, sourceBuildEnvironment } from './build-release-payload.mjs';
 import { assertReleaseRun, releasedManifest, verifyReleaseAssets } from './verify-release-assets.mjs';
+
+test('consumer reuse requires the exact source, installed bytes, and copied runtime tree', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dscode-consumer-provenance-'));
+  const manifest = { dsh: { testedVersion: '0.1.5-rc.2', sourceCommit: 'a'.repeat(40) } };
+  const modules = join(root, 'node_modules');
+  try {
+    mkdirSync(join(modules, '@deepseek-ai/dsh'), { recursive: true });
+    const pkg = join(modules, '@deepseek-ai/dsh/package.json');
+    writeFileSync(pkg, JSON.stringify({ version: manifest.dsh.testedVersion }));
+    assert.throws(() => validateConsumer(root, manifest), /no build provenance/);
+    recordConsumerProvenance(root, manifest);
+    validateConsumer(root, manifest);
+    assert.throws(() => validateConsumer(root, { dsh: { ...manifest.dsh, sourceCommit: 'b'.repeat(40) } }), /mismatch/);
+    cpSync(modules, join(root, 'copied'), { recursive: true });
+    validateConsumer(root, manifest, join(root, 'copied'));
+    writeFileSync(join(root, 'copied/@deepseek-ai/dsh/new-code.js'), 'stale cached SDK');
+    assert.throws(() => validateConsumer(root, manifest, join(root, 'copied')), /mismatch/);
+    writeFileSync(pkg, JSON.stringify({ version: manifest.dsh.testedVersion, stale: true }));
+    assert.throws(() => validateConsumer(root, manifest), /mismatch/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test('terminal acceptance rejects old tmux before creating a test profile', () => {
   const work = mkdtempSync(join(tmpdir(), 'dscode-old-tmux-'));

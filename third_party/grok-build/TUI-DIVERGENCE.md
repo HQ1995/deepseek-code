@@ -684,3 +684,15 @@ termination tests run in the product Rust release gate.
 The catalog keeps role descriptions alongside localized preset names. Overlay
 ownership tests expect the current Kitty transmit-and-display command (`a=T`),
 and both child and modal post-flush cleanup cases run in the release gate.
+
+### DSH profile isolation and automatic updates
+
+Default DSH leader sockets include the canonical profile path and TUI build.
+External bridge registration reports its actual package version; mismatches
+fail with a profile/update diagnostic without evicting another session's leader.
+A development TUI accepts its corresponding release bridge without `-dev`.
+
+Selecting the DSH backend preserves the user's automatic-update setting.
+Whole-product update delegation carries the original trigger so the launcher
+can honor background opt-out and avoid stale-target reinstalls. Socket isolation,
+version compatibility and launch/update argument checks run in the release gate.

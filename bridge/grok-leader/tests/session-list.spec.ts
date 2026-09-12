@@ -136,9 +136,35 @@ describe('SessionListIndex inspect', () => {
     await expect(index.inspect('s', 0, async () => { throw new Error('read failed') })).rejects.toThrow('read failed')
     expect((await index.inspect('s', 0, async () => undefined)).firstPrompt).toBe('')
     expect((await index.inspect('s', 0, async () => [titleEvent(1, 'a title')])).firstPrompt).toBe('')
-    const row = await index.inspect('s', 0, async () => [userMessage(2, 'now prompted')])
+    const row = await index.inspect('s', 0, async () => [userMessage(2, 'now prompted')], 'revision-1')
     expect(row.firstPrompt).toBe('now prompted')
-    expect(await index.inspect('s', 0, async () => { throw new Error('cached read') })).toEqual(row)
+    expect(await index.inspect('s', 0, async () => { throw new Error('cached read') }, 'revision-1')).toEqual(row)
+  })
+
+  it('refreshes external changes by revision and never trusts an unversioned cache', async () => {
+    const index = new SessionListIndex()
+    const events = [userMessage(1, 'prompt'), titleEvent(2, 'old')]
+    let reads = 0
+    const load = async () => { reads++; return events }
+    await index.inspect('s', 0, load, 'r1')
+    await index.inspect('s', 0, load, 'r1')
+    expect(reads).toBe(1)
+    events.push(titleEvent(3, 'external change'))
+    expect(await index.inspect('s', 0, load, 'r2')).toMatchObject({ title: 'external change', updatedAt: 3 })
+    events.push(titleEvent(4, 'no revision available'))
+    expect(await index.inspect('s', 0, load)).toMatchObject({ title: 'no revision available', updatedAt: 4 })
+    expect(reads).toBe(3)
+  })
+
+  it('does not share an old in-flight inspection with a newer revision', async () => {
+    const index = new SessionListIndex()
+    let release!: (events: readonly SessionEvent[]) => void
+    const held = new Promise<readonly SessionEvent[]>(resolve => { release = resolve })
+    const old = index.inspect('s', 0, () => held, 'r1')
+    const latest = index.inspect('s', 0, async () => [userMessage(1, 'prompt'), titleEvent(3, 'latest')], 'r2')
+    release([userMessage(1, 'prompt'), titleEvent(2, 'old')])
+    expect((await old).title).toBe('old')
+    expect((await latest).title).toBe('latest')
   })
 })
 

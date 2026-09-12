@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import { nodeVersionSupported } from '../bin/dscode.mjs'
+import { migrateLegacyTuiHome, nodeVersionSupported } from '../bin/dscode.mjs'
 import { channelAccepts, commitInstallation, extractArchive, resolveRelease, updateOptions } from '../bin/update.mjs'
 import { create as createTar } from 'tar'
 
@@ -24,6 +24,29 @@ afterEach(() => {
 })
 
 describe('launcher lifecycle', () => {
+  it('merges unique legacy files and preserves conflicts and symlinks across repeated migration', () => {
+    const home = mkdtempSync(join(tmpdir(), 'dscode-migration-'))
+    homes.push(home)
+    const profile = join(home, 'profiles/dscode'), legacy = join(home, 'dsc-tui')
+    for (const dir of [profile, legacy]) {
+      mkdirSync(join(dir, 'worktrees'), { recursive: true })
+      writeFileSync(join(dir, 'config.toml'), dir)
+    }
+    writeFileSync(join(profile, 'worktrees/current'), 'current')
+    writeFileSync(join(legacy, 'worktrees/unique'), 'legacy')
+    symlinkSync('missing', join(profile, 'link'))
+    writeFileSync(join(legacy, 'link'), 'preserved conflict')
+    migrateLegacyTuiHome(home, profile)
+    migrateLegacyTuiHome(home, profile)
+    expect(readFileSync(join(profile, 'worktrees/unique'), 'utf8')).toBe('legacy')
+    expect(readFileSync(join(profile, 'worktrees/current'), 'utf8')).toBe('current')
+    expect(readFileSync(join(profile, 'config.toml'), 'utf8')).toBe(profile)
+    expect(readFileSync(join(legacy, 'config.toml'), 'utf8')).toBe(legacy)
+    expect(readlinkSync(join(profile, 'link'))).toBe('missing')
+    expect(readFileSync(join(legacy, 'link'), 'utf8')).toBe('preserved conflict')
+    expect(existsSync(join(legacy, 'worktrees'))).toBe(false)
+  })
+
   it('preserves relative archive links and rejects absolute links before extraction', () => {
     const home = mkdtempSync(join(tmpdir(), 'dscode-archive-'))
     homes.push(home)

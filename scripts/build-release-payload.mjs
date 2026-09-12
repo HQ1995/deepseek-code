@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { basename, delimiter, dirname, join, resolve } from 'node:path';
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { basename, delimiter, dirname, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -63,6 +63,40 @@ export function sourceBuildEnvironment(bin, env = process.env) {
   run('corepack', ['enable', '--install-directory', bin, 'pnpm']);
   return { ...env, PATH: `${bin}${delimiter}${env.PATH}` };
 }
+// Hash the installed bytes and executable modes, not just package versions.
+export function consumerTreeDigest(modules) {
+  const root = realpathSync(modules), hash = createHash('sha256');
+  const walk = dir => {
+    for (const name of readdirSync(dir).sort()) {
+      if (['.cache', '.npmrc', '.package-lock.json'].includes(name)) continue;
+      const path = join(dir, name), stat = lstatSync(path);
+      hash.update(JSON.stringify([relative(root, path), stat.mode & 0o111, stat.isSymbolicLink() ? 'link' : stat.isDirectory() ? 'dir' : 'file']));
+      if (stat.isSymbolicLink()) {
+        const target = relative(root, realpathSync(path));
+        if (target === '..' || target.startsWith('../')) throw new Error(`Consumer link escapes installed tree: ${path}`);
+        hash.update(JSON.stringify(readlinkSync(path)));
+      } else if (stat.isDirectory()) walk(path);
+      else if (stat.isFile()) hash.update(createHash('sha256').update(readFileSync(path)).digest());
+      else throw new Error(`Unsupported consumer entry: ${path}`);
+    }
+  };
+  walk(root);
+  return hash.digest('hex');
+}
+export function recordConsumerProvenance(consumer, manifest) {
+  save(join(consumer, 'dscode-consumer.json'), { schema: 1, sourceCommit: manifest.dsh.sourceCommit,
+    dshVersion: manifest.dsh.testedVersion, platform: process.platform, arch: process.arch,
+    tree: consumerTreeDigest(join(consumer, 'node_modules')) });
+}
+export function validateConsumer(consumer, manifest, modules = join(consumer, 'node_modules')) {
+  const path = join(consumer, 'dscode-consumer.json');
+  if (!existsSync(path)) throw new Error('Consumer has no build provenance; omit --consumer or use a new consumer directory to rebuild');
+  const record = json(path);
+  if (record.schema !== 1 || record.sourceCommit !== manifest.dsh.sourceCommit || record.dshVersion !== manifest.dsh.testedVersion
+    || record.platform !== process.platform || record.arch !== process.arch || record.tree !== consumerTreeDigest(modules)) {
+    throw new Error('Consumer provenance/content mismatch; rebuild from the pinned source');
+  }
+}
 function sourceConsumer(source, consumer, manifest, reuse) {
   const commit = manifest.dsh.sourceCommit;
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('dsh.sourceCommit must be a full revision');
@@ -73,7 +107,7 @@ function sourceConsumer(source, consumer, manifest, reuse) {
   if (run('git', ['rev-parse', 'HEAD'], source) !== commit || run('git', ['status', '--porcelain', '--untracked-files=no'], source)) throw new Error('Upstream source must be clean and exactly pinned');
   if (json(join(source, 'package.json')).version !== manifest.dsh.testedVersion) throw new Error('Source version mismatch');
   if (reuse) {
-    if (!existsSync(join(consumer, 'node_modules/@deepseek-ai/dsh/package.json'))) throw new Error('Missing installed source consumer');
+    validateConsumer(consumer, manifest);
     return;
   }
   const env = sourceBuildEnvironment(join(consumer, '.bin'));
@@ -112,6 +146,7 @@ function sourceConsumer(source, consumer, manifest, reuse) {
   });
   // npm 10 crashes while resolving the cyclic peer graph of source SDK tarballs.
   run('npx', ['--yes', 'npm@11.19.1', 'install', '--no-audit', '--no-fund', '--package-lock=false'], consumer);
+  recordConsumerProvenance(consumer, manifest);
 }
 function buildRuntime(consumer, source, manifest, out, work) {
   const platform = { 'linux/x64': 'linux-x86_64', 'darwin/arm64': 'macos-aarch64' }[`${process.platform}/${process.arch}`];
@@ -121,6 +156,7 @@ function buildRuntime(consumer, source, manifest, out, work) {
   // Preserve the real installed layout, native helpers and relative npm links.
   // Only package payloads are copied: never the consumer's lock, auth or profile.
   cpSync(join(consumer, 'node_modules'), join(stage, 'node_modules'), { recursive: true, verbatimSymlinks: true, filter: path => !['.cache', '.npmrc', '.package-lock.json'].includes(basename(path)) });
+  validateConsumer(consumer, manifest, join(stage, 'node_modules'));
   const cli = json(join(stage, 'node_modules/@deepseek-ai/dsh/package.json'));
   if (cli.version !== manifest.dsh.testedVersion) throw new Error('Runtime CLI manifest version mismatch');
   symlinkSync(`../node_modules/@deepseek-ai/dsh/${cli.bin.dsh}`, join(stage, 'bin/dsh'));
@@ -184,7 +220,7 @@ function main() {
   try {
     const source = resolve(values.source || join(work, 'source'));
     const consumer = resolve(values.consumer || join(work, 'consumer'));
-    if (manifest.dsh?.sourceCommit) sourceConsumer(source, consumer, manifest, Boolean(values.consumer));
+    if (manifest.dsh?.sourceCommit) sourceConsumer(source, consumer, manifest, Boolean(values.consumer && existsSync(join(consumer, 'node_modules'))));
     else {
       mkdirSync(consumer, { recursive: true });
       save(join(consumer, 'package.json'), { ...manifest, private: true, scripts: {} });

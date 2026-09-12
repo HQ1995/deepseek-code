@@ -63,7 +63,8 @@ export class SessionListIndex {
   private readonly firstPromptCache = new Map<string, string>()
   private readonly sessionTitleCache = new Map<string, string>()
   private readonly sessionActivityCache = new Map<string, number>()
-  private readonly inspections = new Map<string, Promise<SessionProjection>>()
+  private readonly inspections = new Map<string, { revision?: string; result: Promise<SessionProjection> }>()
+  private readonly revisions = new Map<string, string>()
   private readonly inspectionTails = Array.from({ length: 4 }, () => Promise.resolve())
   private nextInspection = 0
   private readonly firstPromptSeen = new Set<string>()
@@ -84,6 +85,7 @@ export class SessionListIndex {
       const oldest = this.firstPromptCache.keys().next().value as string | undefined
       if (oldest === undefined) break
       this.firstPromptCache.delete(oldest)
+      this.revisions.delete(oldest)
     }
   }
 
@@ -98,19 +100,23 @@ export class SessionListIndex {
 
   /** Share cold reads across requests and cap open logs at four. The returned
    * snapshot belongs to the request, so LRU eviction cannot change its rows. */
-  inspect(sessionId: string, createdAt: number, load: () => Promise<readonly SessionEvent[] | undefined>): Promise<SessionProjection> {
+  inspect(sessionId: string, createdAt: number, load: () => Promise<readonly SessionEvent[] | undefined>, revision?: string): Promise<SessionProjection> {
     const pending = this.inspections.get(sessionId)
-    if (pending !== undefined) return pending
-    if (this.firstPromptCache.has(sessionId)) {
+    if (pending !== undefined) return pending.revision === revision ? pending.result
+      : pending.result.then(() => this.inspect(sessionId, createdAt, load, revision))
+    if (revision !== undefined && this.revisions.get(sessionId) === revision && this.firstPromptCache.has(sessionId)) {
       return Promise.resolve(this.projection(sessionId, createdAt))
     }
     const lane = this.nextInspection++ % this.inspectionTails.length
     const result = this.inspectionTails[lane]!.then(async () => {
       const events = await load()
-      if (events !== undefined) this.recordInspection(sessionId, createdAt, events)
+      if (events !== undefined) {
+        this.recordInspection(sessionId, createdAt, events)
+        if (revision !== undefined && this.firstPromptCache.has(sessionId)) this.revisions.set(sessionId, revision)
+      }
       return this.projection(sessionId, createdAt)
     }).finally(() => this.inspections.delete(sessionId))
-    this.inspections.set(sessionId, result)
+    this.inspections.set(sessionId, { revision, result })
     this.inspectionTails[lane] = result.then(() => {}, () => {})
     return result
   }
@@ -122,6 +128,7 @@ export class SessionListIndex {
    * floored at `createdAt`.
    */
   recordInspection(sessionId: string, createdAt: number, events: readonly SessionEvent[]): void {
+    this.revisions.delete(sessionId)
     this.cacheFirstPrompt(sessionId, firstUserPrompt(events))
     const title = foldedSessionTitle(events)
     if (title === '') this.sessionTitleCache.delete(sessionId)

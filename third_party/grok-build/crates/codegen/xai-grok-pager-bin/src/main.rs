@@ -2203,6 +2203,19 @@ fn main() {
         std::process::exit(1);
     }
 }
+fn configure_dsh_launch(args: &mut PagerArgs) {
+    // Preserve the user's update preference when selecting the DSH backend.
+    if args.command.is_none() && !args.no_leader {
+        args.leader = true;
+        if args.leader_socket.is_none() {
+            args.leader_socket = Some(xai_grok_pager::dsh_leader::default_leader_socket());
+        }
+        if args.sandbox.is_none() {
+            args.sandbox = Some("off".into());
+        }
+    }
+}
+
 async fn async_main(args: PagerArgs) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut args = args.apply_cwd()?;
@@ -2220,16 +2233,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     // dscode single entry point: every session-producing launch (interactive
     // or headless, but not standalone subcommands) runs against the external
     // dsh leader unless --no-leader is explicit.
-    if args.command.is_none() && !args.no_leader {
-        args.leader = true;
-        if args.leader_socket.is_none() {
-            args.leader_socket = Some(xai_grok_pager::dsh_leader::default_leader_socket());
-        }
-        if args.sandbox.is_none() {
-            args.sandbox = Some("off".into());
-        }
-        args.no_auto_update = true;
-    }
+    configure_dsh_launch(&mut args);
     if let Some(ref socket) = args.leader_socket {
         unsafe { std::env::set_var(xai_grok_shell::leader::LEADER_SOCKET_ENV, socket) };
     }
@@ -3343,6 +3347,20 @@ mod tests {
             !stdio_auto_update_enabled(true, false, true, false),
             "pinned binary"
         );
+    }
+
+    #[test]
+    fn dsh_launch_preserves_update_opt_in_and_opt_out() {
+        for flags in [vec!["dscode"], vec!["dscode", "--no-auto-update"]] {
+            let mut args = PagerArgs::try_parse_from(&flags).unwrap();
+            configure_dsh_launch(&mut args);
+            assert!(args.leader);
+            assert!(args.leader_socket.is_some());
+            assert_eq!(args.no_auto_update, flags.len() > 1);
+        }
+        let mut standalone = PagerArgs::try_parse_from(["dscode", "--no-leader"]).unwrap();
+        configure_dsh_launch(&mut standalone);
+        assert!(!standalone.leader);
     }
     use clap::Parser as _;
     /// `grok dashboard` flags the startup hook without forcing leader mode —

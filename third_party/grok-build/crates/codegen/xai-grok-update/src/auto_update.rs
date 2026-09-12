@@ -963,7 +963,7 @@ async fn run_update_subcommand(
     update_config: &UpdateConfig,
 ) -> Result<Option<tokio::process::Child>> {
     let mut cmd = if installer == "dscode" {
-        dscode_update_command(target, &update_config.channel)?
+        dscode_update_command(target, &update_config.channel, trigger)?
     } else {
         let mut cmd = tokio::process::Command::new(std::env::current_exe()?);
         cmd.arg("update");
@@ -2624,7 +2624,7 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
 /// Delegate whole-product preparation and commit to the profile launcher.
 pub async fn install_dscode_release(target: Option<&str>, channel: &str) -> Result<()> {
     let version = resolve_dscode_target(target, channel).await?;
-    let status = dscode_update_command(&version, channel)?
+    let status = dscode_update_command(&version, channel, CliUpdateTrigger::UserCommand)?
         .status()
         .await
         .context("Failed to start the dscode product launcher")?;
@@ -2646,7 +2646,11 @@ async fn resolve_dscode_target(target: Option<&str>, channel: &str) -> Result<St
     }
 }
 
-fn dscode_update_command(version: &str, channel: &str) -> Result<tokio::process::Command> {
+fn dscode_update_command(
+    version: &str,
+    channel: &str,
+    trigger: CliUpdateTrigger,
+) -> Result<tokio::process::Command> {
     semver::Version::parse(version).context("Invalid dscode target version")?;
     anyhow::ensure!(
         matches!(channel, "stable" | "beta" | "alpha" | "enterprise"),
@@ -2668,7 +2672,8 @@ fn dscode_update_command(version: &str, channel: &str) -> Result<tokio::process:
         .arg("update")
         .arg("--version")
         .arg(version)
-        .arg(format!("--{channel}"));
+        .arg(format!("--{channel}"))
+        .arg(format!("--trigger={}", trigger.as_str()));
     command.env("DSCODE_HOME", grok_home());
     if let Ok(executable) = std::env::current_exe() {
         command.env("DSCODE_LEGACY_BIN", executable);
