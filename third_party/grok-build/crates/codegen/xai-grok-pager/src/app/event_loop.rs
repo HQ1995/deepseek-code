@@ -501,12 +501,40 @@ fn suspend_for_child(
     Ok(moved_cursor)
 }
 
+/// How long the writer thread may sit on unwritten payloads before it is
+/// reported blocked. Healthy writes land in milliseconds; seconds mean the
+/// terminal stopped reading the pty.
+const WRITER_BLOCKED_WARN_AFTER: Duration = Duration::from_secs(5);
+
+/// What one [`Presenter::observe_writer_progress`] observation concluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriterProgress {
+    /// No backlog, or the backlog is draining: nothing to report.
+    Flowing,
+    /// A backlog with zero written progress; the stall episode is running
+    /// (or just began).
+    Stalled,
+    /// Progress ended an episode that had already been reported blocked.
+    Recovered { blocked_for: Duration },
+}
+
 /// Coalesces draw requests, gates in-flight frames, and owns draw cadence.
 #[derive(Debug)]
 struct Presenter {
     dirty: bool,
     force_full_repaint: bool,
     in_flight_target: Option<u64>,
+    /// Start of the current zero-progress stall episode
+    /// ([`Self::observe_writer_progress`]). Covers frames and out-of-band
+    /// escapes alike; drives the blocked-writer report.
+    writer_stalled_since: Option<Instant>,
+    /// Written watermark at the previous observation. Progress re-anchors the
+    /// episode, so a slowly-draining terminal never accrues a false report.
+    last_written_observed: u64,
+    /// Latched once the current stall episode has been reported blocked, so
+    /// one episode emits exactly one report. Cleared when the writer makes
+    /// progress.
+    blocked_reported: bool,
     last_draw_at: Instant,
     draw_scheduled_at: Option<Instant>,
 }
@@ -517,6 +545,9 @@ impl Presenter {
             dirty: false,
             force_full_repaint: false,
             in_flight_target: None,
+            writer_stalled_since: None,
+            last_written_observed: 0,
+            blocked_reported: false,
             last_draw_at: Instant::now(),
             draw_scheduled_at: None,
         }
@@ -531,12 +562,67 @@ impl Presenter {
         }
     }
 
+    /// Track writer progress from the queue watermarks, once per loop
+    /// iteration: a backlog with zero written progress starts or continues a
+    /// stall episode, and any progress ends it.
+    fn observe_writer_progress(
+        &mut self,
+        queued: u64,
+        written: u64,
+        now: Instant,
+    ) -> WriterProgress {
+        let progressed = written > self.last_written_observed;
+        self.last_written_observed = written;
+        if written < queued && !progressed {
+            self.writer_stalled_since.get_or_insert(now);
+            return WriterProgress::Stalled;
+        }
+        let since = self.writer_stalled_since.take();
+        let reported = std::mem::take(&mut self.blocked_reported);
+        if written < queued {
+            // Progress with a remaining backlog: the old episode (if any) ends
+            // and a fresh anchor starts, so only zero-progress time accrues
+            // toward the report.
+            self.writer_stalled_since = Some(now);
+        }
+        if !reported {
+            return WriterProgress::Flowing;
+        }
+        let blocked_for = since.map_or(Duration::ZERO, |s| now.duration_since(s));
+        WriterProgress::Recovered { blocked_for }
+    }
+
+    /// Deadline for reporting the current stall episode as blocked, if
+    /// unreported.
+    fn blocked_report_deadline(&self) -> Option<Instant> {
+        if self.blocked_reported {
+            return None;
+        }
+        self.writer_stalled_since
+            .map(|since| since + WRITER_BLOCKED_WARN_AFTER)
+    }
+
+    /// Latch the blocked report for this episode and return its duration so far.
+    fn mark_blocked_reported(&mut self) -> Duration {
+        self.blocked_reported = true;
+        self.writer_stalled_since
+            .map_or(Duration::ZERO, |since| since.elapsed())
+    }
+
     fn try_present(
         &mut self,
+        written: u64,
         queued_before: u64,
         draw: impl FnOnce(bool),
         queued_after: impl FnOnce() -> u64,
     ) -> bool {
+        // Never draw while the writer trails its queue, even with no frame in
+        // flight: the frame would queue behind the backlog it is meant to
+        // describe. `dirty` stays set, so the frame lands on the Written
+        // wakeup after catch-up.
+        if written < queued_before {
+            return false;
+        }
         if self.in_flight_target.is_some() || !self.dirty {
             return false;
         }
@@ -576,6 +662,7 @@ impl Presenter {
         let sync = terminal.backend_mut().writer_mut().writer_sync().clone();
         let queued_before = sync.queued();
         let drew = self.try_present(
+            sync.written(),
             queued_before,
             |force| {
                 if force {
@@ -2533,6 +2620,29 @@ pub(crate) async fn run(
             }
         };
 
+        // Blocked-writer watermark check. Recovery is detected here, not in
+        // the ack arm: an escape-only stall's final payload produces a Written
+        // wakeup but no gate ack.
+        let writer_progress_sync = terminal.backend_mut().writer_mut().writer_sync().clone();
+        if let WriterProgress::Recovered { blocked_for } = presenter.observe_writer_progress(
+            writer_progress_sync.queued(),
+            writer_progress_sync.written(),
+            Instant::now(),
+        ) {
+            crate::unified_log::info(
+                "term.writer.recovered",
+                None,
+                Some(serde_json::json!({ "blocked_ms": blocked_for.as_millis() as u64 })),
+            );
+        }
+        let writer_blocked_report_at = presenter.blocked_report_deadline();
+        let writer_blocked_report = async {
+            match writer_blocked_report_at {
+                Some(at) => sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+
         tokio::select! {
             biased;
 
@@ -2566,6 +2676,23 @@ pub(crate) async fn run(
                     }
                 };
                 presenter.acknowledge(sequence);
+            }
+
+            // Writer sat on unwritten payloads past the threshold: the terminal
+            // stopped reading the pty. Field diagnosis for the mid-turn freeze
+            // family (loop alive, screen frozen). Above the ACP arm so a
+            // mid-turn token firehose cannot starve it.
+            _ = writer_blocked_report => {
+                let blocked_for = presenter.mark_blocked_reported();
+                crate::unified_log::warn(
+                    "term.writer.blocked",
+                    None,
+                    Some(serde_json::json!({
+                        "blocked_ms": blocked_for.as_millis() as u64,
+                        "payloads_queued": writer_progress_sync.queued(),
+                        "payloads_written": writer_progress_sync.written(),
+                    })),
+                );
             }
 
             // Biased order: cancellation/quit, writer acks/failures, ACP,
@@ -5472,17 +5599,17 @@ mod tests {
         let mut draws = 0;
 
         presenter.request(false);
-        assert!(presenter.try_present(0, |_| draws += 1, || 1));
+        assert!(presenter.try_present(0, 0, |_| draws += 1, || 1));
         assert_eq!(presenter.in_flight_target, Some(1));
         for _ in 0..5 {
             presenter.request(false);
-            assert!(!presenter.try_present(1, |_| draws += 1, || 2));
+            assert!(!presenter.try_present(1, 1, |_| draws += 1, || 2));
         }
         assert_eq!(draws, 1);
         assert!(presenter.dirty);
 
         presenter.acknowledge(1);
-        assert!(presenter.try_present(1, |_| draws += 1, || 2));
+        assert!(presenter.try_present(1, 1, |_| draws += 1, || 2));
         assert_eq!(draws, 2);
         assert_eq!(presenter.in_flight_target, Some(2));
     }
@@ -5492,12 +5619,12 @@ mod tests {
         let mut presenter = Presenter::new();
         presenter.request(false);
 
-        assert!(presenter.try_present(4, |_| {}, || 4));
+        assert!(presenter.try_present(4, 4, |_| {}, || 4));
         assert_eq!(presenter.in_flight_target, None);
         assert!(!presenter.dirty);
 
         presenter.request(false);
-        assert!(presenter.try_present(4, |_| {}, || 5));
+        assert!(presenter.try_present(4, 4, |_| {}, || 5));
         assert_eq!(presenter.in_flight_target, Some(5));
     }
 
@@ -5512,7 +5639,7 @@ mod tests {
         let mut forced = false;
 
         presenter.acknowledge(8);
-        assert!(presenter.try_present(8, |force| forced = force, || 9));
+        assert!(presenter.try_present(8, 8, |force| forced = force, || 9));
         assert!(forced);
         assert!(!presenter.force_full_repaint);
     }
@@ -5526,7 +5653,7 @@ mod tests {
         presenter.acknowledge(3);
         presenter.request(false);
 
-        assert!(presenter.try_present(3, |_| {}, || 4));
+        assert!(presenter.try_present(3, 3, |_| {}, || 4));
         assert_eq!(presenter.in_flight_target, Some(4));
     }
 
@@ -5546,14 +5673,149 @@ mod tests {
     fn presenter_waits_for_last_payload_in_turn() {
         let mut presenter = Presenter::new();
         presenter.request(false);
-        assert!(presenter.try_present(10, |_| {}, || 13));
+        assert!(presenter.try_present(10, 10, |_| {}, || 13));
         presenter.request(false);
 
         presenter.acknowledge(11);
-        assert!(!presenter.try_present(13, |_| panic!("target not acknowledged"), || 14));
+        assert!(!presenter.try_present(13, 13, |_| panic!("target not acknowledged"), || 14));
         presenter.acknowledge(13);
-        assert!(presenter.try_present(13, |_| {}, || 14));
+        assert!(presenter.try_present(13, 13, |_| {}, || 14));
         assert_eq!(presenter.in_flight_target, Some(14));
+    }
+
+    /// A backlogged writer must gate the draw even with the frame gate open: the
+    /// frame would queue behind the backlog it is meant to describe.
+    #[test]
+    fn presenter_backlog_gates_draws_until_caught_up() {
+        let mut presenter = Presenter::new();
+        presenter.request(false);
+
+        assert!(!presenter.try_present(0, 1, |_| panic!("drew during writer backlog"), || 1));
+        assert!(presenter.dirty, "request must survive the gated draw");
+        assert_eq!(presenter.in_flight_target, None);
+
+        // Writer caught up: the deferred frame draws on the next attempt.
+        assert!(presenter.try_present(1, 1, |_| {}, || 2));
+        assert_eq!(presenter.in_flight_target, Some(2));
+    }
+
+    /// The blocked-writer report arms on any backlog (frames or escapes), fires once
+    /// per episode, and the catch-up observation reports the recovery duration.
+    #[test]
+    fn presenter_blocked_report_lifecycle() {
+        let mut presenter = Presenter::new();
+        let t0 = Instant::now();
+        assert_eq!(presenter.blocked_report_deadline(), None);
+
+        // Writer trails the queue: an episode starts and arms the report.
+        // No frame gate involved - this is exactly the escape-only case too.
+        assert_eq!(
+            presenter.observe_writer_progress(1, 0, t0),
+            WriterProgress::Stalled
+        );
+        assert_eq!(
+            presenter.blocked_report_deadline(),
+            Some(t0 + WRITER_BLOCKED_WARN_AFTER)
+        );
+
+        // The anchor holds while the stall continues, even as more payloads queue.
+        assert_eq!(
+            presenter.observe_writer_progress(3, 0, t0 + Duration::from_secs(1)),
+            WriterProgress::Stalled
+        );
+        assert_eq!(
+            presenter.blocked_report_deadline(),
+            Some(t0 + WRITER_BLOCKED_WARN_AFTER)
+        );
+
+        // A prompt catch-up ends the episode without a recovery report.
+        assert_eq!(
+            presenter.observe_writer_progress(3, 3, t0 + Duration::from_secs(2)),
+            WriterProgress::Flowing
+        );
+        assert_eq!(presenter.blocked_report_deadline(), None);
+
+        // Reported episode: report latches (no re-arm), catch-up returns the duration.
+        let t1 = t0 + Duration::from_secs(10);
+        assert_eq!(
+            presenter.observe_writer_progress(4, 3, t1),
+            WriterProgress::Stalled
+        );
+        presenter.mark_blocked_reported();
+        assert_eq!(presenter.blocked_report_deadline(), None);
+        assert_eq!(
+            presenter.observe_writer_progress(4, 4, t1 + Duration::from_secs(7)),
+            WriterProgress::Recovered {
+                blocked_for: Duration::from_secs(7)
+            }
+        );
+
+        // Next episode starts clean.
+        assert_eq!(
+            presenter.observe_writer_progress(5, 4, t1 + Duration::from_secs(8)),
+            WriterProgress::Stalled
+        );
+        assert!(presenter.blocked_report_deadline().is_some());
+    }
+
+    /// A slowly-draining terminal re-anchors the episode on each progress step and
+    /// never accrues into a false blocked report.
+    #[test]
+    fn presenter_slow_drain_progress_reanchors_episode() {
+        let mut presenter = Presenter::new();
+        let t0 = Instant::now();
+        // First observation already shows progress (0 -> 1 written) with a backlog left:
+        // flowing, but the backlog anchors an episode from now.
+        assert_eq!(
+            presenter.observe_writer_progress(2, 1, t0),
+            WriterProgress::Flowing
+        );
+        assert_eq!(
+            presenter.blocked_report_deadline(),
+            Some(t0 + WRITER_BLOCKED_WARN_AFTER)
+        );
+
+        // One payload written per observation, backlog never empty: the anchor
+        // follows the progress instead of accruing toward the report.
+        let t1 = t0 + Duration::from_secs(4);
+        assert_eq!(
+            presenter.observe_writer_progress(3, 2, t1),
+            WriterProgress::Flowing
+        );
+        assert_eq!(
+            presenter.blocked_report_deadline(),
+            Some(t1 + WRITER_BLOCKED_WARN_AFTER)
+        );
+        let t2 = t1 + Duration::from_secs(4);
+        assert_eq!(
+            presenter.observe_writer_progress(4, 3, t2),
+            WriterProgress::Flowing
+        );
+        assert_eq!(
+            presenter.blocked_report_deadline(),
+            Some(t2 + WRITER_BLOCKED_WARN_AFTER)
+        );
+
+        // A reported episode ends on progress even with a backlog remaining.
+        presenter.mark_blocked_reported();
+        assert_eq!(
+            presenter.observe_writer_progress(5, 4, t2 + Duration::from_secs(6)),
+            WriterProgress::Recovered {
+                blocked_for: Duration::from_secs(6)
+            }
+        );
+        assert!(presenter.blocked_report_deadline().is_some());
+    }
+
+    /// A caught-up writer must not arm the blocked-writer report.
+    #[test]
+    fn presenter_caught_up_writer_does_not_arm_blocked_report() {
+        let mut presenter = Presenter::new();
+        assert_eq!(
+            presenter.observe_writer_progress(4, 4, Instant::now()),
+            WriterProgress::Flowing
+        );
+        assert_eq!(presenter.blocked_report_deadline(), None);
     }
 
     #[test]

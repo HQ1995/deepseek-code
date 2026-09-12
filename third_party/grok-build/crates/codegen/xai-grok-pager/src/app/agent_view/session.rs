@@ -341,6 +341,7 @@ impl AgentView {
             cancel_turn_buttons: Vec::new(),
             cancel_subagents_preference: None,
             cancel_trigger_hint: None,
+            minimal_cancel_hint_turn: None,
             rewind_state: None,
             rewind_points: None,
             inline_edit: None,
@@ -2214,7 +2215,7 @@ mod status_window_tests {
             attempts: 1,
             confirmed: false,
             cancel_subagents: true,
-            trigger: crate::app::actions::CancelTrigger::Esc,
+            trigger: crate::app::actions::CancelTrigger::DashboardStop,
         });
         agent.start_turn_boundary(None);
         assert!(agent.session.state.is_turn_running());

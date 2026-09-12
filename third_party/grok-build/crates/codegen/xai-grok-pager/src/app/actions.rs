@@ -1224,10 +1224,7 @@ impl PlanModeKind {
 /// as a stop, so new variants need no shell change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelTrigger {
-    /// Wire value `"esc"` (bare Esc mid-turn cancel in minimal / non-vim
-    /// mode, plus the Esc cancel-retry while TurnCancelling).
-    Esc,
-    /// `Ctrl+C` pressed (the default cancel keybinding).
+    /// `Ctrl+C` pressed (the default cancel keybinding). A bare Esc never cancels; it only hints at this key.
     CtrlC,
     /// The on-screen cancel button was clicked.
     Mouse,
@@ -1239,7 +1236,6 @@ impl CancelTrigger {
     /// Snake_case wire string sent as `_meta.cancelTrigger`.
     pub fn as_wire_str(self) -> &'static str {
         match self {
-            Self::Esc => "esc",
             Self::CtrlC => "ctrl_c",
             Self::Mouse => "mouse",
             Self::DashboardStop => "dashboard_stop",

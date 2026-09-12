@@ -481,7 +481,10 @@ fn compute_normalized_blocking(
             });
         }
     };
-    if buf.len() >= original_bytes {
+    // The downscale is the point for an over-side image even when the result is
+    // not smaller in bytes: keeping the original leaves it over the clamp, and
+    // the API rejects it (400 on many-image requests).
+    if !exceeded_dimensions && buf.len() >= original_bytes {
         return Ok(NormalizedEntry::Unchanged {
             bytes: Bytes::from(raw_bytes),
             mime: Cow::Borrowed(orig_mime),

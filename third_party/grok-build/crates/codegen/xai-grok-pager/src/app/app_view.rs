@@ -1989,33 +1989,6 @@ impl AppView {
             None
         }
     }
-    /// App-level Esc owners that consume the key BEFORE any agent input
-    /// routing — the render-boundary decision handed to the agent hint path
-    /// (`AgentView::draw` → `esc_would_cancel_turn`) so a hint bar rendered
-    /// beneath one of these never advertises `Esc cancel`.
-    ///
-    /// Mirrors `handle_input`'s intercepts, in their order: the focused dev
-    /// tracing pane (step 1a consumes all non-global keys), the cloud modal
-    /// (step 1d), the import-Claude modal (agent-arm intercept),
-    /// [`Self::voice_esc_outcome`] — listening OR pending cold-start, the
-    /// handler's actual condition, not the render-only recording flag — and
-    /// the dashboard's attached-agent popup (dashboard-arm intercept). Keep
-    /// this list in lockstep with those intercepts when adding a top-level
-    /// Esc owner.
-    pub(crate) fn esc_owned_before_agent(&self) -> bool {
-        if matches!(self.active_view, ActiveView::AgentDashboard)
-            && self
-                .dashboard
-                .as_ref()
-                .and_then(|d| d.attached_agent)
-                .is_some_and(|id| self.agents.contains_key(&id))
-        {
-            return true;
-        }
-        self.import_claude_modal.is_some()
-            || self.voice_listening()
-            || self.voice_state.pending_cold_start()
-    }
     /// Commit interim on real send keys only (not multiline bare Enter).
     fn maybe_commit_voice_interim_before_submit_key(&mut self, key: &crossterm::event::KeyEvent) {
         if self.registry.matches_id(ActionId::InterjectPrompt, key) {
@@ -4534,7 +4507,6 @@ impl AppView {
         let voice_interim = voice_on_surface
             .then(|| self.voice_interim().map(str::to_owned))
             .flatten();
-        let esc_owned_before_agent = self.esc_owned_before_agent();
         let scroll_debug_panel = self.scroll_debug_panel();
         let dev_fps_rows = self.dev_fps_rows();
         let fps_overlay = self.fps_hud.overlay(dev_fps_rows);
@@ -4960,7 +4932,6 @@ impl AppView {
                                     voice_available,
                                     voice_listening,
                                     voice_interim: voice_interim.as_deref(),
-                                    esc_owned_before_agent,
                                     preset_label: self
                                         .persona_override
                                         .as_deref()
@@ -5086,7 +5057,6 @@ impl AppView {
                                                     false,
                                                     link_spans,
                                                     AppRenderParams {
-                                                        esc_owned_before_agent,
                                                         preset_label: self
                                                             .persona_override
                                                             .as_deref()

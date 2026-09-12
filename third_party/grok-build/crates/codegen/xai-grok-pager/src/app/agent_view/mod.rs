@@ -26,27 +26,23 @@
 //!       on an empty prompt) re-enters this level and runs CancelTurn.
 //!   → 3. Esc policy (try_handle_esc_policy) on Prompt or Scrollback only,
 //!       after overlays/dropdowns/selection returned Changed / stole Esc:
-//!       turn running, gate ON (`esc_cancels_turn`: minimal mode OR
-//!         `[ui].vim_mode` off) → CancelTurn (even with a draft; the draft
-//!         is preserved, unlike Ctrl+C's clear-first gesture)
-//!       turn running, gate OFF (fullscreen vim mode) → Changed (swallow)
-//!       turn cancelling → CancelTurn in every mode (retry lost ack;
-//!         Ctrl+C escalates to Quit)
+//!       turn running or cancelling, any mode → Changed (swallow) plus a
+//!         "Press Ctrl+C to cancel the turn" hint; Esc never cancels, and
+//!         a draft is always preserved (Ctrl+C's clear-first gesture is the
+//!         only way to clear)
 //!       idle + non-empty prompt, prompt pane only → ArmPending ClearPrompt (2× within 800ms, hint)
 //!       idle + empty + messages, either pane (Normal composer mode, no
 //!         needs-input overlay pending, no open history search, and not
-//!         within ESC_CANCEL_REWIND_GRACE of an Esc-fired cancel) →
+//!         within ESC_CANCEL_REWIND_GRACE of a mid-turn Esc) →
 //!         ArmPending RewindShowPicker (2×, silent)
 //!       idle otherwise (scrollback-pane draft / latent mode / pending overlay /
-//!         open history search / post-cancel grace, or empty + no messages) →
+//!         open history search / mid-turn Esc grace, or empty + no messages) →
 //!         Changed (swallow Esc; not FocusScrollback)
 //!   → 4. return Unchanged → bubbles to app_view for global actions (quit)
 //! ```
 //!
-//! The mid-turn cancel is the only Esc-policy branch gated on `[ui].vim_mode`
-//! (scrollback nav); everything else — and all of it with respect to
-//! `[ui].simple_mode` (prompt editor) — is mode-independent. Tab remains
-//! leave-prompt in both modes.
+//! No Esc-policy branch depends on `[ui].vim_mode` (scrollback nav) or
+//! `[ui].simple_mode` (prompt editor). Tab remains leave-prompt in both modes.
 //!
 //! ## Future: data/view split
 //!
@@ -1492,12 +1488,15 @@ pub struct AgentView {
     /// agent and persist to `[ui].cancel_subagents_on_turn_cancel`; when unset,
     /// cancel falls back to that UI/config field, then the prompt panel.
     pub(crate) cancel_subagents_preference: Option<bool>,
-    /// What gesture triggered the pending turn-cancel (Ctrl+C / mouse; Esc
-    /// via the mid-turn cancel in minimal / non-vim mode and the cancel-retry
-    /// path while TurnCancelling).
-    /// Set by the key/mouse handler, consumed by `do_cancel_turn` / the
-    /// cancel-retry path so `session/cancel` carries `_meta.cancelTrigger`.
+    /// What gesture triggered the pending turn-cancel (Ctrl+C / mouse /
+    /// dashboard stop). Set by the key/mouse handler, consumed by
+    /// `do_cancel_turn` / the cancel-retry path so `session/cancel` carries
+    /// `_meta.cancelTrigger`.
     pub(crate) cancel_trigger_hint: Option<crate::app::actions::CancelTrigger>,
+    /// User turn (`scrollback.turn_count()`) that already got the mid-turn
+    /// "press Ctrl+C" hint in minimal mode, which renders that hint as a
+    /// scrollback system line instead of a toast. One line per user turn.
+    pub(crate) minimal_cancel_hint_turn: Option<usize>,
     pub(crate) rewind_state: Option<crate::views::rewind::RewindState>,
     pub(crate) rewind_points: Option<Vec<crate::views::rewind::RewindPointInfo>>,
     /// In-place edit of a previous user prompt. See `inline_edit.rs`.

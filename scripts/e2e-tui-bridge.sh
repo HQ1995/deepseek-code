@@ -1047,6 +1047,15 @@ echo "[tui] preset selection preserves the active turn"
 clear_prompt
 send_line "exercise active preset selection"
 wait_frame "active preset probe" 'PRESET_SWITCH_RUNNING' 300
+# Upstream 1.0.24: a bare Esc mid-turn reminds instead of cancelling, and must
+# leave both the running turn and the transcript intact.
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Escape
+wait_frame "mid-turn Esc reminder" 'Press Ctrl\+[cC] to cancel the turn' 100
+sleep 2
+capture
+grep -q 'PRESET_SWITCH_RUNNING' "$FRAME" || fail "mid-turn Esc discarded the active transcript"
+grep -q '\[stop\]' "$FRAME" || fail "mid-turn Esc cancelled the running turn"
+cp "$FRAME" "$OUT/esc-mid-turn-$RUN_ID.txt"
 send_line "/preset"
 wait_frame "busy preset picker" 'Presets'
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Home Down Enter

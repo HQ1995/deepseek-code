@@ -120,6 +120,15 @@ impl AgentView {
         self.expect_send_now_cancel = Some(prompt_id);
     }
 
+    /// Whether an armed send-now is still waiting for the shell to hand the turn
+    /// over: the session reads idle for the frames between that cancel landing
+    /// and the new prompt starting, which flickers the status row.
+    pub(crate) fn send_now_awaiting_current(&self) -> bool {
+        self.expect_send_now_cancel
+            .as_deref()
+            .is_some_and(|id| self.session.current_prompt_id.as_deref() != Some(id))
+    }
+
     /// Clear cancel-marker + no-entry-top pin (failure / interactive cancel / reload).
     pub(crate) fn clear_send_now_expectation(&mut self) {
         self.expect_send_now_cancel = None;
@@ -747,6 +756,28 @@ mod queue_edit_routing_tests {
 
     fn delete_key() -> KeyEvent {
         KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn send_now_awaiting_current_follows_prompt_id_convergence() {
+        let mut agent = make_running_agent();
+        assert!(!agent.send_now_awaiting_current(), "nothing armed");
+
+        agent.arm_send_now_expectation("p-send-now".into());
+        assert!(
+            agent.send_now_awaiting_current(),
+            "armed: the old turn is still current"
+        );
+
+        agent.session.current_prompt_id = Some("p-send-now".into());
+        assert!(
+            !agent.send_now_awaiting_current(),
+            "handed off: the replacement prompt is current"
+        );
+
+        agent.clear_send_now_expectation();
+        agent.session.current_prompt_id = None;
+        assert!(!agent.send_now_awaiting_current(), "cleared");
     }
 
     #[test]

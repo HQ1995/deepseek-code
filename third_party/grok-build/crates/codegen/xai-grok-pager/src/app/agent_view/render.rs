@@ -47,12 +47,6 @@ pub struct AppRenderParams<'a> {
     pub voice_listening: bool,
     /// Interim transcript for the prompt overlay while dictating.
     pub voice_interim: Option<&'a str>,
-    /// App-level Esc ownership snapshot — single producer
-    /// `AppView::esc_owned_before_agent` (voice listening / cold-start,
-    /// focused dev tracing pane, cloud / import-Claude modals, dashboard
-    /// attached-agent popup). Feeds the hint path so the bar never
-    /// advertises `Esc cancel` while an app-level owner would consume it.
-    pub esc_owned_before_agent: bool,
     /// Current agent preset label shown in the prompt footer: the picked
     /// persona when set, otherwise the roster default "minimal".
     pub preset_label: &'a str,
@@ -285,16 +279,8 @@ impl AgentView {
     /// draw returns early and the child renders its own bar; Current on the parent
     /// still reflects parent context (documented limitation, pre-existing before
     /// this change).
-    ///
-    /// `esc_owned_before_agent`: app-level Esc ownership snapshot
-    /// (`AppView::esc_owned_before_agent`); the draw path passes its param
-    /// of the same name.
-    pub fn current_shortcut_hints(
-        &self,
-        registry: &ActionRegistry,
-        esc_owned_before_agent: bool,
-    ) -> Vec<HintItem> {
-        match self.shortcuts_bar_content(registry, esc_owned_before_agent) {
+    pub fn current_shortcut_hints(&self, registry: &ActionRegistry) -> Vec<HintItem> {
+        match self.shortcuts_bar_content(registry) {
             ShortcutsBarContent::Surface(hints) | ShortcutsBarContent::Pane(hints) => hints,
             ShortcutsBarContent::Hidden => vec![],
         }
@@ -312,11 +298,7 @@ impl AgentView {
     }
     /// The bar names the surface the keys actually reach, so it asks
     /// [`AgentView::key_owner`] rather than keeping an order of its own.
-    fn shortcuts_bar_content(
-        &self,
-        registry: &ActionRegistry,
-        esc_owned_before_agent: bool,
-    ) -> ShortcutsBarContent {
+    fn shortcuts_bar_content(&self, registry: &ActionRegistry) -> ShortcutsBarContent {
         use crate::views::shortcuts_bar::HintItem;
         match self.key_owner() {
             KeyOwner::LineViewer => self.line_viewer_bar(),
@@ -349,7 +331,7 @@ impl AgentView {
                     .unwrap_or_default(),
             ),
             KeyOwner::Pane => {
-                ShortcutsBarContent::Pane(self.normal_pane_hints(registry, esc_owned_before_agent))
+                ShortcutsBarContent::Pane(self.normal_pane_hints(registry))
             }
         }
     }
@@ -377,11 +359,7 @@ impl AgentView {
     /// Shared "normal pane" hints: flag computation + `build_hints` + queue hint.
     /// Single source of truth for the two former duplicated blocks in
     /// `current_shortcut_hints` and `draw`.
-    fn normal_pane_hints(
-        &self,
-        registry: &ActionRegistry,
-        esc_owned_before_agent: bool,
-    ) -> Vec<HintItem> {
+    fn normal_pane_hints(&self, registry: &ActionRegistry) -> Vec<HintItem> {
         let fold_label = self.selected_fold_label();
         let is_editing = matches!(self.prompt_mode, PromptMode::EditingQueued { .. });
         let selected_entry = self
@@ -513,7 +491,6 @@ impl AgentView {
             self.is_subagent_view,
             (self.session.state.is_turn_running() || self.wake_turn_active())
                 && !self.renders_parked(),
-            self.esc_would_cancel_turn(esc_owned_before_agent),
             !self.visible_queue_is_empty(),
             selected_is_user_prompt,
             selected_is_agent_message,
@@ -892,7 +869,6 @@ impl AgentView {
             voice_available,
             voice_listening,
             voice_interim,
-            esc_owned_before_agent,
             preset_label,
             status_line,
         } = app_params;
@@ -1316,8 +1292,18 @@ impl AgentView {
         let watchers = self.watchers();
         let parked = self.renders_parked();
         let wake_display_state = self.wake_display_state();
+        let display_state = wake_display_state.unwrap_or(&self.session.state);
+        // A send-now awaiting the shell's hand-off reads idle for a few frames
+        // (cancel landed, replacement prompt not running yet): keep the status
+        // row on "running" until the prompt ids converge, or the row blinks.
+        let send_now_gap = self.send_now_awaiting_current() && display_state.is_idle();
+        let status_state = if send_now_gap {
+            crate::app::agent::AgentState::TurnRunning
+        } else {
+            display_state.clone()
+        };
         let turn_status_height = if turn_status::should_show(
-            wake_display_state.unwrap_or(&self.session.state),
+            &status_state,
             drain_blocked,
             self.mcp_init_progress.as_ref(),
             watchers,
@@ -2179,7 +2165,8 @@ impl AgentView {
                 height: layout.turn_status.height,
             };
             let tick = self.scrollback.animation_tick();
-            let activity = self.resolve_turn_activity();
+            let live = self.resolve_turn_activity();
+            let activity = if send_now_gap { None } else { live };
             if crate::acp::tracker::is_phase_transition(
                 self.last_activity.as_ref(),
                 activity.as_ref(),
@@ -2266,7 +2253,7 @@ impl AgentView {
                     buf,
                     turn_area,
                     turn_status::TurnStatusArgs {
-                        state: wake_display_state.unwrap_or(&self.session.state),
+                        state: &status_state,
                         activity: &activity,
                         turn_elapsed: self.turn_elapsed(),
                         activity_started_at: self.activity_started_at,
@@ -3391,7 +3378,7 @@ impl AgentView {
             self.pane_areas = layout.pane_areas();
             return (None, crate::terminal::overlay::clear().map(Into::into));
         }
-        match self.shortcuts_bar_content(registry, esc_owned_before_agent) {
+        match self.shortcuts_bar_content(registry) {
             ShortcutsBarContent::Hidden => {}
             ShortcutsBarContent::Surface(hints) => {
                 ShortcutsBar::new(&hints)

@@ -421,18 +421,18 @@ fn cancel_turn_in_finished_subagent_view_falls_through_to_root() {
 
 #[test]
 fn cancel_turn_forwards_trigger_hint_to_effect() {
-    // The key/mouse producer sets `cancel_trigger_hint` (here ESC) before
+    // The key/mouse producer sets `cancel_trigger_hint` (here Ctrl+C) before
     // dispatching CancelTurn; `do_cancel_turn` must forward it onto
     // `Effect::CancelTurn.trigger` (→ `_meta.cancelTrigger`) and consume it.
-    // This is the same plumbing the Ctrl+C end-to-end test exercises; only
-    // the `CancelTrigger` value differs across producers (esc/ctrl_c/mouse).
+    // This is the same plumbing each producer exercises; only the
+    // `CancelTrigger` value differs (ctrl_c/mouse/dashboard_stop).
     use crate::app::actions::CancelTrigger;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
-        agent.cancel_trigger_hint = Some(CancelTrigger::Esc);
+        agent.cancel_trigger_hint = Some(CancelTrigger::CtrlC);
     }
 
     let effects = dispatch(Action::CancelTurn, &mut app);
@@ -440,7 +440,7 @@ fn cancel_turn_forwards_trigger_hint_to_effect() {
     assert!(matches!(
         &effects[0],
         Effect::CancelTurn {
-            trigger: Some(CancelTrigger::Esc),
+            trigger: Some(CancelTrigger::CtrlC),
             ..
         }
     ));
@@ -652,7 +652,7 @@ fn confirmed_stop_retry_does_not_rearm_auto_resend() {
             .is_some_and(|p| p.confirmed)
     );
 
-    // Gesture retry (hint set, as `[stop]` / Esc do).
+    // Gesture retry (hint set, as `[stop]` does).
     app.agents.get_mut(&id).unwrap().cancel_trigger_hint = Some(CancelTrigger::Mouse);
     let effects = dispatch(Action::CancelTurn, &mut app);
     assert!(
@@ -696,12 +696,12 @@ fn hintless_retry_replays_recorded_trigger() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
-        agent.cancel_trigger_hint = Some(CancelTrigger::Esc);
+        agent.cancel_trigger_hint = Some(CancelTrigger::CtrlC);
     }
     assert!(matches!(
         dispatch(Action::CancelTurn, &mut app).as_slice(),
         [Effect::CancelTurn {
-            trigger: Some(CancelTrigger::Esc),
+            trigger: Some(CancelTrigger::CtrlC),
             ..
         }]
     ));
@@ -711,7 +711,7 @@ fn hintless_retry_replays_recorded_trigger() {
         matches!(
             effects.as_slice(),
             [Effect::CancelTurn {
-                trigger: Some(CancelTrigger::Esc),
+                trigger: Some(CancelTrigger::CtrlC),
                 ..
             }]
         ),
@@ -734,7 +734,7 @@ fn cancel_turn_stops_compact_even_with_stale_wake_marker() {
             prompt_id: "task-completed-bg1".into(),
             cancel_sent: false,
         });
-        agent.cancel_trigger_hint = Some(CancelTrigger::Esc);
+        agent.cancel_trigger_hint = Some(CancelTrigger::CtrlC);
     }
 
     let effects = dispatch(Action::CancelTurn, &mut app);
@@ -750,7 +750,7 @@ fn cancel_turn_stops_compact_even_with_stale_wake_marker() {
                 command: AgentCommand::Compact,
             }
         ),
-        "Esc during /compact must cancel compact, not only the stale wake, got {:?}",
+        "Ctrl+C during /compact must cancel compact, not only the stale wake, got {:?}",
         agent.session.state
     );
 }
@@ -770,7 +770,7 @@ fn cancel_after_local_send_during_wake_does_not_arm_resend() {
         });
         agent.start_turn_boundary(Some("user-1"));
         agent.session.current_prompt_id = Some("user-1".into());
-        agent.cancel_trigger_hint = Some(CancelTrigger::Esc);
+        agent.cancel_trigger_hint = Some(CancelTrigger::CtrlC);
     }
 
     let effects = dispatch(Action::CancelTurn, &mut app);
@@ -778,7 +778,7 @@ fn cancel_after_local_send_during_wake_does_not_arm_resend() {
         matches!(
             effects.as_slice(),
             [Effect::CancelTurn {
-                trigger: Some(CancelTrigger::Esc),
+                trigger: Some(CancelTrigger::CtrlC),
                 rewind_prompt_id: None,
                 ..
             }]
@@ -819,7 +819,7 @@ fn stale_cancel_resend_clears_once_pane_is_idle() {
             attempts: 3,
             confirmed: true,
             cancel_subagents: false,
-            trigger: CancelTrigger::Esc,
+            trigger: CancelTrigger::CtrlC,
         });
     }
     assert!(reconcile_overdue_cancels(&mut app).is_none());
@@ -1560,7 +1560,7 @@ fn cancel_turn_without_overlay_while_idle_is_noop_even_with_running_child() {
 fn cancel_turn_when_already_cancelling_resends_cancel() {
     // A cancel that was sent but never resolved (lost notification or
     // lost turn-end response) used to make every further
-    // Esc a silent no-op, permanently stranding the pane on
+    // Ctrl+C a silent no-op, permanently stranding the pane on
     // "Cancelling…". Cancelling again must RE-SEND the (idempotent)
     // cancel instead.
     let mut app = test_app_with_agent();
@@ -2144,8 +2144,8 @@ fn cancel_rewind_removes_all_combined_segment_blocks() {
 }
 
 /// A cancel landing before first server activity must NOT rewind the stashed
-/// in-flight prompt over a NEWER composer draft. Esc (and the mouse stop /
-/// palette cancel) fire with the draft intact — unlike keyboard Ctrl+C,
+/// in-flight prompt over a NEWER composer draft. The mouse stop and the
+/// palette cancel fire with the draft intact — unlike keyboard Ctrl+C,
 /// which only cancels on an empty prompt — so the no-output rewind falls back
 /// to the standard cancel and the draft survives.
 #[test]

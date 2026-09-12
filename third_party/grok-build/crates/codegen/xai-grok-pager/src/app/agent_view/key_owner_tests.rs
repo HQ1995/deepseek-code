@@ -100,7 +100,7 @@ fn permission_key(agent: &mut AgentView, code: KeyCode, modifiers: KeyModifiers)
 
 fn hint_labels(agent: &AgentView) -> Vec<String> {
     agent
-        .current_shortcut_hints(&ActionRegistry::defaults(), false)
+        .current_shortcut_hints(&ActionRegistry::defaults())
         .iter()
         .map(|hint| hint.label.to_string())
         .collect()
@@ -313,7 +313,7 @@ fn a_parked_card_contributes_one_route_back() {
     assert!(hint_labels(&agent).contains(&"next answer".to_string()));
 
     agent.active_pane = AgentPane::Scrollback;
-    let hints = agent.current_shortcut_hints(&ActionRegistry::defaults(), false);
+    let hints = agent.current_shortcut_hints(&ActionRegistry::defaults());
     let labels: Vec<String> = hints.iter().map(|h| h.label.to_string()).collect();
     assert!(
         !labels.contains(&"next answer".to_string()),

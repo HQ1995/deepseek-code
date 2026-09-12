@@ -310,6 +310,20 @@ after entering the namespace to handle older util-linux launchers.
   - `bb7f39d585`: scanned wrap fragments share an OSC8 ID, scanner IDs avoid
     Markdown IDs, and scanning fills uncovered continuation rows. Preserve
     the local bounded cursor-position startup in `xai-ratatui-inline`.
+  - `bb7f39d585`: the status row stays on "running" while an armed send-now
+    awaits the shell's hand-off (`AgentView::send_now_awaiting_current`), so a
+    double Enter no longer flickers the row between idle and running.
+  - `75810042ca` (1.0.19 changelog: mid-turn freezes when the terminal stops
+    reading output): `Presenter::observe_writer_progress` tracks the writer
+    watermark, gates draws while the writer trails its queue, and reports a
+    stall past 5s as `term.writer.blocked` / recovery as
+    `term.writer.recovered` in the unified log.
+  - `75810042ca` (1.0.24): Esc no longer cancels a running turn; the bar keeps
+    a conservative hint because Esc's owner stays app-level. Ctrl+C cancels.
+  - 1.0.13 image clamp: an over-2000px image is re-encoded even when the
+    downscale is not smaller in bytes, so a byte-efficient 2048px export can
+    no longer brick many-image requests; the 5s stall threshold and the clamp
+    carry unit coverage (`presenter_*`, `oversize_dimension_*`).
   Relevant upstream unit/ACP/terminal regressions are retained. Product PTY
   checks in `scripts/e2e-tui-bridge.sh` exercise CRLF/manual submission,
   fullscreen editor restoration, source-preserving copy and OSC8 output.

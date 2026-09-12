@@ -1040,3 +1040,47 @@ async fn seven_by_eight_is_rejected() {
     assert_eq!(result.dropped.len(), 1);
     assert!(result.dropped[0].contains("7×8"));
 }
+
+/// Regression: a byte-efficient image over the 2000px side clamp (e.g. a 2048px
+/// export) whose downscale is not smaller in bytes. The keep-original branch
+/// returned the still-oversized original, which the API rejects on many-image
+/// requests, so the side clamp must win over the byte comparison.
+#[tokio::test]
+async fn oversize_dimension_but_byte_efficient_is_still_downscaled() {
+    use image::{ImageBuffer, Rgb};
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(2048, 1000, |x, y| {
+        Rgb([
+            (x.wrapping_mul(17).wrapping_add(y)) as u8,
+            (x.wrapping_mul(31).wrapping_add(y.wrapping_mul(7))) as u8,
+            (x.wrapping_add(y).wrapping_mul(13)) as u8,
+        ])
+    });
+    let mut raw = Vec::new();
+    JpegEncoder::new_with_quality(&mut raw, 20)
+        .encode_image(&DynamicImage::ImageRgb8(img))
+        .expect("encode test JPEG");
+    assert!(
+        raw.len() <= MAX_IMAGE_BYTES,
+        "fixture must be under the byte cap to isolate the dimension path ({} B)",
+        raw.len()
+    );
+    let content = ImageContent::new(
+        base64::engine::general_purpose::STANDARD.encode(&raw),
+        "image/jpeg",
+    );
+    let cache = fresh_cache();
+    let Outcome::Compressed { content: out, .. } = normalize_one_in(content, 1, false, &cache).await
+    else {
+        panic!("over-side image must be re-encoded, not kept as-is");
+    };
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&out.data)
+        .unwrap();
+    let decoded_img = image::load_from_memory(&decoded).expect("normalized image decodes");
+    assert!(
+        decoded_img.width() <= MAX_ENCODE_SIDE_PX && decoded_img.height() <= MAX_ENCODE_SIDE_PX,
+        "normalized image must fit the {MAX_ENCODE_SIDE_PX}px clamp, got {}x{}",
+        decoded_img.width(),
+        decoded_img.height()
+    );
+}

@@ -2404,7 +2404,7 @@ mod question_answer_focus_tests {
     }
     fn hint_labels(agent: &AgentView) -> Vec<String> {
         agent
-            .current_shortcut_hints(&ActionRegistry::defaults(), false)
+            .current_shortcut_hints(&ActionRegistry::defaults())
             .iter()
             .map(|hint| hint.label.to_string())
             .collect()
