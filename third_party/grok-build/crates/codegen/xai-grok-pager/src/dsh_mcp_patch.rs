@@ -115,11 +115,14 @@ pub fn remove_server(text: &str, name: &str) -> (String, bool) {
     let Some(entry_idx) = find_entry(&lines, name) else {
         return (text.to_string(), false);
     };
-    // Walk up to the enclosing top-level `- insert:` line.
+    // Only the nearest top-level item can own this entry. Do not reach
+    // backwards across another patch operation to a previous insert.
     let mut insert_idx = None;
     for k in (0..=entry_idx).rev() {
-        if leading_spaces(lines[k]) == 0 && lines[k].trim_start().starts_with("- insert") {
-            insert_idx = Some(k);
+        if leading_spaces(lines[k]) == 0 && lines[k].trim_start().starts_with("- ") {
+            if lines[k].trim_start().starts_with("- insert:") {
+                insert_idx = Some(k);
+            }
             break;
         }
     }
@@ -129,9 +132,20 @@ pub fn remove_server(text: &str, name: &str) -> (String, bool) {
         return (join_excluding(&lines, entry_idx, end), true);
     };
     // The block spans from `insert_idx` to the next top-level entry.
-    let end = (insert_idx + 1..lines.len())
-        .find(|&k| leading_spaces(lines[k]) == 0)
-        .unwrap_or(lines.len());
+    let end = end_of_item(&lines, insert_idx);
+    // A hand-edited insert may contain other plugins or MCP servers.
+    // Remove the wrapper only when this is its sole child entry.
+    let entry_indent = leading_spaces(lines[entry_idx]);
+    if (insert_idx + 1..end).any(|k| {
+        k != entry_idx
+            && leading_spaces(lines[k]) == entry_indent
+            && lines[k].trim_start().starts_with("- ")
+    }) {
+        return (
+            join_excluding(&lines, entry_idx, end_of_item(&lines, entry_idx)),
+            true,
+        );
+    }
     (join_excluding(&lines, insert_idx, end), true)
 }
 
@@ -311,6 +325,21 @@ mod tests {
     const ONE: &str = "- insert:\n    - id: mcp-client-httptest\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        transport: 'stdio'\n        serverName: httptest\n        command: 'python3'\n        args: ['/tmp/mcp-stdio-test.py']\n        failOnStartupError: true\n";
 
     const TWO: &str = "- id: system-prompt\n  config:\n    persona: 'x'\n\n- insert:\n    - id: mcp-client-a\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        transport: 'stdio'\n        serverName: a\n        command: 'py'\n        failOnStartupError: true\n\n- insert:\n    - id: mcp-client-b\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        transport: 'streamable-http'\n        serverName: b\n        url: 'https://x/mcp'\n        failOnStartupError: true\n";
+
+    #[test]
+    fn remove_keeps_insert_siblings_and_skips_blank_lines() {
+        let first = "    - id: mcp-client-a\n      name: '@deepseek-ai/dsh-mcp-client'\n\n      config:\n        serverName: a\n";
+        let sibling = "    - id: unrelated\n      config: !!js process.env.VALUE\n";
+        let doc = format!("- insert:\n{first}{sibling}");
+        assert_eq!(
+            remove_server(&doc, "a"),
+            (format!("- insert:\n{sibling}"), true)
+        );
+        assert_eq!(
+            as_document(&remove_server(&format!("- insert:\n{first}"), "a").0),
+            "[]\n"
+        );
+    }
 
     #[test]
     fn lists_both_servers() {

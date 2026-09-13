@@ -10,11 +10,22 @@ if (lane === 'hold') {
     await new Promise(resolve => process.once('message', resolve))
   })
 } else {
-  if (lane === 'A') {
+  const stageName = ['crash', 'rollback-failure'].includes(lane) ? '.dscode-update-' + lane : lane
+  if (lane === 'rollback-failure') {
+    const rename = fs.renameSync
+    fs.renameSync = (from, to) => {
+      if ([join(root, stageName, 'profile/runtime'), join(root, stageName, 'backup/node_modules')].includes(from)) {
+        throw new Error('fixture storage failure')
+      }
+      return rename(from, to)
+    }
+    syncBuiltinESMExports()
+  }
+  if (lane === 'A' || lane === 'crash') {
     const rename = fs.renameSync
     fs.renameSync = (from, to) => {
       rename(from, to)
-      if (from !== join(root, lane, 'profile/node_modules')) return
+      if (from !== (lane === 'crash' ? join(root, 'active/node_modules') : join(root, lane, 'profile/node_modules'))) return
       fs.writeFileSync(join(root, 'paused'), '')
       const flag = new Int32Array(new SharedArrayBuffer(4))
       const deadline = Date.now() + 10000
@@ -25,5 +36,5 @@ if (lane === 'hold') {
     }
     syncBuiltinESMExports()
   }
-  await commitInstallation(join(root, 'active'), join(root, lane), ['node_modules', 'runtime', 'bin/dscode', 'config.toml'])
+  await commitInstallation(join(root, 'active'), join(root, stageName), ['node_modules', 'runtime', 'bin/dscode', 'config.toml'])
 }

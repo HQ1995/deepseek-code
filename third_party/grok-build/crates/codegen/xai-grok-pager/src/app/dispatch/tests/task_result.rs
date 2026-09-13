@@ -57,8 +57,10 @@ fn native_goal_result_is_separate_from_live_assistant_and_never_settles_turn() {
             let agent = app.agents.get_mut(&id).unwrap();
             assert_eq!(agent.scrollback.len(), before + 1);
             let control_index = agent.scrollback.index_of_id(live_entry).unwrap() - 1;
-            assert!(matches!(&agent.scrollback.entry(control_index).unwrap().block,
-                RenderBlock::System(block) if block.text == expected));
+            assert!(
+                matches!(&agent.scrollback.entry(control_index).unwrap().block,
+                RenderBlock::System(block) if block.text == expected)
+            );
             let entry = agent.scrollback.get_by_id(live_entry).unwrap();
             assert!(entry.is_running);
             assert!(
@@ -90,8 +92,10 @@ fn native_goal_result_is_separate_from_live_assistant_and_never_settles_turn() {
                 matches!(&agent.scrollback.get_by_id(live_entry).unwrap().block,
                 RenderBlock::AgentMessage(message) if message.text() == "live assistant continues")
             );
-            assert!(matches!(&agent.scrollback.entry(control_index).unwrap().block,
-                RenderBlock::System(block) if block.text == expected));
+            assert!(
+                matches!(&agent.scrollback.entry(control_index).unwrap().block,
+                RenderBlock::System(block) if block.text == expected)
+            );
         }
     }
 }
@@ -104,17 +108,24 @@ fn native_goal_result_keeps_live_output_visible_in_both_arrival_orders() {
         let agent = app.agents.get_mut(&id).unwrap();
         let session_id = agent.session.session_id.clone().unwrap();
         agent.native_session_running = true;
-        agent.scrollback.push_block(RenderBlock::user_prompt("previous turn"));
-        agent.scrollback.push_block(RenderBlock::system("old output\n".repeat(30)));
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("previous turn"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::system("old output\n".repeat(30)));
         agent.scrollback.prepare_layout(80, 8);
         agent.scrollback.goto_bottom();
         for complete in [result_first, !result_first] {
             if complete {
-                dispatch(Action::TaskComplete(TaskResult::SessionCommandComplete {
-                    agent_id: id,
-                    session_id: session_id.clone(),
-                    result: Ok("Goal created\n".repeat(12)),
-                }), &mut app);
+                dispatch(
+                    Action::TaskComplete(TaskResult::SessionCommandComplete {
+                        agent_id: id,
+                        session_id: session_id.clone(),
+                        result: Ok("Goal created\n".repeat(12)),
+                    }),
+                    &mut app,
+                );
             } else {
                 let agent = app.agents.get_mut(&id).unwrap();
                 agent.session.tracker.handle_update(
@@ -128,11 +139,18 @@ fn native_goal_result_keeps_live_output_visible_in_both_arrival_orders() {
         }
         let sb = &mut app.agents.get_mut(&id).unwrap().scrollback;
         sb.prepare_layout(80, 8);
-        let visible = (0..8).filter_map(|row| sb.entry_index_at_screen_row(
-            row, ratatui::layout::Rect::new(0, 0, 80, 8),
-        )).any(|index| matches!(&sb.entry(index).unwrap().block,
-            RenderBlock::AgentMessage(message) if message.text() == "native live output"));
-        assert!(visible, "command result_first={result_first} hid the live response");
+        let visible = (0..8)
+            .filter_map(|row| {
+                sb.entry_index_at_screen_row(row, ratatui::layout::Rect::new(0, 0, 80, 8))
+            })
+            .any(|index| {
+                matches!(&sb.entry(index).unwrap().block,
+            RenderBlock::AgentMessage(message) if message.text() == "native live output")
+            });
+        assert!(
+            visible,
+            "command result_first={result_first} hid the live response"
+        );
     }
 }
 
@@ -1187,7 +1205,7 @@ fn switch_model_complete_success_updates_model_and_pushes_message() {
             agent_id: id,
             model_id: model_id.clone(),
             effort: None,
-            result: Ok(()),
+            result: Ok(None),
             prev_model_id: None,
         }),
         &mut app,
@@ -1222,6 +1240,7 @@ fn switch_model_complete_skips_message_and_persist_when_unchanged() {
         acp::ModelInfo::new(model_id.clone(), "Grok 4.5".to_string()),
     );
     agent.session.models.current = Some(model_id.clone());
+    agent.session.user_model_preference = Some(model_id.clone());
     agent.session.models.reasoning_effort = None;
     agent.session.model_switch_pending = true;
 
@@ -1231,7 +1250,7 @@ fn switch_model_complete_skips_message_and_persist_when_unchanged() {
             agent_id: id,
             model_id: model_id.clone(),
             effort: None,
-            result: Ok(()),
+            result: Ok(None),
             prev_model_id: None,
         }),
         &mut app,
@@ -1285,7 +1304,7 @@ fn switch_model_complete_persists_resolved_effort_from_catalog_meta() {
             agent_id: id,
             model_id: model_id.clone(),
             effort: None, // user typed `/model Blackbox 4.7` with no effort
-            result: Ok(()),
+            result: Ok(None),
             prev_model_id: None,
         }),
         &mut app,
@@ -1351,7 +1370,7 @@ fn switch_to_non_reasoning_model_clears_persisted_effort() {
             agent_id: id,
             model_id: model_id.clone(),
             effort: None,
-            result: Ok(()),
+            result: Ok(None),
             prev_model_id: None,
         }),
         &mut app,
@@ -1593,7 +1612,7 @@ fn same_agent_type_switch_no_modal() {
             agent_id: id,
             model_id: model_b.clone(),
             effort: None,
-            result: Ok(()),
+            result: Ok(None),
             prev_model_id: None,
         }),
         &mut app,
@@ -1636,7 +1655,7 @@ fn switch_model_pending_lifecycle() {
             agent_id: id,
             model_id,
             effort: None,
-            result: Ok(()),
+            result: Ok(None),
             prev_model_id: None,
         }),
         &mut app,

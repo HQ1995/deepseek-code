@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
+import { fixtureEnvironment } from './fixtures/environment.ts'
 
 const defaultTui = fileURLToPath(new URL('../../../third_party/grok-build/target/release/dscode', import.meta.url))
 const tui = resolve(process.env.DSCODE_TUI_BIN ?? defaultTui)
@@ -23,16 +24,14 @@ const run = (home: string, args: string[]): RunResult => {
     cwd: home,
     encoding: 'utf8',
     timeout: 30_000,
-    env: {
-      ...process.env,
-      HOME: home,
+    env: fixtureEnvironment(home, {
       DSH_HOME: join(home, '.dsh'),
       DSC_HOME: profile,
       DSCODE_HOME: profile,
       DSCODE_MANAGED_LAUNCHER: '1',
       DSH_TELEMETRY_DISABLED: '1',
       NO_COLOR: '1',
-    },
+    }),
   })
   return {
     status: result.status,

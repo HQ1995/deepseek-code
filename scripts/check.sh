@@ -16,6 +16,11 @@ for f in "$ROOT"/scripts/*.sh; do
 done
 echo "  bash -n ok"
 
+for f in "$ROOT"/scripts/*.mjs "$ROOT"/bridge/grok-leader/bin/*.mjs; do
+  node --check "$f" || fail "node --check $f"
+done
+echo "  Node script syntax ok"
+
 repo_version="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 package_version="$(node -p "require('$ROOT/bridge/grok-leader/package.json').version")"
 [[ "$repo_version" == "$package_version" ]] \

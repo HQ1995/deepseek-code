@@ -33,7 +33,6 @@ use tokio_util::sync::CancellationToken;
 use xai_grok_pager::app::{
     AgentCmd, Command, HeadlessArgs, LeaderMgmtArgs, LeaderMgmtCommand, LeaderMode,
     LeaderTargetArgs, PagerArgs, join_early_prefetch, resolve_leader_mode, resolve_use_leader,
-    warn_leader_disabled_by_sandbox,
 };
 use xai_grok_pager::app::{WorkspaceMgmtArgs, WorkspaceMgmtCommand, WorkspaceStartArgs};
 use xai_grok_pager::client_identity::PAGER_CLIENT_VERSION;
@@ -1220,7 +1219,9 @@ async fn run_agent_command(
         "leader mode resolved"
     );
     if let Some(profile) = disabled_by_confinement {
-        warn_leader_disabled_by_sandbox(profile);
+        anyhow::bail!(
+            "dscode cannot use TUI sandbox profile '{profile}' with its DSH backend; configure sandboxing in DSH"
+        );
     }
     let managed_install = is_managed_install(
         std::env::current_exe().ok(),
@@ -1862,6 +1863,12 @@ const DSCODE_ENV_ALIASES: [(&str, &str); 3] = [
 /// process; inherited GROK_* values are ignored unless their DSCODE_* alias is
 /// explicitly present.
 fn isolate_dscode_environment() {
+    for (name, _) in std::env::vars_os() {
+        if name.as_encoded_bytes().starts_with(b"GROK_") {
+            // SAFETY: called before threads and config initialization.
+            unsafe { std::env::remove_var(name) };
+        }
+    }
     for (public, internal) in DSCODE_ENV_ALIASES {
         // SAFETY: main calls this before worker threads, config loading, or
         // leader spawning. Tests serialize every mutation of these names.
@@ -2203,9 +2210,21 @@ fn main() {
         std::process::exit(1);
     }
 }
-fn configure_dsh_launch(args: &mut PagerArgs) {
+fn configure_dsh_launch(args: &mut PagerArgs) -> Result<()> {
     // Preserve the user's update preference when selecting the DSH backend.
-    if args.command.is_none() && !args.no_leader {
+    if args.command.is_none() {
+        if args.no_leader {
+            anyhow::bail!("dscode requires the DSH backend; --no-leader is unsupported");
+        }
+        if args
+            .sandbox
+            .as_deref()
+            .is_some_and(|profile| !matches!(profile, "off" | "none"))
+        {
+            anyhow::bail!(
+                "dscode cannot apply a TUI sandbox profile to the external DSH backend; configure sandboxing in DSH"
+            );
+        }
         args.leader = true;
         if args.leader_socket.is_none() {
             args.leader_socket = Some(xai_grok_pager::dsh_leader::default_leader_socket());
@@ -2214,6 +2233,7 @@ fn configure_dsh_launch(args: &mut PagerArgs) {
             args.sandbox = Some("off".into());
         }
     }
+    Ok(())
 }
 
 async fn async_main(args: PagerArgs) -> Result<()> {
@@ -2233,7 +2253,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     // dscode single entry point: every session-producing launch (interactive
     // or headless, but not standalone subcommands) runs against the external
     // dsh leader unless --no-leader is explicit.
-    configure_dsh_launch(&mut args);
+    configure_dsh_launch(&mut args)?;
     if let Some(ref socket) = args.leader_socket {
         unsafe { std::env::set_var(xai_grok_shell::leader::LEADER_SOCKET_ENV, socket) };
     }
@@ -2910,6 +2930,10 @@ mod tests {
             "GROK_CONFIG",
             "GROK_CONFIG_PATH",
             "GROK_CONNECT_UI_TIMEOUT_SECS",
+            "GROK_DISABLE_AUTOUPDATER",
+            "GROK_DEBUG_LOG",
+            "GROK_HOOKS_LOG",
+            "GROK_COMPACTION_MODE",
         ];
         let _restore = EnvRestore::capture(&names);
         // SAFETY: this test holds the shared alias lock and restores all names.
@@ -2920,12 +2944,18 @@ mod tests {
             std::env::set_var("GROK_CONFIG", "ambient-grok-config");
             std::env::set_var("GROK_CONFIG_PATH", "/tmp/ambient-grok.toml");
             std::env::set_var("GROK_CONNECT_UI_TIMEOUT_SECS", "5");
+            for name in &names[6..] {
+                std::env::set_var(name, "ambient");
+            }
         }
 
         isolate_dscode_environment();
         assert_eq!(std::env::var("GROK_CONFIG").unwrap(), r#"{"models":{}}"#);
         assert!(std::env::var_os("GROK_CONFIG_PATH").is_none());
         assert_eq!(std::env::var("GROK_CONNECT_UI_TIMEOUT_SECS").unwrap(), "60");
+        for name in &names[6..] {
+            assert!(std::env::var_os(name).is_none(), "{name}");
+        }
 
         // No public alias means an ambient Grok setting is ignored, not reused.
         unsafe {
@@ -3353,14 +3383,17 @@ mod tests {
     fn dsh_launch_preserves_update_opt_in_and_opt_out() {
         for flags in [vec!["dscode"], vec!["dscode", "--no-auto-update"]] {
             let mut args = PagerArgs::try_parse_from(&flags).unwrap();
-            configure_dsh_launch(&mut args);
+            configure_dsh_launch(&mut args).unwrap();
             assert!(args.leader);
             assert!(args.leader_socket.is_some());
             assert_eq!(args.no_auto_update, flags.len() > 1);
         }
         let mut standalone = PagerArgs::try_parse_from(["dscode", "--no-leader"]).unwrap();
-        configure_dsh_launch(&mut standalone);
-        assert!(!standalone.leader);
+        assert!(configure_dsh_launch(&mut standalone).is_err());
+        let mut confined =
+            PagerArgs::try_parse_from(["dscode", "--sandbox", "restricted"]).unwrap();
+        assert!(configure_dsh_launch(&mut confined).is_err());
+        assert_eq!(confined.sandbox.as_deref(), Some("restricted"));
     }
     use clap::Parser as _;
     /// `grok dashboard` flags the startup hook without forcing leader mode —

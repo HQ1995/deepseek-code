@@ -87,8 +87,8 @@ async function stop() {
 async function boot(resume = false, preset) {
   socket = join(artifacts, `leader-${++generation}.sock`)
   sockets.push(socket)
-  const command = [env.DSCODE_TUI_BIN, ...(resume ? ['--resume', activeId] : ['--session-id', activeId]), ...(preset ? ['--agent', preset] : []), '--model', 'fake-model', '--no-plan', '--always-approve']
-  const commandEnv = { ...baseEnv, DSCODE_SOCKET: socket, DSCODE_LOG: join(artifacts, `leader-${generation}.log`), GROK_DEBUG_LOG: join(artifacts, `tui-${generation}.log`) }
+  const command = [env.DSCODE_TUI_BIN, ...(resume ? ['--resume', activeId] : ['--session-id', activeId]), ...(preset ? ['--agent', preset] : []), '--model', 'fake-model', '--no-plan', '--always-approve', '--no-auto-update', '--debug-file', join(artifacts, `tui-${generation}.log`)]
+  const commandEnv = { ...baseEnv, DSCODE_SOCKET: socket, DSCODE_LOG: join(artifacts, `leader-${generation}.log`) }
   const shell = `cd ${quote(cwd)} && exec ${command.map(quote).join(' ')}`
   await execute('tmux', ['-L', session, '-f', '/dev/null', 'new-session', '-d', '-s', session, '-n', 'main', '-x', '200', '-y', '60', shell],
     { env: commandEnv, timeout: 10000, maxBuffer: 8 * 1024 * 1024 })
@@ -110,7 +110,7 @@ async function runHeadless({ cwd: workdir, preset, prompt, sessionId, resume }) 
   const number = ++headlessCount
   const headlessSocket = join(artifacts, `headless-${number}.sock`)
   sockets.push(headlessSocket)
-  const args = ['-p', prompt, '--output-format', 'json', '--agent', preset, '--model', 'fake-model', '--no-plan', '--always-approve']
+  const args = ['-p', prompt, '--output-format', 'json', '--agent', preset, '--model', 'fake-model', '--no-plan', '--always-approve', '--no-auto-update', '--debug-file', join(artifacts, `headless-${number}.tui.log`)]
   if (resume) args.push('--resume', sessionId)
   else args.push('--session-id', sessionId ?? randomUUID())
   try {
@@ -176,7 +176,7 @@ async function permissionAcceptance() {
   const initial = await waitState(value => value.policy.approval === 'never', 'initial-always-approve')
   assert.equal(initial.permission, 'danger-full-access')
   assert.equal(initial.policy.sandbox, 'danger-full-access')
-  const command = [env.DSCODE_TUI_BIN, '--session-id', peerId, '--model', 'fake-model', '--no-plan', '--always-approve']
+  const command = [env.DSCODE_TUI_BIN, '--session-id', peerId, '--model', 'fake-model', '--no-plan', '--always-approve', '--no-auto-update', '--debug-file', join(artifacts, `tui-${generation}.log`)]
   const shell = `cd ${quote(cwd)} && exec env ${Object.entries({ ...baseEnv, DSCODE_SOCKET: socket }).map(([k,v]) => `${k}=${quote(v)}`).join(' ')} ${command.map(quote).join(' ')}`
   await tmux('new-window', '-d', '-t', session, '-n', 'peer', shell)
   const peerBefore = await waitFor(() => state(peerId), value => value?.policy.approval === 'never', 'second-live-session')

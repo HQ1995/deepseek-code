@@ -14,7 +14,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { createAssistantMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-attachment'
-import { KNOWN_SESSION_EVENT_TYPES, SessionId, SessionLogOffset, SessionSeq, type SessionEvent, type UserMessage } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset, SessionSeq, type SessionEvent, type UserMessage } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import { SessionFormatUnsupportedError, SessionPersistenceRevision, sessionFormatVersionRefusal, type SessionAccess, type SessionHandle, type SessionPersistenceSnapshot } from '@deepseek-ai/dsh-session-persistence'
@@ -557,6 +557,131 @@ const register = (client: ClientHandle): void => {
 }
 
 describe('grok leader over a unix socket', () => {
+  it('control: an ordinary catalog selection keeps the exact route', async () => {
+    const { client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    expect(created.error).toBeUndefined()
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const switched = await c.request(2, 'session/set_model', { sessionId, modelId: 'pi-code' })
+    expect(switched.error).toBeUndefined()
+    expect(mockDefaultModel.saved.at(-1)).toEqual({ provider: 'pi', model: 'pi-code' })
+  })
+
+  it('raw model names containing their provider prefix retain the full name', async () => {
+    const llm = {
+      listProviders: () => [{ id: 'p' }],
+      listModels: async () => [{ id: 'base', name: 'Base' }, { id: 'p:mini', name: 'Tagged mini' }],
+    }
+    const { client: c } = await start({ llm: llm as never })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    expect(created.error).toBeUndefined()
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const switched = await c.request(2, 'session/set_model', { sessionId, modelId: 'p:mini' })
+    expect(switched.error).toBeUndefined()
+    expect(mockDefaultModel.saved.at(-1)).toEqual({ provider: 'p', model: 'p:mini' })
+  })
+
+  it('raw and generated model identifiers stay unique in the wire catalog', async () => {
+    const llm = {
+      listProviders: () => [{ id: 'a' }, { id: 'b' }],
+      listModels: async (provider: string) => provider === 'a'
+        ? [{ id: 'base', name: 'Base' }, { id: 'b:shared', name: 'A tagged model' }, { id: 'shared', name: 'A shared' }]
+        : [{ id: 'shared', name: 'B shared' }],
+    }
+    const { client: c } = await start({ llm: llm as never })
+    register(c)
+    await c.next()
+    const listed = await c.request(1, 'x.ai/models/list', {})
+    expect(listed.error).toBeUndefined()
+    const rows = (listed.result as { availableModels: Array<{ modelId: string }> }).availableModels
+    expect(new Set(rows.map(row => row.modelId)).size).toBe(rows.length)
+  })
+
+  it('a rejected model save does not append an accepted session selection', async () => {
+    const { registry, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    expect(created.error).toBeUndefined()
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const before = agent.session.snapshotEvents()
+    const originalSave = mockDefaultModel.saveSelection
+    mockDefaultModel.saveSelection = async () => { throw new Error('injected settings write failure') }
+    try {
+      const rejected = await c.request(2, 'session/set_model', { sessionId, modelId: 'pi-code' })
+      expect(rejected.error).toBeDefined()
+      expect(agent.session.snapshotEvents()).toEqual(before)
+    } finally {
+      mockDefaultModel.saveSelection = originalSave
+    }
+  })
+
+  const answerQuestion = async (
+    questions: Array<{ id: string; question: string; options?: Array<{ label: string }> }>,
+    response: Record<string, unknown>,
+  ) => {
+    const { pluginCtx, registry, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    expect(created.error).toBeUndefined()
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const answer = pluginCtx.waterfall('user-questions/request', {
+      agent: registry.byId.get(sessionId)!, questions,
+    }, () => Promise.reject(new Error('no answerer')))
+    await waitFor(() => c.all.some(message => message.method === 'x.ai/ask_user_question'))
+    const reverse = c.all.find(message => message.method === 'x.ai/ask_user_question')!
+    c.send({ type: 'acp', payload: JSON.stringify({ jsonrpc: '2.0', id: reverse.id, result: response }) })
+    return await answer
+  }
+
+  it('control: freeform answers survive the Other marker and annotations', async () => {
+    expect(await answerQuestion([{ id: 'q1', question: 'Name?' }], {
+      outcome: 'accepted', answers: { 'Name?': ['Other'] }, annotations: { 'Name?': { notes: 'my custom answer' } },
+    })).toEqual({ answers: [{ id: 'q1', selected: [], custom: 'my custom answer' }] })
+  })
+
+  it('a real option labelled Other remains selected', async () => {
+    expect(await answerQuestion([{ id: 'q1', question: 'Category?', options: [{ label: 'Main' }, { label: 'Other' }] }], {
+      outcome: 'accepted', answers: { 'Category?': ['Other'] },
+    })).toEqual({ answers: [{ id: 'q1', selected: ['Other'] }] })
+  })
+
+  it('equal question text does not lose a distinct question id', async () => {
+    const result = await answerQuestion([
+      { id: 'q1', question: 'Choice?', options: [{ label: 'first' }, { label: 'second' }] },
+      { id: 'q2', question: 'Choice?', options: [{ label: 'first' }, { label: 'second' }] },
+    ], {
+      outcome: 'accepted', answers: { q1: ['first'], q2: ['second'] },
+    })
+    // The TUI returns each stable ID even when the displayed headings match.
+    expect(result.answers.map(answer => answer.id).sort()).toEqual(['q1', 'q2'])
+  })
+
+  it('reports an applied model with a durability warning when session flush fails', async () => {
+    const store = { flush: async () => { throw new Error('history write failed') } }
+    const { client: c, registry } = await start({ sessionsStore: store })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const switched = await c.request(2, 'session/set_model', { sessionId, modelId: 'pi-code' })
+    expect(switched.error).toBeUndefined()
+    expect(switched.result).toMatchObject({ _meta: { persistenceWarning: expect.stringContaining('history write failed') } })
+    expect(registry.byId.get(sessionId)!.session.snapshotEvents().at(-1)).toMatchObject({ type: 'model/selection', data: { provider: 'pi', model: 'pi-code' } })
+  })
+
+  it('rejects ambiguous legacy question keys instead of assigning the answer to the last question', async () => {
+    await expect(answerQuestion([
+      { id: 'q1', question: 'Choice?' }, { id: 'q2', question: 'Choice?' },
+    ], { outcome: 'accepted', answers: { 'Choice?': ['Other'] } })).rejects.toThrow('ambiguous question')
+  })
+
   let harness: LeaderHarness | undefined
   let client: ClientHandle | undefined
 
@@ -567,6 +692,7 @@ describe('grok leader over a unix socket', () => {
     client = undefined
     mockDefaultModel.saved.length = 0
     mockDefaultModel.current = undefined
+    mockSessionsStore.flushed.length = 0
   })
 
   const start = async (
@@ -649,18 +775,6 @@ describe('grok leader over a unix socket', () => {
     register(c)
     const reply = await c.next() as { type: string; leader_binary_version?: string }
     expect(reply.leader_binary_version).toBe(packageVersion)
-  })
-
-  it('registers the dscode model-selected vocabulary in the dsh persistence gate', async () => {
-    // The bridge must extend KNOWN_SESSION_EVENT_TYPES before any session
-    // restore: the persistence read path refuses logs carrying unknown
-    // non-ignorable types (dsh-session-persistence). Lock the seam so an
-    // upstream switch to a frozen Set fails HERE, not at user session load.
-    for (const type of ['dscode/model-selected', 'model/selected']) {
-      expect((KNOWN_SESSION_EVENT_TYPES as Set<string>).has(type)).toBe(true)
-    }
-    // And the guard the bridge raises when the Set is frozen stays congruent.
-    expect(Object.isFrozen(KNOWN_SESSION_EVENT_TYPES)).toBe(false)
   })
 
   it('advertises the package.json version in agentInfo', async () => {
@@ -756,8 +870,38 @@ describe('grok leader over a unix socket', () => {
     await expect(echo?.execute({ text: 'through MCP' }, { signal: new AbortController().signal }))
       .resolves.toMatchObject({ content: [{ type: 'text', text: 'through MCP' }] })
     expect((await c.request(2, 'x.ai/mcp/list', { sessionId })).result).toMatchObject({
-      servers: [{ name: 'fixture', session: { status: 'connected' }, _meta: { toolCount: 1 } }],
+      servers: [{ name: 'fixture', session: { status: 'unknown' }, _meta: { toolCount: 1 } }],
     })
+  })
+
+  it('resolves model metadata across providers concurrently and refreshes changed adapters', async () => {
+    let release!: () => void
+    const ready = new Promise<void>(resolve => { release = resolve })
+    const seen = new Set<string>()
+    let effort = 'high'
+    const llm = {
+      listProviders: () => [{ id: 'one' }, { id: 'two' }],
+      listModels: async () => [{ id: 'shared', name: 'Shared' }],
+      resolveModelInfo: async (provider: string, id: string) => {
+        seen.add(provider)
+        if (seen.size === 2) release()
+        await ready
+        return { provider, id, reasoning: { efforts: [{ id: effort }] } }
+      },
+    }
+    const { client: c } = await start({ llm })
+    register(c)
+    await c.next()
+    const first = await c.request(1, 'x.ai/models/list', {})
+    expect(first.result).toMatchObject({ availableModels: [
+      { modelId: 'shared', _meta: { provider: 'one', reasoningEfforts: ['high'] } },
+      { modelId: 'two:shared', _meta: { provider: 'two', reasoningEfforts: ['high'] } },
+    ] })
+    effort = 'max'
+    const refreshed = await c.request(2, 'x.ai/models/list', {})
+    expect(refreshed.result).toMatchObject({ availableModels: [
+      { _meta: { reasoningEfforts: ['max'] } }, { _meta: { reasoningEfforts: ['max'] } },
+    ] })
   })
 
   it('advertises exact model image capabilities to the TUI composer', async () => {
@@ -1794,6 +1938,7 @@ describe('grok leader over a unix socket', () => {
     changed(owner); finish(row)
     expect((await waitForId(c, 5)).result).toEqual({ result: { taskId: row.id, outcome: 'killed' } })
     expect(c.all).toContainEqual(expect.objectContaining({ method: 'x.ai/task_completed', params: expect.objectContaining({ update: { sessionUpdate: 'task_completed', task_snapshot: expect.objectContaining({ task_id: row.id, completed: true, exit_code: null, signal: null }) }, _meta: expect.objectContaining({ nativeTask: { status: 'killed', kind: 'bash', detail: 'terminated by producer', outputAvailable: false } }) }) }))
+    expect(c.all.filter(msg => msg.method === 'x.ai/task_backgrounded')).toHaveLength(2)
     expect(onJobsChanged).toHaveBeenCalledTimes(1)
   })
 
@@ -3322,8 +3467,8 @@ describe('grok leader over a unix socket', () => {
     const mcp = await c.request(7, 'x.ai/mcp/list', { sessionId })
     expect(mcp.result).toMatchObject({
       servers: [
-        { name: 'github', _meta: { toolCount: 2 }, session: { status: 'connected' } },
-        { name: 'filesystem', _meta: { toolCount: 1 }, session: { status: 'connected' } },
+        { name: 'github', _meta: { toolCount: 2 }, session: { status: 'unknown' } },
+        { name: 'filesystem', _meta: { toolCount: 1 }, session: { status: 'unknown' } },
       ],
     })
 
@@ -3949,7 +4094,7 @@ describe('grok leader over a unix socket', () => {
     expect(c.completes).toHaveLength(completes.length + 2)
   })
 
-  it.each(['success', 'error'])('returns native %s unchanged over x.ai/goal and settles the same output over session/prompt', async (kind) => {
+  it.each(['success', 'error'])('returns native %s over x.ai/goal and preserves its outcome over session/prompt', async (kind) => {
     const result = { kind, text: 'native admission response' }
     const execute = vi.fn(async (_agent: Agent, _line: string, _images: unknown[], _signal: AbortSignal) => ({ commandId: 'goal', result }))
     const { registry, client: c } = await start({ commands: { list: () => [], execute } })
@@ -3963,12 +4108,15 @@ describe('grok leader over a unix socket', () => {
     expect((await c.request(2, 'x.ai/goal', { sessionId, prompt })).result).toEqual({ result })
     expect(c.all.slice(before).filter(m => m.method === 'session/update')).toEqual([])
     expect(c.completes).toEqual([])
-    expect((await c.request(3, 'session/prompt', { sessionId, prompt, _meta: { promptId: 'native-headless' } })).result)
-      .toMatchObject({ stopReason: 'end_turn', _meta: { promptId: 'native-headless' } })
-    const body = kind === 'error' ? 'error: ' + result.text : result.text
-    await waitFor(() => c.all.some(m => m.method === 'session/update'
-      && (m.params as { update?: { sessionUpdate?: string; content?: { text?: string } } }).update?.sessionUpdate === 'agent_message_chunk'
-      && (m.params as { update?: { content?: { text?: string } } }).update?.content?.text === body))
+    const response = await c.request(3, 'session/prompt', { sessionId, prompt, _meta: { promptId: 'native-headless' } })
+    if (kind === 'error') {
+      expect(response.error).toMatchObject({ code: -32602, message: result.text })
+      expect(c.all.slice(before).filter(m => m.method === 'session/update')).toEqual([])
+    } else {
+      expect(response.result).toMatchObject({ stopReason: 'end_turn', _meta: { promptId: 'native-headless' } })
+      await waitFor(() => c.all.some(m => m.method === 'session/update'
+        && (m.params as { update?: { content?: { text?: string } } }).update?.content?.text === result.text))
+    }
     expect(execute.mock.calls.map(call => call[1])).toEqual([' /goal status  ', ' /goal status  '])
     expect(execute.mock.calls.every(call => call[0] === agent && call[3] instanceof AbortSignal && !call[3].aborted)).toBe(true)
     expect(agent.internals.followups).toEqual([])
@@ -4105,10 +4253,10 @@ describe('grok leader over a unix socket', () => {
     const sessionId = (created.result as { sessionId: string }).sessionId
     setPermission.mockClear()
     setPlan.mockClear()
-    expect((await c.request(2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/auto on' }] })).result)
-      .toMatchObject({ stopReason: 'end_turn' })
-    await waitFor(() => c.all.some(m => m.method === 'session/update'
-      && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('/auto is unsupported')))
+    expect((await c.request(2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/auto on' }] })).error)
+      .toMatchObject({ code: -32602, message: expect.stringContaining('/auto is unsupported') })
+    expect(c.all.filter(m => m.method === 'session/update'
+      && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('/auto is unsupported'))).toEqual([])
     expect(execute).not.toHaveBeenCalled()
     expect(setPermission).not.toHaveBeenCalled()
     expect(setPlan).not.toHaveBeenCalled()
@@ -4196,10 +4344,9 @@ describe('grok leader over a unix socket', () => {
       prompt: [{ type: 'text', text: '/compact' }],
     })
 
-    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'end_turn' })
-    await waitFor(() => c.all.some(message => JSON.stringify(message).includes(
-      'Manual compaction is unavailable in the selected preset.',
-    )))
+    expect((await waitForId(c, 2)).error).toMatchObject({ code: -32602, message: 'Manual compaction is unavailable in this session.' })
+    expect(c.all.filter(m => m.method === 'session/update'
+      && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('Manual compaction'))).toEqual([])
     expect(agent.internals.followups).toEqual([])
   })
 
@@ -4339,13 +4486,13 @@ describe('grok leader over a unix socket', () => {
       const { withProfileLock } = await import('../bin/update.mjs')
       const before = readFileSync(resolve(profileDir, 'package.json'), 'utf8')
       await withProfileLock(profileDir, async () => {
-        for (const [rpc, command] of [[90, '/dsh add --trust ' + JSON.stringify(spec)], [91, '/dsh remove dsh-plugin-local-bundle']] as const) {
-          sendRequest(c, rpc, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: command }] })
-          await waitForId(c, rpc)
-        }
+        sendRequest(c, 90, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh add ' + JSON.stringify(spec) }] })
+        await new Promise(resolve => setTimeout(resolve, 150))
+        expect(c.all.some(message => message.id === 90)).toBe(false)
         expect(readFileSync(resolve(profileDir, 'package.json'), 'utf8')).toBe(before)
-        expect(c.all.filter(message => JSON.stringify(message).includes('another dscode installation'))).toHaveLength(2)
       })
+      expect((await waitForId(c, 90)).error).toBeUndefined()
+      expect(readFileSync(resolve(profileDir, 'package.json'), 'utf8')).toBe(before)
 
       sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh add ' + JSON.stringify(spec) }] })
       const refused = await waitForId(c, 2)
@@ -4878,11 +5025,12 @@ describe('grok leader over a unix socket', () => {
     ])
   })
 
-  it('x.ai/session/list retries an empty firstPrompt instead of caching the miss', async () => {
+  it('x.ai/session/list refreshes an empty firstPrompt when the durable revision changes', async () => {
     const { persistence, client: c } = await start()
     register(c)
     await c.next()
     let prompted = false
+    persistence.list = async () => [{ header: persistence.header, revision: SessionPersistenceRevision(prompted ? 'prompted' : 'empty') }]
     persistence.readEvents = async () => prompted
         ? [{ type: 'user/message', seq: SessionSeq(0), time: 0, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Late title' }] } }]
         : []

@@ -193,7 +193,7 @@ echo "published $TAG with complete platform assets"
 # pass NPM_OTP or run scripts/publish-npm.sh manually afterwards.
 if ! bash "$ROOT/scripts/publish-npm.sh" --pin "$VERSION"; then
   echo "error: GitHub release is live but npm publish failed; recover with:" >&2
-  echo "  scripts/publish-npm.sh --otp <code> --pin $VERSION" >&2
+  echo "  scripts/publish-npm.sh --pin $VERSION (provide OTP through NPM_OTP)" >&2
   exit 1
 fi
 echo "published dscode@$VERSION to npm"

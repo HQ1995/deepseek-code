@@ -186,11 +186,8 @@ impl CommandRegistry {
         // of advertising actions that end in method-not-found. `/compact` is
         // deliberately not hidden: its grok builtin is omitted and the
         // preset-scoped dsh command is discovered over ACP when available.
-        // `/mcps` is read-only in dscode: the bridge serves live status and
-        // refresh, while configuration remains in the TUI's normal MCP files.
-        // If the others are typed explicitly they pass through, where the
-        // bridge returns a precise unsupported message rather than sending
-        // them to the model.
+        // `/mcps` browses dsh servers; CLI edits use cordis.patch.yml.
+        // Typed hidden commands are rejected locally by unavailable_message.
         hidden.insert("delete".to_string());
         hidden.insert("remember".to_string());
         // DIVERGENCE(deepseek): rewind is conversation-only. The bridge
@@ -258,6 +255,21 @@ impl CommandRegistry {
             .filter(|cmd| !self.hidden.contains(cmd.name()))
             .filter(|cmd| !self.restricted_match(cmd))
             .filter(|cmd| self.tools_satisfied(cmd))
+    }
+
+    /// Retain knowledge of gated commands so typed names never become prompts.
+    pub(crate) fn unavailable_message(&self, key: &str) -> Option<String> {
+        (self.get_for_dispatch(key).is_none()
+            && (self.hidden.contains(key)
+                || BLOCKED_ACP_NAMES.contains(&key)
+                || xai_grok_shell::session::PAGER_COMMAND_KEYS.contains(&key)
+                || self
+                    .commands
+                    .iter()
+                    .any(|cmd| cmd.name() == key || cmd.aliases().contains(&key))))
+        .then(|| {
+            format!("/{key} is unavailable in this session. Use /help to see available commands.")
+        })
     }
 
     /// Declared modes for `key` (canonical name or alias), unfiltered by any
@@ -380,16 +392,12 @@ impl CommandRegistry {
 
     /// Show or hide the /hooks and /plugins commands.
     /// When hidden, they won't appear in the dropdown or be executable.
-    pub fn set_plugins_visible(&mut self, visible: bool) {
+    pub fn set_plugins_visible(&mut self, _visible: bool) {
+        // DIVERGENCE(deepseek): config reloads cannot enable Grok's separate
+        // plugin UI. Native dsh plugin commands are advertised over ACP.
         let names = ["hooks", "plugins"];
-        if visible {
-            for name in &names {
-                self.hidden.remove(*name);
-            }
-        } else {
-            for name in &names {
-                self.hidden.insert((*name).to_string());
-            }
+        for name in &names {
+            self.hidden.insert((*name).to_string());
         }
         self.rebuild_triggers();
     }
@@ -974,8 +982,9 @@ mod tests {
             assert!(registry.get(name).is_none(), "{name} must not be offered");
             assert!(
                 registry.get_for_dispatch(name).is_none(),
-                "{name} must pass through to the bridge's explicit refusal"
+                "{name} must not execute"
             );
+            assert!(registry.unavailable_message(name).is_some());
             assert!(
                 !registry
                     .triggers()
@@ -983,6 +992,24 @@ mod tests {
                     .any(|trigger| trigger.canonical == name),
                 "{name} must not remain in completion"
             );
+        }
+        assert!(registry.unavailable_message("an-unknown-skill").is_none());
+        assert!(registry.unavailable_message("skills").is_none());
+    }
+
+    #[test]
+    fn omitted_commands_are_refused_until_advertised_and_plugins_stay_disabled() {
+        let mut registry = CommandRegistry::new(vec![]);
+        for name in ["compact", "voice", "config-agents", "personas"] {
+            assert!(registry.unavailable_message(name).is_some(), "{name}");
+        }
+        registry.set_acp_commands(&[acp_skill("compact", serde_json::json!({}))]);
+        assert!(registry.get_for_dispatch("compact").is_some());
+        assert!(registry.unavailable_message("compact").is_none());
+        registry.set_plugins_visible(true);
+        for name in ["hooks", "plugins"] {
+            assert!(registry.get_for_dispatch(name).is_none());
+            assert!(registry.unavailable_message(name).is_some());
         }
     }
 

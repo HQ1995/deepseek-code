@@ -2875,7 +2875,7 @@ fn switch_model_holds_prompt_until_complete() {
             agent_id: id,
             model_id,
             effort: None,
-            result: Ok(()),
+            result: Ok(None),
             prev_model_id: None,
         }),
         &mut app,
@@ -2892,6 +2892,17 @@ fn switch_model_holds_prompt_until_complete() {
 fn slash_compact_is_forwarded_to_the_harness() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .slash_controller
+        .registry_mut()
+        .set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+            "compact",
+            "Compact this session",
+        )]);
 
     let effects = dispatch(Action::SendPrompt("/compact".into()), &mut app);
     // dscode delegates compaction to the harness instead of the upstream shell.
@@ -3073,7 +3084,14 @@ fn native_session_controls_bypass_busy_queue_without_starting_a_turn() {
             ] => {
                 assert_eq!(*agent_id, id);
                 assert_eq!(*receiving_session, session_id);
-                assert_eq!(*method, if command.starts_with("/goal") { "x.ai/goal" } else { "x.ai/subagents" });
+                assert_eq!(
+                    *method,
+                    if command.starts_with("/goal") {
+                        "x.ai/goal"
+                    } else {
+                        "x.ai/subagents"
+                    }
+                );
                 assert_eq!(
                     serde_json::to_value(prompt).unwrap(),
                     serde_json::json!([
@@ -3226,6 +3244,29 @@ fn unsupported_auto_refuses_immediately_while_busy_without_permission_change() {
     assert!(!agent.session.is_auto());
     assert!(!agent.session.is_yolo());
     assert!(scrollback_has_system_text(&app, id, "/auto is unsupported"));
+}
+
+#[test]
+fn slash_unavailable_commands_never_reach_the_model() {
+    for name in [
+        "hooks",
+        "plugins",
+        "marketplace",
+        "delete",
+        "remember",
+        "loop",
+    ] {
+        let mut app = test_app_with_agent();
+        let before = app.agents[&AgentId(0)].scrollback.len();
+        let effects = dispatch(Action::SendPrompt(format!("/{name}")), &mut app);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::SendPrompt { .. })),
+            "{name}"
+        );
+        assert!(app.agents[&AgentId(0)].scrollback.len() > before, "{name}");
+    }
 }
 
 #[test]

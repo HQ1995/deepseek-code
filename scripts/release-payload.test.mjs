@@ -10,6 +10,38 @@ import { gzipSync } from 'node:zlib';
 import { copyClosure, recordConsumerProvenance, validateConsumer, releaseAssets, releaseChannel, sourceBuildEnvironment } from './build-release-payload.mjs';
 import { assertReleaseRun, releasedManifest, verifyReleaseAssets } from './verify-release-assets.mjs';
 
+test('product acceptance clears ambient profile and backend overrides while retaining explicit test inputs', () => {
+  const script = fileURLToPath(new URL('./test-environment.sh', import.meta.url));
+  const result = spawnSync('bash', ['-c', `source "$1"
+dscode_clear_test_overrides
+for name in DSCODE_HOME DSC_HOME DSH_HOME DSH_PROFILE_DIR DSH_BIN DSCODE_BIN DSCODE_SOCKET GROK_DEBUG_LOG NODE_OPTIONS; do
+  [[ -z "\${!name:-}" ]] || exit 1
+done
+[[ "$DSCODE_E2E_NODE_BIN" == fixture-node && "$DSCODE_TUI_BIN" == fixture-tui ]]
+`, 'test-environment', script], {
+    encoding: 'utf8',
+    env: { ...process.env, DSCODE_HOME: '/ambient/profile', DSC_HOME: '/ambient/profile', DSH_HOME: '/ambient',
+      DSH_PROFILE_DIR: '/ambient/profile', DSH_BIN: '/ambient/dsh', DSCODE_BIN: '/ambient/tui', DSCODE_SOCKET: '/ambient/socket',
+      GROK_DEBUG_LOG: '/ambient/log', NODE_OPTIONS: 'ambient', DSCODE_E2E_NODE_BIN: 'fixture-node', DSCODE_TUI_BIN: 'fixture-tui' },
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('documented unavailable TUI commands match the registry boundary', () => {
+  const root = new URL('../third_party/grok-build/', import.meta.url);
+  const registry = readFileSync(new URL('crates/codegen/xai-grok-pager/src/slash/registry.rs', root), 'utf8');
+  const constructor = registry.slice(registry.indexOf('pub fn new(builtins:'), registry.indexOf('let mut menu_hidden'));
+  const hidden = [...constructor.matchAll(/hidden\.insert\("([^"\n]+)"\.to_string\(\)\);/g)].map(match => match[1]);
+  const document = readFileSync(new URL('TUI-DIVERGENCE.md', root), 'utf8');
+  const declaration = document.split('\n').find(line => line.startsWith('Unavailable built-ins:'));
+  assert.ok(declaration, 'missing command boundary in divergence ledger');
+  const documented = [...declaration.matchAll(/`\/([^`]+)`/g)].map(match => match[1]);
+  assert.deepEqual(documented.sort(), hidden.sort());
+  for (const name of ['skills', 'mcps', 'workflows', 'rewind']) assert.ok(!hidden.includes(name));
+  assert.equal(document.split('\n').filter(line => line === '## Feature').length, 1);
+});
+
 test('consumer reuse requires the exact source, installed bytes, and copied runtime tree', () => {
   const root = mkdtempSync(join(tmpdir(), 'dscode-consumer-provenance-'));
   const manifest = { dsh: { testedVersion: '0.1.5-rc.2', sourceCommit: 'a'.repeat(40) } };

@@ -928,13 +928,17 @@ impl QuestionViewState {
             // only the freeform input was used. The wire format carries
             // these as separate elements so downstream cursor-shape
             // resolvers do not have to re-split a comma-joined string.
-            let label_vec: Vec<String> = if labels.is_empty() && has_freeform {
+            let label_vec: Vec<String> = if q.id.is_none() && labels.is_empty() && has_freeform {
                 vec!["Other".to_string()]
             } else {
                 labels
             };
 
-            answers.insert(q.question.clone(), label_vec);
+            // DIVERGENCE(deepseek): keep native question IDs across the wire.
+            // ID-keyed freeform answers use an empty selection, so a real
+            // option named "Other" remains distinguishable from typed text.
+            let answer_key = q.id.as_ref().unwrap_or(&q.question);
+            answers.insert(answer_key.clone(), label_vec);
 
             // Build annotation if there's preview or notes.
             let is_single = !q.multi_select.unwrap_or(false);
@@ -957,7 +961,7 @@ impl QuestionViewState {
             };
 
             if preview.is_some() || notes.is_some() {
-                annotations.insert(q.question.clone(), QuestionAnnotation { preview, notes });
+                annotations.insert(answer_key.clone(), QuestionAnnotation { preview, notes });
             }
         }
 
@@ -2208,6 +2212,24 @@ mod tests {
                 "chrome accounting vs render drift at content_w={content_w}"
             );
         }
+    }
+
+    #[test]
+    fn native_question_ids_keep_duplicate_headings_and_other_options_distinct() {
+        let mut first = make_question("Same?", &["Other"], false);
+        first.id = Some("q1".into());
+        let mut second = first.clone();
+        second.id = Some("q2".into());
+        let mut state =
+            QuestionViewState::new("call".into(), vec![first, second], StashedPrompt::default());
+        state.selections[0] = QuestionSelection::Single(Some(0));
+        state.per_question_freeform_selected[1] = true;
+        state.per_question_freeform[1] = "custom answer".into();
+        let value = serde_json::to_value(state.build_accepted_response()).unwrap();
+        assert_eq!(value["answers"]["q1"], serde_json::json!(["Other"]));
+        assert_eq!(value["answers"]["q2"], serde_json::json!([]));
+        assert_eq!(value["annotations"]["q2"]["notes"], "custom answer");
+        assert_eq!(value["answers"].as_object().unwrap().len(), 2);
     }
 
     /// Helper: build a question with N options.

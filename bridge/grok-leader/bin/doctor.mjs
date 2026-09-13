@@ -4,7 +4,7 @@ import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync
 import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { validateRuntime } from './update.mjs'
+import { parseCliVersion, validateRuntime } from './update.mjs'
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const json = path => JSON.parse(readFileSync(path, 'utf8'))
@@ -16,7 +16,7 @@ const executable = command => {
 const version = bin => {
   const result = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 15000, maxBuffer: 65536 })
   if (result.error || result.status !== 0) throw new Error(`Cannot read version from ${bin}`)
-  const value = /(?:^|\s)(\d+\.\d+\.\d+(?:-[\w.-]+)?)(?:\s|$)/.exec(result.stdout)?.[1]
+  const value = parseCliVersion(result.stdout)
   if (!value) throw new Error(`Invalid version from ${bin}`)
   return value
 }
@@ -80,7 +80,10 @@ export const installationReport = ({
 }
 export const formatInstallationReport = findings => ['Dscode runtime diagnostics', ...findings.map(f => `[${f.status}] ${f.name}: ${f.detail}`)].join('\n\n')
 
-if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+let invokedDirectly = false
+try { invokedDirectly = !!process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url) }
+catch { /* Imported from stdin, eval, or a launcher that has been replaced. */ }
+if (invokedDirectly) {
   const findings = installationReport({ optional: !process.argv.includes('--runtime-only') })
   console.log(process.argv.includes('--json') ? JSON.stringify(findings) : formatInstallationReport(findings))
 }

@@ -7,6 +7,9 @@
 # with the switch-first message. A second boot proves the edited settings
 # persist. Artifacts use DSCODE_E2E_OUT_DIR, defaulting to /tmp/provmanage-e2e/.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/test-environment.sh"
+dscode_clear_test_overrides
+export DSCODE_CONFIG='{"cli":{"auto_update":false}}'
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${DSCODE_TUI_BIN:-$ROOT/third_party/grok-build/target/release/dscode}"

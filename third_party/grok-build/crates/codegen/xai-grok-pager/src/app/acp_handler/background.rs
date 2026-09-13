@@ -18,9 +18,17 @@ pub(super) fn route_bg_task_stdout(
 
     // Extract stdout from the raw_output BashOutput
     if let Some(ref raw_output) = tcu.fields.raw_output {
-        // The shell sends full cumulative output buffer — just overwrite.
-        // Check for BashOutput type
         if raw_output.get("type").and_then(|v| v.as_str()) == Some("Bash") {
+            // DIVERGENCE(deepseek): native job growth carries only its suffix.
+            // Full snapshots below still establish/reset a rolling output window.
+            if let Some(delta) = raw_output.get("output_append").and_then(|v| v.as_str()) {
+                if let Some(task) = session.bg_tasks.get_mut(&task_id) {
+                    let mut output = std::mem::take(&mut task.stdout);
+                    output.push_str(delta);
+                    task.set_stdout(output);
+                }
+                return true;
+            }
             // Try output_for_prompt first (pre-stripped string)
             let stdout =
                 if let Some(s) = raw_output.get("output_for_prompt").and_then(|v| v.as_str()) {

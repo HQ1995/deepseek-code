@@ -79,16 +79,19 @@ after entering the namespace to handle older util-linux launchers.
   mode against the external DSH CLI instead of grok's self-spawn.
   crates/codegen/xai-grok-pager/src/dsh_leader.rs
   spawns "dsh --profile dscode" with DSCODE_SOCKET /
-  DSH_TELEMETRY_DISABLED=1 and a numactl node-1 wrapper (host policy,
-  conditional), logs to /tmp/dscode.log, and records the PID in the
+  DSH_TELEMETRY_DISABLED=1, logs to /tmp/dscode.log, and records the PID in the
   sibling .lock. pager-bin main.rs synthesizes --leader/--leader-socket/
-  --sandbox off/--no-auto-update; acp::connect_via_leader and the
+  --sandbox off; explicit --sandbox restrictions and --no-leader fail closed.
+  The user's auto-update opt-in/out is preserved. Host NUMA binding is applied
+  by the caller, not by this portable launcher. acp::connect_via_leader and the
   LeaderReconnector call the new xai-grok-shell connect_or_spawn_external
   (connect-first adoption of a live leader, flock-serialized single spawner,
   one ~30s wait that covers a cold node boot, failed spawns are killed) so
   sessions spawned by the old shell leader on the same socket
   are still adopted. scripts/install.sh links ~/.local/bin/dscode to the
-  profile-owned JS launcher; historical direct-binary links are migrated.
+  stable profile-owned JS bootstrap; historical direct-binary links are migrated.
+  The bootstrap survives interrupted directory swaps, recovers the durable
+  update journal under the profile lock, then loads the installed launcher.
 - Independent stable/beta/alpha updater channels: legacy unmarked alpha config
   resolves beta, while channel_format=1 records canonical selections. Read-only
   checks bypass writeful startup and uncached checks do not persist anything.
@@ -104,13 +107,11 @@ after entering the namespace to handle older util-linux launchers.
   limit-spent: the anonymous API allows 60 requests per hour per address, which
   a release day or a shared egress address can exhaust. The Rust check and the
   managed JS updater apply the same policy.
-- Environment namespace isolation: pager-bin maps DSCODE_CONFIG,
-  DSCODE_CONFIG_PATH, and DSCODE_CONNECT_UI_TIMEOUT_SECS onto the upstream
-  GROK_* implementation names before configuration loads. When a DSCODE alias
-  is absent, the corresponding inherited GROK_* value is removed inside the
-  dscode process, so a co-installed grok-build cannot leak its shell-wide
-  configuration into dscode. The mapping never mutates the parent shell;
-  startup recovery copy advertises the DSCODE timeout name.
+- Environment namespace isolation: pager-bin strips every inherited `GROK_*`
+  variable before configuration loads, then maps only `DSCODE_CONFIG`,
+  `DSCODE_CONFIG_PATH`, and `DSCODE_CONNECT_UI_TIMEOUT_SECS` to their internal
+  Grok names. The dsh child also strips those internal names before spawning.
+  Parent-shell state is untouched; recovery copy uses the DSCODE timeout name.
 - Leader mode: --leader/--leader-socket flags connect the TUI to our bridge
   over the grok leader unix-socket protocol instead of x.ai; local xai auth
   is bypassed in leader mode.
@@ -231,23 +232,25 @@ after entering the namespace to handle older util-linux launchers.
   without spawning xai-grok-shell. x.ai restore-code semantics remain hidden
   and fail closed because dsh does not persist repository snapshots.
 
-## Feature
+## Capability boundaries
 
 - Slash commands removed (x.ai authoring/management surfaces, dsh has no
   matching concept): /personas and /config-agents (agents-modal authoring UI),
   /login, /logout, /share, /feedback, /imagine, /imagine_video, /import_claude,
   /gboom, /voice, /release_notes, /announcements, /recap, /timeline. /preset
   remains the only preset picker; /usage is adapted to session stats (above).
-- Slash commands hard-hidden because dsh has no matching surface: /cd (no
-  Agent Dashboard), /auto (no dsh auto permission-mode classifier),
-  /workflows (dsh workflow has no list/run-history API yet), /delete, /remember,
-  /mcps, /skills, plus the already-hidden /hooks, /plugins, /marketplace,
-  /dashboard, /rewind. The bridge explicitly refuses the four typed
-  dsh-extension commands so none can fall through to the model.
+Unavailable built-ins: `/dashboard`, `/cd`, `/recap`, `/voice`, `/auto`, `/hooks`, `/plugins`, `/marketplace`, `/delete`, `/remember`.
+
+These commands remain known to the registry while hidden from completion.
+Typed names and aliases get a local unavailable message, including tool-gated
+commands before capability discovery; they do not become model prompts.
+`/skills`, `/mcps`, and `/workflows` are supported read-only harness browsers;
+`/rewind` forks conversation history, preserving files and the source session.
+
 - Bridge now maps dsh capabilities onto grok RPCs: x.ai/session/rename →
   dsh session-title, session/set_mode → dsh plan-mode, x.ai/session/fork →
-  dsh sessions.fork + agents.create(seed), x.ai/mcp/list → dsh MCP tool
-  names, x.ai/yolo_mode_changed → dsh permission-presets, /loop →
+  dsh sessions.fork + agents.create(seed), x.ai/mcp/list → scoped dsh MCP client configurations and tools
+  (connection status is `unknown` when the harness does not expose it), x.ai/yolo_mode_changed → dsh permission-presets, /loop →
   a TUI-owned model scheduling instruction. /tasks is fed from dsh jobs
   (task_backgrounded/task_completed),
   dsh subagent events (subagent_spawned/subagent_finished), and dsh-schedule
@@ -335,7 +338,8 @@ after entering the namespace to handle older util-linux launchers.
   the public grok-build sync includes that test but excludes both
   `docs/internal` files it `include_str!`s, so the published test target cannot
   compile. Re-enable only when those operator documents become public or the
-  upstream test is made self-contained.
+  upstream test is made self-contained. `scripts/release-payload.test.mjs`
+  checks our documented unavailable commands against the registry locally.
 - The dashboard non-git location test chooses a temporary root with no `.git`
   ancestor. CI/dev `TMPDIR` may itself live inside another checkout, where the
   original fixture was correctly detected as Git-backed and asserted the
@@ -458,18 +462,13 @@ handshake exists). The native shell emitter does not stamp seq yet
 (seq: None), so non-leader mode is unchanged; stamping it upstream is the
 natural follow-up if this is offered as a PR.
 
-### /rewind is hidden (bridge has no rewind RPCs)
+### /rewind forks conversation history
 
-`slash/registry.rs CommandRegistry::new` adds `rewind` to the fail-closed
-`hidden` set (same mechanism as /dashboard and /voice; the `undo` alias is
-hidden with it because the gate matches the canonical name). Upstream
-/rewind opens a picker backed by the x.ai/rewind/points and
-x.ai/rewind/execute RPCs, which the grok-leader bridge does not implement —
-the visible command was a dead end that errored on open. Typed `/rewind`
-now falls through to the model as plain prompt text like any unrecognized
-command. Un-hide it when the bridge implements rewind over dsh session
-persistence (the sessions store replays full transcripts, so a
-turn-boundary rewind is feasible later).
+`/rewind` and its `/undo` alias open the native prompt-boundary picker.
+The bridge implements `x.ai/rewind/points` and `x.ai/rewind/execute` using a
+new dsh session fork. `conversation_only` is the wire mode; no file snapshots
+are claimed, no files are reverted, and the source session remains intact.
+The TUI renders this conversation-only result and switches to the new session.
 
 ### Plugin slash commands arrive over ACP available_commands_update
 
@@ -484,7 +483,9 @@ This generic path covers dsh presets, tools, commands, providers, models, and
 settings. Browser-only plugin slots, custom panels, and private extension RPCs
 still require an explicit TUI/bridge adapter; they are not inferred. The same
 applies to plugin-owned durable session event types while pinned dsh
-0.1.1-rc.2 has no public downstream registration seam for that vocabulary.
+0.1.5-rc.2 deliberately has no public downstream registration seam for that
+vocabulary. The bridge writes native `model/selection` records; its legacy
+JSONL reader normalizes historical names without mutating DSH's global table.
 
 ### xAI login/logout CLI subcommands are severed
 
@@ -526,18 +527,11 @@ registration error. The focused client test pins the fail-fast behavior.
 
 ### Unsupported extension surfaces are hard-hidden
 
-`slash/registry.rs CommandRegistry::new` adds `/hooks`, `/plugins`,
-`/marketplace`, `/skills`, `/delete`, `/remember`, and `/mcps` to the
-fail-closed `hidden` set. The pager-plugin group opens grok-build's OWN plugin
-system — a second plugin world dscode does not use, whose names collide
-head-on with the real one (dsh plugins, managed by /dsh). Note dsh itself DOES
-have skills (the `skills` registry, packages/skill) and hooks
-(hooks-claude-code); those live harness-side and are unreachable from these TUI
-management surfaces. The remaining commands require extension RPCs or session
-mutation semantics the bridge cannot complete. Typed commands reach the
-bridge's precise refusal; they never become model prompts. The future path for
-exposing harness-side features is bridge-advertised ACP commands, not un-hiding
-grok's local UIs.
+The unavailable built-ins above open Grok's plugin world or require semantics
+the dsh bridge cannot provide. `/skills` and `/mcps` instead browse scoped dsh
+services. MCP editing uses `dscode mcp` and `cordis.patch.yml`: reads propagate
+storage errors, edits share the profile lock, and writes use atomic replacement.
+Future plugin capabilities enter through harness-advertised ACP commands.
 
 ### Manual compaction uses the dsh command registry
 

@@ -964,6 +964,7 @@ fn switch_model_deferred_when_no_session_id() {
     let id = AgentId(0);
     let model_id = acp::ModelId::new(std::sync::Arc::from("grok-4.5"));
     app.agents.get_mut(&id).unwrap().session.session_id = None;
+    let previous = app.agents[&id].session.models.current.clone();
     let effects = dispatch(
         Action::SwitchModel {
             model_id: model_id.clone(),
@@ -972,16 +973,10 @@ fn switch_model_deferred_when_no_session_id() {
         &mut app,
     );
     assert!(
-        matches!(
-            &effects[..],
-            [Effect::PersistPreferredModel { model_id: m, .. }] if m == &model_id
-        ),
-        "expected persist-only, got {effects:?}"
+        effects.is_empty(),
+        "deferred selection must wait for backend acceptance"
     );
-    assert_eq!(
-        app.agents[&id].session.models.current,
-        Some(model_id.clone())
-    );
+    assert_eq!(app.agents[&id].session.models.current, previous);
     assert_eq!(
         app.agents[&id].session.deferred_model_switch,
         Some(crate::app::agent::DeferredModelSwitch {

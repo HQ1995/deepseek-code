@@ -4,7 +4,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/platform.sh"
-PROFILE="${DSCODE_HOME:-${DSH_HOME:-$HOME/.dsh}/profiles/dscode}"
+install_home="${HOME:-$(node -p 'require("node:os").homedir()')}"
+PROFILE="${DSCODE_HOME:-${DSH_HOME:-$install_home/.dsh}/profiles/dscode}"
 VERSION="$(cat "$ROOT/VERSION")"
 release_args=()
 local_install=1
@@ -31,19 +32,13 @@ if ! command -v node >/dev/null 2>&1 || ! node -e 'const a=process.versions.node
 fi
 ASSET="$(dscode_prebuilt_asset)"
 [[ -n "$ASSET" ]] || { echo "error: source-built runtime payloads support Linux x86_64 and macOS arm64 only" >&2; exit 1; }
-# Keep local file URLs alive after installation. Never overwrite an artifact
-# directory referenced by an already installed profile manifest.
+# Build payloads are temporary. The Node helper retains only the immutable
+# plugin archive needed by the installed manifest's local dependency URL.
 stage="$(mktemp -d "${TMPDIR:-/tmp}/dscode-install.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 payload="${DSCODE_RELEASE_DIR:-}"
 if [[ -z "$payload" ]]; then
-  if [[ "$local_install" == 1 ]]; then
-    cache="${XDG_CACHE_HOME:-$HOME/.cache}/dscode/releases"
-    mkdir -p "$cache"
-    payload="$(mktemp -d "$cache/checkout.XXXXXX")"
-  else
-    payload="$stage/payload"
-  fi
+  payload="$stage/payload"
   build_args=(--version "$VERSION" --out "$payload")
   [[ -z "${DSCODE_SOURCE_DIR:-}" ]] || build_args+=(--source "$DSCODE_SOURCE_DIR")
   [[ -z "${DSCODE_RUNTIME_CONSUMER:-}" ]] || build_args+=(--consumer "$DSCODE_RUNTIME_CONSUMER")
@@ -69,12 +64,14 @@ NODE
 mkdir -p "$stage/helper"
 tar -xzf "$payload/dscode-plugin.tgz" -C "$stage/helper"
 node --input-type=module - "$ROOT" "$PROFILE" "$VERSION" "$ASSET" "$payload" "$stage/helper/package" "$local_install" "${release_args[@]}" <<'NODE'
-import { readFileSync, lstatSync, mkdirSync, readlinkSync, symlinkSync, renameSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { readFileSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { homedir } from 'node:os';
+import { join, resolve, basename } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 const [root, profileArg, checkoutVersion, asset, payload, helper, local, ...args] = process.argv.slice(2);
 const profile = resolve(profileArg);
-const { installRelease, resolveRelease, updateOptions } = await import(pathToFileURL(join(helper, 'bin/update.mjs')));
+const { atomicWrite, installRelease, resolveRelease, updateOptions } = await import(pathToFileURL(join(helper, 'bin/update.mjs')));
 const { releaseChannel } = await import(pathToFileURL(join(root, 'scripts/build-release-payload.mjs')));
 const packageName = JSON.parse(readFileSync(join(root, 'bridge/grok-leader/package.json'), 'utf8')).name;
 // Only installation selections are meaningful here, not update/check modes.
@@ -84,29 +81,33 @@ for (let i = 0; i < args.length; i++) {
 }
 const options = local === '1' ? { version: checkoutVersion, channel: releaseChannel(checkoutVersion) } : updateOptions(args, profile, checkoutVersion);
 const version = local === '1' ? checkoutVersion : await resolveRelease(options);
-const localOptions = local === '1' ? {
-  base: pathToFileURL(resolve(payload)).href.replace(/\/$/, ''),
-  fetcher: async url => {
-    try { return new Response(readFileSync(fileURLToPath(url))); }
-    catch (error) { if (error.code === 'ENOENT') return new Response(null, { status: 404 }); throw error; }
-  },
-} : {};
+let localOptions = {};
+if (local === '1') {
+  const bytes = readFileSync(join(payload, 'dscode-plugin.tgz'));
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  const cache = join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'dscode/releases', digest);
+  mkdirSync(cache, { recursive: true });
+  const archive = join(cache, 'dscode-plugin.tgz');
+  let existing;
+  try { existing = readFileSync(archive); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (!existing || createHash('sha256').update(existing).digest('hex') !== digest) atomicWrite(archive, bytes, 0o600);
+  const base = pathToFileURL(cache).href.replace(/\/$/, '');
+  localOptions = {
+    base,
+    fetcher: async url => {
+      if (!String(url).startsWith(base + '/')) throw new Error('unexpected local release URL');
+      // The manifest references the retained plugin; runtime/TUI payloads are
+      // needed only for this validated installation and come from the build.
+      const file = join(payload, basename(fileURLToPath(url)));
+      try { return new Response(readFileSync(file)); }
+      catch (error) { if (error.code === 'ENOENT') return new Response(null, { status: 404 }); throw error; }
+    },
+  };
+}
 await installRelease({ profile, packageName, version, channel: options.channel, asset, ...localOptions });
 const launcher = join(profile, 'node_modules', ...packageName.split('/'), 'bin/dscode.mjs');
-const link = join(process.env.HOME, '.local/bin/dscode');
-try {
-let existing;
-try { existing = lstatSync(link); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-const owned = !existing || (existing.isSymbolicLink() && [launcher, join(profile, 'bin/dscode'), join(root, 'bin/dscode'), join(root, 'third_party/grok-build/target/release/dscode')].includes(resolve(join(link, '..'), readlinkSync(link))));
-if (owned) {
-  mkdirSync(join(process.env.HOME, '.local/bin'), { recursive: true });
-  const temporary = `${link}.install-${process.pid}`;
-  try { symlinkSync(launcher, temporary); renameSync(temporary, link); }
-  finally { rmSync(temporary, { force: true }); }
-} else console.error(`warning: ${link} is not owned by this installation; leaving it alone`);
-} catch (error) {
-  console.error(`warning: installed tuple is ready, but could not repair ${link}: ${error.message}`);
-}
+const { healLauncherLink } = await import(pathToFileURL(join(helper, 'bin/dscode.mjs')));
+healLauncherLink({ profile, legacyTargets: [join(profile, 'bin/dscode'), join(root, 'bin/dscode'), join(root, 'third_party/grok-build/target/release/dscode')] });
 console.log(`Installed ${version} (${options.channel}) at ${profile}.`);
 console.log(`Run with the same profile environment: ${launcher}`);
 NODE

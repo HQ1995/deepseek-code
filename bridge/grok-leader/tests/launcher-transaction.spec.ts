@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { create as tar } from 'tar'
 import { expect, it } from 'vitest'
 import { installationMatches } from '../bin/update.mjs'
+import { fixtureEnvironment } from './fixtures/environment.ts'
 
 const bridge = fileURLToPath(new URL('..', import.meta.url))
 const current = JSON.parse(readFileSync(join(bridge, 'package.json'), 'utf8'))
@@ -60,7 +62,7 @@ globalThis.fetch = async url => {
 };`)
   const run = (args: string[]) => spawnSync(process.execPath, ['--import', shim, join(root, 'launcher/bin/dscode.mjs'), ...args], {
     encoding: 'utf8', timeout: 20000,
-    env: { ...process.env, HOME: root, DSH_HOME: join(root, 'home'), DSCODE_HOME: profile, DSCODE_BIN: '', DSH_BIN: '' },
+    env: fixtureEnvironment(root, { DSH_HOME: join(root, 'home'), DSCODE_HOME: profile }),
   })
   return { root, profile, plugin, runtime, remote, descriptor, metadata, put, run, requests }
 }
@@ -114,4 +116,74 @@ it.each(['manual', 'manual dev', 'auto', 'auto stale target', 'force', 'repair',
       expect(readFileSync(join(f.profile, 'config.toml'), 'utf8')).toContain('alpha')
     }
   } finally { rmSync(f.root, { recursive: true, force: true }) }
+})
+
+it('preserves an unchanged channel config byte for byte during forced reinstall', () => {
+  const f = fixture()
+  try {
+    const path = join(f.profile, 'config.toml')
+    const config = '# user notes\n[cli]\nchannel = "alpha"\nchannel_format = 1\nauto_update = false\n'
+    f.put(path, config, 0o600)
+    const inode = lstatSync(path).ino
+    const result = f.run(['update', '--alpha', '--force'])
+    expect(result.status, result.stderr).toBe(0)
+    expect(readFileSync(path, 'utf8')).toBe(config)
+    expect(lstatSync(path).ino).toBe(inode)
+  } finally { rmSync(f.root, { recursive: true, force: true }) }
+})
+
+it.each(['launch', 'background update'])('keeps a developer TUI during %s without downloading', scenario => {
+  const f = fixture()
+  try {
+    const binary = `#!/bin/sh\necho 'dscode ${current.version}-dev'\n`
+    f.put(join(f.profile, 'bin/dscode'), binary, 0o755)
+    const result = f.run(scenario === 'launch' ? [] : ['update', '--auto', '--alpha'])
+    expect(result.status, result.stderr).toBe(0)
+    expect(readFileSync(join(f.profile, 'bin/dscode'), 'utf8')).toBe(binary)
+    expect(existsSync(f.requests)).toBe(false)
+  } finally { rmSync(f.root, { recursive: true, force: true }) }
+})
+
+it('recovers through the stable entrypoint after interruption while the plugin directory is absent', async () => {
+  const f = fixture()
+  // The crash worker's active profile and the real launcher share this exact owned fixture.
+  const root = join(f.root, 'crash'), profile = join(root, 'active')
+  mkdirSync(root)
+  const unrelatedJournal = join(root, '.dscode-update-unrecognized', 'transaction.json')
+  f.put(unrelatedJournal, '{unrecognized staging data')
+  cpSync(f.profile, profile, { recursive: true, verbatimSymlinks: true })
+  const plugin = join(profile, 'node_modules', current.name)
+  cpSync(join(bridge, 'bin'), join(plugin, 'bin'), { recursive: true })
+  symlinkSync(join(bridge, 'node_modules'), join(plugin, 'node_modules'))
+  cpSync(join(bridge, 'bin/bootstrap.mjs'), join(profile, 'dscode.mjs'))
+  f.put(join(profile, 'config.toml'), '[cli]\nchannel="alpha"\nchannel_format=1\n')
+  f.put(join(profile, 'sessions/user'), 'preserved session')
+  const stage = join(root, '.dscode-update-crash')
+  cpSync(profile, join(stage, 'profile'), { recursive: true, verbatimSymlinks: true })
+  const child = spawn(process.execPath, [fileURLToPath(new URL('./fixtures/update-worker.mjs', import.meta.url)), root, 'crash', new URL('../bin/update.mjs', import.meta.url).href], {
+    env: fixtureEnvironment(f.root), stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const exited = once(child, 'exit')
+  try {
+    for (let attempt = 0; !existsSync(join(root, 'paused')); attempt++) {
+      if (attempt > 500 || child.exitCode !== null) throw new Error('updater did not reach the interruption point')
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    expect(existsSync(join(plugin, 'bin/dscode.mjs'))).toBe(false)
+    child.kill('SIGKILL')
+    await exited
+    const recovered = spawnSync(process.execPath, [join(profile, 'dscode.mjs'), 'doctor', '--runtime', '--json'], {
+      env: fixtureEnvironment(f.root, { DSCODE_HOME: profile }), encoding: 'utf8', timeout: 20000,
+    })
+    expect(recovered.status, recovered.stderr).toBe(0)
+    expect(recovered.stderr).toContain('restored the previous installation')
+    expect(JSON.parse(recovered.stdout).filter((finding: { status: string }) => finding.status === 'ERROR')).toEqual([])
+    expect(readFileSync(join(profile, 'sessions/user'), 'utf8')).toBe('preserved session')
+    expect(existsSync(stage)).toBe(false)
+    expect(readFileSync(unrelatedJournal, 'utf8')).toBe('{unrecognized staging data')
+    expect(installationMatches(profile, current.name, current.version, current.dsh)).toBe(true)
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited }
+    rmSync(f.root, { recursive: true, force: true })
+  }
 })

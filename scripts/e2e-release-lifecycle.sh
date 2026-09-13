@@ -3,6 +3,9 @@
 # Uses an isolated HOME and a local mock model; no user state or paid API.
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/test-environment.sh"
+dscode_clear_test_overrides
+
 PACKAGE_SPEC="${DSCODE_E2E_PACKAGE_SPEC:-@hqzhao95/dscode@beta}"
 KEEP="${DSCODE_E2E_KEEP:-0}"
 NODE_BIN="${DSCODE_E2E_NODE_BIN:-$(command -v node || true)}"
@@ -65,7 +68,7 @@ PROFILE="$DSH_HOME/profiles/dscode"
 LAUNCHER="$TEST_HOME/.local/bin/dscode"
 TUI_BIN="$PROFILE/bin/dscode"
 DSH_BIN="$PROFILE/runtime/bin/dsh"
-PROFILE_LAUNCHER="$PROFILE/node_modules/@hqzhao95/dscode/bin/dscode.mjs"
+PROFILE_LAUNCHER="$PROFILE/dscode.mjs"
 
 echo "dscode published-release lifecycle E2E"
 echo "  host: $(uname -s)-$(uname -m)"
@@ -263,8 +266,11 @@ echo "[5/6] uninstall owned product state"
 mkdir -p "$DSH_HOME/sessions" "$DSH_HOME/storages"
 printf 'keep\n' >"$DSH_HOME/sessions/shared.keep"
 printf 'keep\n' >"$DSH_HOME/storages/shared.keep"
+mkdir -p "$PROFILE/sessions"
+printf 'local keep\n' >"$PROFILE/sessions/local.keep"
 "$LAUNCHER" uninstall >"$RUN_ROOT/uninstall.out" 2>"$RUN_ROOT/uninstall.err"
-[[ ! -e "$PROFILE" ]] || fail "uninstall kept the dscode profile"
+[[ ! -e "$PROFILE/bin/dscode" && ! -e "$PROFILE/runtime" ]] || fail "uninstall kept product binaries"
+[[ -f "$PROFILE/sessions/local.keep" && -f "$PROFILE/config.toml" ]] || fail "uninstall removed profile user data"
 [[ ! -e "$LAUNCHER" && ! -L "$LAUNCHER" ]] || fail "uninstall kept the launcher link"
 [[ -f "$DSH_HOME/settings.yaml" ]] || fail "uninstall removed shared dsh settings"
 [[ -f "$DSH_HOME/sessions/shared.keep" ]] || fail "uninstall removed shared sessions"

@@ -40,20 +40,20 @@ import {
 } from '@deepseek-ai/dsh-attachment'
 import { ReasoningEffortId, ToolCallId, createUserMessage, errorChain, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm-retry'
-import { KNOWN_SESSION_EVENT_TYPES, SessionId, SessionLogOffset, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import { SessionFormatUnsupportedError, SessionPersistenceCorruptionError, SessionPersistenceNotFoundError, type SessionInspection, type SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { SubagentRuntime, SubagentPromptRequestId } from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { load as loadYaml } from 'js-yaml'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
-import { encodeJsonFrame, FrameDecoder } from './codec.ts'
-import { AcpMcpConfigError, mountMcpConfigs, resolveAcpMcpConfigs, type McpClientConfig } from './mcp.ts'
+import { writeJsonFrame, waitForDrain, FrameDecoder } from './codec.ts'
+import { AcpMcpConfigError, listMcpServers as mcpServerList, mountMcpConfigs, resolveAcpMcpConfigs, type McpClientConfig } from './mcp.ts'
 import { LEADER_PROTOCOL_VERSION, RpcError, decodeClientMessage, encodeServerMessage, type ClientMessage, type ServerMessage } from './protocol.ts'
 import { SessionListIndex } from './session-list.ts'
 import { ChildHistoryIndex, CHILD_HISTORY_PAGE_SIZE, type ChildEventReader } from './child-history.ts'
-import { workflowUpdates, type LiveWorkflow } from './workflows.ts'
-import { observeJobOutputs } from './job-output.ts'
-import { createImageOutputProjector } from './image-output.ts'
+import { WorkflowIndex, type LiveWorkflow } from './workflows.ts'
+import { jobOutputPatch, observeJobOutputs } from './job-output.ts'
+import { createImageOutputProjector, hasToolImages } from './image-output.ts'
 import { parseReminder } from './reminders.ts'
 import { TerminalSessionId, type TerminalSessionService } from '@deepseek-ai/dsh-terminal'
 import { exportSessionArchive } from './session-export.ts'
@@ -83,25 +83,8 @@ declare module '@deepseek-ai/dsh-session/types' {
 }
 
 const MODEL_SELECTION_EVENT = 'model/selection' as const
-const LEGACY_MODEL_SELECTION_EVENT = 'model/selected' as const
-/**
- * Register the bridge's durable event vocabulary with dsh's persistence read
- * gate. Upstream deliberately ships the Set as a mutable export while deferring
- * a registration API ("a registration surface ... is deferred until such a
- * consumer exists" — dsh-session known-event-types); the declared type is
- * ReadonlySet, so this is the ONE sanctioned seam. Guard it against upstream
- * mutations: a frozen Set would silently drop registration and the persistence
- * layer would refuse every dscode session log containing a model-selected
- * event. Call once, before any session load/restore.
- */
-const knownSessionEventTypes = KNOWN_SESSION_EVENT_TYPES as Set<string>
-if (Object.isFrozen(knownSessionEventTypes)) {
-  // Fail loudly at module load rather than letting resumed sessions hit
-  // SessionFormatUnsupportedError later for an event we wrote ourselves.
-  throw new Error('dsh session event vocabulary is frozen; dscode cannot register its model-selected event')
-}
-knownSessionEventTypes.add('dscode/model-selected')
-knownSessionEventTypes.add(LEGACY_MODEL_SELECTION_EVENT)
+// Historical event names are normalized by installLegacySessionMigration before
+// native admission. Current writes use DSH's model/selection vocabulary.
 export const name = 'grok-leader'
 /** The bridge cannot accept clients until agents and durable session discovery are ready. */
 export const inject = ['agents', 'sessionPersistence', 'attachments']
@@ -156,10 +139,7 @@ const packageDirectory = (): string => {
 
 const PACKAGE_DIRECTORY = packageDirectory()
 const PACKAGE_VERSION = (JSON.parse(readFileSync(join(PACKAGE_DIRECTORY, 'package.json'), 'utf8')) as { version: string }).version
-// Resolve from the package root in both source and compiled installations.
-const { withProfileLock } = await import(pathToFileURL(join(PACKAGE_DIRECTORY, 'bin/update.mjs')).href) as {
-  withProfileLock<T>(profile: string, action: () => Promise<T>): Promise<T>
-}
+const textDecoder = new TextDecoder()
 
 /** How long an unregistered connection may sit before it is dropped (server.rs). */
 const REGISTRATION_TIMEOUT_MS = 30_000
@@ -315,7 +295,7 @@ async function readBoundedModelListing(response: Response): Promise<unknown> {
     body.set(chunk, offset)
     offset += chunk.byteLength
   }
-  return JSON.parse(new TextDecoder().decode(body)) as unknown
+  return JSON.parse(textDecoder.decode(body)) as unknown
 }
 
 /** Best-effort second read for endpoint capability extensions that dsh's
@@ -343,13 +323,6 @@ const MODEL_ID_SEPARATOR = ':'
 /** Build the wire catalog id for a provider/model pair. */
 function wireModelId(provider: string, modelId: string): string {
   return provider + MODEL_ID_SEPARATOR + modelId
-}
-
-/** Split a wire catalog id back into provider/model when it is provider-qualified. */
-function parseWireModelId(wireId: string): { provider: string; model: string } | undefined {
-  const index = wireId.indexOf(MODEL_ID_SEPARATOR)
-  if (index <= 0 || index === wireId.length - 1) return undefined
-  return { provider: wireId.slice(0, index), model: wireId.slice(index + 1) }
 }
 
 /** Stable in-memory key for a provider/model effort. */
@@ -416,7 +389,7 @@ interface ModelCatalog {
   /** Provider that owns currentModelId ('' when no current model). */
   currentProviderId: string
   availableModels: Array<{ modelId: string; name: string; description?: string; _meta?: { provider: string; supportsReasoningEffort?: boolean; reasoningEfforts?: string[]; reasoningEffort?: string; inputModalities?: string[]; acceptsImages?: boolean } }>
-  providerByModel: Map<string, string>
+  routesByModel: Map<string, { provider: string; model: string }>
   providerModelToWireId: Map<string, string>
 }
 
@@ -1076,7 +1049,19 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
             id: model.id,
             name: model.name ?? model.id,
           }))
-        return { provider: provider.id, models }
+        // Resolve providers concurrently while preserving each provider's order.
+        // Refresh on every explicit catalog request: adapters can change in place.
+        const metadata = new Map<string, Awaited<ReturnType<NonNullable<LlmLike['resolveModelInfo']>>>>()
+        if (llmService.resolveModelInfo !== undefined) {
+          for (const model of models) {
+            if (metadata.has(model.id)) continue
+            try { metadata.set(model.id, await llmService.resolveModelInfo(provider.id, model.id)) }
+            catch (error) {
+              logger.warn('grok-leader: could not resolve model metadata for ' + provider.id + '/' + model.id + ': ' + (error instanceof Error ? error.message : String(error)))
+            }
+          }
+        }
+        return { provider: provider.id, models, metadata }
       }))
     const modelCount = new Map(rows.map(row => [row.provider, row.models.length]))
     const providers = await Promise.all([...providerRows.values()].map(async p => {
@@ -1099,7 +1084,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         ...note === undefined ? {} : { note },
       }
     }))
-    const providerByModel = new Map<string, string>()
+    const routesByModel = new Map<string, { provider: string; model: string }>()
+    const reservedRawIds = new Set(rows.flatMap(row => row.models.map(model => model.id)))
     const providerModelToWireId = new Map<string, string>()
     const rawModelOwners = new Map<string, string>()
     const defaultEffortByModel = new Map<string, string>()
@@ -1112,32 +1098,25 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         // backward compatibility; later providers that also carry the same
         // id get a provider-qualified wire id so both remain selectable.
         const existingOwner = rawModelOwners.get(model.id)
-        const wireId = existingOwner === undefined || existingOwner === row.provider
-          ? model.id
-          : wireModelId(row.provider, model.id)
+        let wireId = model.id
+        if (existingOwner !== undefined && existingOwner !== row.provider) {
+          const qualified = wireModelId(row.provider, model.id)
+          wireId = qualified
+          for (let suffix = 2; reservedRawIds.has(wireId) || routesByModel.has(wireId); suffix++) {
+            wireId = `${qualified} (${suffix})`
+          }
+        }
         rawModelOwners.set(model.id, existingOwner ?? row.provider)
         providerModelToWireId.set(pairKey, wireId)
-        providerByModel.set(wireId, row.provider)
+        routesByModel.set(wireId, { provider: row.provider, model: model.id })
         // Prefer the adapter's exact-model reasoning metadata over the old
         // one-size-fits-all grok menu, so a provider that has no low/medium/
         // xhigh does not advertise them.
-        const resolveModelInfo = llmService?.resolveModelInfo
-        const hasMetadataResolver = resolveModelInfo !== undefined
-        let reasoning: { defaultEffort?: string; efforts?: Array<{ id: string; name?: string }> } | undefined
-        let inputModalities = model.inputModalities
+        const hasMetadataResolver = llmService?.resolveModelInfo !== undefined
+        const info = row.metadata.get(model.id)
+        const reasoning = info?.reasoning
+        const inputModalities = (info?.inputModalities ?? model.inputModalities)
           ?.filter((modality): modality is string => typeof modality === 'string' && modality.length > 0)
-        if (resolveModelInfo !== undefined) {
-          try {
-            const info = await resolveModelInfo.call(llmService, row.provider, model.id)
-            reasoning = info.reasoning
-            if (info.inputModalities !== undefined) {
-              inputModalities = info.inputModalities
-                .filter((modality): modality is string => typeof modality === 'string' && modality.length > 0)
-            }
-          } catch (error) {
-            logger.warn('grok-leader: could not resolve model metadata for ' + row.provider + '/' + model.id + ': ' + (error instanceof Error ? error.message : String(error)))
-          }
-        }
         const efforts = reasoning?.efforts
           ?.map(effort => effort.id)
           .filter((id): id is string => typeof id === 'string' && id.length > 0)
@@ -1190,15 +1169,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // Once the user adds a provider, the first advertised model becomes the
     // UI seed until they make (and persist) an explicit selection.
     let currentModelId = requested ?? availableModels[0]?.modelId ?? ''
-    if (currentModelId !== '' && !providerByModel.has(currentModelId)) {
+    if (currentModelId !== '' && !routesByModel.has(currentModelId)) {
       currentModelId = availableModels[0]?.modelId ?? ''
       logger.warn('grok-leader: model "' + requested + '" is not in the catalog; falling back to "' + currentModelId + '"')
     }
-    const currentProviderId = currentModelId === '' ? '' : providerByModel.get(currentModelId) ?? ''
-    const currentParsed = parseWireModelId(currentModelId)
-    const currentRawModel = currentParsed !== undefined && currentProviderId === currentParsed.provider
-      ? currentParsed.model
-      : currentModelId
+    const currentRoute = routesByModel.get(currentModelId)
+    const currentProviderId = currentRoute?.provider ?? ''
+    const currentRawModel = currentRoute?.model ?? ''
     // The pager reads the selected effort from the current model's
     // _meta.reasoningEffort on every models/list, so a /effort choice must
     // ride the catalog or it is forgotten across restarts. When the user has
@@ -1223,7 +1200,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       providers,
       currentProviderId,
       availableModels,
-      providerByModel,
+      routesByModel,
       providerModelToWireId,
     }
     return catalog
@@ -1276,11 +1253,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     let wireId: string | undefined
     if (explicitProvider === undefined
       && explicitModel !== undefined
-      && current.providerByModel.has(explicitModel)) {
+      && current.routesByModel.has(explicitModel)) {
       wireId = explicitModel
     } else if (candidate !== undefined) {
       wireId = current.providerModelToWireId.get(modelEffortKey(candidate.provider, candidate.model))
-        ?? (current.providerByModel.get(candidate.model) === candidate.provider ? candidate.model : undefined)
+        ?? (current.routesByModel.get(candidate.model)?.provider === candidate.provider ? candidate.model : undefined)
     }
     if (wireId === undefined && (explicitModel !== undefined || explicitProvider !== undefined)) {
       throw invalidParams('requested provider/model is not in the catalog: '
@@ -1288,10 +1265,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
     wireId ??= current.currentModelId === '' ? undefined : current.currentModelId
     if (wireId === undefined) return undefined
-    const provider = current.providerByModel.get(wireId)
-    if (provider === undefined) return undefined
-    const parsed = parseWireModelId(wireId)
-    const model = parsed !== undefined && parsed.provider === provider ? parsed.model : wireId
+    const route = current.routesByModel.get(wireId)
+    if (route === undefined) return undefined
+    const { provider, model } = route
     const advertisedModel = current.availableModels.find(entry => entry.modelId === wireId)
     const reasoningEffort = acceptedReasoningEffort(advertisedModel, candidate?.reasoningEffort)
       ?? acceptedReasoningEffort(advertisedModel, advertisedModel?._meta?.reasoningEffort)
@@ -1338,10 +1314,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
 
   const sendAcp = (conn: ClientConnection, value: unknown): void => {
+    const payload = JSON.stringify(value)
     if (process.env.DSCODE_DEBUG === '1') {
-      process.stderr.write('grok-leader wire out acp: ' + JSON.stringify(value).slice(0, 400) + '\n')
+      process.stderr.write('grok-leader wire out acp: ' + payload.slice(0, 400) + '\n')
     }
-    conn.socket.write(encodeJsonFrame({ type: 'acp', payload: JSON.stringify(value) }))
+    writeJsonFrame(conn.socket, { type: 'acp', payload })
   }
 
   const sendNotification = (conn: ClientConnection, method: string, params: unknown): void => {
@@ -1670,11 +1647,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           return
         }
         const updates = mapEvent(record, event, false)
-        const result = event.type === 'tool/result' ? event.data.message.content[0] : undefined
-        const carriesImage = result !== undefined && result.type === 'tool-result'
-          ? result.content.some(block => block.type === 'image')
-          : event.type === 'tool/ptc-dispatch' && event.data.content.some(block => block.type === 'image')
-        const projected = carriesImage ? projectImages(event, updates) : undefined
+        const projected = hasToolImages(event) ? projectImages(event, updates) : undefined
         updates.forEach((item, index) => emitUpdate(conn, record,
           projected === undefined ? item : projected.then(items => items[index]!), false, event.time))
       }
@@ -1747,8 +1720,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const record = request.agent === undefined ? undefined : ownedAgentRecord(request.agent)
     const conn = record === undefined ? undefined : connections.get(record.clientId)
     if (record === undefined || conn === undefined) return next()
-    // grok keys accepted answers by question text, so remember each text's dsh id.
-    const textToId = new Map<string, string>()
+    // IDs survive repeated/translated headings. Accept legacy text keys only
+    // when exactly one question owns the text.
+    const byId = new Map(request.questions.map(question => [question.id, question]))
+    const textToId = new Map<string, string | undefined>()
     const grokQuestions = request.questions.map((question) => {
       // The pager's question card has one multiline heading slot. Preserve
       // dsh's separate short header and supporting detail instead of
@@ -1756,7 +1731,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       const displayQuestion = [question.header, question.question, question.detail]
         .filter(nonEmptyString)
         .join('\n')
-      textToId.set(displayQuestion, question.id)
+      textToId.set(displayQuestion, textToId.has(displayQuestion) ? undefined : question.id)
       return {
         question: displayQuestion,
         options: (question.options ?? []).map(option => ({
@@ -1804,13 +1779,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       ? annotationsRaw as Record<string, { notes?: unknown }>
       : undefined
     const answers: AskUserQuestionAnswer['answers'] = []
-    for (const [text, labels] of Object.entries(response.answers)) {
-      const id = textToId.get(text)
-      if (id === undefined) continue
+    for (const [key, labels] of Object.entries(response.answers)) {
+      const id = byId.has(key) ? key : textToId.get(key)
+      if (id === undefined) throw new UserQuestionError('unknown or ambiguous question in response', 'ASK_CANCELLED')
       // ACP accepts both "value" and ["value"] per answer entry.
       const rawLabels = Array.isArray(labels) ? labels : labels === undefined ? [] : [labels]
-      const notes = annotations?.[text]?.notes
-      const selected = rawLabels.filter((label): label is string => typeof label === 'string' && label !== 'Other')
+      const notes = annotations?.[key]?.notes
+      const offered = new Set(byId.get(id)?.options?.map(option => option.label))
+      const selected = rawLabels.filter((label): label is string => typeof label === 'string'
+        && (label !== 'Other' || offered.has(label)))
       answers.push({ id, selected, ...(typeof notes === 'string' && notes.length > 0 ? { custom: notes } : {}) })
     }
     return { answers }
@@ -1885,7 +1862,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       // the client-side rewind composer restore, so it stays unadvertised.
       // modelState flattens provider-scoped dsh model ids into one global
       // catalog of modelId strings (agent.rs SessionModelState); the
-      // leader-side providerByModel map keeps provider ownership for
+      // leader-side routesByModel map keeps provider ownership for
       // session/set_model.
       _meta: {
         grokShell: true,
@@ -2662,10 +2639,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         ?? ''
     const availableModels = current.availableModels.map(model => {
       if (selection === undefined || model.modelId !== selectedId || model._meta === undefined) return model
+      const meta = { ...model._meta }
+      delete meta.reasoningEffort
       return {
         ...model,
         _meta: {
-          ...model._meta,
+          ...meta,
           ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
         },
       }
@@ -2923,9 +2902,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       }
     }
     try {
-      return verb === 'add' || verb === 'remove' ? await withProfileLock(dir, execute) : await execute()
+      if (verb !== 'add' && verb !== 'remove') return await execute()
+      const { withProfileLock } = await import(pathToFileURL(join(PACKAGE_DIRECTORY, 'bin/update.mjs')).href) as {
+        withProfileLock<T>(profile: string, action: () => Promise<T>): Promise<T>
+      }
+      return await withProfileLock(dir, execute)
     } catch (error: unknown) {
-      return settle('/dsh ' + String(verb) + ' failed: ' + (error instanceof Error ? error.message : String(error)))
+      throw invalidParams('/dsh ' + String(verb) + ' failed: ' + (error instanceof Error ? error.message : String(error)))
     }
   }
 
@@ -2943,15 +2926,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   /** Headless ACP clients use the advertised raw command; the TUI uses its picker. */
   const runPresetCommand = async (record: SessionRecord, p: Record<string, unknown>, text: string): Promise<PromptSettleResult> => {
     const roster = agentPresets()
-    if (roster === undefined) return settleBridgeCommand(record, p, 'Preset management is unavailable in this composition.')
+    if (roster === undefined) throw invalidParams('Preset management is unavailable in this session.')
     const requested = text.replace(/^\/preset\s*/, '').trim()
     if (requested.length === 0) {
       const presets = await roster.list()
       return settleBridgeCommand(record, p, 'Usage: /preset <id>\nAvailable: ' + presets.map(preset => preset.id).join(', '))
     }
-    if (/\s/.test(requested)) return settleBridgeCommand(record, p, 'Usage: /preset <id>')
+    if (/\s/.test(requested)) throw invalidParams('Usage: /preset <id>')
     const resolved = await resolvePresetId(requested)
-    if (resolved === undefined) return settleBridgeCommand(record, p, 'Unknown preset "' + requested + '".')
+    if (resolved === undefined) throw invalidParams('Unknown preset "' + requested + '".')
     const current = roster.composedPreset?.(record.agent.ctx)
       ?? sessionPresetFromLog(record.agent.session.header, record.agent.session.snapshotEvents())
     if (current === resolved) {
@@ -2959,7 +2942,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       return settleBridgeCommand(record, p, 'Preset "' + resolved + '" is active and is now the default for new sessions.')
     }
     if (record.runningPromptId !== undefined || presetSwitchLocked(record.agent.session.snapshotEvents())) {
-      return settleBridgeCommand(record, p, 'agent-preset-locked: a preset can only be changed before the session has produced history')
+      throw invalidParams('agent-preset-locked: a preset can only be changed before the session has produced history')
     }
     await roster.recompose(record.agent.ctx, resolved)
     try {
@@ -3086,18 +3069,20 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (/^\/subagents(?:\s|$)/i.test(text.trim())) {
       const execution = await executeSubagentCommand(clientId, p)
       const { kind, text: body } = execution.result
-      return settleBridgeCommand(record, p, kind === 'error' ? 'error: ' + body : body)
+      if (kind === 'error') throw invalidParams(body)
+      return settleBridgeCommand(record, p, body)
     }
     const slashName = /^\/([^\s]+)/.exec(text.trim())?.[1]?.toLowerCase()
     const unsupported = slashName === undefined ? undefined : unsupportedSlashCommands[slashName]
     if (unsupported !== undefined) {
       if (parsed.images.length > 0) throw invalidParams('/' + slashName + ' does not accept image attachments')
-      return settleBridgeCommand(record, p, unsupported)
+      throw invalidParams(unsupported)
     }
     if (slashName === 'goal') {
       const execution = await executeGoalCommand(record, parsed)
       const { kind, text: body } = execution.result
-      return settleBridgeCommand(record, p, kind === 'error' ? 'error: ' + body : body)
+      if (kind === 'error') throw invalidParams(body)
+      return settleBridgeCommand(record, p, body)
     }
     // Plugin-registered slash commands own image admission. Unknown slash text
     // still reaches the model unchanged (grok pass-through semantics).
@@ -3114,14 +3099,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           const meta = p._meta as Record<string, unknown> | null | undefined
           const id = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
           const body = execution.result.text ?? (execution.result.kind === 'success' ? 'done' : 'command failed')
-          notifySession(record, execution.result.kind === 'error' ? 'error: ' + body : body)
+          if (execution.result.kind === 'error') throw invalidParams(body)
+          notifySession(record, body)
           return promptSettled(record, id, 'end_turn')
         }
       }
     }
     if (slashName === 'compact') {
       if (parsed.images.length > 0) throw invalidParams('/compact does not accept image attachments')
-      return settleBridgeCommand(record, p, 'Manual compaction is unavailable in the selected preset.')
+      throw invalidParams('Manual compaction is unavailable in this session.')
     }
     if (record.selection.current === undefined) {
       throw invalidParams('no model selected; use /provider to add or choose a provider first')
@@ -3358,11 +3344,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       // Keep turnStartMs current so replayed updates carry streamStartMs
       // and the pager renders ThinkingBlock durations on resume.
       if (event.type === 'turn/start') record.turnStartMs = event.time
-      const items = await projectImages(event, mapEvent(record, event, true))
+      const mapped = mapEvent(record, event, true)
+      const items = hasToolImages(event) ? await projectImages(event, mapped) : mapped
       if (!noReplay && conn !== undefined) {
         if (!admitEvent(record, event.seq)) continue
         for (const item of items) {
           emitUpdate(conn, record, item, true, event.time)
+          if (conn.socket.writableNeedDrain) await waitForDrain(conn.socket)
         }
       } else {
         record.lastSeq = Math.max(record.lastSeq, event.seq)
@@ -3401,13 +3389,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const explicitEffort = typeof reasoningEffort === 'string' && reasoningEffort.length > 0
       ? reasoningEffort
       : undefined
-    // grok modelId is a global catalog id; dsh needs a provider+model pair, so
-    // the provider resolves from the catalog's modelId -> provider mapping,
-    // then the agent's own route, then config.provider (implemented below).
+    // Wire IDs are opaque: the catalog owns their exact provider/model route.
     const current = await currentCatalog()
     // Never persist an unresolvable selection: a modelId the client has not
     // been offered cannot name a provider route.
-    if (!current.providerByModel.has(modelId)) {
+    if (!current.routesByModel.has(modelId)) {
       throw invalidParams('modelId is not in the catalog: ' + modelId)
     }
     const advertisedModel = current.availableModels.find(model => model.modelId === modelId)
@@ -3418,45 +3404,43 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         throw invalidParams('reasoningEffort "' + explicitEffort + '" is not supported by model ' + modelId)
       }
     }
-    const parsed = parseWireModelId(modelId)
-    const provider = parsed !== undefined && current.providerByModel.get(modelId) === parsed.provider
-      ? parsed.provider
-      : current.providerByModel.get(modelId) ?? record.agent.options.provider ?? config.provider ?? ''
-    const rawModel = parsed !== undefined && provider === parsed.provider ? parsed.model : modelId
+    const { provider, model: rawModel } = current.routesByModel.get(modelId)!
     // Reasoning vocabularies belong to exact provider/model routes. Remembering
     // by raw id alone leaks an effort to another provider exposing the same id.
     const effortKey = modelEffortKey(provider, rawModel)
-    if (explicitEffort !== undefined) record.modelEfforts.set(effortKey, explicitEffort)
     const rememberedEffort = record.modelEfforts.get(effortKey)
     const effectiveEffort = explicitEffort
       ?? acceptedReasoningEffort(advertisedModel, rememberedEffort)
-    if (explicitEffort === undefined && rememberedEffort !== undefined && effectiveEffort === undefined) {
-      record.modelEfforts.delete(effortKey)
-    }
     const selection = {
       provider,
       model: rawModel,
       ...effectiveEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effectiveEffort) },
     }
-    // Commit the session-specific choice before advertising success. This log
-    // is distinct from agent-default-model: resume restores the session's own
-    // route, while a brand-new session inherits the latest global default.
-    record.agent.session.append(MODEL_SELECTION_EVENT, selection)
-    record.selection.current = selection
+    // Reject a failed settings save before changing the live session or its
+    // append-only log. Once appended, the choice is applied; a later flush
+    // failure must be reported as a durability warning, not a rejected switch.
     const defaultModel = agentDefaultModel()
     if (defaultModel !== undefined) await defaultModel.saveSelection(selection)
+    record.agent.session.append(MODEL_SELECTION_EVENT, selection)
+    record.selection.current = selection
+    if (effectiveEffort === undefined) record.modelEfforts.delete(effortKey)
+    else record.modelEfforts.set(effortKey, effectiveEffort)
     const sessionStore = ctx.get('sessions') as SessionsLike | undefined
-    if (sessionStore !== undefined) await sessionStore.flush(record.agent.session)
-    // The catalog may have fallen back to a different provider's model (or the
-    // persisted default may have moved providers); refresh so the next
-    // models/list (and initialize _meta) reports the provider that now owns
-    // the current model. Without this a re-spawned TUI shows the pre-switch
-    // provider scope.
+    let persistenceWarning: string | undefined
+    try {
+      if (sessionStore !== undefined) await sessionStore.flush(record.agent.session)
+    } catch (error) {
+      persistenceWarning = 'Model changed, but session history could not be saved; resuming may restore the previous model. ' + errorChain(error)
+      logger.warn(persistenceWarning)
+    }
+    // The roster did not change. Updating the selected pointer avoids a
+    // second discovery (and a post-commit RPC failure if discovery is down).
     if (catalog !== undefined) {
-      await refreshCatalog()
+      catalog.currentModelId = modelId
+      catalog.currentProviderId = provider
       notifyModelsUpdate(record)
     }
-    return {}
+    return persistenceWarning === undefined ? {} : { _meta: { persistenceWarning } }
   }
 
   /**
@@ -4249,37 +4233,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     }
   }
 
-  const listMcpServers = (record: SessionRecord | undefined): { servers: Array<Record<string, unknown>> } => {
-    const tools = record?.agent.ctx.get('tools') as
-      | { schemas(scope?: unknown): Array<{ name: string }> }
-      | undefined
-    const schemas = tools === undefined ? [] : tools.schemas(record?.agent)
-    const counts = new Map<string, number>()
-    for (const schema of schemas) {
-      if (!schema.name.startsWith('mcp__')) continue
-      const rest = schema.name.slice('mcp__'.length)
-      const idx = rest.lastIndexOf('__')
-      if (idx <= 0 || idx + 2 >= rest.length) continue
-      const server = rest.slice(0, idx)
-      counts.set(server, (counts.get(server) ?? 0) + 1)
-    }
-    return {
-      servers: [...counts.entries()].map(([name, toolCount]) => ({
-        name,
-        displayName: name,
-        source: 'local',
-        sourceLabel: 'plugin: dsh',
-        session: {
-          enabled: true,
-          status: 'connected',
-          tools: [],
-          authRequired: false,
-          setupRequired: false,
-        },
-        _meta: { toolCount },
-      })),
-    }
-  }
+  const listMcpServers = (record: SessionRecord | undefined) => mcpServerList(ctx, record?.agent)
 
   const searchSessions = async (params: unknown): Promise<Record<string, unknown>> => {
     const p = paramRecord(params, 'x.ai/session/search')
@@ -4680,7 +4634,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           : snapshots.filter(({ header }) => header.cwd === cwd
             || (query !== undefined && header.id.toLowerCase() === query))
         // Backfill display titles BEFORE the text query so picker search can
-        // match prompt text. Misses stay uncached and in-flight loads dedupe.
+        // match prompt text. Revisions invalidate cached metadata; in-flight loads dedupe.
         const projections = await Promise.all(candidates.map(({ header, revision }) => sessionListIndex.inspect(header.id, header.createdAt, async () => {
           try {
             const inspection = await readPersistedSession(store, SessionId(header.id))
@@ -5156,7 +5110,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const send = (msg: ServerMessage): void => {
       wireLog('out', msg)
       // One write() per frame: node serializes per-socket writes in order.
-      socket.write(encodeJsonFrame(encodeServerMessage(msg)))
+      writeJsonFrame(socket, encodeServerMessage(msg))
     }
     socket.setTimeout(REGISTRATION_TIMEOUT_MS)
     socket.on('timeout', () => {
@@ -5192,7 +5146,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const handleFrame = async (frame: Uint8Array): Promise<void> => {
       let value: unknown
       try {
-        value = JSON.parse(new TextDecoder().decode(frame))
+        value = JSON.parse(textDecoder.decode(frame))
       } catch {
         send({ type: 'error', code: -32700, message: 'invalid JSON frame' })
         socket.destroy()
@@ -5311,9 +5265,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const emitReminders = (record: SessionRecord): void => {
     const conn = connections.get(record.clientId)
     if (conn === undefined || ownedAgentRecord(record.agent) !== record) return
-    const { active, seenIds } = foldScheduleEvents(record.agent.session.ownEvents())
-    // Reconnect also clears native IDs that were deleted while the UI was away.
-    const previous = reminderSnapshots.get(record) ?? new Map<string, string>(seenIds.map(id => [id, '']))
+    const cached = reminderSnapshots.get(record)
+    // The native projection already folds schedule changes incrementally.
+    const schedule = record.agent.ctx.get('sessionProjections')?.snapshot(record.agent.session, ['schedule']).values.schedule
+    // The first baseline also clears IDs deleted while the UI was away.
+    const folded = cached === undefined || schedule === undefined ? foldScheduleEvents(record.agent.session.ownEvents()) : undefined
+    const active = schedule ?? folded!.active
+    const previous = cached ?? new Map<string, string>(folded!.seenIds.map(id => [id, '']))
     const next = new Map<string, string>()
     for (const reminder of active) {
       const serialized = JSON.stringify(reminder)
@@ -5422,17 +5380,20 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const systemTime = (ms: number): unknown => ({ secs_since_epoch: Math.floor(ms / 1000), nanos_since_epoch: (ms % 1000) * 1_000_000 })
     for (const job of jobs.list(record.agent)) {
       // Settled producers are immutable; do not rescan their output every tick.
-      if (!jobIsRunning(job) && previous.get(job.id) === JSON.stringify([job, true])) continue
+      if (!jobIsRunning(job) && (previous.get(job.id) === JSON.stringify([job, true])
+        || previous.get(job.id) === JSON.stringify([job, false]))) continue
       const output = jobOutput(jobs, record.agent, job.id)
       const serialized = JSON.stringify([job, output !== undefined])
       if (previous.get(job.id) === serialized) {
         emitJobOutput(record, job.id, output)
         continue
       }
+      const known = previous.has(job.id)
       previous.set(job.id, serialized)
       const cwd = record.agent.session.header.cwd ?? ''
       if (jobIsRunning(job)) {
-        sendNotification(conn, 'x.ai/task_backgrounded', {
+        // Re-announcing an existing task resets the TUI's output buffer.
+        if (!known) sendNotification(conn, 'x.ai/task_backgrounded', {
           sessionId: record.agent.session.id,
           update: { sessionUpdate: 'task_backgrounded', tool_call_id: job.id, task_id: job.id, command: job.label, cwd, description: job.label },
           _meta: { eventSeq: record.eventSeq++ },
@@ -5452,7 +5413,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
           _meta: { eventSeq: record.eventSeq++, nativeTask: { status: job.status, kind: job.kind, outputAvailable: output !== undefined, ...job.detail === undefined ? {} : { detail: job.detail } } },
         })
       }
-      emitJobOutput(record, job.id, output)
+      if (jobIsRunning(job)) emitJobOutput(record, job.id, output)
+      else jobOutputSnapshots.get(record)?.delete(job.id)
     }
   }
   const emitJobOutput = (record: SessionRecord, id: string, output: string | undefined): void => {
@@ -5461,11 +5423,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (conn === undefined) return
     let previous = jobOutputSnapshots.get(record)
     if (previous === undefined) { previous = new Map(); jobOutputSnapshots.set(record, previous) }
-    if (previous.get(id) === output) return
+    const before = previous.get(id)
+    if (before === output) return
     previous.set(id, output)
     emitUpdate(conn, record, {
       sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed',
-      rawOutput: { type: 'Bash', output_for_prompt: output },
+      rawOutput: jobOutputPatch(before, output),
     }, false)
   }
   ctx.effect(() => {
@@ -5498,13 +5461,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   type ChildRow = { kind: 'child' | 'diagnostic'; id: string; mode?: 'continuable' | 'one-shot'; label?: string; parentId?: string }
   const liveWorkflows = new Map<string, LiveWorkflow>()
+  const workflowIndexes = new WeakMap<SessionRecord, { cursor: number; index: WorkflowIndex }>()
   const emitWorkflows = (record: SessionRecord, replay = false, runId?: string): void => {
     const conn = connections.get(record.clientId)
     if (conn === undefined || ownedAgentRecord(record.agent) !== record) return
-    // ponytail: scan on workflow transitions only; add a native projection if
-    // sessions with very large workflow histories make this measurable.
-    for (const update of workflowUpdates(record.agent.session.snapshotEvents(), liveWorkflows, Date.now())) {
-      if (runId !== undefined && update.run_id !== runId) continue
+    let cached = workflowIndexes.get(record)
+    if (cached === undefined) { cached = { cursor: 0, index: new WorkflowIndex() }; workflowIndexes.set(record, cached) }
+    cached.index.append(record.agent.session.snapshotEvents(SessionLogOffset(cached.cursor)))
+    cached.cursor = record.agent.session.seq
+    for (const update of cached.index.updates(liveWorkflows, Date.now(), runId)) {
       sendNotification(conn, 'x.ai/session_notification', {
         sessionId: record.agent.session.id, update,
         _meta: { eventSeq: record.eventSeq++, isReplay: replay },
@@ -5521,12 +5486,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const run = liveWorkflows.get(info.id)
     if (run === undefined) return
     run.phase = phase
-    for (const record of sessions.values()) emitWorkflows(record, false, info.id)
+    for (const record of sessions.values()) {
+      if (workflowIndexes.get(record)?.index.has(info.id)) emitWorkflows(record, false, info.id)
+    }
   })
   workflowEvents.on('workflow/end', info => {
     liveWorkflows.delete(info.id)
     // The tool appends run-end as its awaited native result settles.
-    setTimeout(() => { for (const record of sessions.values()) emitWorkflows(record, false, info.id) }, 0)
+    setTimeout(() => { for (const record of sessions.values()) {
+      if (workflowIndexes.get(record)?.index.has(info.id)) emitWorkflows(record, false, info.id)
+    } }, 0)
   })
   type SubagentsLike = {
     listDescendants(root: SessionId): Promise<ChildRow[]>
@@ -5691,7 +5660,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       let turnStartMs = index.turnStartAt(after)
       for (const event of await read(after, nextSeq - after)) {
         if (event.type === 'turn/start') turnStartMs = event.time
-        const updates = await projectImages(event, sessionEventToUpdates(event, { replay: true, cwd: meta.cwd, toolCall: id => index.toolCallAt(id, event.seq) }))
+        const mapped = sessionEventToUpdates(event, { replay: true, cwd: meta.cwd, toolCall: id => index.toolCallAt(id, event.seq) })
+        const updates = hasToolImages(event) ? await projectImages(event, mapped) : mapped
         for (const update of updates) entries.push({ update, meta: { isReplay: true, agentTimestampMs: event.time, turnStartMs, streamStartMs: turnStartMs } })
         if (event.type === 'turn/end') entries.push({ turnEnded: true })
       }
@@ -5924,7 +5894,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (status === 'idle' && childStates.get(owner)?.get(agent.session.id)?.agent === agent) {
         const conn = connections.get(owner.clientId)
         if (conn !== undefined) sendNotification(conn, 'x.ai/subagent/history_changed', {
-          sessionId: owner.agent.session.id, childSessionId: agent.session.id, nextSeq: agent.session.snapshotEvents().length,
+          sessionId: owner.agent.session.id, childSessionId: agent.session.id, nextSeq: agent.session.seq,
         })
       }
     }

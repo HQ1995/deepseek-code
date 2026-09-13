@@ -129,7 +129,9 @@ pub enum LockError {
 /// 2. File contents store the leader's PID for diagnostics
 ///
 /// Lock semantics:
-/// - Leader holds exclusive lock for its entire lifetime
+/// - The embedded leader holds an exclusive lock for its entire lifetime.
+///   Dscode releases this startup token after spawning the external dsh leader;
+///   process identity and registration validate external leader ownership.
 /// - Clients use try_lock to check if leader exists and coordinate spawning
 ///
 /// Cleanup behavior:

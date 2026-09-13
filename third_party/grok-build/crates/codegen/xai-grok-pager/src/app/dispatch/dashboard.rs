@@ -1369,7 +1369,13 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             return vec![];
         }
 
-        let Some(command) = reg.get(invocation.token).cloned() else {
+        if let Some(message) = reg.unavailable_message(invocation.token) {
+            if let Some(d) = app.dashboard.as_mut() {
+                d.set_error_toast(&message);
+            }
+            return vec![];
+        }
+        let Some(command) = reg.get_for_dispatch(invocation.token).cloned() else {
             // Unknown command. Fall back to the regular dispatch
             // path so the text becomes a new session's prompt.
             return dispatch_dashboard_dispatch(app, text, /* attach */ false);
