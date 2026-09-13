@@ -308,33 +308,55 @@ export const withProfileLock = async (profile, action, runtime = join(profile, '
     .flatMap(({ stage }) => [join(stage, 'backup/runtime'), join(stage, 'profile/runtime')])]
   const locations = [...runtimes.map(path => join(path, 'package.json')), import.meta.url]
   if (process.env.DSH_BIN && existsSync(process.env.DSH_BIN)) locations.push(realpathSync(process.env.DSH_BIN))
-  let binding
+  let bindingError, locked = false
+  const attempted = new Set()
   // The lock guards the profile, so a flock binding from the runtime being
   // installed or from the one already running is equally usable.
   const families = new Set(runtimes.flatMap(nativePackages))
   const specifiers = ['@deepseek-ai/node-addon-system/flock', ...[...families].map(name => `@deepseek-ai/${name}/flock`)]
-  for (const location of locations) {
-    for (const specifier of specifiers) {
-      try { binding = createRequire(location).resolve(specifier); break } catch (error) {
-        if (error.code !== 'MODULE_NOT_FOUND') throw error
-      }
-    }
-    if (binding) break
-  }
-  if (!binding) throw new Error('cannot lock dscode profile: the pinned runtime native addon is unavailable')
-  const { tryLockExclusive } = await import(pathToFileURL(binding).href)
   const fd = openSync(join(dirname(canonical), `.${basename(canonical)}.install.lock`), constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600)
   try {
     const deadline = performance.now() + 60000
     let announced = false
-    for (;;) {
-      try { await tryLockExclusive(fd); break } catch (error) {
-        if (!['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) throw error
-        if (performance.now() >= deadline) throw new Error('timed out waiting for the dscode profile update; retry after it finishes', { cause: error })
-        if (!announced) { console.error('dscode: waiting for the current profile update...'); announced = true }
-        await delay(100)
+    const acquire = async tryLockExclusive => {
+      for (;;) {
+        try { await tryLockExclusive(fd); return true } catch (error) {
+          // The pinned SDK loads .node lazily on the first lock attempt.
+          // Native admission failure may try another runtime; a real flock
+          // error or anything thrown by the action must never trigger fallback.
+          if (error?.syscall !== 'flock' && ['ERR_DLOPEN_FAILED', 'MODULE_NOT_FOUND', 'ERR_MODULE_NOT_FOUND'].includes(error?.code)) {
+            bindingError = error
+            return false
+          }
+          if (!['EAGAIN', 'EWOULDBLOCK'].includes(error?.code)) throw error
+          if (performance.now() >= deadline) throw new Error('timed out waiting for the dscode profile update; retry after it finishes', { cause: error })
+          if (!announced) { console.error('dscode: waiting for the current profile update...'); announced = true }
+          await delay(100)
+        }
       }
     }
+    for (const location of locations) {
+      for (const specifier of specifiers) {
+        let tryLockExclusive
+        try {
+          const binding = createRequire(location).resolve(specifier)
+          if (attempted.has(binding)) continue
+          attempted.add(binding)
+          const loaded = await import(pathToFileURL(binding).href)
+          if (typeof loaded.tryLockExclusive !== 'function') throw new Error('runtime lock binding has no tryLockExclusive export')
+          tryLockExclusive = loaded.tryLockExclusive
+        } catch (error) {
+          if (bindingError === undefined || error?.code !== 'MODULE_NOT_FOUND') bindingError = error
+          continue
+        }
+        if (await acquire(tryLockExclusive)) { locked = true; break }
+      }
+      if (locked) break
+    }
+    if (!locked) throw Object.assign(
+      new Error('cannot lock dscode profile: the pinned runtime native addon is unavailable', { cause: bindingError }),
+      { code: 'DSCODE_PROFILE_LOCK_UNAVAILABLE' },
+    )
     recoverInstallations(canonical)
     return await action()
   } finally { closeSync(fd) }

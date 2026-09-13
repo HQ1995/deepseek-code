@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { accessSync, constants, readFileSync, readdirSync, statSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
 // Read the installed family's contract: frozen launchers must also accept an
@@ -6,7 +6,12 @@ import { isAbsolute, join, relative, resolve } from 'node:path'
 export const nativePackages = runtime => {
   const scope = join(runtime, 'node_modules', '@deepseek-ai')
   const current = name => name === 'node-addon-system' || name.startsWith('node-addon-system-')
-  return (existsSync(scope) ? readdirSync(scope) : [])
+  let names
+  try { names = readdirSync(scope) } catch (error) {
+    if (['ENOENT', 'ENOTDIR'].includes(error.code)) return []
+    throw error
+  }
+  return names
     .filter(name => name.startsWith('node-addon-'))
     .sort((a, b) => Number(current(b)) - Number(current(a)) || a.localeCompare(b))
 }

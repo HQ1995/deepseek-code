@@ -1,7 +1,7 @@
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readlinkSync, symlinkSync, lstatSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readlinkSync, symlinkSync, lstatSync, rmSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,6 +9,57 @@ import { expect, it } from 'vitest'
 import { fixtureEnvironment } from './fixtures/environment.ts'
 import { installationReport } from '../bin/doctor.mjs'
 import { commitInstallation, saveUpdateChannel, validateRuntime, withProfileLock } from '../bin/update.mjs'
+
+it.each(['unloadable addon', 'lazy addon failure', 'invalid native scope'])('uses an available runtime lock binding despite %s in the profile', async damage => {
+  const root = mkdtempSync(join(tmpdir(), 'dscode-broken-binding-'))
+  try {
+    const native = join(root, 'runtime/node_modules/@deepseek-ai/node-addon-system')
+    if (damage === 'invalid native scope') {
+      mkdirSync(join(root, 'runtime/node_modules'), { recursive: true })
+      writeFileSync(join(root, 'runtime/node_modules/@deepseek-ai'), 'not a directory')
+    } else {
+      mkdirSync(native, { recursive: true })
+      writeFileSync(join(native, 'package.json'), JSON.stringify({ name: '@deepseek-ai/node-addon-system', type: 'module', exports: { './flock': './flock.mjs' } }))
+      const failure = 'throw Object.assign(new Error("damaged native addon fixture"), { code: "ERR_DLOPEN_FAILED" });'
+      writeFileSync(join(native, 'flock.mjs'), damage === 'lazy addon failure' ? `export const tryLockExclusive = async () => { ${failure} };\n` : failure)
+    }
+    let entered = 0
+    await expect(withProfileLock(root, () => ++entered)).resolves.toBe(1)
+    expect(entered).toBe(1)
+    const nativeFailure = Object.assign(new Error('action failed'), { code: 'ERR_DLOPEN_FAILED' })
+    await expect(withProfileLock(root, () => { throw nativeFailure })).rejects.toBe(nativeFailure)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+it.each(['EACCES', 'ERR_DLOPEN_FAILED'])('does not fall back or run the action after a flock syscall error: %s', async code => {
+  const root = mkdtempSync(join(tmpdir(), 'dscode-refused-lock-'))
+  try {
+    const native = join(root, 'runtime/node_modules/@deepseek-ai/node-addon-system')
+    mkdirSync(native, { recursive: true })
+    writeFileSync(join(native, 'package.json'), JSON.stringify({ name: '@deepseek-ai/node-addon-system', type: 'module', exports: { './flock': './flock.mjs' } }))
+    writeFileSync(join(native, 'flock.mjs'), `export const tryLockExclusive = () => { throw Object.assign(new Error("lock refused fixture"), { code: ${JSON.stringify(code)}, syscall: 'flock' }); };\n`)
+    let entered = false
+    await expect(withProfileLock(root, () => { entered = true })).rejects.toMatchObject({ code, syscall: 'flock' })
+    expect(entered).toBe(false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+it('fails closed with a repairable error when no runtime lock binding is loadable', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dscode-no-lock-binding-'))
+  try {
+    cpSync(fileURLToPath(new URL('../bin', import.meta.url)), join(root, 'bin'), { recursive: true })
+    mkdirSync(join(root, 'node_modules'))
+    for (const name of ['smol-toml', 'tar']) symlinkSync(fileURLToPath(new URL('../node_modules/' + name, import.meta.url)), join(root, 'node_modules', name))
+    const script = `const { withProfileLock } = await import(${JSON.stringify(pathToFileURL(join(root, 'bin/update.mjs')).href)});
+try { await withProfileLock(${JSON.stringify(root)}, () => { throw Error('unlocked action ran') }); process.exit(2) }
+catch (error) { if (error.code !== 'DSCODE_PROFILE_LOCK_UNAVAILABLE') throw error; console.log('repairable, no unlocked action') }`
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      encoding: 'utf8', timeout: 5000, env: fixtureEnvironment(root, { NODE_PATH: '' }),
+    })
+    expect(child.status, child.stderr).toBe(0)
+    expect(child.stdout).toContain('repairable, no unlocked action')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
 
 it('retains the only backup when rollback fails and retries recovery at the next lock', async () => {
   const root = mkdtempSync(join(tmpdir(), 'dscode-rollback-recovery-'))

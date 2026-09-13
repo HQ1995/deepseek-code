@@ -518,6 +518,11 @@ export const main = async () => {
       managed && !process.env.DSH_BIN ? Promise.resolve(dshRuntimeBin) : ensureDshCli(),
       managed ? Promise.resolve(binPath) : process.env.DSCODE_BIN ? Promise.resolve(process.env.DSCODE_BIN) : ensureBinary(),
     ])
+  }).catch(error => {
+    // A present but corrupt native addon passes the file-only preflight.
+    // A validated replacement runtime supplies the lock during rebootstrap.
+    if (managedRelease && error?.code === 'DSCODE_PROFILE_LOCK_UNAVAILABLE') return undefined
+    throw error
   })
   if (prepared === undefined) {
     await rebootstrapManaged()
