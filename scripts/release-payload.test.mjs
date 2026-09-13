@@ -53,6 +53,14 @@ done
   assert.equal(result.status, 0, result.stderr);
 });
 
+test('terminal acceptance disables updates in profile files, not the filtered environment overlay', () => {
+  const tui = readFileSync(new URL('./e2e-tui-bridge.sh', import.meta.url), 'utf8');
+  const providers = readFileSync(new URL('./e2e-provider-manage.sh', import.meta.url), 'utf8');
+  for (const script of [tui, providers]) assert.doesNotMatch(script, /export DSCODE_CONFIG=.*auto_update/);
+  assert.match(tui, /cat >"\$SCRATCH\/dsc-tui\/config\.toml" <<'EOF'\n\[cli\]\nauto_update = false\n/);
+  assert.match(providers, /printf '\[cli\]\\nauto_update = false\\n' >"\$SCRATCH\/profiles\/dscode\/config\.toml"/);
+});
+
 test('documented unavailable TUI commands match the registry boundary', () => {
   const root = new URL('../third_party/grok-build/', import.meta.url);
   const registry = readFileSync(new URL('crates/codegen/xai-grok-pager/src/slash/registry.rs', root), 'utf8');

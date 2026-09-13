@@ -9,7 +9,6 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/test-environment.sh"
 dscode_clear_test_overrides
-export DSCODE_CONFIG='{"cli":{"auto_update":false}}'
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${DSCODE_TUI_BIN:-$ROOT/third_party/grok-build/target/release/dscode}"
@@ -128,6 +127,9 @@ agent-default-model:
   model: fake-model
 EOF
 DSH_HOME="$SCRATCH" "$DSH_BIN" plugin --profile dscode add "file:$BRIDGE_ARCHIVE" >"$OUT/plugin-$RUN_ID.log" 2>&1 || fail "dsh plugin add failed"
+# CLI settings are deliberately excluded from the environment overlay.
+# Keep acceptance on the supplied payload through the isolated profile file.
+printf '[cli]\nauto_update = false\n' >"$SCRATCH/profiles/dscode/config.toml"
 printf '[folders."%s"]\ntrusted = true\ndecided_at = 0\n' "$ROOT" >"$SCRATCH/profiles/dscode/trusted_folders.toml"
 
 export TERM=xterm-256color

@@ -1,5 +1,7 @@
 # Upstream integration review — 2026-09-13
 
+Subsequent failure-path findings and verification: [bugfix-review.md](bugfix-review.md).
+
 This review supersedes the pre-pull validation in [architecture-review.md](architecture-review.md).
 The user confirmed that the concurrent performance task had finished and asked
 to integrate remote work, organize commits, and remove obsolete worktrees.

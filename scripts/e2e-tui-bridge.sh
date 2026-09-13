@@ -3,8 +3,6 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/test-environment.sh"
 dscode_clear_test_overrides
-# Keep acceptance on the supplied payload while exercising the real TUI/runtime.
-export DSCODE_CONFIG='{"cli":{"auto_update":false}}'
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODE_BIN="${DSCODE_E2E_NODE_BIN:-$(command -v node || true)}"
@@ -136,6 +134,8 @@ if [[ "$(uname -s)" == Darwin ]]; then
 fi
 mkdir -p "$SCRATCH/dsc-tui"
 cat >"$SCRATCH/dsc-tui/config.toml" <<'EOF'
+[cli]
+auto_update = false
 [ui]
 keep_text_selection = "word_select"
 EOF
@@ -918,7 +918,7 @@ stop_client() {
 }
 
 echo "[tui] dscode environment namespace isolation"
-# This probe must not inherit this harness's intentional DSCODE_CONFIG overlay.
+# This probe must not inherit any intentional DSCODE_CONFIG overlay.
 env -u DSCODE_CONFIG PATH="$PATH" DSH_HOME="$SCRATCH" DSC_HOME="$SCRATCH/dsc-tui" \
   GROK_CONFIG='{"models":{"default_reasoning_effort":"low"}}' \
   DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 TERM=xterm-256color \
