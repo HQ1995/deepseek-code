@@ -117,12 +117,10 @@ package rename and cannot validate a current runtime; re-run
 `npx @hqzhao95/dscode@<channel>` once to re-bootstrap, then `dscode update`
 keeps working.
 
-Uninstall removes the owned profile, runtime, TUI, and launcher link; shared DSH
-sessions and attachment storage remain.
-
 ## Maintainers
 
 - [Bridge development](bridge/grok-leader/README.md)
 - [Protocol contract](docs/grok-leader-protocol.md)
 - [Upgrade, testing, and release](docs/upgrade-strategy.md)
+- [Repository maintenance review](docs/maintenance-review.md)
 - [License and third-party notices](THIRD_PARTY_NOTICES.md)
