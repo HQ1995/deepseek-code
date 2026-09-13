@@ -1,4 +1,5 @@
 import type { SessionWork } from './session-work.ts'
+import { hasToolImages } from './image-output.ts'
 import { randomUUID } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { errorChain } from '@deepseek-ai/dsh-llm'
@@ -101,14 +102,14 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     const run = liveWorkflows.get(info.id)
     if (run === undefined) return
     run.phase = phase
-    for (const record of host.sessions.values()) emitWorkflows(record, false, info.id)
+    for (const record of host.sessions.values()) if (workflowIndexes.get(record)?.has(info.id)) emitWorkflows(record, false, info.id)
   })
   on('workflow/end', info => {
     liveWorkflows.delete(info.id)
     // The tool appends run-end as its awaited native result settles.
     const timer = setTimeout(() => {
       deferredWorkflowEnds.delete(timer)
-      if (!closed) for (const record of host.sessions.values()) emitWorkflows(record, false, info.id)
+      if (!closed) for (const record of host.sessions.values()) if (workflowIndexes.get(record)?.has(info.id)) emitWorkflows(record, false, info.id)
     }, 0)
     deferredWorkflowEnds.add(timer)
   })
@@ -300,7 +301,8 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
         for (const event of await read(after, nextSeq - after)) {
           if (!isLive(record)) throw invalidParams('unknown session')
           if (event.type === 'turn/start') turnStartMs = event.time
-          const updates = await host.projectImages(event, sessionEventToUpdates(event, { replay: true, cwd: meta.cwd, toolCall: id => index.toolCallAt(id, event.seq) }))
+          const mapped = sessionEventToUpdates(event, { replay: true, cwd: meta.cwd, toolCall: id => index.toolCallAt(id, event.seq) })
+          const updates = hasToolImages(event) ? await host.projectImages(event, mapped) : mapped
           for (const update of updates) entries.push({ update, meta: { isReplay: true, agentTimestampMs: event.time, turnStartMs, streamStartMs: turnStartMs } })
           if (event.type === 'turn/end') entries.push({ turnEnded: true })
         }
@@ -521,7 +523,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       void refreshChildren(owner)
       if (status === 'idle' && childStates.get(owner)?.get(agent.session.id)?.agent === agent) {
         host.notify(owner, 'x.ai/subagent/history_changed', {
-          sessionId: owner.agent.session.id, childSessionId: agent.session.id, nextSeq: agent.session.snapshotEvents().length,
+          sessionId: owner.agent.session.id, childSessionId: agent.session.id, nextSeq: agent.session.seq,
         })
       }
     }

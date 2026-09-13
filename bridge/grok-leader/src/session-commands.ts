@@ -203,18 +203,20 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
       }
       if (children || name === 'goal') {
         const execution = children ? await host.children.command(record.clientId, params) : await host.goals.goal(record.clientId, params)
-        return settle(record, params, execution.result.kind === 'error' ? 'error: ' + execution.result.text : execution.result.text, scope)
+        if (execution.result.kind === 'error') throw invalidParams(execution.result.text)
+        return settle(record, params, execution.result.text, scope)
       }
-      if (refusal !== undefined) { textOnly('/' + name); return settle(record, params, refusal, scope) }
+      if (refusal !== undefined) { textOnly('/' + name); throw invalidParams(refusal) }
       if (registry !== undefined) {
         const execution = await registry.execute(record.agent, text, parsed.images, AbortSignal.any([scope.signal, shutdown.signal]))
         active(record, scope)
         if (execution !== undefined) {
           const body = execution.result.text ?? (execution.result.kind === 'success' ? 'done' : 'command failed')
-          return settle(record, params, execution.result.kind === 'error' ? 'error: ' + body : body, scope)
+          if (execution.result.kind === 'error') throw invalidParams(body)
+          return settle(record, params, body, scope)
         }
       }
-      if (name === 'compact') { textOnly('/compact'); return settle(record, params, 'Manual compaction is unavailable in the selected preset.', scope) }
+      if (name === 'compact') { textOnly('/compact'); throw invalidParams('Manual compaction is unavailable in this session.') }
       return undefined
     }))
   }

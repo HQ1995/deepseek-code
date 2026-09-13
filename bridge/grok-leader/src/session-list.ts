@@ -52,8 +52,8 @@ export const foldedSessionTitle = (events: readonly SessionEvent[]): string => {
  *
  * Holds three caches:
  * - first prompt: an LRU whose reads refresh recency and whose oldest entry is
- *   evicted past the limit. A '' miss is deliberately NOT cached so the same
- *   session is retried on the next list (it may be prompted between reads).
+ *   evicted past the limit. Empty results are reusable only with an unchanged
+ *   durable revision; unversioned reads still retry on the next list.
  * - durable title: latest non-empty session/title for the picker row.
  * - activity: latest event.time, floored at the session's createdAt.
  *
@@ -74,12 +74,10 @@ export class SessionListIndex {
     this.firstPromptCacheLimit = firstPromptCacheLimit
   }
 
-  /** Store a first prompt, evicting the LRU oldest past the cap. An empty
-   * value is never stored so the miss retries on a later inspection. */
+  /** Store the inspected prompt (including absence), evicting the LRU oldest. */
   private cacheFirstPrompt(sessionId: string, title: string): void {
     this.firstPromptCache.delete(sessionId)
-    if (title === '') return
-    this.firstPromptSeen.add(sessionId)
+    if (title !== '') this.firstPromptSeen.add(sessionId)
     this.firstPromptCache.set(sessionId, title)
     while (this.firstPromptCache.size > this.firstPromptCacheLimit) {
       const oldest = this.firstPromptCache.keys().next().value as string | undefined

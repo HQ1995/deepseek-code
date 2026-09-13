@@ -3,14 +3,6 @@ use xai_grok_tools::implementations::grok_build::loop_usage_message;
 
 use crate::slash::command::{CommandExecCtx, CommandResult, ScheduledTaskPreview, SlashCommand};
 
-/// Pre-built slice for `LoopCommand::required_tools()`. Lifted to a
-/// module-level constant so the trait method can return a `'static`
-/// slice; the constant pulls the canonical name from `xai-grok-tools`
-/// so a tool rename surfaces here at compile time.
-// DIVERGENCE(deepseek): /loop is handled by the dsh bridge through
-// dsh-schedule; it no longer depends on grok's scheduler_create tool.
-const LOOP_REQUIRED_TOOLS: &[&str] = &[];
-
 pub struct LoopCommand;
 
 /// Split `/loop` args into an optional leading compact interval token (only for
@@ -36,7 +28,9 @@ fn is_interval_token(s: &str) -> bool {
     if s.len() < 2 {
         return false;
     }
-    let (digits, suffix) = s.split_at(s.len() - 1);
+    let Some((digits, suffix)) = s.split_at_checked(s.len() - 1) else {
+        return false;
+    };
     matches!(suffix, "s" | "m" | "h" | "d")
         && digits.chars().all(|c| c.is_ascii_digit())
         && digits.parse::<u64>().is_ok_and(|n| n > 0)
@@ -105,13 +99,14 @@ impl SlashCommand for LoopCommand {
     }
 
     fn required_tools(&self) -> &[&str] {
-        LOOP_REQUIRED_TOOLS
+        // DIVERGENCE(deepseek): use the native session-local dsh tool.
+        &["schedule_create"]
     }
 
     fn visible(&self, ctx: &crate::slash::command::AppCtx) -> bool {
         ctx.capabilities
             .as_ref()
-            .map_or(true, |caps| caps.contains("schedule"))
+            .is_some_and(|caps| caps.contains("schedule"))
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -217,13 +212,15 @@ mod tests {
         // suffix, and zero-valued tokens. Each must fall through to the model
         // with no host-side cadence.
         for input in [
-            "5x do x",                    // bad suffix
-            "5 do x",                     // no suffix
-            "m do x",                     // too short / no digits
-            "55mm do x",                  // multi-char suffix
-            "0m do x",                    // zero value (tool would reject)
-            "0s do x",                    // zero value
-            "abc do x",                   // alphabetic
+            "5x do x",   // bad suffix
+            "5 do x",    // no suffix
+            "m do x",    // too short / no digits
+            "55mm do x", // multi-char suffix
+            "0m do x",   // zero value (tool would reject)
+            "0s do x",   // zero value
+            "abc do x",  // alphabetic
+            "每隔10分钟 检查部署",
+            "🙂 check deploy",
             "99999999999999999999m do x", // overflows u64 -> parse Err branch
         ] {
             let (interval, prompt) = parse_loop_args(input);

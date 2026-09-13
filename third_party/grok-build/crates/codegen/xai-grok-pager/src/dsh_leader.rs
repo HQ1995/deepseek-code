@@ -141,6 +141,12 @@ pub fn spawn_dsh_leader(sock_path: &Path) -> Result<u32, ConnectionError> {
             ))
         })?;
     let mut cmd = Command::new(&argv[0]);
+    // Internal TUI aliases must not become shell-wide settings in dsh tools.
+    for (name, _) in std::env::vars_os() {
+        if name.as_encoded_bytes().starts_with(b"GROK_") {
+            cmd.env_remove(name);
+        }
+    }
     cmd.args(&argv[1..])
         .arg("--profile")
         .arg("dscode")

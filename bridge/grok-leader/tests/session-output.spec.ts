@@ -10,6 +10,7 @@ const text = (body: string): ProjectedUpdate => ({ sessionUpdate: 'agent_message
 const assistantEvent = (seq: number, body: string, usage = { inputTokens: 10, outputTokens: 2 }) => event(seq, 'assistant/message', {
   turn: 0, step: 0, usage, stream: [], message: { role: 'assistant', content: [{ type: 'text', text: body }] },
 })
+const imageEvent = (seq: number) => event(seq, 'tool/ptc-dispatch', { subCallId: 'image-' + seq, name: 'read', content: [{ type: 'image', mimeType: 'image/png', data: 'fixture' }] })
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (error: unknown) => void
@@ -21,8 +22,9 @@ function fixture() {
   let values: ContextProjectionValues = {}
   const notes: Note[] = []
   const warn = vi.fn()
+  const drain = vi.fn<() => Promise<void> | undefined>(() => undefined)
   const projectImages = vi.fn(async (_event: SessionEvent, updates: ProjectedUpdate[]): Promise<ProjectedUpdate[]> => updates)
-  const output = createSessionOutput({ sessionId: 'session', cwd: () => '/workspace',
+  const output = createSessionOutput({ sessionId: 'session', cwd: () => '/workspace', drain,
     isLive: () => live, promptId: () => promptId, contextValues: () => values,
     notify: (method, params) => { notes.push({ method, params: params as Note['params'] }) }, projectImages, logger: { warn } })
   const content = () => notes.flatMap(note => {
@@ -30,7 +32,7 @@ function fixture() {
     return 'content' in update && !Array.isArray(update.content) && update.content?.type === 'text' ? [update.content.text] : []
   })
   const frame = (value: unknown) => output.assistant(value as AssistantStreamFrame)
-  return { output, notes, warn, projectImages, content, frame,
+  return { output, notes, warn, projectImages, content, frame, drain,
     unpublish: () => { live = false }, setPrompt: (id: string | undefined) => { promptId = id }, setContext: (next: ContextProjectionValues) => { values = next } }
 }
 
@@ -133,7 +135,7 @@ describe('session output ownership', () => {
   it('keeps an asynchronous replay event ahead of a live successor', async () => {
     const f = fixture(), image = deferred<ProjectedUpdate[]>()
     f.projectImages.mockImplementationOnce(() => image.promise)
-    const replay = f.output.restore([assistantEvent(0, 'old')])
+    const replay = f.output.restore([imageEvent(0)])
     f.output.live(assistantEvent(1, 'new'))
     expect(f.notes).toEqual([])
     image.resolve([text('old')]); await replay
@@ -145,14 +147,28 @@ describe('session output ownership', () => {
   it('reserves the whole replay prefix before live events while hydrating one event at a time', async () => {
     const f = fixture(), first = deferred<ProjectedUpdate[]>()
     f.projectImages.mockImplementationOnce(() => first.promise)
-    const replay = f.output.restore([assistantEvent(0, 'old one'), assistantEvent(1, 'old two')])
+    f.projectImages.mockImplementationOnce(async () => [text('old two')])
+    const replay = f.output.restore([imageEvent(0), imageEvent(1)])
     f.output.live(assistantEvent(2, 'live'))
     await Promise.resolve()
     expect(f.projectImages).toHaveBeenCalledTimes(1)
     first.resolve([text('old one')]); await replay
     expect(f.content()).toEqual(['old one', 'old two', 'live'])
-    expect(f.output.stats.messageCount).toBe(3)
+    expect(f.output.stats.messageCount).toBe(1)
     expect(f.projectImages).toHaveBeenCalledTimes(2)
+  })
+
+  it('waits for replay socket drain without losing reserved history or overtaking a live successor', async () => {
+    const f = fixture(), held = deferred<void>()
+    f.drain.mockImplementationOnce(() => held.promise)
+    const replay = f.output.restore([assistantEvent(0, 'first'), assistantEvent(1, 'second')])
+    f.output.live(assistantEvent(2, 'live'))
+    await vi.waitFor(() => expect(f.content()).toEqual(['first']))
+    expect(f.projectImages).not.toHaveBeenCalled()
+    held.resolve(); await replay
+    expect(f.content()).toEqual(['first', 'second', 'live'])
+    expect(f.output.stats.messageCount).toBe(3)
+    expect(f.notes.map(note => note.params._meta.eventSeq)).toEqual([1, 2, 3])
   })
 
   it.each(['dispose', 'unpublish'])('drops late hydration after %s and cannot resurrect output', async action => {

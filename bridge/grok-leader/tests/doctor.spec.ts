@@ -5,11 +5,25 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
 import { unsupportedPlatformMessage } from '../bin/update.mjs'
+import { fixtureEnvironment } from './fixtures/environment.ts'
 
 it('explains x64 Node on Apple Silicon without claiming Intel prebuilt support', () => {
   expect(unsupportedPlatformMessage('darwin', 'x64')).toContain('native arm64 Node.js')
   expect(unsupportedPlatformMessage('darwin', 'x64')).toContain('Intel Macs require a source build')
   expect(unsupportedPlatformMessage('linux', 'arm64')).not.toContain('Apple Silicon')
+})
+
+it('can import runtime diagnostics from the shell installer stdin entrypoint', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dscode-doctor-import-'))
+  try {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-'], {
+      input: `await import(${JSON.stringify(new URL('../bin/doctor.mjs', import.meta.url).href)})`,
+      encoding: 'utf8', timeout: 10000, env: fixtureEnvironment(root),
+    })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toBe('')
+    expect(readdirSync(root)).toEqual([])
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 it('diagnoses a broken installation before startup without provisioning or requiring optional tools', () => {

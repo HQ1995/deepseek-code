@@ -1,6 +1,7 @@
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { errorChain, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { hasToolImages } from './image-output.ts'
 import { assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, parseJsonObject, sessionEventToUpdates, contextInfoFromProjection, type ContextProjectionValues, type DecodeSpeed, type ProjectedUpdate } from './projection.ts'
 
 export interface SessionOutputHost {
@@ -9,6 +10,7 @@ export interface SessionOutputHost {
   isLive(): boolean
   promptId(): string | undefined
   notify(method: string, params: unknown): void
+  drain?(): Promise<void> | undefined
   contextValues(): ContextProjectionValues
   projectImages(event: SessionEvent, updates: ProjectedUpdate[]): Promise<ProjectedUpdate[]>
   logger: { warn(message: string): void }
@@ -91,7 +93,7 @@ export function createSessionOutput(host: SessionOutputHost) {
     if (closed || !host.isLive()) return
     const promptId = host.promptId()
     const turnStartMs = state.turnStartMs
-    const send = (item: ProjectedUpdate) => {
+    const send = (item: ProjectedUpdate): Promise<void> | undefined => {
       const eventSeq = state.eventSeq++
       const { totalTokens, cacheHitPercent, tokensPerSecond, ...update } = item
       host.notify('session/update', {
@@ -109,6 +111,7 @@ export function createSessionOutput(host: SessionOutputHost) {
           ...turnStartMs === undefined ? {} : { streamStartMs: turnStartMs, turnStartMs },
         },
       })
+      return isReplay ? host.drain?.() : undefined
     }
     const previous = outputTail
     if (previous !== undefined || item instanceof Promise) {
@@ -122,7 +125,7 @@ export function createSessionOutput(host: SessionOutputHost) {
       )
       const tail = (previous ?? Promise.resolve()).then(() => projected).then(result => {
         if (result.status === 'rejected') throw result.reason
-        if (!closed && host.isLive()) send(result.value)
+        if (!closed && host.isLive()) return send(result.value)
       }).catch(error => logger.warn('TUI output projection: ' + errorChain(error)))
       outputTail = tail
       void tail.then(() => {
@@ -272,11 +275,7 @@ export function createSessionOutput(host: SessionOutputHost) {
       return
     }
     const updates = mapEvent(event, false)
-    const result = event.type === 'tool/result' ? event.data.message.content[0] : undefined
-    const carriesImage = result !== undefined && result.type === 'tool-result'
-      ? result.content.some(block => block.type === 'image')
-      : event.type === 'tool/ptc-dispatch' && event.data.content.some(block => block.type === 'image')
-    const projected = carriesImage ? host.projectImages(event, updates) : undefined
+    const projected = hasToolImages(event) ? host.projectImages(event, updates) : undefined
     updates.forEach((item, index) => update(
       projected === undefined ? item : projected.then(items => items[index]!), false, event.time))
   }
@@ -308,7 +307,7 @@ export function createSessionOutput(host: SessionOutputHost) {
         // yielding. Otherwise a live successor raises lastSeq while an image
         // is loading and causes the remaining history to be dropped. Keep
         // image I/O sequential instead of opening every attachment at once.
-        const projected = hydration.then(() => closed || !host.isLive() ? items : host.projectImages(event, items))
+        const projected = hydration.then(() => closed || !host.isLive() || !hasToolImages(event) ? items : host.projectImages(event, items))
         hydration = projected
         for (let index = 0; index < items.length; index++) update(projected.then(values => values[index]!), true, event.time)
       }

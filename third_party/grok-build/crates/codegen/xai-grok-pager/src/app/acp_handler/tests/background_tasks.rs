@@ -1,6 +1,27 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
+    #[test]
+    fn bg_task_output_deltas_preserve_utf8_and_reset_rolled_windows() {
+        let mut app = make_app_with_agent("sess-1");
+        handle_task_backgrounded(&make_task_backgrounded_notif("sess-1", "tc", "job", "build"), &mut app);
+        for (fields, expected) in [
+            (serde_json::json!({"output_for_prompt": "开"}), "开"),
+            (serde_json::json!({"output_append": "始🙂\nnext"}), "开始🙂\nnext"),
+            (serde_json::json!({"output_for_prompt": "[truncated]\nlast"}), "[truncated]\nlast"),
+            (serde_json::json!({"output_append": " line"}), "[truncated]\nlast line"),
+        ] {
+            let mut output = fields;
+            output["type"] = serde_json::json!("Bash");
+            let update = acp::ToolCallUpdate::new(acp::ToolCallId::new("tc"), acp::ToolCallUpdateFields::new().raw_output(Some(output)));
+            let session = &mut app.agents.get_mut(&AgentId(0)).unwrap().session;
+            assert!(super::super::background::route_bg_task_stdout(&update, session));
+            let task = &session.bg_tasks["job"];
+            assert_eq!(task.stdout, expected);
+            assert_eq!(task.stdout_line_count, expected.lines().count());
+        }
+    }
+
     /// Regression (resume sync): the on-disk replay stream re-emits persisted
     /// notifications through the generic `x.ai/session/update` envelope. A
     /// background `monitor`/bash task (`TaskBackgrounded`) must restore into

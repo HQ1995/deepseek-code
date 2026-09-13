@@ -164,7 +164,7 @@ describe('native interaction ownership', () => {
 
   it('preserves flat question payload, native ids, multiline headings, multi-select and annotations', async () => {
     const f = fixture(), text = 'Title\nProceed?\nDetail'
-    f.replies.mockResolvedValue({ outcome: 'accepted', answers: { [text]: ['Yes', 'Other', 2], unknown: ['No'] }, annotations: { [text]: { notes: 'custom\ntext' } } })
+    f.replies.mockResolvedValue({ outcome: 'accepted', answers: { [text]: ['Yes', 'Other', 2] }, annotations: { [text]: { notes: 'custom\ntext' } } })
     await expect(f.ask()).resolves.toEqual({ answers: [{ id: 'native-id', selected: ['Yes'], custom: 'custom\ntext' }] })
     expect(f.request).toHaveBeenCalledWith('_x.ai/ask_user_question', {
       sessionId: 'root', toolCallId: expect.any(String), questions: [{ question: text, id: 'native-id', multiSelect: true,
@@ -172,6 +172,8 @@ describe('native interaction ownership', () => {
     }, 'root', Infinity, expect.any(AbortSignal))
     f.replies.mockResolvedValue({ outcome: 'accepted', answers: { [text]: 'No' }, annotations: null })
     await expect(f.ask()).resolves.toEqual({ answers: [{ id: 'native-id', selected: ['No'] }] })
+    f.replies.mockResolvedValue({ outcome: 'accepted', answers: { unknown: ['No'] } })
+    await expect(f.ask()).rejects.toMatchObject({ code: 'ASK_CANCELLED' })
     await expect(f.emit('user-questions/request', { questions: [] }, async () => ({ answers: ['fallback'] }))).resolves.toEqual({ answers: ['fallback'] })
   })
 

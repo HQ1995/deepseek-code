@@ -2,11 +2,10 @@
 
 use super::*;
 
-/// Plan mode must not gate voice: typing `/voice` + Enter through the real
-/// input path (prompt keys → slash registry → dispatch) starts recording
-/// with `plan_mode_active` set, exactly like normal mode.
+/// DSH has no voice builtin; even a stale upstream gate must not send /voice
+/// through as a model prompt or start the unrelated Grok recording flow.
 #[test]
-fn voice_slash_submit_starts_recording_in_plan_mode() {
+fn voice_slash_submit_is_refused_in_plan_mode() {
     use crate::app::app_view::InputOutcome;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     if !xai_grok_voice::AUDIO_SUPPORTED {
@@ -35,10 +34,12 @@ fn voice_slash_submit_starts_recording_in_plan_mode() {
     let InputOutcome::Action(action) = out else {
         panic!("Enter on /voice must produce a submit action, got {out:?}");
     };
-    dispatch(action, &mut app);
+    let effects = dispatch(action, &mut app);
+    assert!(!app.voice_listening());
     assert!(
-        app.voice_listening(),
-        "typed /voice + Enter must start recording in plan mode"
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendPrompt { .. }))
     );
 }
 

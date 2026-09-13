@@ -98,7 +98,7 @@ try {
   // Normal startup must repair native damage before loading that runtime's
   // lock binding, not only when the user explicitly runs the update command.
   await rm(helper)
-  const banner = await run(installed, ['--version'])
+  const banner = await run(join(profile, 'dscode.mjs'), ['--version'])
   assert.ok(banner.stdout.includes(manifest.version))
   await stat(helper)
   await doctor()

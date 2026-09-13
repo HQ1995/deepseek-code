@@ -254,6 +254,6 @@ describe('session preset ownership', () => {
     f.setSettings()
     await expect(f.presets.command(record, '/preset standard')).rejects.toThrow('settings service is not configured')
     await expect(f.presets.command(record, '/preset')).resolves.toContain('Available: standard, minimal, custom')
-    await expect(f.presets.command(record, '/preset typo')).resolves.toBe('Unknown preset "typo".')
+    await expect(f.presets.command(record, '/preset typo')).rejects.toThrow('Unknown preset "typo".')
   })
 })

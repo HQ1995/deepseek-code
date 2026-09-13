@@ -20,6 +20,7 @@ export class WorkflowIndex {
   #source: WorkflowSource | undefined
   #offset = 0
   #runs = new Map<string, Run>()
+  has(id: string): boolean { return this.#runs.has(id) }
 
   updates(source: WorkflowSource, live: ReadonlyMap<string, LiveWorkflow>, now: number, runId?: string) {
     const end = source.seq

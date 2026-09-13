@@ -229,6 +229,7 @@ pub enum McpServerDisplayStatus {
     SetupRequired,
     Unavailable,
     Initializing,
+    Unknown,
 }
 
 impl McpServerDisplayStatus {
@@ -240,6 +241,7 @@ impl McpServerDisplayStatus {
             Self::SetupRequired => theme.warning,
             Self::Unavailable => theme.accent_error,
             Self::Initializing => theme.running,
+            Self::Unknown => theme.text_secondary,
         }
     }
 
@@ -251,6 +253,7 @@ impl McpServerDisplayStatus {
             Self::SetupRequired => "setup required",
             Self::Unavailable => "unavailable",
             Self::Initializing => "initializing",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -281,6 +284,7 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
                             Some("ready") => McpServerDisplayStatus::Ready,
                             Some("initializing") => McpServerDisplayStatus::Initializing,
                             Some("setuprequired") => McpServerDisplayStatus::SetupRequired,
+                            Some("unknown") => McpServerDisplayStatus::Unknown,
                             _ => McpServerDisplayStatus::Unavailable,
                         };
                         let tools: Vec<McpToolDetail> = session
@@ -397,6 +401,19 @@ pub fn patch_server_row(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unknown_status_preserves_tools_without_claiming_connection() {
+        let response = serde_json::from_value(serde_json::json!({
+            "servers": [{"name": "native", "source": "plugin", "session": {
+                "enabled": true, "status": "unknown", "tools": [{"name": "lookup"}]
+            }}]
+        }))
+        .unwrap();
+        let rows = super::convert_list_response(response);
+        assert_eq!(rows[0].status, super::McpServerDisplayStatus::Unknown);
+        assert_eq!(rows[0].status.label(), "unknown");
+        assert_eq!(rows[0].tool_count, 1);
+    }
     use super::*;
 
     fn make_row(name: &str, status: McpServerDisplayStatus) -> McpServerInfo {

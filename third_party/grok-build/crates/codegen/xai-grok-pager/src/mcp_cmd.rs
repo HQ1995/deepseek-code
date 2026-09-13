@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use clap::{Subcommand, ValueEnum};
-use xai_grok_shell::util::config::{McpServerConfig, McpServerTransportConfig};
+use xai_grok_shell::util::config::{
+    McpServerConfig, McpServerTransportConfig, atomic_write_string, read_to_string_or_empty,
+};
 
 use crate::util::display_user_grok_path;
 
@@ -40,7 +42,38 @@ fn dsh_patch_path() -> Result<PathBuf> {
 
 /// Read the dsh user MCP patch; an absent file reads as no servers.
 fn read_dsh_patch() -> Result<String> {
-    Ok(std::fs::read_to_string(dsh_patch_path()?).unwrap_or_default())
+    Ok(read_to_string_or_empty(&dsh_patch_path()?)?)
+}
+
+/// Serialize the entire edit with the launcher's existing profile lock. The
+/// lock inode is outside the profile replaced by an installation update.
+fn edit_dsh_patch(path: &Path, edit: impl FnOnce(&str) -> Option<String>) -> Result<bool> {
+    let profile = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("patch has no profile directory"))?;
+    std::fs::create_dir_all(profile)?;
+    let profile = profile.canonicalize()?;
+    let parent = profile
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("profile has no parent directory"))?;
+    let name = profile
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("profile has no name"))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let lock = options.open(parent.join(format!(".{}.install.lock", name.to_string_lossy())))?;
+    lock.lock()?;
+    let current = read_to_string_or_empty(path)?;
+    let Some(next) = edit(&current) else {
+        return Ok(false);
+    };
+    atomic_write_string(path, &crate::dsh_mcp_patch::as_document(&next))?;
+    Ok(true)
 }
 
 #[derive(Debug, clap::Args, Clone)]
@@ -721,7 +754,6 @@ async fn run_doctor(json: bool, name: Option<String>) -> Result<()> {
         return run_doctor_dsh(json, name.as_deref());
     }
 
-
     let cwd = current_dir_or_exit();
     let report = xai_grok_shell::mcp_doctor::run_doctor(&cwd, name.as_deref()).await;
 
@@ -797,9 +829,13 @@ fn run_add_dsh(args: &AddArgs) -> Result<()> {
         }
     };
     let path = dsh_patch_path()?;
-    let merged = crate::dsh_mcp_patch::upsert_server(&read_dsh_patch()?, name, &block);
-    std::fs::write(&path, crate::dsh_mcp_patch::as_document(&merged))?;
-    println!("Added MCP server '{name}' to {} (all presets)", path.display());
+    edit_dsh_patch(&path, |current| {
+        Some(crate::dsh_mcp_patch::upsert_server(current, name, &block))
+    })?;
+    println!(
+        "Added MCP server '{name}' to {} (all presets)",
+        path.display()
+    );
     println!("No restart needed: dscode hot-reloads cordis.patch.yml.");
     Ok(())
 }
@@ -807,12 +843,14 @@ fn run_add_dsh(args: &AddArgs) -> Result<()> {
 /// Remove an MCP server from the dsh profile's patch.
 fn run_remove_dsh(name: &str) -> Result<()> {
     let path = dsh_patch_path()?;
-    let (merged, removed) = crate::dsh_mcp_patch::remove_server(&read_dsh_patch()?, name);
+    let removed = edit_dsh_patch(&path, |current| {
+        let (merged, removed) = crate::dsh_mcp_patch::remove_server(current, name);
+        removed.then_some(merged)
+    })?;
     if !removed {
         eprintln!("No MCP server named '{name}'.");
         std::process::exit(1);
     }
-    std::fs::write(&path, crate::dsh_mcp_patch::as_document(&merged))?;
     println!("Removed MCP server '{name}' from {}.", path.display());
     Ok(())
 }
@@ -1424,10 +1462,8 @@ url = "https://mcp.example.test/sse"
     #[serial_test::serial(dsh_leader_env)]
     #[test]
     fn dsh_backend_detection_matches_dsh_bin_env() {
-        let _env = crate::test_util::EnvVarGuard::set(
-            crate::dsh_leader::DSH_BIN_ENV,
-            "/explicit/dsh",
-        );
+        let _env =
+            crate::test_util::EnvVarGuard::set(crate::dsh_leader::DSH_BIN_ENV, "/explicit/dsh");
         assert!(crate::dsh_leader::is_dsh_backend());
     }
 
@@ -1458,5 +1494,44 @@ url = "https://mcp.example.test/sse"
             Some((McpScope::Project, project))
         );
         assert_eq!(surviving_definition(false, None), None);
+    }
+}
+
+#[cfg(test)]
+mod dsh_patch_write_tests {
+    use super::*;
+
+    #[test]
+    fn edits_keep_other_writers_and_refuse_unreadable_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile/cordis.patch.yml");
+        std::thread::scope(|scope| {
+            for index in 0..4 {
+                let path = &path;
+                scope.spawn(move || {
+                    let name = format!("server{index}");
+                    let block = crate::dsh_mcp_patch::render_block_stdio(&name, "tool", &[], None);
+                    edit_dsh_patch(path, |text| {
+                        Some(crate::dsh_mcp_patch::upsert_server(text, &name, &block))
+                    })
+                    .unwrap();
+                });
+            }
+        });
+        assert_eq!(
+            crate::dsh_mcp_patch::list_servers(&std::fs::read_to_string(&path).unwrap()).len(),
+            4
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(edit_dsh_patch(&path, |_| panic!("must not edit an unreadable document")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), [0xff]);
     }
 }

@@ -1,21 +1,25 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, closeSync, constants, cpSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { accessSync, chmodSync, closeSync, constants, cpSync, createWriteStream, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createGunzip } from 'node:zlib'
-import { Readable } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { setTimeout as delay } from 'node:timers/promises'
 import { parse, stringify } from 'smol-toml'
 import { list, extract as extractTar } from 'tar'
 import { nativePackages, validateNativeArtifacts } from './native-runtime.mjs'
+import { atomicWrite, syncDirectory, healLauncherLink } from './launcher-files.mjs'
+export { atomicWrite } from './launcher-files.mjs'
 
 const repo = 'HQ1995/deepseek-code'
 export const unsupportedPlatformMessage = (platform = process.platform, arch = process.arch) =>
   `no prebuilt dscode runtime/TUI for ${platform}/${arch}; ${platform === 'darwin' && arch === 'x64'
     ? 'on Apple Silicon, use a native arm64 Node.js >=22.19.0 and retry (check node -p process.arch). Intel Macs require a source build'
     : 'build from the repo (scripts/build-deepseek-tui.sh)'}`
+export const RECOVERY_VERSION = 1
 /** Anonymous GitHub API calls are capped at 60/hour per address, which a
  *  release day or a shared egress address can exhaust; use a token when the
  *  environment already provides one and stay anonymous otherwise. */
@@ -113,17 +117,40 @@ const run = (command, args, options = {}) => {
   if (result.error || result.status !== 0) throw new Error(`${command} failed: ${result.error?.message ?? result.stderr ?? result.status}`)
   return result.stdout
 }
-const binaryVersion = path => /(?:^|\s)(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\s|$)/.exec(run(path, ['--version'], { timeout: 15000 }))?.[1]
-const downloadVerified = async (base, name, dest, fetcher, compressed = false) => {
-  let response = await fetcher(`${base}/${name}${compressed ? '.gz' : ''}`, { signal: AbortSignal.timeout(120000) })
+export const parseCliVersion = output => /(?:^|\s)(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\s|$)/.exec(output)?.[1]
+const binaryVersion = path => parseCliVersion(run(path, ['--version'], { timeout: 15000 }))
+export const downloadVerified = async (base, name, dest, fetcher = fetch, compressed = false) => {
+  const controller = new AbortController()
+  const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(15 * 60000)])
+  let idleTimer
+  const activity = () => {
+    clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => controller.abort(new Error(`download stalled for ${name}; retry the update`)), 120000)
+  }
+  activity()
+  console.error(`dscode: downloading ${name}...`)
+  try {
+  let response = await fetcher(`${base}/${name}${compressed ? '.gz' : ''}`, { signal })
   let gzip = compressed
-  if (compressed && response.status === 404) { response = await fetcher(`${base}/${name}`); gzip = false }
+  if (compressed && response.status === 404) { response = await fetcher(`${base}/${name}`, { signal }); gzip = false }
   if (!response.ok) throw new Error(`missing release asset ${name}: ${response.status}`)
   if (!response.body) throw new Error(`empty release asset ${name}`)
   const input = Readable.fromWeb(response.body)
-  if (gzip) await pipeline(input, createGunzip(), createWriteStream(dest))
-  else await pipeline(input, createWriteStream(dest))
-  const checksum = await fetcher(`${base}/${name}.sha256`, { signal: AbortSignal.timeout(120000) })
+  let received = 0, progressAt = performance.now()
+  input.on('data', chunk => {
+    activity()
+    received += chunk.length
+    if (performance.now() - progressAt >= 2000) {
+      console.error(`dscode: ${name}: ${(received / 1024 / 1024).toFixed(1)} MiB received`)
+      progressAt = performance.now()
+    }
+  })
+  const hash = createHash('sha256')
+  const digest = new Transform({ transform(chunk, _encoding, done) { hash.update(chunk); done(null, chunk) } })
+  if (gzip) await pipeline(input, createGunzip(), digest, createWriteStream(dest), { signal })
+  else await pipeline(input, digest, createWriteStream(dest), { signal })
+  activity()
+  const checksum = await fetcher(`${base}/${name}.sha256`, { signal })
   let expected
   if (checksum.ok) {
     expected = (await checksum.text()).trim().split(/\s+/)[0]
@@ -141,9 +168,10 @@ const downloadVerified = async (base, name, dest, fetcher, compressed = false) =
     if (!digest) throw new Error(`missing verifiable digest for ${name}`)
     expected = digest[1]
   }
-  const hash = createHash('sha256')
-  await pipeline(createReadStream(dest), hash)
+  signal.throwIfAborted()
   if (!/^[0-9a-f]{64}$/i.test(expected) || hash.digest('hex') !== expected.toLowerCase()) throw new Error(`SHA-256 mismatch for ${name}`)
+  console.error(`dscode: verified ${name}`)
+  } finally { clearTimeout(idleTimer) }
 }
 export const extractArchive = (archive, dest) => {
   const entries = new Map()
@@ -185,14 +213,14 @@ export const validateRuntime = (runtime, metadata, platform = process.platform, 
   validateRuntimeFiles(runtime, metadata, platform, arch)
   if (binaryVersion(join(runtime, 'bin', 'dsh')) !== metadata.dsh.testedVersion) throw new Error('runtime CLI version mismatch')
 }
-const matchesInstallation = (profile, packageName, version, expectedDsh, probeVersions) => {
+const matchesInstallation = (profile, packageName, version, expectedDsh, probeVersions, tuiVersion) => {
   try {
     const plugin = join(profile, 'node_modules', ...packageName.split('/'))
     const metadata = json(join(plugin, 'package.json'))
     if (metadata.name !== packageName || metadata.version !== version
       || !existsSync(join(plugin, 'bin/dscode.mjs'))
       || !existsSync(join(profile, 'bin/dscode'))
-      || (probeVersions && binaryVersion(join(profile, 'bin/dscode')) !== version)) return false
+      || (probeVersions && (tuiVersion ?? binaryVersion(join(profile, 'bin/dscode'))) !== version)) return false
     if (expectedDsh && ['testedVersion', 'sourceCommit', 'supportedRange'].some(key => metadata.dsh?.[key] !== expectedDsh[key])) return false
     const runtime = join(profile, 'runtime')
     if (metadata.dsh?.sourceCommit) validateRuntimeFiles(runtime, metadata, process.platform, process.arch)
@@ -206,19 +234,84 @@ const matchesInstallation = (profile, packageName, version, expectedDsh, probeVe
 export const installationFilesMatch = (profile, packageName, version, expectedDsh) =>
   matchesInstallation(profile, packageName, version, expectedDsh, false)
 /** Inspect the entire managed installation, including actual CLI versions. */
-export const installationMatches = (profile, packageName, version, expectedDsh) =>
-  matchesInstallation(profile, packageName, version, expectedDsh, true)
+export const installationMatches = (profile, packageName, version, expectedDsh, tuiVersion) =>
+  matchesInstallation(profile, packageName, version, expectedDsh, true, tuiVersion)
+const canonicalProfile = profile => existsSync(profile) ? realpathSync(profile) : join(realpathSync(dirname(profile)), basename(profile))
+const syncTree = path => {
+  const stat = lstatSync(path, { throwIfNoEntry: false })
+  if (!stat || stat.isSymbolicLink()) return
+  if (stat.isDirectory()) for (const name of readdirSync(path)) syncTree(join(path, name))
+  syncDirectory(path)
+}
+const writeJournal = (stage, transaction) => atomicWrite(join(stage, 'transaction.json'), JSON.stringify(transaction) + '\n', 0o600)
+const validEntry = entry => typeof entry === 'string' && entry !== '' && !isAbsolute(entry)
+  && !entry.split(/[\\/]/).some(part => part === '..' || part === '.' || part === '')
+/** Only our private, identified stages are candidates for recovery or cleanup. */
+const installationStages = profile => {
+  const parent = dirname(profile)
+  const stages = []
+  for (const name of readdirSync(parent)) {
+    if (!name.startsWith('.dscode-update-')) continue
+    const stage = join(parent, name)
+    try {
+      const stat = lstatSync(stage)
+      if (!stat.isDirectory() || stat.uid !== process.getuid()) continue
+      const transaction = json(join(stage, 'transaction.json'))
+      if (transaction.schema !== 1 || transaction.profile !== profile || !Number.isInteger(transaction.pid) || transaction.pid <= 0
+        || !['preparing', 'pending', 'committed', 'rolled-back'].includes(transaction.state)) continue
+      if (transaction.state === 'pending' && (!Array.isArray(transaction.entries)
+        || !transaction.entries.every(entry => validEntry(entry.path) && typeof entry.existed === 'boolean'))) continue
+      stages.push({ stage, transaction })
+    } catch (error) {
+      if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error
+    }
+  }
+  return stages
+}
+/** Idempotent rollback: the journal precedes every rename; backups survive failure. */
+const rollback = (profile, stage, transaction) => {
+  for (const entry of [...transaction.entries].reverse()) {
+    const active = join(profile, entry.path), old = join(stage, 'backup', entry.path)
+    if (lstatSync(old, { throwIfNoEntry: false })) {
+      rmSync(active, { recursive: true, force: true })
+      mkdirSync(dirname(active), { recursive: true })
+      renameSync(old, active)
+      syncDirectory(dirname(active))
+      syncDirectory(dirname(old))
+    } else if (!entry.existed) {
+      rmSync(active, { recursive: true, force: true })
+      if (existsSync(dirname(active))) syncDirectory(dirname(active))
+    } else if (!lstatSync(active, { throwIfNoEntry: false })) {
+      throw new Error(`update recovery needs the missing backup for ${entry.path}; retained ${stage}`)
+    }
+  }
+  writeJournal(stage, { ...transaction, state: 'rolled-back' })
+}
+const recoverInstallations = profile => {
+  for (const { stage, transaction } of installationStages(profile)) {
+    if (transaction.state === 'preparing') {
+      try { process.kill(transaction.pid, 0); continue } catch (error) { if (error.code !== 'ESRCH') continue }
+    }
+    if (transaction.state === 'pending') {
+      rollback(profile, stage, transaction)
+      console.error('dscode: restored the previous installation after an interrupted update')
+    }
+    rmSync(stage, { recursive: true, force: true })
+  }
+}
 /** Use the pinned runtime's existing POSIX lock binding. The persistent inode
  * lives outside the replaceable profile; process death releases its lock. */
 export const withProfileLock = async (profile, action, runtime = join(profile, 'runtime')) => {
   mkdirSync(dirname(profile), { recursive: true })
-  const canonical = existsSync(profile) ? realpathSync(profile) : join(realpathSync(dirname(profile)), basename(profile))
-  const locations = [join(runtime, 'package.json'), join(canonical, 'runtime/package.json'), import.meta.url]
+  const canonical = canonicalProfile(profile)
+  const runtimes = [runtime, join(canonical, 'runtime'), ...installationStages(canonical)
+    .flatMap(({ stage }) => [join(stage, 'backup/runtime'), join(stage, 'profile/runtime')])]
+  const locations = [...runtimes.map(path => join(path, 'package.json')), import.meta.url]
   if (process.env.DSH_BIN && existsSync(process.env.DSH_BIN)) locations.push(realpathSync(process.env.DSH_BIN))
   let binding
   // The lock guards the profile, so a flock binding from the runtime being
   // installed or from the one already running is equally usable.
-  const families = new Set([...nativePackages(runtime), ...nativePackages(join(canonical, 'runtime'))])
+  const families = new Set(runtimes.flatMap(nativePackages))
   const specifiers = ['@deepseek-ai/node-addon-system/flock', ...[...families].map(name => `@deepseek-ai/${name}/flock`)]
   for (const location of locations) {
     for (const specifier of specifiers) {
@@ -232,10 +325,17 @@ export const withProfileLock = async (profile, action, runtime = join(profile, '
   const { tryLockExclusive } = await import(pathToFileURL(binding).href)
   const fd = openSync(join(dirname(canonical), `.${basename(canonical)}.install.lock`), constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600)
   try {
-    try { await tryLockExclusive(fd) } catch (error) {
-      if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) throw new Error('another dscode installation is updating this profile; retry after it finishes', { cause: error })
-      throw error
+    const deadline = performance.now() + 60000
+    let announced = false
+    for (;;) {
+      try { await tryLockExclusive(fd); break } catch (error) {
+        if (!['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) throw error
+        if (performance.now() >= deadline) throw new Error('timed out waiting for the dscode profile update; retry after it finishes', { cause: error })
+        if (!announced) { console.error('dscode: waiting for the current profile update...'); announced = true }
+        await delay(100)
+      }
     }
+    recoverInstallations(canonical)
     return await action()
   } finally { closeSync(fd) }
 }
@@ -245,34 +345,38 @@ export const commitInstallation = (profile, stage, entries) => withProfileLock(p
 export const saveUpdateChannel = (profile, channel) => withProfileLock(profile, () => {
   const { config } = readChannelConfig(profile)
   if (config.cli?.channel === channel && config.cli?.channel_format === 1) return
-  const stage = mkdtempSync(join(dirname(profile), '.dscode-channel-'))
-  try {
-    config.cli = { ...config.cli, channel, channel_format: 1 }
-    const prepared = join(stage, 'config.toml')
-    writeFileSync(prepared, stringify(config))
-    renameSync(prepared, join(profile, 'config.toml'))
-  } finally { rmSync(stage, { recursive: true, force: true }) }
+  config.cli = { ...config.cli, channel, channel_format: 1 }
+  atomicWrite(join(profile, 'config.toml'), stringify(config))
 })
 
 /** Config commits last; ordinary failures restore every moved entry. Missing staged entries are deletions. */
 const commit = (profile, stage, entries) => {
+  if (entries.some(entry => !validEntry(entry)) || new Set(entries).size !== entries.length
+    || entries.some(entry => entries.some(other => other.startsWith(entry + '/')))) throw new Error('invalid installation entries')
   const backup = join(stage, 'backup')
   mkdirSync(backup)
-  const moved = []
+  const transaction = { schema: 1, profile: canonicalProfile(profile), pid: process.pid, state: 'pending',
+    entries: entries.map(path => ({ path, existed: !!lstatSync(join(profile, path), { throwIfNoEntry: false }) })) }
+  for (const entry of entries) syncTree(join(stage, 'profile', entry))
+  writeJournal(stage, transaction)
   try {
-    for (const entry of entries) {
-      const active = join(profile, entry), prepared = join(stage, 'profile', entry), old = join(backup, entry)
+    for (const entry of transaction.entries) {
+      const active = join(profile, entry.path), prepared = join(stage, 'profile', entry.path), old = join(backup, entry.path)
       mkdirSync(dirname(active), { recursive: true })
       mkdirSync(dirname(old), { recursive: true })
-      const record = { active, old, existed: !!lstatSync(active, { throwIfNoEntry: false }), installed: false }
-      if (record.existed) renameSync(active, old)
-      moved.push(record)
-      if (existsSync(prepared)) { renameSync(prepared, active); record.installed = true }
+      syncDirectory(backup)
+      if (entry.existed) {
+        renameSync(active, old)
+        syncDirectory(dirname(old))
+        syncDirectory(dirname(active))
+      }
+      if (lstatSync(prepared, { throwIfNoEntry: false })) renameSync(prepared, active)
+      syncDirectory(dirname(active))
     }
+    writeJournal(stage, { ...transaction, state: 'committed' })
   } catch (error) {
-    for (const record of moved.reverse()) {
-      if (record.installed) rmSync(record.active, { recursive: true, force: true })
-      if (record.existed) renameSync(record.old, record.active)
+    try { rollback(profile, stage, transaction) } catch (recoveryError) {
+      throw new AggregateError([error, recoveryError], `installation and rollback failed; kept recovery files at ${stage}`)
     }
     throw error
   }
@@ -281,6 +385,7 @@ export const installRelease = async ({ profile, packageName, version, channel, a
   if (!asset) throw new Error(unsupportedPlatformMessage())
   mkdirSync(dirname(profile), { recursive: true })
   const stage = mkdtempSync(join(dirname(profile), '.dscode-update-'))
+  writeJournal(stage, { schema: 1, profile: canonicalProfile(profile), pid: process.pid, state: 'preparing' })
   const prepared = join(stage, 'profile')
   try {
     mkdirSync(join(prepared, 'bin'), { recursive: true })
@@ -333,8 +438,11 @@ export const installRelease = async ({ profile, packageName, version, channel, a
     }
     if (!existsSync(join(destination, 'bin', 'dscode.mjs'))) throw new Error('plugin launcher missing')
     const { config } = readChannelConfig(profile)
-    config.cli = { ...config.cli, channel, channel_format: 1 }
-    writeFileSync(join(prepared, 'config.toml'), stringify(config))
+    const channelChanged = config.cli?.channel !== channel || config.cli?.channel_format !== 1
+    if (channelChanged) {
+      config.cli = { ...config.cli, channel, channel_format: 1 }
+      writeFileSync(join(prepared, 'config.toml'), stringify(config), { mode: (lstatSync(join(profile, 'config.toml'), { throwIfNoEntry: false })?.mode ?? 0o600) & 0o777 })
+    }
     const entries = ['node_modules', 'package.json', 'runtime', 'bin/dscode', 'package-lock.json', 'npm-shrinkwrap.json']
     const patchPath = join(profile, 'cordis.patch.yml')
     const emptyLegacyPatch = '# Your patch layer for this dsh profile'
@@ -342,8 +450,15 @@ export const installRelease = async ({ profile, packageName, version, channel, a
       writeFileSync(join(prepared, 'cordis.patch.yml'), emptyLegacyPatch + '\n[]\n')
       entries.push('cordis.patch.yml')
     }
-    entries.push('config.toml')
+    if (channelChanged) entries.push('config.toml')
+    // Retarget the managed link before moving its plugin directory, so the
+    // next invocation can still load recovery code from this transaction.
+    healLauncherLink({ profile, packageName, sourceBin: dirname(fileURLToPath(import.meta.url)) })
     commit(profile, stage, entries)
     }, runtime)
-  } finally { rmSync(stage, { recursive: true, force: true }) }
+  } finally {
+    // A failed rollback can leave the only good copy here. The next lock owner
+    // recovers it; ordinary preparation failures and completed commits are disposable.
+    if (json(join(stage, 'transaction.json')).state !== 'pending') rmSync(stage, { recursive: true, force: true })
+  }
 }

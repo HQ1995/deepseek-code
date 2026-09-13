@@ -11,6 +11,23 @@ const live = (): Map<string, LiveWorkflow> => new Map([['run', {
   meta: { name: 'review', description: 'Review inputs', phases: [{ title: 'Read' }, { title: 'Write' }] }, phase: 'Read',
 }]])
 
+it('folds workflow deltas and replay into the same terminal result', () => {
+  const history = [
+    event('tool-workflow/run-start', 10, { runId: 'run', name: 'review' }),
+    event('tool-workflow/agent-start', 20, { runId: 'run', seq: 1, label: 'check', childId: 'child', phase: 'review' }),
+    event('tool-workflow/agent-end', 30, { runId: 'run', seq: 1, outcome: 'completed' }),
+    event('tool-workflow/run-end', 40, { runId: 'run', stopReason: 'completed' }),
+  ]
+  const events = history.slice(0, 2), source = sourceOf(events), index = new WorkflowIndex()
+  const active = new Map([['run', { meta: { name: 'review', description: 'inspect' }, phase: 'review' }]])
+  expect(index.updates(source, active, 25, 'run')[0]).toMatchObject({ status: 'active', active_agents: 1, agents: [{ duration_ms: 5 }] })
+  expect(index.has('run')).toBe(true)
+  expect(index.updates(source, active, 25, 'other')).toEqual([])
+  events.push(...history.slice(2)); active.clear()
+  expect(index.updates(source, active, 50)).toEqual(new WorkflowIndex().updates(sourceOf(history), active, 50))
+  expect(index.updates(source, active, 50)[0]).toMatchObject({ status: 'complete', active_agents: 0, elapsed_ms: 30, agents: [{ state: 'done', duration_ms: 10 }] })
+})
+
 it('reads each event once in bounded pages and rereads no unchanged history', () => {
   const events = Array.from({ length: 10000 }, () => event('assistant/message', 0, {}))
   events.push(event('tool-workflow/run-start', 10, { runId: 'run', name: 'review' }))

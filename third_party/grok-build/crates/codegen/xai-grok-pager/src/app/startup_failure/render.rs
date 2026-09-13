@@ -167,7 +167,7 @@ impl NextStep {
     fn command(self) -> Option<&'static str> {
         match self {
             Self::Retry | Self::CheckNetworkThenRetry => Some(CONNECT_UI_TIMEOUT_TRY_COMMAND),
-            Self::RestartSharedLeader => Some("grok leader kill"),
+            Self::RestartSharedLeader => Some("dscode leader kill"),
         }
     }
 }

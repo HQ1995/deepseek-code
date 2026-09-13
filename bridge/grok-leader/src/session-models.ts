@@ -1,9 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentOptions, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import { KNOWN_SESSION_EVENT_TYPES, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { ReasoningEffortId, errorChain } from '@deepseek-ai/dsh-llm'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams, paramRecord } from './acp.ts'
-import { acceptedReasoningEffort, modelEffortKey, modelSelectionFromRequest, parseWireModelId, type AgentDefaultModelLike, type ModelCatalog, type createModelCatalog } from './model-catalog.ts'
+import { acceptedReasoningEffort, modelEffortKey, modelSelectionFromRequest, type AgentDefaultModelLike, type ModelCatalog, type createModelCatalog } from './model-catalog.ts'
 import { LEGACY_MODEL_SELECTION_EVENTS } from './session-migration.ts'
 
 interface DscodeModelSelectionEvent { provider: string; model: string; reasoningEffort?: string }
@@ -14,13 +14,7 @@ declare module '@deepseek-ai/dsh-session/types' {
     'model/selected': DscodeModelSelectionEvent
   }
 }
-// The pinned native persistence vocabulary deliberately exposes a mutable Set
-// until it has a registration API. Register legacy events before any log read,
-// and fail loudly if a future runtime removes this supported compatibility seam.
-const knownTypes = KNOWN_SESSION_EVENT_TYPES as Set<string>
-if (Object.isFrozen(knownTypes)) throw new Error('dsh session event vocabulary is frozen; dscode cannot register its model-selected event')
-knownTypes.add('dscode/model-selected')
-knownTypes.add('model/selected')
+// Legacy names are normalized by the migration adapter before native admission.
 
 export interface SessionModel {
   readonly current: Readonly<ModelSelection> | undefined
@@ -47,7 +41,7 @@ interface ModelHost<S extends ModelSession> {
   owned(clientId: number, id: SessionId | undefined): S | undefined
   clients(): Iterable<number>
   notify(clientId: number, method: string, params: unknown): void
-  catalog: Pick<ReturnType<typeof createModelCatalog>, 'current' | 'peek' | 'refresh' | 'select'>
+  catalog: Pick<ReturnType<typeof createModelCatalog>, 'current' | 'peek' | 'select' | 'selected'>
   defaults(): AgentDefaultModelLike | undefined
   flush(session: Agent['session']): Promise<unknown>
 }
@@ -138,8 +132,11 @@ export function createSessionModels<S extends ModelSession>(host: ModelHost<S>) 
     const selectedId = selection === undefined ? '' : current.providerModelToWireId.get(modelEffortKey(selection.provider, selection.model)) ?? ''
     host.notify(record.clientId, 'x.ai/models/update', {
       currentModelId: selectedId,
-      availableModels: current.availableModels.map(model => selection === undefined || model.modelId !== selectedId || model._meta === undefined ? model : {
-        ...model, _meta: { ...model._meta, ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort } },
+      availableModels: current.availableModels.map(model => {
+        if (selection === undefined || model.modelId !== selectedId || model._meta === undefined) return model
+        const meta = { ...model._meta }
+        delete meta.reasoningEffort
+        return { ...model, _meta: { ...meta, ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort } } }
       }),
       _meta: { currentProviderId: selection?.provider ?? '', providers: current.providers },
     })
@@ -163,40 +160,38 @@ export function createSessionModels<S extends ModelSession>(host: ModelHost<S>) 
     const explicitEffort = nonEmptyString(meta?.reasoningEffort) ? meta.reasoningEffort : undefined
     const current = await host.catalog.current()
     assertLive(record)
-    if (!current.providerByModel.has(modelId)) throw invalidParams('modelId is not in the catalog: ' + modelId)
+    if (!current.routesByModel.has(modelId)) throw invalidParams('modelId is not in the catalog: ' + modelId)
     const advertised = current.availableModels.find(model => model.modelId === modelId)
     if (explicitEffort !== undefined && (advertised?._meta?.supportsReasoningEffort === false
       || (advertised?._meta?.reasoningEfforts !== undefined && !advertised._meta.reasoningEfforts.includes(explicitEffort)))) {
       throw invalidParams('reasoningEffort "' + explicitEffort + '" is not supported by model ' + modelId)
     }
-    const parsed = parseWireModelId(modelId)
-    const provider = parsed !== undefined && current.providerByModel.get(modelId) === parsed.provider
-      ? parsed.provider : current.providerByModel.get(modelId) ?? record.agent.options.provider ?? host.config.provider ?? ''
-    const rawModel = parsed !== undefined && provider === parsed.provider ? parsed.model : modelId
+    const { provider, model: rawModel } = current.routesByModel.get(modelId)!
     const key = modelEffortKey(provider, rawModel)
     const remembered = state.efforts.get(key)
     const effort = explicitEffort ?? acceptedReasoningEffort(advertised, remembered)
     const selection: ModelSelection = { provider, model: rawModel, ...effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effort) } }
+    // Match the acknowledged TUI switch: a failed default save leaves the live
+    // choice unchanged. Retirement during that native write drains it, but must
+    // not append to a retired session when the write returns.
+    await host.defaults()?.saveSelection(selection)
+    assertLive(record)
     // Keep the live reference and effort memory unchanged if append fails.
     record.agent.session.append('model/selection', selection)
     state.selection.current = selection
-    if (explicitEffort !== undefined) state.efforts.set(key, explicitEffort)
-    else if (remembered !== undefined && effort === undefined) state.efforts.delete(key)
-    // An accepted durable choice is flushed even when saving the global default
-    // fails or the owner retires during that write. Its model handle drains this
-    // work before the native Agent is disposed. Neither path may publish late UI.
-    const failures: unknown[] = []
-    try { await host.defaults()?.saveSelection(selection) } catch (error) { failures.push(error) }
-    try { await host.flush(record.agent.session) } catch (error) { failures.push(error) }
-    if (failures.length === 1) throw failures[0]
-    if (failures.length > 1) throw new AggregateError(failures, 'model default and session persistence failed')
-    assertLive(record)
-    if (host.catalog.peek() !== undefined) {
-      await host.catalog.refresh()
-      assertLive(record)
-      notify(record)
+    if (effort === undefined) state.efforts.delete(key)
+    else state.efforts.set(key, effort)
+    // Once appended the model really changed. A flush error is a durability
+    // warning, not a rejected switch that would leave the UI on the old model.
+    // The accepted operation still drains before native agent disposal.
+    let persistenceWarning: string | undefined
+    try { await host.flush(record.agent.session) } catch (error) {
+      persistenceWarning = 'Model changed, but session history could not be saved; resuming may restore the previous model. ' + errorChain(error)
     }
-    return {}
+    assertLive(record)
+    host.catalog.selected(selection)
+    notify(record)
+    return persistenceWarning === undefined ? {} : { _meta: { persistenceWarning } }
   }
   return {
     prepare: (meta?: Record<string, unknown> | null, events?: readonly SessionEvent[]) => run(() => prepare(meta, events)),

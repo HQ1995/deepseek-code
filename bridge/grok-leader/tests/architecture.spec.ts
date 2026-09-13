@@ -81,6 +81,8 @@ describe('architecture ownership and dependency gate', () => {
   it('resolves every local edge and requires computed imports to be explicitly accounted for', () => {
     expect(unresolved).toEqual([])
     expect(computedImports.sort()).toEqual([
+      'bin/bootstrap.mjs: pathToFileURL(candidate).href', // validated active/recovery-stage updater
+      "bin/bootstrap.mjs: pathToFileURL(join(profile, plugin, 'dscode.mjs')).href", // recovered installed launcher
       'bin/update.mjs: pathToFileURL(binding).href', // external pinned native file-lock binding
       "src/package-location.ts: pathToFileURL(join(PACKAGE_DIRECTORY, 'bin/update.mjs')).href",
     ])
@@ -118,15 +120,15 @@ describe('architecture ownership and dependency gate', () => {
     ['session-lifecycle', ['acp', 'mcp', 'prompt-queue', 'session-output', 'session-models', 'session-presets', 'session-registry', 'native-interactions', 'session-work', 'session-discovery', 'projection']],
     ['session-models', ['acp', 'model-catalog', 'session-migration']],
     ['session-presets', ['acp', 'model-catalog']],
-    ['session-output', ['projection']],
-    ['native-tasks', ['acp', 'reminders', 'session-output', 'session-work']],
-    ['native-children', ['acp', 'child-history', 'workflows', 'prompt-content', 'projection', 'session-output', 'session-work']],
+    ['session-output', ['projection', 'image-output']],
+    ['native-tasks', ['acp', 'reminders', 'session-output', 'session-work', 'job-output']],
+    ['native-children', ['acp', 'child-history', 'workflows', 'prompt-content', 'projection', 'session-output', 'session-work', 'image-output']],
     ['native-session-status', ['acp', 'prompt-content', 'projection', 'session-output', 'session-work']],
     ['native-interactions', ['acp', 'leader-transport']],
     ['native-execution', ['acp', 'package-location', 'session-work']],
     ['native-asides', ['acp', 'session-work']],
     ['native-capabilities', []],
-    ['profile-plugins', ['package-location']],
+    ['profile-plugins', ['package-location', 'acp']],
   ] as const)('keeps the %s implementation behind its declared dependencies', (name, allowed) => {
     const actual = [...allEdges.get('src/' + name + '.ts')!]
     expect(actual.filter(target => !allowed.some(dependency => target === 'src/' + dependency + '.ts'))).toEqual([])

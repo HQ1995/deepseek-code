@@ -34,7 +34,7 @@ open(sys.argv[1],'wb').write(b'\\x89PNG\\r\\n\\x1a\\n'+chunk(b'IHDR',struct.pack
     })
     assert.match(String(number), /^\d+$/)
     const env = { ...baseEnv, DISPLAY: `:${number}`, LP_NUM_THREADS: '4', LIBGL_ALWAYS_SOFTWARE: '1',
-      DSCODE_SOCKET: leader, DSCODE_LOG: join(artifacts, 'kitty-leader.log'), GROK_DEBUG_LOG: join(artifacts, 'kitty-tui.log') }
+      DSCODE_SOCKET: leader, DSCODE_LOG: join(artifacts, 'kitty-leader.log') }
     delete env.TMUX; delete env.STY; delete env.WAYLAND_DISPLAY; delete env.KITTY_LISTEN_ON
     const wrapper = `import fcntl,termios,struct,os,sys,json\nr,c,w,h=struct.unpack('HHHH',fcntl.ioctl(0,termios.TIOCGWINSZ,bytes(8)))\nopen(sys.argv[1],'w').write(json.dumps(dict(rows=r,cols=c,width=w,height=h)))\nos.execv(sys.argv[2],sys.argv[2:])`
     kitty = spawn(kittyBin, ['--config', 'NONE', '--listen-on', `unix:${listen}`,
@@ -42,7 +42,7 @@ open(sys.argv[1],'wb').write(b'\\x89PNG\\r\\n\\x1a\\n'+chunk(b'IHDR',struct.pack
       '-o', 'font_family=DejaVu Sans Mono', '-o', 'font_size=14', '-o', 'adjust_line_height=130%',
       '-o', 'remember_window_size=no', '-o', 'initial_window_width=1300', '-o', 'initial_window_height=950',
       '--directory', cwd, 'python3', '-c', wrapper, measurePath, tuiBin,
-      '--agent', 'standard', '--model', 'fake-model', '--no-plan', '--always-approve'], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+      '--agent', 'standard', '--model', 'fake-model', '--no-plan', '--always-approve', '--no-auto-update', '--debug-file', join(artifacts, 'kitty-tui.log')], { env, stdio: ['ignore', 'pipe', 'pipe'] })
     children.push(kitty)
     kitty.stdout.pipe(createWriteStream(join(artifacts, 'kitty.stdout')))
     kitty.stderr.pipe(createWriteStream(join(artifacts, 'kitty.stderr')))

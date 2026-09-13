@@ -192,7 +192,7 @@ mod tests {
         assert!(reg.get("home").is_some());
         assert!(reg.get("view-plan").is_some());
         reg.set_available_tools(std::collections::HashSet::from([
-            "scheduler_create".to_string()
+            "schedule_create".to_string()
         ]));
         assert!(reg.get("loop").is_some(), "/loop should be registered");
         assert!(
@@ -202,20 +202,21 @@ mod tests {
         assert!(reg.get("find").is_some(), "/find should be registered");
     }
     #[test]
-    fn loop_command_declares_no_scheduler_tool_requirement() {
+    fn loop_command_requires_native_schedule_tool() {
         let loop_cmd = loop_cmd::LoopCommand;
-        // DIVERGENCE(deepseek): /loop is handled by the dsh bridge via
-        // dsh-schedule, so it no longer depends on scheduler_create.
-        assert!(loop_cmd.required_tools().is_empty());
+        assert_eq!(loop_cmd.required_tools(), &["schedule_create"]);
     }
     #[test]
-    fn loop_command_visible_without_scheduler_tools() {
+    fn loop_command_hidden_without_scheduler_tools() {
         let mut reg = CommandRegistry::new(builtin_commands());
         reg.set_available_tools(std::collections::HashSet::from([
             "read_file".to_string(),
             "grep".to_string(),
         ]));
-        assert!(reg.get("loop").is_some(), "/loop should be visible");
+        assert!(
+            reg.get("loop").is_none(),
+            "/loop needs the native scheduling tool"
+        );
         assert!(reg.get("quit").is_some());
         assert!(reg.get("copy").is_some());
     }

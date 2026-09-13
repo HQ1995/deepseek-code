@@ -1,4 +1,5 @@
 import { createNativeCapabilities, type NativeToolSchemas } from './native-capabilities.ts'
+import { listMcpServers } from './mcp.ts'
 import { createLeaderLifecycle } from './leader-lifecycle.ts'
 import { createNativeAsides, type NativeAsideRuntime } from './native-asides.ts'
 import { createSessionInput } from './session-input.ts'
@@ -290,7 +291,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       // the client-side rewind composer restore, so it stays unadvertised.
       // modelState flattens provider-scoped dsh model ids into one global
       // catalog of modelId strings (agent.rs SessionModelState); the
-      // leader-side providerByModel map keeps provider ownership for
+      // leader-side routesByModel map keeps provider ownership for
       // session/set_model.
       _meta: {
         grokShell: true,
@@ -451,7 +452,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         const p = paramRecord(params, 'x.ai/mcp/list')
         const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
         const record = sessionId === undefined ? undefined : ownedRecord(clientId, sessionId)
-        return nativeCapabilities.mcp(record)
+        return await listMcpServers(ctx, record?.agent)
       }
       case 'x.ai/workflows/list':
         // Legacy template catalog. Native run history is pushed via workflow_updated.

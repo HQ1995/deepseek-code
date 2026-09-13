@@ -1437,13 +1437,15 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
     agent_id: AgentId,
     model_id: acp::ModelId,
     effort: Option<ReasoningEffort>,
-    result: Result<(), SwitchModelError>,
+    result: Result<Option<String>, SwitchModelError>,
     prev_model_id: Option<acp::ModelId>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.model_switch_pending = false;
         let mut effects = match result {
-            Ok(()) => {
+            Ok(persistence_warning) => {
+                let preference_changed =
+                    agent.session.user_model_preference.as_ref() != Some(&model_id);
                 agent.session.user_model_preference = Some(model_id.clone());
                 let display_name = agent
                     .session
@@ -1456,6 +1458,9 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                 let prev_effort = agent.session.models.reasoning_effort;
                 agent.session.models.set_current(model_id.clone(), effort);
                 let resolved_effort = agent.session.models.reasoning_effort;
+                if app.models.available.contains_key(&model_id) {
+                    app.models.set_current(model_id.clone(), resolved_effort);
+                }
                 let unchanged =
                     prev_model.as_ref() == Some(&model_id) && prev_effort == resolved_effort;
                 if !unchanged {
@@ -1466,7 +1471,10 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                     };
                     agent.scrollback.push_block(RenderBlock::system(msg));
                 }
-                if unchanged {
+                if let Some(warning) = persistence_warning {
+                    agent.scrollback.push_block(RenderBlock::system(warning));
+                }
+                if unchanged && !preference_changed {
                     vec![]
                 } else {
                     vec![Effect::PersistPreferredModel {
@@ -1476,7 +1484,9 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                 }
             }
             Err(SwitchModelError::IncompatibleAgent { .. }) => {
-                if let Some(ref prev) = prev_model_id {
+                if let Some(ref prev) = prev_model_id
+                    && agent.session.models.current.as_ref() != Some(prev)
+                {
                     agent.session.models.set_current(prev.clone(), None);
                 }
                 agent.active_modal = None;

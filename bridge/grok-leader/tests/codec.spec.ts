@@ -4,8 +4,9 @@
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { Writable } from 'node:stream'
 import { describe, expect, it } from 'vitest'
-import { FrameDecoder, FrameError, MAX_MESSAGE_SIZE, encodeFrame, encodeJsonFrame } from '../src/codec.ts'
+import { FrameDecoder, FrameError, MAX_MESSAGE_SIZE, encodeFrame, encodeJsonFrame, writeJsonFrame, waitForDrain } from '../src/codec.ts'
 import { decodeClientMessage, encodeServerMessage, type ServerMessage } from '../src/protocol.ts'
 
 interface CaptureLine {
@@ -37,6 +38,17 @@ function decodeByteWise(frame: Uint8Array): unknown {
 }
 
 describe('grok leader frame codec', () => {
+  it('disconnects a stalled consumer before its frame queue exceeds the bound', async () => {
+    const socket = new Writable({ write() { /* Hold the first write until the peer resumes. */ } })
+    const error = new Promise<Error>(resolve => socket.once('error', resolve))
+    const chunk = 'x'.repeat(1024 * 1024)
+    for (let n = 0; n < 65; n++) {
+      writeJsonFrame(socket, chunk)
+      expect(socket.writableLength).toBeLessThanOrEqual(MAX_MESSAGE_SIZE + 4)
+    }
+    expect(socket.destroyed).toBe(true)
+    expect((await error).message).toContain('client is not reading')
+  })
   it('roundtrips every captured inbound message through frame encode and byte-wise decode', () => {
     for (const line of capture()) {
       if (line.dir !== 'in') continue
@@ -161,4 +173,29 @@ it('accepts a valid 9 MiB frame across ordinary socket-sized chunks', () => {
   }
   expect(frames).toHaveLength(1)
   expect(Buffer.from(frames[0]!).equals(Buffer.from(payload))).toBe(true)
+})
+
+it('drains a slow replay reader beyond the queue cap and releases waits on close', async () => {
+  let total = 0
+  const sink = new Writable({ highWaterMark: 16, write(chunk, _encoding, done) {
+    total += chunk.length
+    setImmediate(done)
+  } })
+  let peak = 0
+  for (let index = 0; index < 70; index++) {
+    writeJsonFrame(sink, 'x'.repeat(1024 * 1024))
+    peak = Math.max(peak, sink.writableLength)
+    if (sink.writableNeedDrain) await waitForDrain(sink)
+  }
+  expect(total).toBeGreaterThan(MAX_MESSAGE_SIZE)
+  expect(peak).toBeLessThan(2 * 1024 * 1024)
+  expect(sink.destroyed).toBe(false)
+  expect(sink.listenerCount('close')).toBe(0)
+  sink.destroy()
+  const blocked = new Writable({ highWaterMark: 1, write() {} })
+  blocked.write('blocked')
+  const waiting = waitForDrain(blocked)
+  blocked.destroy()
+  await expect(waiting).rejects.toThrow('client disconnected')
+  expect(blocked.listenerCount('drain')).toBe(0)
 })

@@ -5,6 +5,8 @@ import { validateHeaderName, validateHeaderValue } from 'node:http'
 import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type * as McpClient from '@deepseek-ai/dsh-mcp-client'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { scopeChainOf, scopeOf } from '@deepseek-ai/dsh-scope'
 
 const VALID_SERVER_NAME = /^[A-Za-z0-9_-]{1,32}$/
 
@@ -75,6 +77,36 @@ export async function mountMcpConfigs(agentCtx: Context, configs: readonly McpCl
   if (configs.length === 0) return
   const client = await loadMcpClient()
   for (const config of configs) await agentCtx.plugin(client, config)
+}
+
+/** DSH exposes registrations and plugin config, but no live connection status. */
+export async function listMcpServers(ctx: Context, agent?: Agent): Promise<{ servers: Array<Record<string, unknown>> }> {
+  const client = await loadMcpClient()
+  const activeCtx = agent?.ctx ?? ctx
+  const visibleScopes = new Set(scopeChainOf(scopeOf(activeCtx)))
+  const servers = new Map<string, { transport?: string; tools: Array<{ name: string; description?: string }> }>()
+  for (const fiber of ctx.registry.get(client)?.fibers ?? []) {
+    const scope = scopeOf(fiber.ctx)
+    if (scope !== undefined && !visibleScopes.has(scope)) continue
+    const config = fiber.config as Partial<McpClientConfig> | undefined
+    if (typeof config?.serverName !== 'string') continue
+    servers.set(config.serverName, { transport: config.transport, tools: [] })
+  }
+  const tools = activeCtx.get('tools') as { schemas(owner?: Agent): Array<{ name: string; description?: string }> } | undefined
+  for (const tool of tools?.schemas(agent) ?? []) {
+    const match = /^mcp__([A-Za-z0-9_-]+)__(.+)$/.exec(tool.name)
+    if (match === null) continue
+    const name = match[1]!
+    let server = servers.get(name)
+    if (server === undefined) { server = { tools: [] }; servers.set(name, server) }
+    server.tools.push({ name: match[2]!, ...typeof tool.description === 'string' ? { description: tool.description } : {} })
+  }
+  return { servers: [...servers].map(([name, server]) => ({
+    name, displayName: name, source: 'plugin', sourceLabel: 'plugin: dsh',
+    ...server.transport === undefined ? {} : { type: server.transport },
+    session: { enabled: true, status: 'unknown', tools: server.tools },
+    _meta: { toolCount: server.tools.length, connectionStatusAvailable: false },
+  })) }
 }
 
 function stringArray(value: unknown, field: string): string[] {

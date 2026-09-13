@@ -209,3 +209,17 @@ describe('SessionListIndex first-prompt LRU', () => {
     expect(index.projection('c', 0).firstPrompt).toBe('c prompt')
   })
 })
+
+it('caches empty durable logs only while their revision is unchanged', async () => {
+  const index = new SessionListIndex()
+  let reads = 0
+  const load = async () => { reads++; return [] }
+  await index.inspect('empty', 1, load, 'v1')
+  await index.inspect('empty', 1, load, 'v1')
+  expect(reads).toBe(1)
+  await index.inspect('empty', 1, load, 'v2')
+  expect(reads).toBe(2)
+  await index.inspect('empty', 1, load)
+  await index.inspect('empty', 1, load)
+  expect(reads).toBe(4)
+})

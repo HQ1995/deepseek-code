@@ -1877,7 +1877,10 @@ pub(crate) fn execute(
                         .meta(meta);
                     let result = acp_send(req, &tx)
                         .await
-                        .map(|_| ())
+                        .map(|response| response.meta.as_ref()
+                            .and_then(|meta| meta.get("persistenceWarning"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(sanitize_user_error))
                         .map_err(|e| {
                             use xai_grok_shell::agent::config::ModelSwitchIncompatibleAgentError;
                             if let Some(typed) = ModelSwitchIncompatibleAgentError::from_acp_error(

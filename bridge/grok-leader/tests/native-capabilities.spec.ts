@@ -54,38 +54,10 @@ describe('native tool capability views', () => {
     f.host.tools.mockReturnValue(undefined); expect(f.views.capabilities(f.record)).toEqual([])
   })
 
-  it('groups MCP schemas by the final delimiter and preserves wire shape, order and schema counts', () => {
-    const f = fixture()
-    for (const name of ['mcp__first__read', 'mcp__team__remote__one', 'mcp__first__write', 'mcp__first__write']) f.rows.push({ name })
-    expect(f.views.mcp(f.record)).toEqual({ servers: [
-      { name: 'first', displayName: 'first', source: 'local', sourceLabel: 'plugin: dsh',
-        session: { enabled: true, status: 'connected', tools: [], authRequired: false, setupRequired: false }, _meta: { toolCount: 3 } },
-      { name: 'team__remote', displayName: 'team__remote', source: 'local', sourceLabel: 'plugin: dsh',
-        session: { enabled: true, status: 'connected', tools: [], authRequired: false, setupRequired: false }, _meta: { toolCount: 1 } },
-    ] })
-    expect(f.tools.schemas).toHaveBeenCalledExactlyOnceWith(f.record.agent)
-    expect(f.host.hasService).not.toHaveBeenCalled()
-  })
-
-  it('does not infer MCP servers from malformed names, unrelated tools or an absent owner', () => {
-    const f = fixture()
-    for (const name of ['mcp__', 'mcp__server', 'mcp__server__', 'mcp____tool', 'prefix_mcp__server__tool', 'mcp_server_tool']) f.rows.push({ name })
-    expect(f.views.mcp(undefined)).toEqual({ servers: [] }); expect(f.host.tools).not.toHaveBeenCalled()
-    expect(f.views.mcp(f.record)).toEqual({ servers: [] })
-    f.host.tools.mockReturnValue(undefined); expect(f.views.mcp(f.record)).toEqual({ servers: [] })
-  })
-
-  it('builds fresh MCP views without mutating the borrowed native schemas', () => {
-    const f = fixture(); f.rows.push(Object.freeze({ name: 'mcp__native__one' }))
-    const first = f.views.mcp(f.record); first.servers[0]!.name = 'changed'; first.servers[0]!._meta.toolCount = 99
-    expect(f.views.mcp(f.record).servers[0]).toMatchObject({ name: 'native', _meta: { toolCount: 1 } })
-    expect(f.rows).toEqual([{ name: 'mcp__native__one' }])
-  })
-
   it('preserves native schema and service errors instead of caching a fabricated capability view', () => {
     const f = fixture(), error = new Error('native unavailable')
     f.tools.schemas.mockImplementationOnce(() => { throw error })
-    expect(() => f.views.mcp(f.record)).toThrow(error)
+    expect(() => f.views.toolNames(f.record)).toThrow(error)
     f.rows.push({ name: 'skill' }); f.host.hasService.mockImplementationOnce(() => { throw error })
     expect(() => f.views.capabilities(f.record)).toThrow(error)
     f.services.add('skills'); expect(f.views.capabilities(f.record)).toEqual(['skills'])

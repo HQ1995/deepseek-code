@@ -1,19 +1,52 @@
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readlinkSync, symlinkSync, lstatSync, rmSync } from 'node:fs'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
+import { fixtureEnvironment } from './fixtures/environment.ts'
 import { installationReport } from '../bin/doctor.mjs'
-import { commitInstallation, validateRuntime, withProfileLock } from '../bin/update.mjs'
+import { commitInstallation, saveUpdateChannel, validateRuntime, withProfileLock } from '../bin/update.mjs'
+
+it('retains the only backup when rollback fails and retries recovery at the next lock', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dscode-rollback-recovery-'))
+  const profile = join(root, 'active'), stage = join(root, '.dscode-update-rollback-failure')
+  try {
+    for (const base of [profile, join(stage, 'profile')]) {
+      mkdirSync(join(base, 'bin'), { recursive: true })
+      for (const entry of ['node_modules', 'runtime', 'bin/dscode', 'config.toml']) writeFileSync(join(base, entry), base)
+    }
+    const child = spawnSync(process.execPath, [fileURLToPath(new URL('./fixtures/update-worker.mjs', import.meta.url)), root, 'rollback-failure', new URL('../bin/update.mjs', import.meta.url).href], {
+      env: fixtureEnvironment(root), encoding: 'utf8', timeout: 15000,
+    })
+    expect(child.status).not.toBe(0)
+    expect(child.stderr).toContain('kept recovery files')
+    expect(readFileSync(join(stage, 'backup/node_modules'), 'utf8')).toBe(profile)
+    expect(JSON.parse(readFileSync(join(stage, 'transaction.json'), 'utf8')).state).toBe('pending')
+    await withProfileLock(profile, () => {})
+    for (const entry of ['node_modules', 'runtime', 'bin/dscode', 'config.toml']) expect(readFileSync(join(profile, entry), 'utf8')).toBe(profile)
+    expect(existsSync(stage)).toBe(false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+it('preserves restrictive config permissions when saving the update channel', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dscode-channel-permissions-'))
+  try {
+    const path = join(root, 'config.toml')
+    writeFileSync(path, '[cli]\nchannel="beta"\nchannel_format=1\n', { mode: 0o600 })
+    await saveUpdateChannel(root, 'alpha')
+    expect(lstatSync(path).mode & 0o777).toBe(0o600)
+    expect(readFileSync(path, 'utf8')).toContain('alpha')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
 
 it('excludes a second process throughout tuple commit and releases locks after a crash', async () => {
   const root = mkdtempSync(join(tmpdir(), 'dscode-concurrent-update-'))
   const children: ReturnType<typeof spawn>[] = []
   const start = (lane: string) => {
-    const child = spawn(process.execPath, [fileURLToPath(new URL('./fixtures/update-worker.mjs', import.meta.url)), root, lane, new URL('../bin/update.mjs', import.meta.url).href], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
+    const child = spawn(process.execPath, [fileURLToPath(new URL('./fixtures/update-worker.mjs', import.meta.url)), root, lane, new URL('../bin/update.mjs', import.meta.url).href], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'], env: fixtureEnvironment(root) })
     children.push(child)
     return child
   }
@@ -27,22 +60,27 @@ it('excludes a second process throughout tuple commit and releases locks after a
       if (i > 500 || a.exitCode !== null) throw new Error('first updater did not reach commit')
       await delay(10)
     }
-    const b = start('B')
+    const b = start('B'), bDone = once(b, 'exit')
     let error = ''
     b.stderr!.on('data', bytes => { error += String(bytes) })
-    expect((await once(b, 'exit'))[0]).not.toBe(0)
-    expect(error).toContain('another dscode installation')
+    await delay(200)
+    expect(b.exitCode).toBeNull()
+    expect(error).toContain('waiting for the current profile update')
     writeFileSync(join(root, 'resume'), '')
     expect((await aDone)[0]).toBe(0)
-    for (const entry of ['node_modules', 'runtime', 'bin/dscode', 'config.toml']) expect(readFileSync(join(root, 'active', entry), 'utf8')).toBe('A/profile')
+    expect((await bDone)[0]).toBe(0)
+    for (const entry of ['node_modules', 'runtime', 'bin/dscode', 'config.toml']) expect(readFileSync(join(root, 'active', entry), 'utf8')).toBe('B/profile')
 
     const owner = start('hold')
     expect((await once(owner, 'message'))[0]).toBe('locked')
-    await expect(withProfileLock(join(root, 'active'), () => {})).rejects.toThrow('another dscode installation')
+    let entered = false
+    const waiting = withProfileLock(join(root, 'active'), () => { entered = true; return 'recovered' })
+    await delay(150)
+    expect(entered).toBe(false)
     const exited = once(owner, 'exit')
     owner.kill('SIGKILL')
     await exited
-    await expect(withProfileLock(join(root, 'active'), () => 'recovered')).resolves.toBe('recovered')
+    await expect(waiting).resolves.toBe('recovered')
   } finally {
     for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
     await Promise.all(children.filter(child => child.exitCode === null && child.signalCode === null).map(child => once(child, 'exit')))

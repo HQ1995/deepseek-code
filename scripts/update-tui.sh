@@ -12,7 +12,7 @@ REF="${1:-HEAD}"
 echo "cloning upstream grok-build @ $REF into $SCRATCH"
 git init "$SCRATCH/upstream" >/dev/null
 git -C "$SCRATCH/upstream" remote add origin https://github.com/xai-org/grok-build.git
-if ! git -C "$SCRATCH/upstream" fetch --depth 1 origin "$REF" >/dev/null 2>&1; then
+if ! git -C "$SCRATCH/upstream" fetch origin "$REF" >/dev/null 2>&1; then
   echo "error: upstream ref not found: $REF" >&2
   exit 1
 fi
@@ -22,7 +22,11 @@ echo "=== upstream baseline ==="
 cat "$TUI/UPSTREAM_REV.new"
 echo
 echo "=== changed paths vs our tree (excluding target/node_modules) ==="
-diff -rq --exclude .git --exclude target --exclude node_modules --exclude UPSTREAM_REV --exclude UPSTREAM_REV.new --exclude TUI-DIVERGENCE.md "$SCRATCH/upstream" "$TUI" | head -80 || true
+diff_status=0
+diff -rq --exclude .git --exclude target --exclude node_modules --exclude UPSTREAM_REV --exclude UPSTREAM_REV.new --exclude TUI-DIVERGENCE.md "$SCRATCH/upstream" "$TUI" > "$SCRATCH/changed-paths.txt" || diff_status=$?
+[[ "$diff_status" -le 1 ]] || { echo "error: cannot compare upstream tree" >&2; exit "$diff_status"; }
+cat "$SCRATCH/changed-paths.txt"
+echo "Full changed-path inventory: $SCRATCH/changed-paths.txt"
 echo
 echo "Now port selected changes by hand into $TUI. Record the new baseline with:"
 echo "  mv $TUI/UPSTREAM_REV.new $TUI/UPSTREAM_REV   (after updating the file's notes)"

@@ -112,12 +112,13 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
     if (record === undefined || client === undefined) return next()
     return accepted(record, request.signal, async signal => {
       if (signal.aborted || !live(record)) throw cancelledQuestion()
-      // The pager keys answers by its multiline heading, not by native id.
-      const textToId = new Map<string, string>()
+      // Native IDs are stable; legacy heading keys must be unambiguous.
+      const byId = new Map(request.questions.map(item => [item.id, item]))
+      const textToId = new Map<string, string | undefined>()
       const questions = request.questions.map(item => {
         const text = [item.header, item.question, item.detail]
           .filter(value => typeof value === 'string' && value.length > 0).join('\n')
-        textToId.set(text, item.id)
+        textToId.set(text, textToId.has(text) ? undefined : item.id)
         return { question: text, id: item.id,
           options: (item.options ?? []).map(option => ({ label: option.label, description: option.description ?? '' })),
           ...item.multiSelect === undefined ? {} : { multiSelect: item.multiSelect },
@@ -138,12 +139,13 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
       const payload = object(response), wireAnswers = object(payload?.answers)
       if (payload?.outcome !== 'accepted' || wireAnswers === undefined) throw cancelledQuestion()
       const annotations = object(payload.annotations), answers: AskUserQuestionAnswer['answers'] = []
-      for (const [text, labels] of Object.entries(wireAnswers)) {
-        const id = textToId.get(text)
-        if (id === undefined) continue
+      for (const [key, labels] of Object.entries(wireAnswers)) {
+        const id = byId.has(key) ? key : textToId.get(key)
+        if (id === undefined) throw new UserQuestionError('unknown or ambiguous question in response', 'ASK_CANCELLED')
         const rawLabels = Array.isArray(labels) ? labels : labels === undefined ? [] : [labels]
-        const notes = object(annotations?.[text])?.notes
-        const selected = rawLabels.filter((label): label is string => typeof label === 'string' && label !== 'Other')
+        const notes = object(annotations?.[key])?.notes
+        const offered = new Set(byId.get(id)?.options?.map(option => option.label))
+        const selected = rawLabels.filter((label): label is string => typeof label === 'string' && (label !== 'Other' || offered.has(label)))
         answers.push({ id, selected, ...typeof notes === 'string' && notes.length > 0 ? { custom: notes } : {} })
       }
       return { answers }

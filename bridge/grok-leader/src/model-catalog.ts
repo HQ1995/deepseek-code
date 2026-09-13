@@ -1,6 +1,6 @@
 /** Provider/model catalog ownership. No socket, agent registry or Cordis dependency. */
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { RpcError } from './protocol.ts'
 import { JSONRPC_INVALID_PARAMS, invalidParams, internalError, paramRecord } from './acp.ts'
 
@@ -29,6 +29,7 @@ const DEFAULT_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as c
 const PI_AI_REASONING_EFFORTS = new Set(['off', 'minimal', ...DEFAULT_REASONING_EFFORTS])
 /** Match dsh-llm-pi-ai's discovery response ceiling for caller-supplied URLs. */
 const MODEL_LIST_MAX_BYTES = 4 * 1024 * 1024
+const textDecoder = new TextDecoder()
 
 type PiAiReasoningEfforts = Record<string, string | null>
 
@@ -126,7 +127,7 @@ async function readBoundedModelListing(response: Response): Promise<unknown> {
     body.set(chunk, offset)
     offset += chunk.byteLength
   }
-  return JSON.parse(new TextDecoder().decode(body)) as unknown
+  return JSON.parse(textDecoder.decode(body)) as unknown
 }
 
 /** Best-effort second read for endpoint capability extensions that dsh's
@@ -157,13 +158,6 @@ function wireModelId(provider: string, modelId: string): string {
   return provider + MODEL_ID_SEPARATOR + modelId
 }
 
-/** Split a wire catalog id back into provider/model when it is provider-qualified. */
-export function parseWireModelId(wireId: string): { provider: string; model: string } | undefined {
-  const index = wireId.indexOf(MODEL_ID_SEPARATOR)
-  if (index <= 0 || index === wireId.length - 1) return undefined
-  return { provider: wireId.slice(0, index), model: wireId.slice(index + 1) }
-}
-
 /** Stable in-memory key for a provider/model effort. */
 export function modelEffortKey(provider: string, model: string): string {
   return provider + '\u0000' + model
@@ -180,7 +174,7 @@ export interface ModelCatalog {
   /** Provider that owns currentModelId ('' when no current model). */
   currentProviderId: string
   availableModels: Array<{ modelId: string; name: string; description?: string; _meta?: { provider: string; supportsReasoningEffort?: boolean; reasoningEfforts?: string[]; reasoningEffort?: string; inputModalities?: string[]; acceptsImages?: boolean } }>
-  providerByModel: Map<string, string>
+  routesByModel: Map<string, { provider: string; model: string }>
   providerModelToWireId: Map<string, string>
 }
 
@@ -431,7 +425,20 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
             id: model.id,
             name: model.name ?? model.id,
           }))
-        return { provider: provider.id, models }
+        // Resolve providers concurrently, keeping every native branch in the
+        // accepted-work drain even when a sibling provider rejects early.
+        const metadata = new Map<string, Awaited<ReturnType<NonNullable<LlmLike['resolveModelInfo']>>>>()
+        if (llmService.resolveModelInfo !== undefined) {
+          for (const model of models) {
+            assertOpen()
+            if (metadata.has(model.id)) continue
+            try { metadata.set(model.id, await llmService.resolveModelInfo(provider.id, model.id)) }
+            catch (error) {
+              logger.warn('grok-leader: could not resolve model metadata for ' + provider.id + '/' + model.id + ': ' + (error instanceof Error ? error.message : String(error)))
+            }
+          }
+        }
+        return { provider: provider.id, models, metadata }
       })))
     assertOpen()
     const modelCount = new Map(rows.map(row => [row.provider, row.models.length]))
@@ -457,7 +464,8 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
       }
     })))
     assertOpen()
-    const providerByModel = new Map<string, string>()
+    const routesByModel = new Map<string, { provider: string; model: string }>()
+    const reservedRawIds = new Set(rows.flatMap(row => row.models.map(model => model.id)))
     const providerModelToWireId = new Map<string, string>()
     const rawModelOwners = new Map<string, string>()
     const defaultEffortByModel = new Map<string, string>()
@@ -470,33 +478,23 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
         // backward compatibility; later providers that also carry the same
         // id get a provider-qualified wire id so both remain selectable.
         const existingOwner = rawModelOwners.get(model.id)
-        const wireId = existingOwner === undefined || existingOwner === row.provider
-          ? model.id
-          : wireModelId(row.provider, model.id)
+        let wireId = model.id
+        if (existingOwner !== undefined && existingOwner !== row.provider) {
+          const qualified = wireModelId(row.provider, model.id)
+          wireId = qualified
+          for (let suffix = 2; reservedRawIds.has(wireId) || routesByModel.has(wireId); suffix++) wireId = `${qualified} (${suffix})`
+        }
         rawModelOwners.set(model.id, existingOwner ?? row.provider)
         providerModelToWireId.set(pairKey, wireId)
-        providerByModel.set(wireId, row.provider)
+        routesByModel.set(wireId, { provider: row.provider, model: model.id })
         // Prefer the adapter's exact-model reasoning metadata over the old
         // one-size-fits-all grok menu, so a provider that has no low/medium/
         // xhigh does not advertise them.
-        const resolveModelInfo = llmService?.resolveModelInfo
-        const hasMetadataResolver = resolveModelInfo !== undefined
-        let reasoning: { defaultEffort?: string; efforts?: Array<{ id: string; name?: string }> } | undefined
-        let inputModalities = model.inputModalities
+        const hasMetadataResolver = llmService?.resolveModelInfo !== undefined
+        const info = row.metadata.get(model.id)
+        const reasoning = info?.reasoning
+        const inputModalities = (info?.inputModalities ?? model.inputModalities)
           ?.filter((modality): modality is string => typeof modality === 'string' && modality.length > 0)
-        if (resolveModelInfo !== undefined) {
-          try {
-            const info = await resolveModelInfo.call(llmService, row.provider, model.id)
-            reasoning = info.reasoning
-            if (info.inputModalities !== undefined) {
-              inputModalities = info.inputModalities
-                .filter((modality): modality is string => typeof modality === 'string' && modality.length > 0)
-            }
-          } catch (error) {
-            logger.warn('grok-leader: could not resolve model metadata for ' + row.provider + '/' + model.id + ': ' + (error instanceof Error ? error.message : String(error)))
-          }
-          assertOpen()
-        }
         const efforts = reasoning?.efforts
           ?.map(effort => effort.id)
           .filter((id): id is string => typeof id === 'string' && id.length > 0)
@@ -549,15 +547,13 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     // Once the user adds a provider, the first advertised model becomes the
     // UI seed until they make (and persist) an explicit selection.
     let currentModelId = requested ?? availableModels[0]?.modelId ?? ''
-    if (currentModelId !== '' && !providerByModel.has(currentModelId)) {
+    if (currentModelId !== '' && !routesByModel.has(currentModelId)) {
       currentModelId = availableModels[0]?.modelId ?? ''
       logger.warn('grok-leader: model "' + requested + '" is not in the catalog; falling back to "' + currentModelId + '"')
     }
-    const currentProviderId = currentModelId === '' ? '' : providerByModel.get(currentModelId) ?? ''
-    const currentParsed = parseWireModelId(currentModelId)
-    const currentRawModel = currentParsed !== undefined && currentProviderId === currentParsed.provider
-      ? currentParsed.model
-      : currentModelId
+    const currentRoute = routesByModel.get(currentModelId)
+    const currentProviderId = currentRoute?.provider ?? ''
+    const currentRawModel = currentRoute?.model ?? ''
     // The pager reads the selected effort from the current model's
     // _meta.reasoningEffort on every models/list, so a /effort choice must
     // ride the catalog or it is forgotten across restarts. When the user has
@@ -583,7 +579,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
       providers,
       currentProviderId,
       availableModels,
-      providerByModel,
+      routesByModel,
       providerModelToWireId,
     }
     return catalog
@@ -610,11 +606,11 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     let wireId: string | undefined
     if (explicitProvider === undefined
       && explicitModel !== undefined
-      && current.providerByModel.has(explicitModel)) {
+      && current.routesByModel.has(explicitModel)) {
       wireId = explicitModel
     } else if (candidate !== undefined) {
       wireId = current.providerModelToWireId.get(modelEffortKey(candidate.provider, candidate.model))
-        ?? (current.providerByModel.get(candidate.model) === candidate.provider ? candidate.model : undefined)
+        ?? (current.routesByModel.get(candidate.model)?.provider === candidate.provider ? candidate.model : undefined)
     }
     if (wireId === undefined && (explicitModel !== undefined || explicitProvider !== undefined)) {
       throw invalidParams('requested provider/model is not in the catalog: '
@@ -622,10 +618,9 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     }
     wireId ??= current.currentModelId === '' ? undefined : current.currentModelId
     if (wireId === undefined) return undefined
-    const provider = current.providerByModel.get(wireId)
-    if (provider === undefined) return undefined
-    const parsed = parseWireModelId(wireId)
-    const model = parsed !== undefined && parsed.provider === provider ? parsed.model : wireId
+    const route = current.routesByModel.get(wireId)
+    if (route === undefined) return undefined
+    const { provider, model } = route
     const advertisedModel = current.availableModels.find(entry => entry.modelId === wireId)
     // A qualified wire id can infer its provider even without a saved route;
     // do not lose an explicit effort merely because candidate is undefined.
@@ -1077,6 +1072,16 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
 
   return {
     peek: () => catalog,
+    /** Publish an acknowledged default choice without repeating discovery.
+     * Resolve against the latest catalog: a concurrent refresh may change wire IDs. */
+    selected(selection: Pick<ModelSelection, 'provider' | 'model'>): void {
+      assertOpen()
+      const wireId = catalog?.providerModelToWireId.get(modelEffortKey(selection.provider, selection.model))
+      if (catalog !== undefined && wireId !== undefined) {
+        catalog.currentModelId = wireId
+        catalog.currentProviderId = selection.provider
+      }
+    },
     current: () => admit(currentCatalog),
     refresh: () => admit(refreshCatalog),
     select: (...args: Parameters<typeof selectionForRequest>) => admit(() => selectionForRequest(...args)),

@@ -5,8 +5,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { migrateLegacyTuiHome, nodeVersionSupported } from '../bin/dscode.mjs'
-import { channelAccepts, commitInstallation, extractArchive, resolveRelease, updateOptions } from '../bin/update.mjs'
+import { channelAccepts, commitInstallation, extractArchive, resolveRelease, updateOptions, withProfileLock } from '../bin/update.mjs'
 import { create as createTar } from 'tar'
+import { fixtureEnvironment } from './fixtures/environment.ts'
 
 const launcher = fileURLToPath(new URL('../bin/dscode.mjs', import.meta.url))
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
@@ -91,6 +92,7 @@ describe('launcher lifecycle', () => {
     const normalLauncher = join(home, 'launcher', 'bin', 'dscode.mjs')
     mkdirSync(dirname(normalLauncher), { recursive: true })
     copyFileSync(launcher, normalLauncher)
+    symlinkSync(fileURLToPath(new URL('../bin/launcher-files.mjs', import.meta.url)), join(dirname(normalLauncher), 'launcher-files.mjs'))
     symlinkSync(fileURLToPath(new URL('../bin/update.mjs', import.meta.url)), join(dirname(normalLauncher), 'update.mjs'))
     symlinkSync(fileURLToPath(new URL('../bin/doctor.mjs', import.meta.url)), join(dirname(normalLauncher), 'doctor.mjs'))
     writeFileSync(join(home, 'launcher', 'package.json'), JSON.stringify({ ...packageJson, dsh: { ...packageJson.dsh, sourceCommit: undefined } }))
@@ -158,15 +160,13 @@ esac
 
     const result = spawnSync(productNode!, [normalLauncher, 'inspect', '--json'], {
       encoding: 'utf8',
-      env: {
-        ...process.env,
-        HOME: home,
+      env: fixtureEnvironment(home, {
         DSH_HOME: dshHome,
         PATH: `${fakeBin}:/usr/bin:/bin`,
         DSCODE_BIN: '',
         DSH_BIN: '',
         DSCODE_LEGACY_BIN: legacyRealBin,
-      },
+      }),
     })
 
     expect(result.status, result.stderr).toBe(0)
@@ -285,12 +285,10 @@ printf '%s' '${JSON.stringify(packageJson)}' > "$prefix/node_modules/@hqzhao95/d
     const script = `import { ensureProfilePlugin } from ${JSON.stringify(pathToFileURL(launcher).href)}; console.log(JSON.stringify(ensureProfilePlugin())); console.log(JSON.stringify(ensureProfilePlugin()))`
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
       encoding: 'utf8',
-      env: {
-        ...process.env,
-        HOME: home,
+      env: fixtureEnvironment(home, {
         DSH_HOME: dshHome,
         PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
-      },
+      }),
     })
 
     expect(result.status, result.stderr).toBe(0)
@@ -310,7 +308,7 @@ printf '%s' '${JSON.stringify(packageJson)}' > "$prefix/node_modules/@hqzhao95/d
     const script = `import { ensureDshCli } from ${JSON.stringify(pathToFileURL(launcher).href)}; console.log(await ensureDshCli())`
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: home, DSH_HOME: join(home, '.dsh'), DSH_BIN: binary, PATH: home },
+      env: fixtureEnvironment(home, { DSH_BIN: binary, PATH: home }),
     })
     if (version === dshVersion) {
       expect(result.status, result.stderr).toBe(0)
@@ -329,20 +327,21 @@ printf '%s' '${JSON.stringify(packageJson)}' > "$prefix/node_modules/@hqzhao95/d
     const copiedLauncher = join(home, 'bin', 'dscode.mjs')
     mkdirSync(dirname(copiedLauncher))
     copyFileSync(launcher, copiedLauncher)
+    symlinkSync(fileURLToPath(new URL('../bin/launcher-files.mjs', import.meta.url)), join(dirname(copiedLauncher), 'launcher-files.mjs'))
     symlinkSync(fileURLToPath(new URL('../bin/update.mjs', import.meta.url)), join(dirname(copiedLauncher), 'update.mjs'))
     symlinkSync(fileURLToPath(new URL('../bin/doctor.mjs', import.meta.url)), join(dirname(copiedLauncher), 'doctor.mjs'))
     writeFileSync(join(home, 'package.json'), JSON.stringify({ ...packageJson, dsh: {} }))
     const script = `import { ensureDshCli } from ${JSON.stringify(pathToFileURL(copiedLauncher).href)}; await ensureDshCli()`
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: home, DSH_HOME: join(home, '.dsh'), DSH_BIN: '', PATH: home },
+      env: fixtureEnvironment(home, { DSH_BIN: '', PATH: home }),
     })
     expect(result.status).not.toBe(0)
     expect(result.stderr).toContain('missing dsh.testedVersion')
     expect(existsSync(join(home, '.dsh'))).toBe(false)
   })
 
-  it('uninstalls owned state and preserves shared dsh data', () => {
+  it('uninstalls binaries and preserves profile and shared user data', () => {
     const home = mkdtempSync(join(tmpdir(), 'dscode-uninstall-'))
     homes.push(home)
     const dshHome = join(home, '.dsh')
@@ -361,20 +360,28 @@ printf '%s' '${JSON.stringify(packageJson)}' > "$prefix/node_modules/@hqzhao95/d
     }))
     writeFileSync(profileLauncher, '#!/usr/bin/env node\n')
     writeFileSync(sharedSession, 'preserve')
+    mkdirSync(join(profile, 'sessions'))
+    writeFileSync(join(profile, 'sessions/local'), 'local session')
+    writeFileSync(join(profile, 'config.toml'), '[cli]\nchannel="alpha"\n')
+    writeFileSync(join(profile, 'cordis.patch.yml'), '# user MCP settings\n[]\n')
     symlinkSync(profileLauncher, launcherLink)
 
     const result = spawnSync(process.execPath, [launcher, 'uninstall'], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: home, DSH_HOME: dshHome },
+      env: fixtureEnvironment(home),
     })
 
     expect(result.status, result.stderr).toBe(0)
-    expect(existsSync(profile)).toBe(false)
+    expect(existsSync(plugin)).toBe(false)
+    expect(readFileSync(join(profile, 'sessions/local'), 'utf8')).toBe('local session')
+    expect(readFileSync(join(profile, 'config.toml'), 'utf8')).toContain('alpha')
+    expect(readFileSync(join(profile, 'cordis.patch.yml'), 'utf8')).toContain('user MCP settings')
+    expect(JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')).dsh.profile.bundles).not.toContain('@hqzhao95/dscode')
     expect(existsSync(launcherLink)).toBe(false)
     expect(existsSync(sharedSession)).toBe(true)
   })
 
-  it('removes a partial owned profile left by a failed first install', () => {
+  it('preserves a partial owned profile after uninstall', () => {
     const home = mkdtempSync(join(tmpdir(), 'dscode-partial-uninstall-'))
     homes.push(home)
     const dshHome = join(home, '.dsh')
@@ -390,10 +397,37 @@ printf '%s' '${JSON.stringify(packageJson)}' > "$prefix/node_modules/@hqzhao95/d
 
     const result = spawnSync(process.execPath, [launcher, 'uninstall'], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: home, DSH_HOME: dshHome },
+      env: fixtureEnvironment(home),
     })
 
     expect(result.status, result.stderr).toBe(0)
-    expect(existsSync(profile)).toBe(false)
+    expect(existsSync(join(profile, 'package.json'))).toBe(true)
   })
+})
+
+it('waits for a concurrent profile transaction and reads its committed state', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dscode-lock-wait-'))
+  homes.push(home)
+  const profile = join(home, 'profile')
+  let enter!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { enter = resolve })
+  const released = new Promise<void>(resolve => { release = resolve })
+  const order: string[] = []
+  const first = withProfileLock(profile, async () => { order.push('first'); enter(); await released; order.push('committed') })
+  await entered
+  const second = withProfileLock(profile, () => { order.push('second') })
+  await new Promise(resolve => setTimeout(resolve, 150))
+  expect(order).toEqual(['first'])
+  release()
+  await Promise.all([first, second])
+  expect(order).toEqual(['first', 'committed', 'second'])
+})
+
+it('rejects unknown uninstall options before modifying the fixture', () => {
+  const home = mkdtempSync(join(tmpdir(), 'dscode-uninstall-args-'))
+  homes.push(home)
+  const result = spawnSync(process.execPath, [launcher, 'uninstall', '--unknown'], { encoding: 'utf8', env: fixtureEnvironment(home) })
+  expect(result.status).not.toBe(0)
+  expect(result.stderr).toContain('Usage: dscode uninstall')
+  expect(existsSync(join(home, '.dsh'))).toBe(false)
 })

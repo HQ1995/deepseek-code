@@ -182,9 +182,9 @@ describe('owned session commands', () => {
 
   it.each(['/auto', '/delete', '/remember'])('keeps %s ahead of plugins and refuses image attachments', async command => {
     const f = fixture()
-    await expect(f.request(command)).resolves.toMatchObject({ stopReason: 'end_turn' })
+    await expect(f.request(command)).rejects.toThrow(command)
     expect(f.execute).not.toHaveBeenCalled()
-    expect(f.record.output.update.mock.calls[0]![0].content.text).toContain(command)
+    expect(f.record.output.update).not.toHaveBeenCalled()
     await expect(f.request(command, f.record, true)).rejects.toThrow('does not accept image attachments')
   })
 
@@ -193,17 +193,18 @@ describe('owned session commands', () => {
     f.execute.mockResolvedValueOnce({ result: { kind: 'success', text: 'compacted' } })
     await f.request('/compact')
     expect(f.record.output.update.mock.calls[0]![0].content.text).toBe('compacted')
-    await f.request('/compact')
-    expect(f.record.output.update.mock.calls[1]![0].content.text).toContain('Manual compaction is unavailable')
+    await expect(f.request('/compact')).rejects.toThrow('Manual compaction is unavailable')
+    expect(f.record.output.update).toHaveBeenCalledOnce()
     await expect(f.request('/compact', f.record, true)).rejects.toThrow('does not accept image attachments')
   })
 
   it('preserves reserved-command casing and delegates native child and goal controls', async () => {
     const f = fixture()
     f.host.children.command.mockResolvedValueOnce({ result: { kind: 'error', text: 'child failed' } })
-    await f.request('/SUBAGENTS list'); await f.request('/GOAL show')
+    await expect(f.request('/SUBAGENTS list')).rejects.toThrow('child failed')
+    expect(f.record.output.update).not.toHaveBeenCalled()
+    await f.request('/GOAL show')
     expect(f.host.children.command).toHaveBeenCalledOnce(); expect(f.host.goals.goal).toHaveBeenCalledOnce()
-    expect(f.record.output.update.mock.calls[0]![0].content.text).toBe('error: child failed')
     expect(f.execute).not.toHaveBeenCalled()
     await f.request('/DSH plugins')
     expect(f.execute).toHaveBeenCalledOnce(); expect(f.host.profile.execute).not.toHaveBeenCalled()
@@ -227,7 +228,7 @@ describe('owned session commands', () => {
     const result = f.request('/dsh plugins')!, rejected = expect(result).rejects.toThrow('session closed')
     f.record.work.cancel(); gate.resolve(); await rejected
     expect(f.record.output.update.mock.calls.map(call => call[0].content.text)).toEqual(['before'])
-    await expect(f.request('/auto')).resolves.toHaveProperty('stopReason', 'end_turn')
+    await expect(f.request('/auto')).rejects.toThrow('/auto is unsupported')
   })
 
   it('never lets a cancelled unknown native command become model fallback', async () => {

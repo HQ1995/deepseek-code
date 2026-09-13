@@ -76,6 +76,7 @@ pub struct NativeControls {
     edit: Option<Edit>,
     submitted: bool,
     detail_scroll: u16,
+    detail_lines: Option<(usize, u16, usize)>,
 }
 
 impl NativeControls {
@@ -105,6 +106,7 @@ impl NativeControls {
             edit: None,
             submitted: false,
             detail_scroll: 0,
+            detail_lines: None,
         }
     }
 
@@ -168,6 +170,7 @@ impl NativeControls {
     }
 
     fn filter(&mut self, selected: Option<&str>) {
+        self.detail_lines = None;
         let query = self.query.to_lowercase();
         self.items = self
             .all_items
@@ -595,8 +598,20 @@ impl NativeControls {
             }
         } else if let Some(item) = self.selection.selected().and_then(|i| self.items.get(i)) {
             let detail = Paragraph::new(item.text.as_str()).wrap(Wrap { trim: false });
-            let max_scroll = detail
-                .line_count(detail_area.width)
+            let index = self.selection.selected().unwrap_or(0);
+            let lines = match self.detail_lines {
+                Some((cached_index, width, lines))
+                    if cached_index == index && width == detail_area.width =>
+                {
+                    lines
+                }
+                _ => {
+                    let lines = detail.line_count(detail_area.width);
+                    self.detail_lines = Some((index, detail_area.width, lines));
+                    lines
+                }
+            };
+            let max_scroll = lines
                 .saturating_sub(usize::from(detail_area.height))
                 .min(usize::from(u16::MAX)) as u16;
             self.detail_scroll = self.detail_scroll.min(max_scroll);
@@ -663,6 +678,13 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("END_OF_OUTPUT"));
         assert!(state.detail_scroll < u16::MAX);
+        let cached = state.detail_lines;
+        state.render(&mut buffer, area);
+        assert_eq!(state.detail_lines, cached);
+        state.loaded(Ok(presets(1)));
+        assert!(state.detail_lines.is_none());
+        state.render(&mut buffer, area);
+        assert!(state.detail_lines.unwrap().2 < cached.unwrap().2);
     }
     #[test]
     fn preset_search_and_copy_focus_survive_refresh_and_failures() {

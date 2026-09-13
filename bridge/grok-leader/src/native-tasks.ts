@@ -9,6 +9,7 @@ import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { invalidParams, internalError, paramRecord } from './acp.ts'
 import { parseReminder } from './reminders.ts'
 import type { SessionOutput } from './session-output.ts'
+import { jobOutputPatch } from './job-output.ts'
 
 interface TaskSession {
   work: Pick<SessionWork, 'run'>
@@ -49,9 +50,11 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
   const reminderSnapshots = new WeakMap<T, Map<string, string>>()
   const emitReminders = (record: T): void => {
     if (!isLive(record)) return
-    const { active, seenIds } = foldScheduleEvents(record.agent.session.ownEvents())
-    // Reconnect also clears native IDs that were deleted while the UI was away.
-    const previous = reminderSnapshots.get(record) ?? new Map<string, string>(seenIds.map(id => [id, '']))
+    const cached = reminderSnapshots.get(record)
+    const schedule = record.agent.ctx.get('sessionProjections')?.snapshot(record.agent.session, ['schedule']).values.schedule
+    const folded = cached === undefined || schedule === undefined ? foldScheduleEvents(record.agent.session.ownEvents()) : undefined
+    const active = schedule ?? folded!.active
+    const previous = cached ?? new Map<string, string>(folded!.seenIds.map(id => [id, '']))
     const next = new Map<string, string>()
     for (const reminder of active) {
       const serialized = JSON.stringify(reminder)
@@ -171,6 +174,8 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
     const systemTime = (ms: number): unknown => ({ secs_since_epoch: Math.floor(ms / 1000), nanos_since_epoch: (ms % 1000) * 1_000_000 })
     for (const job of jobs.list(record.agent)) {
       // Settled producers are immutable; do not rescan their output every tick.
+      // A settled producer's final passive output can arrive after settlement.
+      // Stop rescanning only after that final output has actually been observed.
       if (!jobIsRunning(job) && previous.get(job.id) === JSON.stringify([job, true])) continue
       const output = host.output(jobs, record.agent, job.id)
       const serialized = JSON.stringify([job, output !== undefined])
@@ -178,10 +183,11 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
         emitJobOutput(record, job.id, output)
         continue
       }
+      const known = previous.has(job.id)
       previous.set(job.id, serialized)
       const cwd = record.agent.session.header.cwd ?? ''
       if (jobIsRunning(job)) {
-        record.output.notify('x.ai/task_backgrounded', { update: { sessionUpdate: 'task_backgrounded', tool_call_id: job.id, task_id: job.id, command: job.label, cwd, description: job.label } })
+        if (!known) record.output.notify('x.ai/task_backgrounded', { update: { sessionUpdate: 'task_backgrounded', tool_call_id: job.id, task_id: job.id, command: job.label, cwd, description: job.label } })
       } else {
         record.output.notify('x.ai/task_completed', { update: {
             sessionUpdate: 'task_completed',
@@ -193,7 +199,8 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
             },
           } }, { nativeTask: { status: job.status, kind: job.kind, outputAvailable: output !== undefined, ...job.detail === undefined ? {} : { detail: job.detail } } })
       }
-      emitJobOutput(record, job.id, output)
+      if (jobIsRunning(job)) emitJobOutput(record, job.id, output)
+      else jobOutputSnapshots.get(record)?.delete(job.id)
     }
   }
   const emitJobOutput = (record: T, id: string, output: string | undefined): void => {
@@ -201,11 +208,12 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
     if (!isLive(record)) return
     let previous = jobOutputSnapshots.get(record)
     if (previous === undefined) { previous = new Map(); jobOutputSnapshots.set(record, previous) }
-    if (previous.get(id) === output) return
+    const before = previous.get(id)
+    if (before === output) return
     previous.set(id, output)
     record.output.update({
       sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed',
-      rawOutput: { type: 'Bash', output_for_prompt: output },
+      rawOutput: jobOutputPatch(before, output),
     }, false)
   }
   const killTask = async (clientId: number, params: unknown): Promise<unknown> => {

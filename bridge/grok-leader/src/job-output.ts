@@ -7,7 +7,9 @@ import type { SubprocessCollectedOutputs, SubprocessRuntime } from '@deepseek-ai
 import type { TerminalSessionService } from '@deepseek-ai/dsh-terminal'
 
 const MAX_OUTPUT_CHARS = 256 * 1024
-type Capture = { streams: SubprocessCollectedOutputs[]; terminal?: () => string; final?: string }
+type Capture = {
+  streams: SubprocessCollectedOutputs[]; terminal?: () => string; final?: string; settled?: boolean
+}
 
 function boundedOutput(text: string): string {
   return text.length > MAX_OUTPUT_CHARS
@@ -26,17 +28,26 @@ export function outputSnapshot(capture: Capture): string {
   const sections: string[] = []
   for (const streams of capture.streams) {
     for (const name of ['stdout', 'stderr'] as const) {
+      // The native reader already caps retained bytes (bash defaults to 64KB).
+      // Its readFrom still copies that buffer; deltas would not avoid the copy
+      // and can corrupt UTF-8 when a sampled chunk ends inside a code point.
       const read = streams[name]?.readFrom(0)
       if (read === undefined || (read.text.length === 0 && !read.lossy)) continue
       if (name === 'stderr' && read.text.length > 0) sections.push('[stderr]')
       if (read.lossy) sections.push('[Earlier output truncated' + (read.spillPath === undefined ? '' : '; full output: ' + read.spillPath) + ']')
-      sections.push(read.text)
+      sections.push(boundedOutput(read.text))
     }
   }
   if (capture.terminal !== undefined) sections.push(capture.terminal())
   if (capture.final !== undefined) sections.push(capture.final)
   const text = sections.join('\n')
   return boundedOutput(text)
+}
+
+/** Full snapshots establish/reset the window; ordinary growth sends only its suffix. */
+export function jobOutputPatch(previous: string | undefined, output: string): Record<string, unknown> {
+  return { type: 'Bash', ...(previous !== undefined && output.startsWith(previous)
+    ? { output_append: output.slice(previous.length) } : { output_for_prompt: output }) }
 }
 
 /** Associate public collected-output handles with the job starter's async scope. */
@@ -47,6 +58,7 @@ export function observeJobOutputs(ctx: Context): (registry: object, owner: Agent
     const terminals = original(scope.terminals)
     const descriptor = Object.getOwnPropertyDescriptor(terminals, 'startSend')
     const startSend = terminals.startSend
+    if (typeof startSend !== 'function' || typeof terminals.read !== 'function') return
     function observedSend(this: TerminalSessionService, ...args: Parameters<TerminalSessionService['startSend']>) {
       const operation = Reflect.apply(startSend, this, args) as ReturnType<TerminalSessionService['startSend']>
       const capture = active.getStore()
@@ -86,6 +98,7 @@ export function observeJobOutputs(ctx: Context): (registry: object, owner: Agent
     const spawnDescriptor = Object.getOwnPropertyDescriptor(subprocess, 'spawn')
     const start = jobs.start
     const spawn = subprocess.spawn
+    if (typeof start !== 'function' || typeof spawn !== 'function') return
     function observedSpawn(this: SubprocessRuntime, ...args: Parameters<SubprocessRuntime['spawn']>) {
       const handle = Reflect.apply(spawn, this, args) as ReturnType<SubprocessRuntime['spawn']>
       const capture = active.getStore()
@@ -101,12 +114,27 @@ export function observeJobOutputs(ctx: Context): (registry: object, owner: Agent
         const hooks = spec.run()
         // Final-only producers already provide immutable settlement output.
         // Observing it neither consumes a stream nor acknowledges completion.
+        const finish = () => {
+          let final = capture.final
+          try { final = outputSnapshot(capture) }
+          catch { /* Output handles may already be disposed; release them regardless. */ }
+          capture.streams = []
+          capture.terminal = undefined
+          capture.final = final
+          capture.settled = true
+          // ponytail: retain the latest 64 finished previews per owner. Native
+          // job output remains authoritative; older previews become unavailable.
+          const outputs = owners.get(spec.owner!)
+          const finished = [...outputs ?? []].filter(([, row]) => row.settled)
+          for (const [id] of finished.slice(0, -64)) outputs!.delete(id)
+        }
         void hooks.done.then(outcome => {
           if (hooks.readOutput === undefined) {
             const output = outcome.output ?? ''
             capture.final = boundedOutput(output)
           }
-        }, () => {})
+          finish()
+        }, finish).catch(() => { /* Passive previews must not fail the producer. */ })
         return hooks
       }) }]) as ReturnType<JobRegistry['start']>
       let outputs = owners.get(spec.owner)

@@ -1,11 +1,11 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   TUI_ASSETS,
-  downloadGzipIfAvailable,
   dshRuntimeBin,
   nodeVersionSupported,
   ownedLauncherTarget,
@@ -17,9 +17,23 @@ import {
   tuiAssetName,
   tuiHome,
 } from '../bin/dscode.mjs'
-import { updateOptions } from '../bin/update.mjs'
+import { downloadVerified, updateOptions } from '../bin/update.mjs'
 
 describe('tuiAssetName', () => {
+  it('aborts a stalled raw fallback instead of waiting indefinitely', async () => {
+    vi.useFakeTimers()
+    const dir = mkdtempSync(join(tmpdir(), 'dscode-timeout-'))
+    try {
+      const fetcher = async (url: string, { signal }: { signal: AbortSignal }) => {
+        if (url.endsWith('.gz')) return new Response(null, { status: 404 })
+        return await new Promise<Response>((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+      }
+      const result = expect(downloadVerified('https://release.invalid', 'dscode', join(dir, 'binary'), fetcher, true)).rejects.toThrow('download stalled')
+      await vi.advanceTimersByTimeAsync(120000)
+      await result
+    } finally { vi.useRealTimers(); rmSync(dir, { recursive: true, force: true }) }
+  })
+
   it('maps the two shipped prebuilts', () => {
     expect(tuiAssetName('linux', 'x64')).toBe('dscode-linux-x86_64')
     expect(tuiAssetName('darwin', 'arm64')).toBe('dscode-macos-aarch64')
@@ -30,8 +44,8 @@ describe('tuiAssetName', () => {
     const dest = join(dir, 'dscode')
     try {
       const compressed = gzipSync('dscode-binary')
-      const url = `data:application/gzip;base64,${compressed.toString('base64')}`
-      await expect(downloadGzipIfAvailable(url, dest)).resolves.toBe(true)
+      const fetcher = async (url: string) => new Response(url.endsWith('.sha256') ? createHash('sha256').update('dscode-binary').digest('hex') : compressed)
+      await downloadVerified('https://release.invalid', 'dscode', dest, fetcher, true)
       expect(readFileSync(dest, 'utf8')).toBe('dscode-binary')
     } finally {
       rmSync(dir, { recursive: true, force: true })

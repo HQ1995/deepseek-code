@@ -24,17 +24,14 @@
 // the cached binary's REAL version is read from `dscode --version` (no
 // marker files to drift). Older cache → download the pin; newer or -dev
 // cache → left alone (developer-managed).
-import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Readable } from 'node:stream'
-import { pipeline } from 'node:stream/promises'
-import { createGunzip } from 'node:zlib'
 import { installationReport, formatInstallationReport } from './doctor.mjs'
-import { compareVersions, installationFilesMatch, installationMatches, installRelease, needsUpdateWithChannel, resolveRelease, saveUpdateChannel, unsupportedPlatformMessage, updateOptions, validateRuntime, withProfileLock } from './update.mjs'
+import { healLauncherLink as repairLauncherLink } from './launcher-files.mjs'
+import { atomicWrite, compareVersions, downloadVerified, parseCliVersion, installationFilesMatch, installationMatches, installRelease, needsUpdateWithChannel, resolveRelease, saveUpdateChannel, unsupportedPlatformMessage, updateOptions, validateRuntime, withProfileLock } from './update.mjs'
 
 const RELEASE_REPO = 'HQ1995/deepseek-code'
 const here = dirname(fileURLToPath(import.meta.url))
@@ -83,8 +80,7 @@ export const nodeVersionSupported = (version) => {
   return true
 }
 
-export const parseCliVersion = (output) =>
-  /(?:^|\s)(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\s|$)/.exec(output)?.[1]
+export { parseCliVersion } from './update.mjs'
 
 /** POSIX `command -v`: the shell's PATH lookup, not a handwritten split. */
 const commandV = (name) => {
@@ -248,7 +244,7 @@ const reconcileProfileManifest = () => {
     ...manifest.dsh,
     profile: { ...manifest.dsh?.profile, bundles },
   }
-  writeFileSync(profileManifestPath, JSON.stringify(manifest, null, 2) + '\n')
+  atomicWrite(profileManifestPath, JSON.stringify(manifest, null, 2) + '\n')
 }
 
 /** First run: register this plugin into the dscode dsh profile without
@@ -313,46 +309,15 @@ const cachedVersion = () => {
   const probe = spawnSync(binPath, ['--version'], { encoding: 'utf8', timeout: 15000 })
   if (probe.status !== 0 || typeof probe.stdout !== 'string') return undefined
   // "dscode 0.0.5-dev (abc123) [stable]"
-  return probe.stdout.trim().split(/\s+/)[1]
-}
-
-const sha256File = async (path) => {
-  const hash = createHash('sha256')
-  await pipeline(createReadStream(path), hash)
-  return hash.digest('hex')
-}
-
-const download = async (url, dest) => {
-  const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(120000) })
-  if (!res.ok || res.body === null) throw new Error(`${res.status} ${res.statusText} for ${url}`)
-  await pipeline(Readable.fromWeb(res.body), createWriteStream(dest))
-}
-
-/** Prefer the smaller release asset while retaining raw-asset compatibility. */
-export const downloadGzipIfAvailable = async (url, dest) => {
-  const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(120000) })
-  if (res.status === 404) return false
-  if (!res.ok || res.body === null) throw new Error(`${res.status} ${res.statusText} for ${url}`)
-  await pipeline(Readable.fromWeb(res.body), createGunzip(), createWriteStream(dest))
-  return true
+  return parseCliVersion(probe.stdout)
 }
 
 const installBinary = async (release, asset) => {
   mkdirSync(binDir, { recursive: true })
   const base = `https://github.com/${RELEASE_REPO}/releases/download/v${release}`
   const tmp = `${binPath}.download-${process.pid}`
-  console.error(`dscode: downloading v${release} (${asset}) from GitHub Releases...`)
   try {
-    const compressed = await downloadGzipIfAvailable(`${base}/${asset}.gz`, tmp)
-    if (!compressed) await download(`${base}/${asset}`, tmp)
-    const shaRes = await fetch(`${base}/${asset}.sha256`, { redirect: 'follow' })
-    if (shaRes.ok) {
-      const expected = (await shaRes.text()).trim().split(/\s+/)[0]
-      const actual = await sha256File(tmp)
-      if (expected !== actual) throw new Error(`SHA-256 mismatch (got ${actual}, want ${expected})`)
-    } else {
-      throw new Error(`release v${release} has no ${asset}.sha256 asset`)
-    }
+    await downloadVerified(base, asset, tmp, fetch, true)
     chmodSync(tmp, 0o755)
     renameSync(tmp, binPath)
   } catch (error) {
@@ -361,41 +326,9 @@ const installBinary = async (release, asset) => {
   }
 }
 
-/** Point ~/.local/bin/dscode at the profile install's launcher (the stable
- *  copy — an npx temp-store copy of this file may be garbage-collected), or
- *  at this file when the profile copy is absent. Retarget plugin launchers
- *  and the exact legacy binary that asked this managed launch to take over;
- *  anything else remains user-owned. */
-export const healLauncherLink = () => {
-  try {
-    const linkDir = join(homedir(), '.local', 'bin')
-    const link = join(linkDir, 'dscode')
-    const preferred = existsSync(profileLauncher) ? profileLauncher : join(here, 'dscode.mjs')
-    let existing
-    try {
-      existing = lstatSync(link)
-    } catch {
-      mkdirSync(linkDir, { recursive: true })
-      symlinkSync(preferred, link)
-      return
-    }
-    if (!existing.isSymbolicLink()) return
-    const target = readlinkSync(link)
-    if (target === preferred) return
-    const absoluteTarget = resolve(dirname(link), target)
-    const legacyBin = process.env.DSCODE_LEGACY_BIN
-    const isLegacyHandoff = legacyBin !== undefined && legacyBin !== ''
-      && realpathSync(absoluteTarget) === realpathSync(legacyBin)
-    if (!isLegacyHandoff && !(target.includes('node_modules') && target.endsWith('/bin/dscode.mjs'))) return
-    rmSync(link)
-    symlinkSync(preferred, link)
-  } catch (error) {
-    // The installed tuple is usable even when the convenience link cannot be repaired.
-    console.error(`dscode: warning: could not repair ${join(homedir(), '.local', 'bin', 'dscode')}: ${error instanceof Error ? error.message : String(error)}; launch with node ${JSON.stringify(profileLauncher)} instead`)
-  }
-}
+export const healLauncherLink = (options = {}) => repairLauncherLink({ profile: profileDir, packageName: pkg.name, sourceBin: here, ...options })
 
-export const ownedLauncherTarget = (target) => resolve(target) === resolve(profileLauncher)
+export const ownedLauncherTarget = target => [profileLauncher, join(profileDir, 'dscode.mjs')].some(path => resolve(target) === resolve(path))
 
 const profileIsOwned = () => {
   const installed = readJsonFile(pluginManifestPath)
@@ -406,8 +339,10 @@ const profileIsOwned = () => {
   return Array.isArray(bundles) && bundles.includes(pkg.name)
 }
 
-/** Remove only product-owned state. Shared dsh sessions/storages stay intact. */
-export const uninstallInstallation = () => {
+/** Remove product executables; retain all profile and shared user data. */
+export const uninstallInstallation = async (args = []) => {
+  if (args.some(arg => arg !== '--remove-dsh')) throw new Error('Usage: dscode uninstall [--remove-dsh]')
+  return withProfileLock(profileDir, async () => {
   if (existsSync(profileDir) && !profileIsOwned()) {
     throw new Error(`refusing to remove ${profileDir}; it is not an owned dscode profile`)
   }
@@ -436,17 +371,24 @@ export const uninstallInstallation = () => {
   }
 
   if (existsSync(profileDir)) {
-    rmSync(profileDir, { recursive: true, force: true })
-    console.error(`dscode: removed ${profileDir}`)
+    const manifest = readJsonFile(profileManifestPath)
+    if (manifest) {
+      delete manifest.dependencies?.[pkg.name]
+      const bundles = manifest.dsh?.profile?.bundles
+      if (Array.isArray(bundles)) manifest.dsh.profile.bundles = bundles.filter(name => name !== pkg.name)
+      atomicWrite(profileManifestPath, JSON.stringify(manifest, null, 2) + '\n')
+    }
+    for (const path of [dirname(dirname(profileLauncher)), runtimeDir, binPath, join(profileDir, 'dscode.mjs')]) rmSync(path, { recursive: true, force: true })
+    console.error(`dscode: removed product binaries; kept sessions, settings and other user data in ${profileDir}`)
   }
-
-  const legacyHome = join(dshHome, 'dsc-tui')
-  if (existsSync(legacyHome) && !lstatSync(legacyHome).isSymbolicLink()) {
-    rmSync(legacyHome, { recursive: true, force: true })
-    console.error(`dscode: removed legacy state ${legacyHome}`)
+  console.error(`dscode: kept shared state under ${dshHome}`)
+  if (args.includes('--remove-dsh')) {
+    await runInstaller(['uninstall', '--global', '@deepseek-ai/dsh'])
+    console.error('dscode: removed the global @deepseek-ai/dsh package')
   }
-  console.error(`dscode: kept shared state under ${join(dshHome, 'sessions')} and ${join(dshHome, 'storages')}`)
+  })
 }
+
 
 export const ensureBinary = async () => {
   const asset = assetName()
@@ -476,7 +418,7 @@ export const updateCommandIndex = (args) => {
 }
 
 
-const main = async () => {
+export const main = async () => {
   const args = process.argv.slice(2)
   // Diagnostics must work even when provisioning/tuple validation would fail.
   if (args[0] === 'doctor' && args.includes('--runtime')) {
@@ -541,7 +483,7 @@ const main = async () => {
     }
   }
   if (process.argv[2] === 'uninstall') {
-    uninstallInstallation()
+    await uninstallInstallation(args.slice(1))
     return
   }
   if (!nodeVersionSupported(process.versions.node)) {
@@ -561,18 +503,20 @@ const main = async () => {
   const prepared = await withProfileLock(profileDir, async () => {
     // Check actual versions once, under the same lock as profile preparation.
     // Repair must happen after unlocking: installRelease acquires its own lock.
-    if (managedRelease && !installationMatches(profileDir, pkg.name, managedRelease, pkg.dsh)) return undefined
+    const tuiVersion = managedRelease ? cachedVersion() : undefined
+    const managed = managedRelease && !tuiVersion?.includes('-dev')
+    if (managed && !installationMatches(profileDir, pkg.name, managedRelease, pkg.dsh, tuiVersion)) return undefined
     if (!process.env.DSCODE_BIN) {
       // Published source-backed installs are reconciled as one transaction above.
       // Keep the npm bootstrap only for unpinned development/legacy packages.
-      if (!managedRelease) ensureProfilePlugin()
+      if (!managed) ensureProfilePlugin()
       else { scaffoldProfile(); reconcileProfileManifest() }
       healLauncherLink()
       migrateLegacyTuiHome()
     }
     return await Promise.all([
-      managedRelease && !process.env.DSH_BIN ? Promise.resolve(dshRuntimeBin) : ensureDshCli(),
-      managedRelease ? Promise.resolve(binPath) : process.env.DSCODE_BIN ? Promise.resolve(process.env.DSCODE_BIN) : ensureBinary(),
+      managed && !process.env.DSH_BIN ? Promise.resolve(dshRuntimeBin) : ensureDshCli(),
+      managed ? Promise.resolve(binPath) : process.env.DSCODE_BIN ? Promise.resolve(process.env.DSCODE_BIN) : ensureBinary(),
     ])
   })
   if (prepared === undefined) {

@@ -8,6 +8,7 @@
  */
 import type { TurnEndReason, SessionEvent } from '@deepseek-ai/dsh-session'
 import { assistantStreamFirstTokenTime, expandAssistantStream, type StreamChunk, type TokenUsage } from '@deepseek-ai/dsh-llm'
+import { parseExitStatus } from '@deepseek-ai/dsh-shell'
 import type {} from '@deepseek-ai/dsh-tool-present/types'
 import { isAbsolute, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -280,11 +281,14 @@ export function sessionEventToUpdates(
   // All consumers (live, resume and child history) must see the same state.
   if (event.type === 'turn/start') return [{ sessionUpdate: 'plan', entries: [] }]
   if (String(event.type) === 'todo/write') {
-    const data = event.data as { todos: Array<{ content: string; status: string }> }
+    const data = event.data as { todos?: unknown }
+    if (!Array.isArray(data?.todos) || !data.todos.every(todo => todo !== null && typeof todo === 'object'
+      && typeof todo.content === 'string' && ['pending', 'in_progress', 'completed'].includes(todo.status))) return []
     return [{ sessionUpdate: 'plan', entries: data.todos.map(todo => ({
       content: todo.content,
+      // ACP requires a priority; DSH todos have none, so use its neutral value.
       priority: 'medium',
-      status: todo.status === 'in_progress' || todo.status === 'completed' ? todo.status : 'pending',
+      status: todo.status,
     })) }]
   }
   switch (event.type) {
@@ -322,7 +326,9 @@ export function sessionEventToUpdates(
       })
     }
     case 'tool/call': {
-      const args = parseJsonObject(event.data.arguments)
+      if (typeof event.data.callId !== 'string' || event.data.callId === '') return []
+      const prior = options.toolCall?.(event.data.callId)
+      const args = prior === undefined ? parseJsonObject(event.data.arguments) : prior.arguments
       return [{
         sessionUpdate: 'tool_call',
         toolCallId: String(event.data.callId),
@@ -334,7 +340,8 @@ export function sessionEventToUpdates(
     }
     case 'tool/result': {
       const block = event.data.message.content[0] as { type?: string; toolCallId?: unknown; content?: unknown } | undefined
-      const callId = String(block?.toolCallId)
+      const callId = block?.toolCallId
+      if (typeof callId !== 'string' || callId === '') return []
       const prior = options.toolCall?.(callId)
       const metaDiffs = diffBlocksFromMeta(event.data.meta)
       const contents: ToolResultContentBlock[] = [
@@ -358,6 +365,7 @@ export function sessionEventToUpdates(
     // sub-call settles exactly once — aborts included. Rendering them through
     // the native call/result path keeps one card vocabulary for both planes.
     case 'tool/ptc-dispatch-start': {
+      if (typeof event.data.subCallId !== 'string' || event.data.subCallId === '') return []
       const args = event.data.arguments
       return [{
         sessionUpdate: 'tool_call',
@@ -369,7 +377,8 @@ export function sessionEventToUpdates(
       }]
     }
     case 'tool/ptc-dispatch': {
-      const callId = String(event.data.subCallId)
+      const callId = event.data.subCallId
+      if (typeof callId !== 'string' || callId === '') return []
       const prior = options.toolCall?.(callId)
       const contents: ToolResultContentBlock[] = [
         ...textBlocks(event.data.content).map(block => ({ type: 'content' as const, content: block })),
@@ -534,18 +543,21 @@ function bashRawOutput(
   text: string,
   isError: boolean,
 ): Record<string, unknown> | undefined {
-  if (prior === undefined) return undefined
-  const args = (prior.arguments ?? {}) as { command?: unknown; description?: unknown }
+  if (prior === undefined || isError || !['bash', 'pwsh'].includes(prior.name.toLowerCase())) return undefined
+  const args = (prior.arguments ?? {}) as { command?: unknown; description?: unknown; run_in_background?: unknown }
+  if (args.run_in_background === true) return undefined
+  const status = parseExitStatus(text)
   const output = Buffer.from(text, 'utf8')
   return {
     type: 'Bash',
     output: Array.from(output),
     output_for_prompt: text,
-    exit_code: isError ? 1 : 0,
+    // Grok uses -1 when termination supplied a signal instead of an exit code.
+    exit_code: 'exitCode' in status ? status.exitCode : -1,
     command: typeof args.command === 'string' ? args.command : '',
-    truncated: false,
-    signal: null,
-    timed_out: false,
+    truncated: /\n\[output truncated; full output: [^\n]+\]/.test(text),
+    signal: 'signal' in status ? status.signal : null,
+    timed_out: /\n\[timed out after [\d.]+ms\]$/.test(status.body),
     ...typeof args.description === 'string' && args.description.length > 0 ? { description: args.description } : {},
     current_dir: '',
     output_file: '',
@@ -557,7 +569,8 @@ function bashRawOutput(
 function readRawOutputFromMeta(meta: unknown): Record<string, unknown> | undefined {
   if (typeof meta !== 'object' || meta === null) return undefined
   const m = meta as { path?: unknown; offset?: unknown; lines?: unknown; totalLines?: unknown }
-  if (typeof m.path !== 'string' || !Array.isArray(m.lines)) return undefined
+  if (typeof m.path !== 'string' || !Array.isArray(m.lines) || typeof m.totalLines !== 'number'
+    || !Number.isInteger(m.totalLines) || m.totalLines < 0) return undefined
   const lines = m.lines as Array<{ number?: unknown; text?: unknown }>
   const rawOutput = lines
     .filter(line => typeof line.text === 'string')
@@ -570,7 +583,7 @@ function readRawOutputFromMeta(meta: unknown): Record<string, unknown> | undefin
       content: rawOutput,
       absolute_path: m.path,
       offset,
-      ...typeof m.totalLines === 'number' ? { total_lines: m.totalLines } : { total_lines: lines.length },
+      total_lines: m.totalLines,
       limit: lines.length,
       raw_output: rawOutput,
     },
@@ -649,13 +662,14 @@ function webFetchRawOutput(
   if (prior === undefined) return undefined
   const args = (prior.arguments ?? {}) as { url?: unknown }
   const m = (meta ?? {}) as { url?: unknown; statusCode?: unknown }
+  if (typeof m.statusCode !== 'number' || !Number.isInteger(m.statusCode) || m.statusCode < 100 || m.statusCode > 599) return undefined
   return {
     type: 'WebFetch',
     Content: {
       url: typeof m.url === 'string' ? m.url : typeof args.url === 'string' ? args.url : '',
       content: text,
       content_type: 'text',
-      status_code: typeof m.statusCode === 'number' ? m.statusCode : 200,
+      status_code: m.statusCode,
       bytes: Buffer.byteLength(text, 'utf8'),
     },
   }

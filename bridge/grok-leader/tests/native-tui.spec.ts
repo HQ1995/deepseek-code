@@ -1,7 +1,8 @@
 import { expect, it } from 'vitest'
 import { sessionEventToUpdates } from '../src/projection.ts'
-import { workflowUpdates } from '../src/workflows.ts'
+import { WorkflowIndex } from '../src/workflows.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+const sourceOf = (events: SessionEvent[]) => ({ get seq() { return events.length }, snapshotEvents: (from: number, to: number) => events.slice(from, to) })
 
 it('orders parallel members by native sequence even when they publish in reverse order', () => {
   const events = [
@@ -9,7 +10,8 @@ it('orders parallel members by native sequence even when they publish in reverse
     { type: 'tool-workflow/agent-start', time: 20, data: { runId: 'run', seq: 2, childId: 'second', label: 'Second' } },
     { type: 'tool-workflow/agent-start', time: 21, data: { runId: 'run', seq: 1, childId: 'first', label: 'First' } },
   ] as unknown as SessionEvent[]
-  expect(workflowUpdates(events, new Map(), 30)[0]!.agents.map(agent => agent.agent_id)).toEqual(['first', 'second'])
+  const index = new WorkflowIndex()
+  expect(index.updates(sourceOf(events), new Map(), 30)[0]!.agents.map(agent => agent.agent_id)).toEqual(['first', 'second'])
 })
 
 it('restores the same Todo state in live and replay paths, retaining completion until the next turn', () => {
@@ -38,11 +40,13 @@ it('keeps same-named native runs distinct and never treats an incomplete cold lo
     { type: 'tool-workflow/agent-start', time: 60, data: { runId: 'second', seq: 1, childId: 'child-b', label: 'B', phase: 'Read' } },
   ] as unknown as SessionEvent[]
   const live = new Map([['second', { meta: { name: 'review', description: 'Review changes' }, phase: 'Read' }]])
-  expect(workflowUpdates(events, live, 80)).toMatchObject([
+  const index = new WorkflowIndex()
+  const source = sourceOf(events)
+  expect(index.updates(source, live, 80)).toMatchObject([
     { run_id: 'first', status: 'complete', elapsed_ms: 30, agents: [{ agent_id: 'child-a', state: 'done', duration_ms: 10 }] },
     { run_id: 'second', status: 'active', elapsed_ms: 30, active_agents: 1, phases: [{ title: 'Read', state: 'active' }] },
   ])
-  const cold = workflowUpdates(events, new Map(), 9000)
+  const cold = index.updates(source, new Map(), 9000)
   expect(cold[1]).toMatchObject({ status: 'interrupted', elapsed_ms: 10, active_agents: 0, agent_budget: null, agent_usage_incomplete: true, agents: [{ agent_id: 'child-b', state: 'interrupted' }] })
   expect(cold[1]!.agents[0]).not.toHaveProperty('tokens_used')
 })
@@ -77,4 +81,29 @@ it('keeps failed sub-calls errors and gives nested edits their diff block', () =
     .toMatchObject({ status: 'completed', content: [{ type: 'content' }, { type: 'diff', path: '/w/a.txt', oldText: 'a', newText: 'b' }] })
   // Without the start event's arguments there is nothing to synthesize from.
   expect(sessionEventToUpdates(edit, { replay: false })[0]).toMatchObject({ content: [{ type: 'content' }] })
+})
+
+it('ignores incomplete tool IDs and invalid todo snapshots in both projection paths', () => {
+  const invalid = [
+    { type: 'tool/call', data: { name: 'bash', arguments: '{}' } },
+    { type: 'tool/result', data: { message: { content: [{ type: 'tool-result', content: [] }] } } },
+    { type: 'tool/ptc-dispatch-start', data: { subCallId: '', arguments: {} } },
+    { type: 'tool/ptc-dispatch', data: { subCallId: 42, content: [] } },
+    { type: 'todo/write', data: { todos: null } },
+    { type: 'todo/write', data: { todos: [{ content: 'Future status', status: 'unknown' }] } },
+  ] as unknown as SessionEvent[]
+  for (const replay of [false, true]) for (const event of invalid) expect(sessionEventToUpdates(event, { replay })).toEqual([])
+})
+
+it('uses generic tool text when HTTP status or file length is unknown', () => {
+  const cases = [
+    { name: 'web_fetch', arguments: { url: 'https://example.invalid' }, meta: { statusCode: undefined } },
+    { name: 'read', arguments: { path: '/workspace/a' }, meta: { path: '/workspace/a', lines: [{ number: 10, text: 'page' }] } },
+  ]
+  for (const prior of cases) for (const replay of [false, true]) {
+    const event = { type: 'tool/result', data: { meta: prior.meta, message: { content: [{ type: 'tool-result', toolCallId: 'call', content: [{ type: 'text', text: 'page' }] }] } } } as unknown as SessionEvent
+    const update = sessionEventToUpdates(event, { replay, toolCall: () => prior })[0]
+    expect(update).toMatchObject({ toolCallId: 'call', content: [{ content: { text: 'page' } }] })
+    expect(update).not.toHaveProperty('rawOutput')
+  }
 })

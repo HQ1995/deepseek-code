@@ -4,6 +4,7 @@
  * leader/protocol.rs; the envelope JSON layer lives in protocol.ts.
  * @module dscode/codec
  */
+import type { Writable } from 'node:stream'
 
 /** Largest accepted frame payload, mirroring MAX_MESSAGE_SIZE in protocol.rs. */
 export const MAX_MESSAGE_SIZE = 64 * 1024 * 1024
@@ -36,8 +37,36 @@ export function encodeFrame(payload: Uint8Array): Uint8Array {
  * @param value - JSON-serializable envelope message.
  * @returns the complete frame.
  */
+const textEncoder = new TextEncoder()
 export function encodeJsonFrame(value: unknown): Uint8Array {
-  return encodeFrame(new TextEncoder().encode(JSON.stringify(value)))
+  return encodeFrame(textEncoder.encode(JSON.stringify(value)))
+}
+
+/** Bound queued output when a client stops reading. Node preserves frame order. */
+export function writeJsonFrame(socket: Writable, value: unknown): void {
+  if (socket.destroyed) return
+  const frame = encodeJsonFrame(value)
+  if (socket.writableLength + frame.byteLength > MAX_MESSAGE_SIZE + 4) {
+    socket.destroy(new FrameError('client is not reading; outgoing frame queue exceeded 64 MiB'))
+    return
+  }
+  socket.write(frame)
+}
+
+/** Let an async replay pause without dropping a healthy but slower reader. */
+export function waitForDrain(socket: Writable): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const finish = (error?: Error) => {
+      socket.off('drain', drained).off('close', closed).off('error', finish)
+      if (error === undefined) resolve()
+      else reject(error)
+    }
+    const drained = () => finish()
+    const closed = () => finish(new FrameError('client disconnected during replay'))
+    socket.once('drain', drained).once('close', closed).once('error', finish)
+    if (socket.destroyed) closed()
+    else if (!socket.writableNeedDrain) drained()
+  })
 }
 
 /**

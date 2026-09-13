@@ -17,7 +17,7 @@ function fixture() {
   const sessions = new Map<SessionId, ReturnType<typeof session>>()
   function session(id: string, clientId = 1) {
     const events: SessionEvent[] = []
-    const record = { clientId, agent: { session: { id: SessionId(id), header: { cwd: '/workspace' }, ownEvents: () => events } } as unknown as Agent,
+    const record = { clientId, agent: { ctx: { get: () => undefined }, session: { id: SessionId(id), header: { cwd: '/workspace' }, ownEvents: () => events } } as unknown as Agent,
       output: { notify: vi.fn(), update: vi.fn() }, events,
       work: createSessionWork({ isLive: () => sessions.get(SessionId(id)) === record, assertReady: () => {} }) }
     return record
@@ -156,7 +156,7 @@ describe('native task ownership', () => {
     const reads = f.output.mock.calls.length
     f.tasks.poll(); f.tasks.poll()
     expect(f.output).toHaveBeenCalledTimes(reads)
-    expect(f.owner.output.update).toHaveBeenCalledTimes(2)
+    expect(f.owner.output.update).toHaveBeenCalledTimes(1) // completion carries the authoritative final snapshot
     expect(f.tasks.output(1, f.request('one'))).toEqual({ taskId: 'one', status: 'completed', available: true, output: 'first\nlast' })
     await f.tasks.dispose()
   })

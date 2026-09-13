@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { KNOWN_SESSION_EVENT_TYPES, SessionId } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { execFile } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
@@ -88,4 +88,11 @@ it('does not weaken native validation or publish a generation for malformed lega
     await ctx.fiber.dispose()
     await rm(root, { recursive: true, force: true })
   }
+})
+
+it('imports the bridge without modifying the native persisted-event vocabulary', async () => {
+  const before = [...KNOWN_SESSION_EVENT_TYPES]
+  await import('../src/index.ts')
+  expect([...KNOWN_SESSION_EVENT_TYPES]).toEqual(before)
+  expect(KNOWN_SESSION_EVENT_TYPES.has('dscode/model-selected')).toBe(false)
 })

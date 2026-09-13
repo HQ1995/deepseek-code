@@ -105,6 +105,8 @@ dscode doctor --runtime            # diagnose even when normal startup fails
 dscode uninstall
 ```
 
+Uninstall removes the product binaries and keeps profile sessions, settings and shared DSH data. Use `dscode uninstall --remove-dsh` to also remove the global DSH package.
+
 Updates install the matching bridge, TUI, and runtime together and save the
 channel only after success. Failed validation or ordinary commit errors retain
 the previous installation. Fresh prerelease installs use

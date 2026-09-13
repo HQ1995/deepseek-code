@@ -30,20 +30,5 @@ export function createNativeCapabilities<S extends ToolSession>(host: Capability
       if (names.has('schedule_create')) capabilities.push('schedule')
       return capabilities
     },
-    mcp(record: S | undefined) {
-      const counts = new Map<string, number>()
-      for (const { name } of record === undefined ? [] : schemas(record)) {
-        if (!name.startsWith('mcp__')) continue
-        const rest = name.slice('mcp__'.length), separator = rest.lastIndexOf('__')
-        if (separator <= 0 || separator + 2 >= rest.length) continue
-        const server = rest.slice(0, separator)
-        counts.set(server, (counts.get(server) ?? 0) + 1)
-      }
-      return { servers: [...counts].map(([name, toolCount]) => ({
-        name, displayName: name, source: 'local', sourceLabel: 'plugin: dsh',
-        session: { enabled: true, status: 'connected', tools: [], authRequired: false, setupRequired: false },
-        _meta: { toolCount },
-      })) }
-    },
   }
 }

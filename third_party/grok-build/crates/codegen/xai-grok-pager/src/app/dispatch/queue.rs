@@ -1159,14 +1159,15 @@ pub(super) fn dispatch_run_edited_queued_command(
         };
         let registry = agent.prompt.slash_controller.registry();
         let mode_refused = crate::slash::parse_invocation(text.trim()).is_some_and(|invocation| {
-            registry
-                .get_for_dispatch(invocation.token)
-                .is_some_and(|command| {
-                    command
-                        .mode_support()
-                        .refusal(invocation.token, screen_mode)
-                        .is_some()
-                })
+            registry.unavailable_message(invocation.token).is_some()
+                || registry
+                    .get_for_dispatch(invocation.token)
+                    .is_some_and(|command| {
+                        command
+                            .mode_support()
+                            .refusal(invocation.token, screen_mode)
+                            .is_some()
+                    })
         });
         if mode_refused {
             EditedCommandGate::RefusedBySendPath

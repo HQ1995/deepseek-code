@@ -253,7 +253,9 @@ describe('native child/workflow ownership', () => {
 
   it('closes cold history handles after projection errors and rejects results after owner withdrawal', async () => {
     const f = fixture(), child = f.add('child')
-    f.logs.get('child')!.push({ seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent)
+    f.logs.get('child')!.push({ seq: 0, time: 1000, type: 'tool/ptc-dispatch', data: {
+      subCallId: 'image', name: 'read', content: [{ type: 'image', mimeType: 'image/png', data: 'fixture' }],
+    } } as unknown as SessionEvent)
     f.agents.delete(child.session.id)
     const request = { sessionId: 'root', childSessionId: 'child' }
     f.projectImages.mockRejectedValueOnce(new Error('preview failed'))

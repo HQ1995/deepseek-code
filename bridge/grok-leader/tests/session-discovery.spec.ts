@@ -100,10 +100,13 @@ describe('owned session discovery', () => {
     expect((await f.picker({ query: 'prompt 0', limit: 1 }))[0]).toMatchObject({ sessionId: '0', firstPrompt: 'prompt 0' })
   })
 
-  it('retries empty logs, caches unchanged revisions, and refreshes changed revisions', async () => {
+  it('caches empty logs with unchanged revisions and refreshes changed revisions', async () => {
     const f = fixture(); f.add('a', '/work', [])
     expect((await f.picker())[0]!.firstPrompt).toBe('')
     f.logs.set('a', [prompt('late prompt'), title('old')])
+    expect((await f.picker())[0]!.firstPrompt).toBe('')
+    expect(f.open).toHaveBeenCalledOnce()
+    f.revisions.set('a', 'r1.1')
     expect((await f.picker())[0]!.firstPrompt).toBe('late prompt')
     await f.picker(); expect(f.open).toHaveBeenCalledTimes(2)
     f.logs.set('a', [prompt('late prompt'), title('new', 3)]); f.revisions.set('a', 'r2')

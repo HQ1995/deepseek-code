@@ -593,7 +593,10 @@ async fn dashboard_change_location_to_non_git_clears_worktree_toggle() {
     }
     let mut roots = vec![std::env::temp_dir()];
     #[cfg(unix)]
-    roots.extend([std::path::PathBuf::from("/tmp"), std::path::PathBuf::from("/var/tmp")]);
+    roots.extend([
+        std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from("/var/tmp"),
+    ]);
     let Some(root) = roots
         .into_iter()
         .find(|root| root.is_dir() && !root.ancestors().any(|p| p.join(".git").exists()))
@@ -1841,7 +1844,7 @@ fn dashboard_slash_compact_does_not_spawn() {
         .as_deref()
         .expect("error toast for not-offered session command");
     assert!(
-        toast.contains("/compact only works in a session"),
+        toast.contains("/compact is unavailable in this session"),
         "unexpected toast: {toast}"
     );
 }
@@ -1863,10 +1866,17 @@ fn dashboard_slash_session_modals_toast_instead_of_noop() {
         "personas",
     ] {
         let command = format!("/{name}");
-        let expected = format!(
-            "{} /{name} only works in a session. Open an agent first.",
-            crate::glyphs::ballot_x()
-        );
+        let expected = if matches!(name, "skills" | "mcps") {
+            format!(
+                "{} /{name} only works in a session. Open an agent first.",
+                crate::glyphs::ballot_x()
+            )
+        } else {
+            format!(
+                "{} /{name} is unavailable in this session. Use /help to see available commands.",
+                crate::glyphs::ballot_x()
+            )
+        };
         let effects = dispatch_dashboard_dispatch_slash(&mut app, command);
         assert!(
             effects.is_empty(),

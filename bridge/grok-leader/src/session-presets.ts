@@ -269,20 +269,20 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
   }
   const command = async (record: S, text: string): Promise<string> => {
     const roster = host.roster()
-    if (roster === undefined) return 'Preset management is unavailable in this composition.'
+    if (roster === undefined) throw invalidParams('Preset management is unavailable in this session.')
     const requested = text.replace(/^\/preset\s*/, '').trim()
     if (requested.length === 0) {
       const presets = await roster.list()
       assertLive(record)
       return 'Usage: /preset <id>\nAvailable: ' + presets.map(preset => preset.id).join(', ')
     }
-    if (/\s/.test(requested)) return 'Usage: /preset <id>'
+    if (/\s/.test(requested)) throw invalidParams('Usage: /preset <id>')
     const resolved = await resolveReal(roster, requested)
     assertLive(record)
-    if (resolved === undefined) return 'Unknown preset "' + requested + '".'
+    if (resolved === undefined) throw invalidParams('Unknown preset "' + requested + '".')
     const previous = current(roster, record)
     if (previous !== resolved) {
-      if (busy(record) || locked(record.agent.session.snapshotEvents())) return lockedMessage
+      if (busy(record) || locked(record.agent.session.snapshotEvents())) throw invalidParams(lockedMessage)
       await swap(roster, record, resolved, previous)
     }
     assertLive(record)

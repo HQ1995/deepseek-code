@@ -20,7 +20,7 @@ function fixture(config: { provider?: string; model?: string } = {}) {
       { modelId: 'beta:shared', name: 'Beta', _meta: { provider: 'beta', supportsReasoningEffort: true, reasoningEfforts: ['high', 'low'] } },
       { modelId: 'plain', name: 'Plain', _meta: { provider: 'alpha', supportsReasoningEffort: false } },
     ],
-    providerByModel: new Map([['shared', 'alpha'], ['beta:shared', 'beta'], ['plain', 'alpha']]),
+    routesByModel: new Map([['shared', { provider: 'alpha', model: 'shared' }], ['beta:shared', { provider: 'beta', model: 'shared' }], ['plain', { provider: 'alpha', model: 'plain' }]]),
     providerModelToWireId: new Map([[modelEffortKey('alpha', 'shared'), 'shared'], [modelEffortKey('beta', 'shared'), 'beta:shared'], [modelEffortKey('alpha', 'plain'), 'plain']]),
   }
   let defaultSelection: { provider: string; model: string; reasoningEffort?: string } | undefined = { provider: 'alpha', model: 'shared', reasoningEffort: 'high' }
@@ -31,6 +31,10 @@ function fixture(config: { provider?: string; model?: string } = {}) {
   }
   const catalog = {
     current: vi.fn(async () => view), peek: vi.fn((): ModelCatalog | undefined => view), refresh: vi.fn(async () => view),
+    selected: vi.fn((choice: Pick<ModelSelection, 'provider' | 'model'>) => {
+      const wire = view.providerModelToWireId.get(modelEffortKey(choice.provider, choice.model))
+      if (wire !== undefined) { view.currentModelId = wire; view.currentProviderId = choice.provider }
+    }),
     select: vi.fn(async (fallback: Parameters<typeof modelSelectionFromRequest>[1], meta: Parameters<typeof modelSelectionFromRequest>[2]): Promise<ModelSelection | undefined> => {
       const choice = modelSelectionFromRequest(config, fallback, meta)
       if (choice === undefined) return undefined
@@ -67,8 +71,8 @@ const event = (type: string, data: unknown): SessionEvent => ({ type, data, seq:
 describe('session model ownership', () => {
   it('prepares independent runtime references from latest native/legacy choices and exact per-model effort memory', async () => {
     const f = fixture()
-    expect(KNOWN_SESSION_EVENT_TYPES.has('dscode/model-selected')).toBe(true)
-    expect(KNOWN_SESSION_EVENT_TYPES.has('model/selected')).toBe(true)
+    expect(KNOWN_SESSION_EVENT_TYPES.has('dscode/model-selected')).toBe(false)
+    expect(KNOWN_SESSION_EVENT_TYPES.has('model/selected')).toBe(false)
     const root = await f.add('root', 1, [
       event('dscode/model-selected', { provider: 'alpha', model: 'shared', reasoningEffort: 'low' }),
       event('model/selected', { provider: 'beta', model: 'shared', reasoningEffort: 'high' }),
@@ -122,14 +126,14 @@ describe('session model ownership', () => {
     await f.models.dispose()
   })
 
-  it('rejects invalid/foreign choices before writes and commits append, default and flush before notifying', async () => {
+  it('rejects invalid/foreign choices before writes and saves default, appends and flushes before notifying', async () => {
     const f = fixture(), { append } = await f.add()
     for (const request of [f.set('shared', 'high', 2), f.set('missing'), f.set(''), f.set('plain', 'high'), f.set('shared', 'unsupported')]) {
       await expect(request).rejects.toMatchObject({ code: -32602 })
     }
     expect(append).not.toHaveBeenCalled(); expect(f.defaults.saveSelection).not.toHaveBeenCalled()
     await f.set('beta:shared', 'low')
-    expect(f.order).toEqual(['append:beta/shared', 'save:beta/shared', 'flush'])
+    expect(f.order).toEqual(['save:beta/shared', 'append:beta/shared', 'flush'])
     expect(append).toHaveBeenCalledWith('model/selection', { provider: 'beta', model: 'shared', reasoningEffort: 'low' })
     expect(f.notify).toHaveBeenLastCalledWith(1, 'x.ai/models/update', expect.objectContaining({ currentModelId: 'beta:shared', _meta: expect.objectContaining({ currentProviderId: 'beta' }) }))
     await f.models.dispose()
@@ -140,18 +144,18 @@ describe('session model ownership', () => {
     append.mockImplementationOnce(() => { throw new Error('append failed') })
     await expect(f.set('beta:shared', 'low')).rejects.toThrow('append failed')
     expect(model.current).toMatchObject({ provider: 'alpha', reasoningEffort: 'high' })
-    expect(f.defaults.saveSelection).not.toHaveBeenCalled(); expect(f.flush).not.toHaveBeenCalled()
+    expect(f.defaults.saveSelection).toHaveBeenCalledOnce(); expect(f.flush).not.toHaveBeenCalled()
     await f.set('beta:shared')
     expect(model.current).toEqual({ provider: 'beta', model: 'shared' })
     await f.models.dispose()
   })
 
-  it('flushes an accepted choice even if the global default write fails and allows a later request', async () => {
+  it('does not change the live choice when the global default write fails and allows a later request', async () => {
     const f = fixture(), { model } = await f.add()
     vi.mocked(f.defaults.saveSelection).mockRejectedValueOnce(new Error('settings failed'))
     await expect(f.set('plain')).rejects.toThrow('settings failed')
-    expect(model.current).toEqual({ provider: 'alpha', model: 'plain' })
-    expect(f.flush).toHaveBeenCalledOnce(); expect(f.notify).not.toHaveBeenCalled()
+    expect(model.current).toEqual({ provider: 'alpha', model: 'shared', reasoningEffort: 'high' })
+    expect(f.flush).not.toHaveBeenCalled(); expect(f.notify).not.toHaveBeenCalled()
     await f.set('shared', 'low')
     expect(model.current).toMatchObject({ model: 'shared', reasoningEffort: 'low' })
     await f.models.dispose()
@@ -165,7 +169,7 @@ describe('session model ownership', () => {
     await entered.promise
     const second = f.set('plain')
     await f.set('shared', 'low', 2, 'other')
-    expect(root.append).toHaveBeenCalledTimes(1)
+    expect(root.append).not.toHaveBeenCalled()
     held.resolve(); await first; await second
     expect(root.events.map(event => (event.data as { model: string }).model)).toEqual(['shared', 'plain'])
     expect(root.model.current).toEqual({ provider: 'alpha', model: 'plain' })
@@ -186,14 +190,15 @@ describe('session model ownership', () => {
 
   it('drains a committed choice through final flush during retirement and suppresses late catalog/UI work', async () => {
     const f = fixture(), root = await f.add(), held = deferred<void>(), entered = deferred<void>()
-    vi.mocked(f.defaults.saveSelection).mockImplementationOnce(async () => { entered.resolve(); await held.promise })
+    f.flush.mockImplementationOnce(async () => { entered.resolve(); await held.promise })
     const work = f.set('plain'), rejected = expect(work).rejects.toThrow('session closed')
     await entered.promise
     f.sessions.delete(root.record.agent.session.id)
     let done = false
     const closing = root.model.dispose().then(() => { done = true })
     await Promise.resolve()
-    expect(done).toBe(false); expect(f.flush).not.toHaveBeenCalled()
+    expect(done).toBe(false); expect(f.flush).toHaveBeenCalledOnce()
+    expect(root.append).toHaveBeenCalledOnce()
     held.resolve(); await rejected; await closing
     expect(f.flush).toHaveBeenCalledOnce()
     expect(f.catalog.refresh).not.toHaveBeenCalled(); expect(f.notify).not.toHaveBeenCalled()
@@ -226,18 +231,23 @@ describe('session model ownership', () => {
     const work = f.set('plain'), rejected = expect(work).rejects.toThrow('session closed')
     await entered.promise; await Promise.resolve()
     expect(done).toBe(false)
-    expect(root.model.current).toEqual({ provider: 'alpha', model: 'plain' })
+    expect(root.model.current).toEqual({ provider: 'alpha', model: 'shared', reasoningEffort: 'high' })
     held.resolve(); await rejected; await disposal
-    expect(f.flush).toHaveBeenCalledOnce()
+    expect(f.flush).not.toHaveBeenCalled(); expect(root.append).not.toHaveBeenCalled()
     expect(f.notify).not.toHaveBeenCalled()
   })
 
-  it('preserves both default and flush failures without advertising a partially persisted choice', async () => {
-    const f = fixture(); await f.add()
+  it('rejects failed defaults but acknowledges an applied choice with a durability warning on flush failure', async () => {
+    const f = fixture(), root = await f.add()
     vi.mocked(f.defaults.saveSelection).mockRejectedValueOnce(new Error('default failed'))
     f.flush.mockRejectedValueOnce(new Error('flush failed'))
-    await expect(f.set('plain')).rejects.toMatchObject({ errors: [expect.objectContaining({ message: 'default failed' }), expect.objectContaining({ message: 'flush failed' })] })
+    await expect(f.set('plain')).rejects.toThrow('default failed')
+    expect(f.flush).not.toHaveBeenCalled(); expect(root.append).not.toHaveBeenCalled()
     expect(f.notify).not.toHaveBeenCalled()
+    await expect(f.set('plain')).resolves.toMatchObject({ _meta: { persistenceWarning: expect.stringContaining('flush failed') } })
+    expect(root.model.current).toEqual({ provider: 'alpha', model: 'plain' })
+    expect(f.notify).toHaveBeenCalledOnce()
+    expect(f.catalog.refresh).not.toHaveBeenCalled()
     await f.models.dispose()
   })
 

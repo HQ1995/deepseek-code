@@ -673,6 +673,13 @@ pub(super) fn dispatch_send_prompt_inner(
                             .record_command_use(invocation.token, invocation.token);
                         command.run(&mut ctx, invocation.args)
                     }
+                } else if let Some(message) = agent
+                    .prompt
+                    .slash_controller
+                    .registry()
+                    .unavailable_message(invocation.token)
+                {
+                    CommandResult::Message(message)
                 } else {
                     // Unknown command -- pass through to shell.
                     CommandResult::PassThrough(text.clone())

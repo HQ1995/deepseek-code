@@ -379,43 +379,23 @@ fn permission_mode_slash_gate_offers_toggles_subject_to_auto_feature() {
     assert!(!offered(&app, "auto"));
 }
 
-/// End-to-end via slash submission: `/always-approve` and `/auto` toggle off
-/// when re-run and cross-switch when the other is active.
+/// DSH supports always-approve; refusing /auto must preserve the current mode.
 #[test]
-fn slash_always_approve_and_auto_toggle_and_cross_switch() {
+fn slash_always_approve_toggles_and_auto_refusal_preserves_mode() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    app.auto_mode_gate = true;
-    app.sync_permission_mode_slash_gate();
-
-    // Off → always-approve.
-    let _ = dispatch(Action::SendPrompt("/always-approve".into()), &mut app);
-    assert!(app.agents[&id].session.is_yolo());
-    assert!(!app.agents[&id].session.is_auto());
-
-    // Always-approve → auto (cross-switch).
-    let _ = dispatch(Action::SendPrompt("/auto".into()), &mut app);
-    assert!(!app.agents[&id].session.is_yolo());
-    assert!(app.agents[&id].session.is_auto());
-
-    // Auto → ask (toggle off).
-    let _ = dispatch(Action::SendPrompt("/auto".into()), &mut app);
-    assert!(!app.agents[&id].session.is_yolo());
-    assert!(!app.agents[&id].session.is_auto());
-
-    // Off → auto.
-    let _ = dispatch(Action::SendPrompt("/auto".into()), &mut app);
-    assert!(app.agents[&id].session.is_auto());
-
-    // Auto → always-approve (cross-switch).
-    let _ = dispatch(Action::SendPrompt("/always-approve".into()), &mut app);
-    assert!(app.agents[&id].session.is_yolo());
-    assert!(!app.agents[&id].session.is_auto());
-
-    // Always-approve → ask (toggle off).
-    let _ = dispatch(Action::SendPrompt("/always-approve".into()), &mut app);
-    assert!(!app.agents[&id].session.is_yolo());
-    assert!(!app.agents[&id].session.is_auto());
+    for expected in [true, false] {
+        dispatch(Action::SendPrompt("/always-approve".into()), &mut app);
+        assert_eq!(app.agents[&id].session.is_yolo(), expected);
+        let effects = dispatch(Action::SendPrompt("/auto".into()), &mut app);
+        assert_eq!(app.agents[&id].session.is_yolo(), expected);
+        assert!(!app.agents[&id].session.is_auto());
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::SendPrompt { .. }))
+        );
+    }
 }
 
 #[test]

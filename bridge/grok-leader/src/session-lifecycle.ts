@@ -50,7 +50,7 @@ interface LifecycleHost {
   presets: Presets
   persistence(): PersistenceLike | undefined
   discovery: Pick<SessionDiscovery, 'inspect'>
-  client(id: number): { readonly closed: boolean; notify(method: string, params: unknown): void } | undefined
+  client(id: number): { readonly closed: boolean; notify(method: string, params: unknown): void; drain?(): Promise<void> | undefined } | undefined
   queue: { combineQueued: boolean; followUpSteer: boolean }
   permissions: Pick<ReturnType<typeof createNativeInteractions<SessionRecord>>, 'validateMeta' | 'apply' | 'assertReady'>
   contextValues(record: SessionRecord): ContextProjectionValues
@@ -111,6 +111,7 @@ export function createSessionLifecycle(host: LifecycleHost) {
         () => record.output.dispose(), () => handle.dispose(),
       ])),
       output: createSessionOutput({
+        drain: () => host.client(clientId)?.drain?.(),
         sessionId: String(handle.agent.session.id), cwd: () => record.agent.session.header.cwd,
         isLive: () => registry.ownedAgent(record.agent) === record,
         promptId: () => record.queue.promptId,

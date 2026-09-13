@@ -1,7 +1,7 @@
 /** Leader framing, registration and ACP lifetimes, independent of DSH/agents. */
 import { chmodSync, unlinkSync } from 'node:fs'
 import { createServer, type Socket } from 'node:net'
-import { encodeJsonFrame, FrameDecoder } from './codec.ts'
+import { writeJsonFrame, waitForDrain, FrameDecoder } from './codec.ts'
 import { LEADER_PROTOCOL_VERSION, RpcError, decodeClientMessage, encodeServerMessage, type ClientMessage, type ServerMessage } from './protocol.ts'
 import { internalError } from './acp.ts'
 
@@ -11,6 +11,8 @@ export interface LeaderClient {
   /** Aborts on disconnect; feature work need not touch the underlying socket. */
   readonly signal: AbortSignal
   notify(method: string, params: unknown): void
+  /** Wait only when the socket is backpressured; no socket leaks to features. */
+  drain?(): Promise<void> | undefined
   request<T>(method: string, params: unknown, sessionId?: string, timeoutMs?: number, signal?: AbortSignal): Promise<T>
   rejectSessionRequests(sessionId: string): void
 }
@@ -36,6 +38,7 @@ const normalizeMethod = (method: string, params: unknown): string => {
 }
 
 export function createLeaderTransport(options: LeaderTransportOptions) {
+  const textDecoder = new TextDecoder()
   const clients = new Map<number, LeaderClient>()
   const sockets = new Set<Socket>()
   let sequence = 0, closed = false, started = false, bound = false
@@ -65,16 +68,17 @@ export function createLeaderTransport(options: LeaderTransportOptions) {
     let registered = false, requestId = 0
     const send = (message: ServerMessage): void => {
       trace('out', message, 200)
-      if (!socket.destroyed) socket.write(encodeJsonFrame(encodeServerMessage(message)))
+      if (!socket.destroyed) writeJsonFrame(socket, encodeServerMessage(message))
     }
     const sendAcp = (value: unknown): void => {
       trace('out acp', value, 400)
-      if (!socket.destroyed) socket.write(encodeJsonFrame({ type: 'acp', payload: JSON.stringify(value) }))
+      if (!socket.destroyed) writeJsonFrame(socket, { type: 'acp', payload: JSON.stringify(value) })
     }
     const client: LeaderClient = {
       clientId,
       get closed() { return closed || socket.destroyed },
       signal: abort.signal,
+      drain: () => socket.writableNeedDrain ? waitForDrain(socket) : undefined,
       notify(method, params) {
         // ACP extensions require the '_' prefix; session/update is typed.
         const wire = method === 'session/update' || method.startsWith('_') ? method : '_' + method
@@ -151,7 +155,7 @@ export function createLeaderTransport(options: LeaderTransportOptions) {
     async function handleFrame(frame: Uint8Array): Promise<void> {
       if (client.closed) return
       let value: unknown
-      try { value = JSON.parse(new TextDecoder().decode(frame)) } catch {
+      try { value = JSON.parse(textDecoder.decode(frame)) } catch {
         send({ type: 'error', code: -32700, message: 'invalid JSON frame' })
         socket.destroy(); return
       }

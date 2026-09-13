@@ -1,5 +1,8 @@
 # Architecture review — integrated source
 
+This is the pre-pull checkpoint. See [upstream-integration.md](upstream-integration.md)
+for the subsequent integration of remote `f6524d4` and fresh validation.
+
 Scope: all six work-plan items and invariants in
 [architecture-refactor.md](architecture-refactor.md). This is a review of the
 integrated shared source. The user confirmed that the performance task had

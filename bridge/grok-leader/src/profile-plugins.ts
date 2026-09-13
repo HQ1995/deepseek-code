@@ -10,6 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import { load as loadYaml } from 'js-yaml'
 import { withProfileLock } from './package-location.ts'
+import { invalidParams } from './acp.ts'
 
 /** Composition rows a third-party layer should not touch silently: the
  *  sandbox/approval/permission spine. Patch layers apply AFTER dsh-base, so
@@ -449,7 +450,7 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
     try {
       return verb === 'add' || verb === 'remove' ? await withProfileLock(dir, execute) : await execute()
     } catch (error: unknown) {
-      return '/dsh ' + String(verb) + ' failed: ' + (error instanceof Error ? error.message : String(error))
+      throw invalidParams('/dsh ' + String(verb) + ' failed: ' + (error instanceof Error ? error.message : String(error)))
     }
   }
 

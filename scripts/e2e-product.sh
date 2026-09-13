@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Product-level dscode E2E matrix. No real model credentials are used.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/test-environment.sh"
+dscode_clear_test_overrides
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=platform.sh

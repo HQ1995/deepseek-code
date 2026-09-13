@@ -975,33 +975,25 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             let Some(agent) = app.agents.get_mut(&id) else {
                 return vec![];
             };
+            if agent.session.model_switch_pending {
+                agent.show_toast("A model switch is already in progress");
+                return vec![];
+            }
             let Some(session_id) = agent.session.session_id.clone() else {
-                let prev_model = agent.session.models.current.clone();
-                let prev_effort = agent.session.models.reasoning_effort;
-                agent.session.models.set_current(model_id.clone(), effort);
-                let resolved_effort = agent.session.models.reasoning_effort;
-                let unchanged =
-                    prev_model.as_ref() == Some(&model_id) && prev_effort == resolved_effort;
                 let rollback_prev = agent
                     .session
                     .deferred_model_switch
                     .take()
                     .and_then(|prior| prior.prev_model_id)
-                    .or(prev_model);
+                    .or_else(|| agent.session.models.current.clone());
                 agent.session.deferred_model_switch =
                     Some(crate::app::agent::DeferredModelSwitch {
-                        model_id: model_id.clone(),
+                        model_id,
                         effort,
                         prev_model_id: rollback_prev,
                     });
-                return if unchanged {
-                    vec![]
-                } else {
-                    vec![Effect::PersistPreferredModel {
-                        model_id,
-                        reasoning_effort: resolved_effort,
-                    }]
-                };
+                agent.show_toast("Model switch will finish after the session starts");
+                return vec![];
             };
             agent.session.model_switch_pending = true;
             vec![Effect::SwitchModel {

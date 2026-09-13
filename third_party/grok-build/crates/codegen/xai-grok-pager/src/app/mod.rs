@@ -724,7 +724,9 @@ pub async fn run(
         "pager TUI leader mode resolved"
     );
     if let Some(profile) = disabled_by_confinement {
-        warn_leader_disabled_by_sandbox(profile);
+        anyhow::bail!(
+            "dscode cannot use TUI sandbox profile '{profile}' with its DSH backend; configure sandboxing in DSH"
+        );
     }
     if session_startup::chat_mode_conflicts_with_leader(args.chat(), use_leader) {
         anyhow::bail!("{}", session_startup::CHAT_MODE_LEADER_CONFLICT);
@@ -1004,14 +1006,13 @@ pub async fn run(
                     lines[start..].join("\n")
                 })
                 .unwrap_or_else(|_| "<no leader log written>".to_string());
-            f.error = anyhow::anyhow!(
-                "{}\n\nThe dsh leader failed to start or accept the connection; \
+            f.error = f.error.context(format!(
+                "The dsh leader failed to start or accept the connection; \
                  dscode has no embedded fallback agent.\n\
                  Leader log tail ({}):\n{}",
-                f.error,
                 log_path.display(),
                 tail
-            );
+            ));
             (Err(f), false, timer, primary_target)
         }
         other => (other, false, timer, primary_target),

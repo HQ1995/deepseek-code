@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createModelCatalog, type ModelCatalogDependencies, type LlmLike, type SettingsLike } from '../src/model-catalog.ts'
+import { createModelCatalog, modelEffortKey, type ModelCatalogDependencies, type LlmLike, type SettingsLike } from '../src/model-catalog.ts'
 
 const deferred = <T>() => {
   let resolve!: (value: T) => void
@@ -53,6 +53,21 @@ function fixture() {
 }
 
 describe('model catalog module', () => {
+  it('publishes acknowledged choices through the latest wire mapping without rediscovery', async () => {
+    const f = fixture(), current = await f.catalog.current()
+    const calls = vi.mocked(f.llm.listModels).mock.calls.length
+    // Use the catalog key format; consumers carry native identity, not wire IDs.
+    current.providerModelToWireId.set(modelEffortKey('beta', 'shared'), 'remapped')
+    f.catalog.selected({ provider: 'beta', model: 'shared' })
+    expect(current.currentModelId).toBe('remapped')
+    expect(current.currentProviderId).toBe('beta')
+    expect(f.llm.listModels).toHaveBeenCalledTimes(calls)
+    f.catalog.selected({ provider: 'removed', model: 'missing' })
+    expect(current.currentModelId).toBe('remapped')
+    await f.catalog.dispose()
+    expect(() => f.catalog.selected({ provider: 'alpha', model: 'shared' })).toThrow('disposed')
+  })
+
   it('rejects every new public operation after closing without touching native capabilities', async () => {
     const f = fixture(); const closing = f.catalog.dispose()
     const calls = [() => f.catalog.current(), () => f.catalog.refresh(), () => f.catalog.list(),

@@ -129,7 +129,7 @@ pub fn format_id_keyed_accepted_tool_result(
         .iter()
         .filter_map(|q| {
             let qid = q.id.as_ref()?;
-            let labels = answers.get(&q.question)?;
+            let labels = answers.get(qid).or_else(|| answers.get(&q.question))?;
             // Each selected label is its own `Vec` element (the wire
             // format no longer joins labels with `", "`), so we look each
             // one up directly. No splitting, no ambiguity around labels
@@ -148,7 +148,7 @@ pub fn format_id_keyed_accepted_tool_result(
                 // input directly after `Question <qid>: `.
                 let notes = annotations
                     .as_ref()
-                    .and_then(|m| m.get(&q.question))
+                    .and_then(|m| m.get(qid).or_else(|| m.get(&q.question)))
                     .and_then(|a| a.notes.as_deref())
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())?;

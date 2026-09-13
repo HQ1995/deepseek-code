@@ -24,6 +24,10 @@ function imageBlocksOf(event: SessionEvent): Array<{ attachment?: unknown }> {
   return []
 }
 
+export function hasToolImages(event: SessionEvent): boolean {
+  return imageBlocksOf(event).length > 0
+}
+
 export function createImageOutputProjector(ctx: Context) {
   let directory: Promise<string> | undefined
   let closed = false
