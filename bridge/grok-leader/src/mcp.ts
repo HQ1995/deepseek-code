@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { validateHeaderName, validateHeaderValue } from 'node:http'
 import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import * as McpClient from '@deepseek-ai/dsh-mcp-client'
+import type * as McpClient from '@deepseek-ai/dsh-mcp-client'
 
 const VALID_SERVER_NAME = /^[A-Za-z0-9_-]{1,32}$/
 
@@ -16,10 +16,24 @@ export class AcpMcpConfigError extends Error {
   }
 }
 
+/** dsh-base does not load the MCP client; it only enters the leader once a
+ *  client actually declares servers, so its schema and SDK stay off the boot
+ *  path. Static import edges of this module remain type-only. */
+let mcpClient: Promise<typeof McpClient> | undefined
+const loadMcpClient = (): Promise<typeof McpClient> => {
+  mcpClient ??= import('@deepseek-ai/dsh-mcp-client').catch((error: unknown) => {
+    mcpClient = undefined
+    throw error
+  })
+  return mcpClient
+}
+
 /** Validate raw ACP declarations before an Agent is created. */
-export function resolveAcpMcpConfigs(raw: unknown, sessionCwd: string): McpClientConfig[] {
+export async function resolveAcpMcpConfigs(raw: unknown, sessionCwd: string): Promise<McpClientConfig[]> {
   if (raw === undefined) return []
   if (!Array.isArray(raw)) throw new AcpMcpConfigError('mcpServers must be an array')
+  if (raw.length === 0) return []
+  const { Config } = await loadMcpClient()
   const names = new Set<string>()
   return raw.map((value, index) => {
     const field = `mcpServers[${index}]`
@@ -38,7 +52,7 @@ export function resolveAcpMcpConfigs(raw: unknown, sessionCwd: string): McpClien
       }
       const args = stringArray(server.args, `${field}.args`)
       const env = entriesToRecord(server.env, `${field}.env`, 'environment')
-      return parseClientConfig(index, {
+      return parseClientConfig(Config, index, {
         transport: 'stdio', serverName, command: server.command, args, env,
         cwd: sessionCwd, failOnStartupError: true,
       })
@@ -47,7 +61,7 @@ export function resolveAcpMcpConfigs(raw: unknown, sessionCwd: string): McpClien
       if (typeof server.url !== 'string') throw new AcpMcpConfigError(`${field}.url must be a string`)
       assertHttpUrl(server.url, `${field}.url`)
       const headers = entriesToRecord(server.headers, `${field}.headers`, 'header')
-      return parseClientConfig(index, {
+      return parseClientConfig(Config, index, {
         transport: 'streamable-http', serverName, url: server.url, headers,
         failOnStartupError: true,
       })
@@ -58,7 +72,9 @@ export function resolveAcpMcpConfigs(raw: unknown, sessionCwd: string): McpClien
 
 /** Mount validated clients into the unpublished Agent scope. */
 export async function mountMcpConfigs(agentCtx: Context, configs: readonly McpClientConfig[]): Promise<void> {
-  for (const config of configs) await agentCtx.plugin(McpClient, config)
+  if (configs.length === 0) return
+  const client = await loadMcpClient()
+  for (const config of configs) await agentCtx.plugin(client, config)
 }
 
 function stringArray(value: unknown, field: string): string[] {
@@ -116,9 +132,9 @@ function assertHttpUrl(value: string, field: string): void {
   }
 }
 
-function parseClientConfig(index: number, input: unknown): McpClient.Config {
+function parseClientConfig(Config: typeof McpClient.Config, index: number, input: unknown): McpClient.Config {
   try {
-    return McpClient.Config(input as McpClient.Config)
+    return Config(input as McpClient.Config)
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     throw new AcpMcpConfigError(`mcpServers[${index}] is invalid: ${detail}`)

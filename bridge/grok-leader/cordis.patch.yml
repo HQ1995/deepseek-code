@@ -97,6 +97,11 @@
       name: '@deepseek-ai/dsh-terminal'
     - id: terminal-bash
       name: '@deepseek-ai/dsh-terminal-bash'
+      config:
+        # Darwin's pinned inspector runs synchronous ps queries and cannot
+        # confirm REPL stdin waits. Reduce polling cost without shortening the
+        # 3s silence guard or pretending a quiet process has completed.
+        pollIntervalMs: !!js "process.platform === 'darwin' ? 200 : 50"
 
     # Host-owned subagent model selection sampled by preset-scoped tools.
     - id: subagent-model-selection-settings

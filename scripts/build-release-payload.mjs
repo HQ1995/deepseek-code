@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { validateNativeArtifacts } from '../bridge/grok-leader/bin/native-runtime.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const run = (cmd, args, cwd, env = process.env) => execFileSync(cmd, args, { cwd, env, stdio: ['ignore', 'pipe', 'inherit'], maxBuffer: 64 * 1024 * 1024 }).toString().trim();
@@ -160,15 +161,8 @@ function buildRuntime(consumer, source, manifest, out, work) {
   const cli = json(join(stage, 'node_modules/@deepseek-ai/dsh/package.json'));
   if (cli.version !== manifest.dsh.testedVersion) throw new Error('Runtime CLI manifest version mismatch');
   symlinkSync(`../node_modules/@deepseek-ai/dsh/${cli.bin.dsh}`, join(stage, 'bin/dsh'));
-  if (process.platform === 'linux') {
-    const native = join(stage, `node_modules/@deepseek-ai/node-addon-system-linux-${process.arch}`);
-    const descriptor = json(join(native, 'prebuilds.json'));
-    if (descriptor.platform !== `linux-${process.arch}` || !descriptor.binaries.some(binary => binary.tool === 'landlock-run' && binary.kind === 'static-musl')) throw new Error('Native helper platform/format mismatch');
-    for (const binary of descriptor.binaries) {
-      const artifact = statSync(join(native, binary.path));
-      if (!artifact.isFile() || (binary.kind === 'static-musl' && !(artifact.mode & 0o111))) throw new Error(`Missing native helper ${binary.path}`);
-    }
-  }
+  const { prebuilds } = validateNativeArtifacts(stage);
+  if (process.platform === 'linux' && !prebuilds.binaries.some(binary => binary.tool === 'landlock-run' && binary.kind === 'static-musl')) throw new Error('Native helper platform/format mismatch');
   const version = run(process.execPath, [join(stage, 'bin/dsh'), '--version'], stage);
   if (version !== manifest.dsh.testedVersion) throw new Error(`Runtime CLI reports ${version}`);
   save(join(stage, 'dscode-runtime.json'), { schema: 1, dshVersion: version, sourceCommit: manifest.dsh.sourceCommit, platform: process.platform, arch: process.arch });

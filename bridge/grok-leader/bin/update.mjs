@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { accessSync, chmodSync, closeSync, constants, cpSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, cpSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
@@ -9,8 +9,13 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { parse, stringify } from 'smol-toml'
 import { list, extract as extractTar } from 'tar'
+import { nativePackages, validateNativeArtifacts } from './native-runtime.mjs'
 
 const repo = 'HQ1995/deepseek-code'
+export const unsupportedPlatformMessage = (platform = process.platform, arch = process.arch) =>
+  `no prebuilt dscode runtime/TUI for ${platform}/${arch}; ${platform === 'darwin' && arch === 'x64'
+    ? 'on Apple Silicon, use a native arm64 Node.js >=22.19.0 and retry (check node -p process.arch). Intel Macs require a source build'
+    : 'build from the repo (scripts/build-deepseek-tui.sh)'}`
 /** Anonymous GitHub API calls are capped at 60/hour per address, which a
  *  release day or a shared egress address can exhaust; use a token when the
  *  environment already provides one and stay anonymous otherwise. */
@@ -167,54 +172,42 @@ export const extractArchive = (archive, dest) => {
   mkdirSync(dest, { recursive: true })
   extractTar({ file: archive, cwd: dest, sync: true, strict: true, preservePaths: false, preserveOwner: false, chmod: true })
 }
-/** Installed `@deepseek-ai/node-addon-*` packages of the pinned runtime, the
- *  current family first. Upstream has renamed this family once already
- *  (landlock-run -> system), so the installer reads what a package declares
- *  instead of matching a package name that a frozen release cannot update. */
-const nativePackages = (runtime) => {
-  const scope = join(runtime, 'node_modules', '@deepseek-ai')
-  const names = (existsSync(scope) ? readdirSync(scope) : []).filter(name => name.startsWith('node-addon-'))
-  return names.sort((a, b) => (a === 'node-addon-system' ? -1 : b === 'node-addon-system' ? 1 : a.localeCompare(b)))
-}
 
-export const validateRuntime = (runtime, metadata, platform = process.platform, arch = process.arch) => {
+const validateRuntimeFiles = (runtime, metadata, platform, arch) => {
   const descriptor = json(join(runtime, 'dscode-runtime.json'))
   if (descriptor.schema !== 1 || descriptor.platform !== platform || descriptor.arch !== arch
     || descriptor.sourceCommit !== metadata.dsh.sourceCommit || descriptor.dshVersion !== metadata.dsh.testedVersion) throw new Error('runtime provenance/platform mismatch')
-  if (!existsSync(join(runtime, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))) throw new Error('runtime CLI entrypoint missing')
-  if (platform === 'linux') {
-    // Assert what the native package declares instead of matching upstream's
-    // identifiers: an installed launcher cannot be updated once they are
-    // renamed, and the release build already gates the contract itself.
-    const helper = nativePackages(runtime)
-      .filter(name => name.endsWith(`-${platform}-${arch}`))
-      .map(name => join(runtime, 'node_modules', '@deepseek-ai', name))
-      .filter(directory => existsSync(join(directory, 'prebuilds.json')))
-      .map(directory => ({ directory, prebuilds: json(join(directory, 'prebuilds.json')) }))
-      .find(({ prebuilds }) => prebuilds.binaries?.length > 0)
-    if (!helper) throw new Error('runtime native helper metadata mismatch')
-    for (const binary of helper.prebuilds.binaries) {
-      if (typeof binary?.path !== 'string') throw new Error('runtime native helper metadata malformed')
-      accessSync(join(helper.directory, binary.path), binary.kind === 'static-musl' ? constants.X_OK : constants.R_OK)
-    }
-  }
+  if (!existsSync(join(runtime, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
+    || !existsSync(join(runtime, 'bin', 'dsh'))) throw new Error('runtime CLI entrypoint missing')
+  validateNativeArtifacts(runtime, platform, arch)
+}
+export const validateRuntime = (runtime, metadata, platform = process.platform, arch = process.arch) => {
+  validateRuntimeFiles(runtime, metadata, platform, arch)
   if (binaryVersion(join(runtime, 'bin', 'dsh')) !== metadata.dsh.testedVersion) throw new Error('runtime CLI version mismatch')
 }
-/** Inspect the entire managed installation before deciding to skip or repair it. */
-export const installationMatches = (profile, packageName, version, expectedDsh) => {
+const matchesInstallation = (profile, packageName, version, expectedDsh, probeVersions) => {
   try {
     const plugin = join(profile, 'node_modules', ...packageName.split('/'))
     const metadata = json(join(plugin, 'package.json'))
     if (metadata.name !== packageName || metadata.version !== version
       || !existsSync(join(plugin, 'bin/dscode.mjs'))
-      || binaryVersion(join(profile, 'bin/dscode')) !== version) return false
+      || !existsSync(join(profile, 'bin/dscode'))
+      || (probeVersions && binaryVersion(join(profile, 'bin/dscode')) !== version)) return false
     if (expectedDsh && ['testedVersion', 'sourceCommit', 'supportedRange'].some(key => metadata.dsh?.[key] !== expectedDsh[key])) return false
     const runtime = join(profile, 'runtime')
-    if (metadata.dsh?.sourceCommit) validateRuntime(runtime, metadata)
-    else if (!metadata.dsh?.testedVersion || binaryVersion(join(runtime, 'bin/dsh')) !== metadata.dsh.testedVersion) return false
+    if (metadata.dsh?.sourceCommit) validateRuntimeFiles(runtime, metadata, process.platform, process.arch)
+    if (!metadata.dsh?.testedVersion || !existsSync(join(runtime, 'bin/dsh'))
+      || (probeVersions && binaryVersion(join(runtime, 'bin/dsh')) !== metadata.dsh.testedVersion)) return false
     return true
   } catch { return false }
 }
+/** Cheap preflight only: does not prove executability or actual CLI versions.
+ * Detect missing native files before trying to load the profile's lock binding. */
+export const installationFilesMatch = (profile, packageName, version, expectedDsh) =>
+  matchesInstallation(profile, packageName, version, expectedDsh, false)
+/** Inspect the entire managed installation, including actual CLI versions. */
+export const installationMatches = (profile, packageName, version, expectedDsh) =>
+  matchesInstallation(profile, packageName, version, expectedDsh, true)
 /** Use the pinned runtime's existing POSIX lock binding. The persistent inode
  * lives outside the replaceable profile; process death releases its lock. */
 export const withProfileLock = async (profile, action, runtime = join(profile, 'runtime')) => {
@@ -285,7 +278,7 @@ const commit = (profile, stage, entries) => {
   }
 }
 export const installRelease = async ({ profile, packageName, version, channel, asset, fetcher = fetch, base = `https://github.com/${repo}/releases/download/v${version}` }) => {
-  if (!asset) throw new Error(`unsupported platform ${process.platform}/${process.arch}`)
+  if (!asset) throw new Error(unsupportedPlatformMessage())
   mkdirSync(dirname(profile), { recursive: true })
   const stage = mkdtempSync(join(dirname(profile), '.dscode-update-'))
   const prepared = join(stage, 'profile')

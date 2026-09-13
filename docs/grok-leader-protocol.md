@@ -41,6 +41,11 @@ unsupported and return a structured error.
 
 ACP JSON-RPC objects travel as strings inside `acp` envelopes.
 
+Tool-result updates use ACP status `completed` or `failed`, including nested
+PTC calls and replay. `error` is not an accepted tool status: the TUI decoder
+drops the entire frame, not just its status. Error metadata remains a separate
+field on the failed result.
+
 | Surface | Contract |
 |---|---|
 | `initialize`, `authenticate` | advertise models, commands, capabilities, and the bridge-owned auth stub |

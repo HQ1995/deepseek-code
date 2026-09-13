@@ -4,6 +4,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
+import { unsupportedPlatformMessage } from '../bin/update.mjs'
+
+it('explains x64 Node on Apple Silicon without claiming Intel prebuilt support', () => {
+  expect(unsupportedPlatformMessage('darwin', 'x64')).toContain('native arm64 Node.js')
+  expect(unsupportedPlatformMessage('darwin', 'x64')).toContain('Intel Macs require a source build')
+  expect(unsupportedPlatformMessage('linux', 'arm64')).not.toContain('Apple Silicon')
+})
 
 it('diagnoses a broken installation before startup without provisioning or requiring optional tools', () => {
   const root = mkdtempSync(join(tmpdir(), 'dscode-doctor-'))
@@ -15,6 +22,9 @@ it('diagnoses a broken installation before startup without provisioning or requi
     expect(result.error).toBeUndefined()
     expect(result.status).toBe(1)
     const findings = JSON.parse(result.stdout)
+    expect(findings.find(f => f.name === 'Host').detail).toContain(process.execPath)
+    expect(findings.find(f => f.name === 'Shipped terminal preset').detail).toContain('profile-free bash')
+    expect(findings.find(f => f.name === 'Shipped terminal preset').detail).toMatch(/^\/bin\/bash \d+\.\d+\.\d+/)
     expect(findings.find(f => f.name === 'DSH runtime')).toMatchObject({ status: 'ERROR' })
     expect(findings.find(f => f.name === 'Shipped LSP preset')).toMatchObject({ status: 'INFO' })
     expect(findings.find(f => f.name === 'Shipped LSP preset').detail).toContain('typescript-language-server, tsc')

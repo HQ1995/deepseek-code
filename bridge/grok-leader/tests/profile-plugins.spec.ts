@@ -1,0 +1,145 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
+import { createProfilePlugins } from '../src/profile-plugins.ts'
+
+const roots: string[] = []
+afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
+
+async function fixture(options: { name?: string; stagedPatch?: string; installedPatch?: string; uninstallFails?: boolean } = {}) {
+  const root = await mkdtemp(join(tmpdir(), 'dscode-profile-test-'))
+  roots.push(root)
+  const name = options.name ?? 'test-plugin'
+  const manifest = { private: true, dependencies: { '@hqzhao95/dscode': '0.0.0' } as Record<string, string>,
+    dsh: { profile: { bundles: ['@hqzhao95/dscode'] } }, untouched: { keep: true } }
+  await writeFile(join(root, 'package.json'), JSON.stringify(manifest))
+  const read = async () => JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as typeof manifest
+  const exec = vi.fn(async (file: string, args: string[], options_: { cwd: string; timeout: number }) => {
+    expect(file).toBe('npm')
+    expect(args.slice(1, 5)).toEqual(['--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps'])
+    expect(options_.timeout).toBe(180_000)
+    const target = join(options_.cwd, 'package.json')
+    const data = JSON.parse(await readFile(target, 'utf8')) as typeof manifest
+    data.dependencies ??= {}
+    if (args[0] === 'uninstall') {
+      // Even a failed cleanup must already be unregistered durably.
+      expect((await read()).dsh.profile.bundles).not.toContain(name)
+      if (options.uninstallFails) throw new Error('simulated npm cleanup failure')
+      delete data.dependencies[name]
+    } else {
+      data.dependencies[name] = 'file:fixture'
+      const dir = join(options_.cwd, 'node_modules', name)
+      await mkdir(dir, { recursive: true })
+      const patch = options_.cwd === root ? options.installedPatch ?? options.stagedPatch : options.stagedPatch
+      await writeFile(join(dir, 'package.json'), JSON.stringify({ name,
+        ...patch === undefined ? {} : { dsh: { bundle: { patch: 'cordis.patch.yml' } } } }))
+      if (patch !== undefined) await writeFile(join(dir, 'cordis.patch.yml'), patch)
+    }
+    await writeFile(target, JSON.stringify(data))
+  })
+  const inspectRuntime = vi.fn((name: string) => name === 'live-plugin' ? 'live plugin report' : undefined)
+  const plugins = createProfilePlugins({ directory: () => root, exec, inspectRuntime })
+  return { root, exec, plugins, read, inspectRuntime }
+}
+
+describe('profile plugin operations', () => {
+  it('lists the installed composition and prefers the live runtime inspection without writes', async () => {
+    const f = await fixture()
+    expect(await f.plugins.execute('/dsh plugins')).toContain('@hqzhao95/dscode 0.0.0 (core)')
+    expect(await f.plugins.execute('/dsh inspect live-plugin')).toBe('live plugin report')
+    expect(await f.plugins.execute('/dsh inspect @hqzhao95/dscode')).toContain('no live plugin instance')
+    expect(await f.plugins.execute('/dsh inspect missing')).toContain('is not installed')
+    expect(f.exec).not.toHaveBeenCalled()
+  })
+
+  it('preserves quoted/escaped local specs and installs a plain dependency without enabling it', async () => {
+    const f = await fixture()
+    const notes: string[] = []
+    expect(await f.plugins.execute('/dsh add "file:../plugin with spaces" file:plain\\ path', text => notes.push(text)))
+      .toContain('installed as a plain dependency')
+    expect(f.exec.mock.calls[0]![1].slice(5)).toEqual(['file:' + resolve(f.root, '../plugin with spaces'), 'file:' + join(f.root, 'plain path')])
+    expect(f.exec.mock.calls[1]![1].slice(5)).toEqual(['file:../plugin with spaces', 'file:plain path'])
+    expect((await f.read()).dsh.profile.bundles).toEqual(['@hqzhao95/dscode'])
+    expect((await f.read()).untouched).toEqual({ keep: true })
+    expect(notes).toHaveLength(2)
+    await expect(readFile(join(f.exec.mock.calls[0]![2].cwd, 'package.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('reports every composition change and requires trust before a profile mutation', async () => {
+    const f = await fixture({ stagedPatch: '- insert:\n    - id: my-tool\n    - id: sandbox-policy\n- id: system-prompt\n  config: {}\n- id: approval\n  disabled: true\n- id: sandbox\n  config:\n    port: !!js 3080\n- id: hmr\n  disabled: !!js false\n' })
+    const before = await readFile(join(f.root, 'package.json'), 'utf8')
+    const report = await f.plugins.execute('/dsh add plugin')
+    expect(report).toContain('Not installed')
+    expect(report).toContain('inserts 2 row(s): my-tool, sandbox-policy')
+    expect(report).toContain('overrides: system-prompt, sandbox, hmr')
+    expect(report).toContain('disables: approval')
+    expect(report).toContain('security rows: sandbox-policy, approval, sandbox')
+    expect(report).toContain('2 !!js expression(s)')
+    expect(await readFile(join(f.root, 'package.json'), 'utf8')).toBe(before)
+    expect(f.exec).toHaveBeenCalledTimes(1)
+    expect(await f.plugins.execute('/dsh add --trust plugin')).toContain('Installed or updated test-plugin')
+    expect((await f.read()).dsh.profile.bundles).toEqual(['@hqzhao95/dscode', 'test-plugin'])
+  })
+
+  it.each(['just a scalar', '- 42', '{ not: [valid'])('refuses a malformed bundle before mutation: %s', async stagedPatch => {
+    const f = await fixture({ stagedPatch })
+    const before = await f.read()
+    expect(await f.plugins.execute('/dsh add --trust plugin')).toContain('before profile mutation')
+    expect(await f.read()).toEqual(before)
+    expect(f.exec).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['- 42', '[]'])('disables an untrusted root when the installed package differs from its plain audit: %s', async installedPatch => {
+    const f = await fixture({ installedPatch })
+    expect(await f.plugins.execute('/dsh add plugin')).toContain('left disabled because post-install verification failed')
+    expect((await f.read()).dependencies['test-plugin']).toBeDefined()
+    expect((await f.read()).dsh.profile.bundles).not.toContain('test-plugin')
+  })
+
+  it.each([false, true])('unregisters before npm cleanup even if removal fails: %s', async uninstallFails => {
+    const f = await fixture({ stagedPatch: '[]', uninstallFails })
+    await f.plugins.execute('/dsh add --trust plugin')
+    const report = await f.plugins.execute('/dsh remove test-plugin')
+    expect(report).toContain(uninstallFails ? 'Unregistered test-plugin, but npm could not remove' : 'Removed test-plugin')
+    const after = await f.read()
+    expect(after.dsh.profile.bundles).toEqual(['@hqzhao95/dscode'])
+    expect(after.dependencies['test-plugin'] !== undefined).toBe(uninstallFails)
+  })
+
+  it('protects core packages, rejects option injection and invalid syntax without installing', async () => {
+    const f = await fixture()
+    for (const text of ['/dsh remove @hqzhao95/dscode', '/dsh add --registry=x', '/dsh add "broken', '/dsh remove a b', '/dsh add']) {
+      expect(await f.plugins.execute(text)).toMatch(/core component|Unsupported npm option|Could not parse|Usage:|Missing package/)
+    }
+    expect(f.exec).not.toHaveBeenCalled()
+    const core = await fixture({ name: '@hqzhao95/dscode' })
+    expect(await core.plugins.execute('/dsh add --trust core')).toContain('use dscode update')
+    expect(core.exec).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps profile discovery optional without invoking an installer', async () => {
+    const exec = vi.fn()
+    const plugins = createProfilePlugins({ directory: () => undefined, exec, inspectRuntime: () => undefined })
+    expect(plugins.directory()).toBeUndefined()
+    expect(await plugins.execute('/dsh add plugin')).toContain('no installed leader profile')
+    expect(exec).not.toHaveBeenCalled()
+  })
+
+  it('drains an accepted mutation through verification and blocks new work during disposal', async () => {
+    const f = await fixture({ stagedPatch: '[]' })
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const install = f.exec.getMockImplementation()!
+    f.exec.mockImplementationOnce(async (...args) => { await gate; return install(...args) })
+    const operation = f.plugins.execute('/dsh add --trust plugin')
+    await vi.waitFor(() => expect(f.exec).toHaveBeenCalledTimes(1))
+    let drained = false
+    const disposal = f.plugins.dispose().then(() => { drained = true })
+    await expect(f.plugins.execute('/dsh add another')).rejects.toThrow('disposed')
+    expect(drained).toBe(false)
+    release(); await expect(operation).resolves.toContain('Installed or updated')
+    await disposal
+    expect((await f.read()).dsh.profile.bundles).toContain('test-plugin')
+  })
+})

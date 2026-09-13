@@ -69,6 +69,7 @@ try {
   await doctor()
   const composed = await execute(join(profile, 'runtime/bin/dsh'), ['--profile', 'dscode', '--dump-config'], { env, timeout: 30000 })
   assert.match(composed.stdout, /grok-leader/)
+  assert.match(composed.stdout, /pollIntervalMs: !!js/, 'Composed terminal polling must retain the platform expression')
   const config = await readFile(join(profile, 'config.toml'), 'utf8')
   await writeFile(join(profile, 'user-kept.txt'), 'preserved')
   // Repair the invalid empty overlay produced by older installRelease builds.
@@ -77,7 +78,7 @@ try {
   // future upstream rename (landlock-run -> system) cannot break this check.
   const nativeHelper = async () => {
     const scope = join(profile, 'runtime/node_modules/@deepseek-ai')
-    for (const name of (await readdir(scope)).filter(entry => entry.startsWith('node-addon-'))) {
+    for (const name of (await readdir(scope)).filter(entry => entry.startsWith('node-addon-') && entry.endsWith(`-${process.platform}-${process.arch}`))) {
       try {
         const prebuilds = JSON.parse(await readFile(join(scope, name, 'prebuilds.json'), 'utf8'))
         const binary = prebuilds.binaries?.find(entry => typeof entry?.path === 'string')
@@ -86,23 +87,28 @@ try {
     }
     throw new Error('no native helper declared by the installed runtime')
   }
-  const helper = process.platform === 'linux' ? await nativeHelper() : join(profile, 'runtime/bin/dsh')
-  await rm(join(profile, 'bin/dscode'))
+  const helper = await nativeHelper()
+  // Leave the CLI/TUI intact: native corruption alone must trigger repair.
   await rm(helper)
   await run(installed, update)
   await stat(helper)
   await doctor()
   const repaired = await execute(join(profile, 'runtime/bin/dsh'), ['--profile', 'dscode', '--dump-config'], { env, timeout: 30000 })
   assert.match(repaired.stdout, /grok-leader/)
+  // Normal startup must repair native damage before loading that runtime's
+  // lock binding, not only when the user explicitly runs the update command.
+  await rm(helper)
   const banner = await run(installed, ['--version'])
   assert.ok(banner.stdout.includes(manifest.version))
+  await stat(helper)
+  await doctor()
   corrupt = true
   assert.match((await run(installed, update)).stdout, /already up to date/)
   await assert.rejects(run(installed, [...update, '--force']), /SHA-256 mismatch/)
   assert.equal(await readFile(join(profile, 'config.toml'), 'utf8'), config)
   assert.equal(await readFile(join(profile, 'user-kept.txt'), 'utf8'), 'preserved')
   await doctor()
-  const report = { version: manifest.version, sourceCommit: manifest.dsh.sourceCommit, installedAndRepaired: true, repairedLegacyOverlay: true, composedProfile: true, sameVersionNoop: true, rejectedCorruptAsset: true, preservedUserFiles: true, installedLauncher: true }
+  const report = { version: manifest.version, sourceCommit: manifest.dsh.sourceCommit, installedAndRepaired: true, startupNativeRepair: true, repairedLegacyOverlay: true, composedProfile: true, sameVersionNoop: true, rejectedCorruptAsset: true, preservedUserFiles: true, installedLauncher: true }
   if (process.env.DSCODE_E2E_OUT_DIR) {
     await mkdir(process.env.DSCODE_E2E_OUT_DIR, { recursive: true })
     await writeFile(join(process.env.DSCODE_E2E_OUT_DIR, 'update-PASS.json'), JSON.stringify(report, null, 2) + '\n')

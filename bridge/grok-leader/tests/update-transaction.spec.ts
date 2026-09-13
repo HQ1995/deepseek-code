@@ -50,33 +50,48 @@ it('excludes a second process throughout tuple commit and releases locks after a
   }
 })
 
-it.each(['landlock-run', 'system', 'upstream-renamed'])('accepts a complete %s runtime and rejects a missing required native artifact', family => {
+it.each(['landlock-run', 'system', 'upstream-renamed', 'darwin'])('accepts a complete %s runtime and rejects a missing required native artifact', family => {
   const root = mkdtempSync(join(tmpdir(), 'dscode-native-runtime-'))
   // The renamed family also renames every identifier inside prebuilds.json.
   const renamed = family === 'upstream-renamed'
-  const artifact = renamed ? 'bin/system-exec' : 'bin/landlock-run'
+  const platform = family === 'darwin' ? 'darwin' : 'linux'
+  const arch = family === 'darwin' ? 'arm64' : 'x64'
+  const artifact = family === 'darwin' ? 'bin/system.node' : renamed ? 'bin/system-exec' : 'bin/landlock-run'
   const metadata = { dsh: { sourceCommit: 'a'.repeat(40), testedVersion: '0.1.5-alpha.1' } }
-  const native = join(root, `node_modules/@deepseek-ai/node-addon-${family}-linux-x64`)
+  const native = join(root, `node_modules/@deepseek-ai/node-addon-${family === 'darwin' ? 'system' : family}-${platform}-${arch}`)
   try {
     mkdirSync(join(root, 'node_modules/@deepseek-ai/dsh/lib'), { recursive: true })
     mkdirSync(join(root, 'bin'))
     writeFileSync(join(root, 'node_modules/@deepseek-ai/dsh/lib/bin.js'), '#!/bin/sh\nprintf "0.1.5-alpha.1\\n"\n', { mode: 0o755 })
     symlinkSync('../node_modules/@deepseek-ai/dsh/lib/bin.js', join(root, 'bin/dsh'))
-    writeFileSync(join(root, 'dscode-runtime.json'), JSON.stringify({ schema: 1, platform: 'linux', arch: 'x64', sourceCommit: metadata.dsh.sourceCommit, dshVersion: metadata.dsh.testedVersion }))
+    writeFileSync(join(root, 'dscode-runtime.json'), JSON.stringify({ schema: 1, platform, arch, sourceCommit: metadata.dsh.sourceCommit, dshVersion: metadata.dsh.testedVersion }))
     mkdirSync(join(native, 'bin'), { recursive: true })
-    writeFileSync(join(native, artifact), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
-    const binaries: object[] = [{ tool: renamed ? 'system-exec' : 'landlock-run', kind: renamed ? 'executable' : 'static-musl', path: artifact }]
+    writeFileSync(join(native, artifact), '#!/bin/sh\nexit 0\n', { mode: family === 'darwin' ? 0o644 : 0o755 })
+    const binaries: object[] = [{ tool: family === 'darwin' ? 'flock' : renamed ? 'system-exec' : 'landlock-run', kind: family === 'darwin' ? 'node-api' : renamed ? 'executable' : 'static-musl', path: artifact }]
     if (family === 'system') {
+      const legacy = join(root, 'node_modules/@deepseek-ai/node-addon-landlock-run-linux-x64')
+      mkdirSync(legacy)
+      writeFileSync(join(legacy, 'helper'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+      writeFileSync(join(legacy, 'prebuilds.json'), JSON.stringify({ platform: 'linux-x64', binaries: [{ path: 'helper', kind: 'static-musl' }] }))
       for (const libc of ['glibc', 'musl']) {
         mkdirSync(join(native, `bin/${libc}`))
         writeFileSync(join(native, `bin/${libc}/system.node`), 'fixture addon')
         binaries.push({ tool: 'flock', kind: 'node-api', libc, path: `bin/${libc}/system.node` })
       }
     }
-    writeFileSync(join(native, 'prebuilds.json'), JSON.stringify({ platform: 'linux-x64', binaries }))
-    expect(() => validateRuntime(root, metadata, 'linux', 'x64')).not.toThrow()
+    writeFileSync(join(native, 'prebuilds.json'), JSON.stringify({ platform: `${platform}-${arch}`, binaries }))
+    expect(() => validateRuntime(root, metadata, platform, arch)).not.toThrow()
+    rmSync(join(native, 'prebuilds.json'))
+    expect(() => validateRuntime(root, metadata, platform, arch)).toThrow()
+    writeFileSync(join(native, 'prebuilds.json'), JSON.stringify({ platform: `${platform}-${arch}`, binaries: [] }))
+    expect(() => validateRuntime(root, metadata, platform, arch)).toThrow('native helper metadata mismatch')
+    writeFileSync(join(native, 'prebuilds.json'), JSON.stringify({ platform: 'wrong-arch', binaries }))
+    expect(() => validateRuntime(root, metadata, platform, arch)).toThrow('native helper metadata mismatch')
+    writeFileSync(join(native, 'prebuilds.json'), JSON.stringify({ platform: `${platform}-${arch}`, binaries: [{ path: 'bin' }] }))
+    expect(() => validateRuntime(root, metadata, platform, arch)).toThrow('artifact invalid')
+    writeFileSync(join(native, 'prebuilds.json'), JSON.stringify({ platform: `${platform}-${arch}`, binaries }))
     rmSync(join(native, family === 'system' ? 'bin/glibc/system.node' : artifact))
-    expect(() => validateRuntime(root, metadata, 'linux', 'x64')).toThrow()
+    expect(() => validateRuntime(root, metadata, platform, arch)).toThrow()
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -113,7 +128,7 @@ it('removes an obsolete dangling npm lock during a successful commit', async () 
 })
 
 // Diagnostics describe the running host; native artifact validation above has
-// deliberately explicit Linux fixtures and must not leak into this check.
+// explicit cross-platform fixtures and must not leak into this check.
 it.each(['host', 'darwin-arm64'])('reports a matching %s runtime and detects a mismatched tuple', host => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
   const arch = Object.getOwnPropertyDescriptor(process, 'arch')!
@@ -130,11 +145,11 @@ it.each(['host', 'darwin-arm64'])('reports a matching %s runtime and detects a m
     symlinkSync('../node_modules/@deepseek-ai/dsh/lib/bin.js', join(root, 'bin/dsh'))
     const descriptor = { schema: 1, platform: process.platform, arch: process.arch, sourceCommit: metadata.dsh.sourceCommit, dshVersion: metadata.dsh.testedVersion }
     writeFileSync(join(root, 'dscode-runtime.json'), JSON.stringify(descriptor))
-    if (process.platform === 'linux') {
-      const native = join(root, `node_modules/@deepseek-ai/node-addon-landlock-run-linux-${process.arch}`)
+    {
+      const native = join(root, `node_modules/@deepseek-ai/node-addon-system-${process.platform}-${process.arch}`)
       mkdirSync(join(native, 'bin'), { recursive: true })
       writeFileSync(join(native, 'bin/landlock-run'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
-      writeFileSync(join(native, 'prebuilds.json'), JSON.stringify({ platform: `linux-${process.arch}`, binaries: [{ tool: 'landlock-run', kind: 'static-musl', path: 'bin/landlock-run' }] }))
+      writeFileSync(join(native, 'prebuilds.json'), JSON.stringify({ platform: `${process.platform}-${process.arch}`, binaries: [{ tool: 'fixture', kind: 'executable', path: 'bin/landlock-run' }] }))
     }
     const dir = join(root, 'package'), profile = join(root, 'profile')
     mkdirSync(dir)

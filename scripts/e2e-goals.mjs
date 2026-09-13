@@ -155,6 +155,9 @@ export async function goalAcceptance(ui) {
   await quiet('paused-no-continuation', paused.goal);
   await ui.send('NATIVE_GOAL_PAUSED_GUARD');
   await visible(/NATIVE_GOAL_PAUSED_GUARD_DONE/, 'Native model tool must not rearm a paused goal');
+  // Goal control cards are intentionally hidden by the pager. Verify its
+  // actual ACP decoder accepted the failed result instead of dropping it.
+  await ui.receivedToolFailure('update_goal');
   const guarded = await observed('paused-model-resume-refused', state => state.status === 'idle' && state.goal?.phase === 'paused');
   assert.deepEqual(guarded.goal, paused.goal, 'Model resume must preserve the paused goal revision and activation');
 

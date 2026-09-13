@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { create as tar } from 'tar'
 import { expect, it } from 'vitest'
-import { installationMatches } from '../bin/update.mjs'
+import { installationFilesMatch, installationMatches, withProfileLock } from '../bin/update.mjs'
 
 const bridge = fileURLToPath(new URL('..', import.meta.url))
 const current = JSON.parse(readFileSync(join(bridge, 'package.json'), 'utf8'))
@@ -33,10 +33,10 @@ const fixture = () => {
   symlinkSync('../node_modules/@deepseek-ai/dsh/lib/bin.js', join(runtime, 'bin/dsh'))
   const descriptor = { schema: 1, platform: process.platform, arch: process.arch, sourceCommit: current.dsh.sourceCommit, dshVersion: current.dsh.testedVersion }
   put(join(runtime, 'dscode-runtime.json'), JSON.stringify(descriptor))
-  if (process.platform === 'linux') {
-    const native = join(runtime, `node_modules/@deepseek-ai/node-addon-system-linux-${process.arch}`)
+  {
+    const native = join(runtime, `node_modules/@deepseek-ai/node-addon-system-${process.platform}-${process.arch}`)
     put(join(native, 'bin/helper'), '#!/bin/sh\nexit 0\n', 0o755)
-    put(join(native, 'prebuilds.json'), JSON.stringify({ binaries: [{ path: 'bin/helper', kind: 'static-musl' }] }))
+    put(join(native, 'prebuilds.json'), JSON.stringify({ platform: `${process.platform}-${process.arch}`, binaries: [{ path: 'bin/helper', kind: 'executable' }] }))
   }
   cpSync(plugin, join(remote, 'package'), { recursive: true })
   cpSync(runtime, join(remote, 'runtime'), { recursive: true, verbatimSymlinks: true })
@@ -58,24 +58,96 @@ globalThis.fetch = async url => {
   const file = ${JSON.stringify(remote)} + '/' + String(url).slice(base.length);
   return existsSync(file) ? new Response(readFileSync(file)) : new Response('', {status:404});
 };`)
-  const run = (args: string[]) => spawnSync(process.execPath, ['--import', shim, join(root, 'launcher/bin/dscode.mjs'), ...args], {
+  const run = (args: string[], overrides: NodeJS.ProcessEnv = {}) => spawnSync(process.execPath, ['--import', shim, join(root, 'launcher/bin/dscode.mjs'), ...args], {
     encoding: 'utf8', timeout: 20000,
-    env: { ...process.env, HOME: root, DSH_HOME: join(root, 'home'), DSCODE_HOME: profile, DSCODE_BIN: '', DSH_BIN: '' },
+    env: { ...process.env, HOME: root, DSH_HOME: join(root, 'home'), DSCODE_HOME: profile, DSCODE_BIN: '', DSH_BIN: '', ...overrides },
   })
   return { root, profile, plugin, runtime, remote, descriptor, metadata, put, run, requests }
 }
 
-it.each(['old bridge', 'old runtime', 'missing TUI'])('reconciles an existing npx installation as a complete tuple: %s', scenario => {
+it.each(['old bridge', 'old runtime', 'missing TUI', 'missing native', 'wrong TUI version', 'wrong CLI version'])('reconciles an existing npx installation as a complete tuple: %s', scenario => {
   const f = fixture()
   try {
     if (scenario === 'old bridge') f.put(join(f.plugin, 'package.json'), JSON.stringify({ ...f.metadata, version: '0.0.1' }))
     if (scenario === 'old runtime') f.put(join(f.runtime, 'dscode-runtime.json'), JSON.stringify({ ...f.descriptor, sourceCommit: 'a'.repeat(40) }))
     if (scenario === 'missing TUI') rmSync(join(f.profile, 'bin/dscode'))
+    if (scenario === 'missing native') rmSync(join(f.runtime, `node_modules/@deepseek-ai/node-addon-system-${process.platform}-${process.arch}/bin/helper`))
+    if (scenario === 'wrong TUI version') f.put(join(f.profile, 'bin/dscode'), '#!/bin/sh\necho "dscode 0.0.1"\n', 0o755)
+    if (scenario === 'wrong CLI version') f.put(join(f.runtime, 'node_modules/@deepseek-ai/dsh/lib/bin.js'), '#!/bin/sh\necho "0.0.1"\n', 0o755)
+    if (scenario.startsWith('wrong')) {
+      expect(installationFilesMatch(f.profile, current.name, current.version, current.dsh)).toBe(true)
+      expect(installationMatches(f.profile, current.name, current.version, current.dsh)).toBe(false)
+    }
     const result = f.run([])
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('tuple ready')
     expect(installationMatches(f.profile, current.name, current.version, current.dsh)).toBe(true)
     expect(readFileSync(f.requests, 'utf8')).toContain('dscode-runtime-')
+  } finally { rmSync(f.root, { recursive: true, force: true }) }
+})
+
+const trackProbes = (f: ReturnType<typeof fixture>) => {
+  const probes = join(f.root, 'version-probes')
+  f.put(join(f.profile, 'bin/dscode'), `#!/bin/sh
+if [ "$1" = '--version' ]; then
+  echo TUI >> '${probes}'
+  echo 'dscode ${current.version}'
+else
+  echo BOOT_READY
+fi
+`, 0o755)
+  f.put(join(f.runtime, 'node_modules/@deepseek-ai/dsh/lib/bin.js'), `#!/bin/sh
+echo DSH >> '${probes}'
+echo '${current.dsh.testedVersion}'
+`, 0o755)
+  return probes
+}
+
+it('probes healthy managed executables once and leaves the profile manifest unchanged', () => {
+  const f = fixture()
+  try {
+    const probes = trackProbes(f)
+    const manifest = join(f.profile, 'package.json')
+    const contents = JSON.stringify({ private: true, dsh: { profile: { bundles: [current.name] } } })
+    f.put(manifest, contents)
+    utimesSync(manifest, 1234567890, 1234567890)
+    const mtime = statSync(manifest).mtimeMs
+    const result = f.run([])
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('BOOT_READY')
+    expect(readFileSync(probes, 'utf8').trim().split('\n')).toEqual(['TUI', 'DSH'])
+    expect(existsSync(f.requests)).toBe(false)
+    expect(readFileSync(manifest, 'utf8')).toBe(contents)
+    expect(statSync(manifest).mtimeMs).toBe(mtime)
+  } finally { rmSync(f.root, { recursive: true, force: true }) }
+})
+
+it('does not probe executables or fetch releases while another process holds the profile lock', async () => {
+  const f = fixture()
+  try {
+    const probes = trackProbes(f)
+    await withProfileLock(f.profile, () => {
+      const result = f.run([])
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('another dscode installation is updating this profile')
+      expect(existsSync(probes)).toBe(false)
+      expect(existsSync(f.requests)).toBe(false)
+    })
+  } finally { rmSync(f.root, { recursive: true, force: true }) }
+})
+
+it('still checks an explicit DSH_BIN after validating the managed runtime', () => {
+  const f = fixture()
+  try {
+    const probes = trackProbes(f)
+    const override = join(f.root, 'custom-dsh')
+    f.put(override, '#!/bin/sh\necho "0.0.1"\n', 0o755)
+    const result = f.run([], { DSH_BIN: override })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain(`DSH_BIN reports 0.0.1, expected ${current.dsh.testedVersion}`)
+    expect(result.stdout).not.toContain('BOOT_READY')
+    expect(readFileSync(probes, 'utf8').trim().split('\n')).toEqual(['TUI', 'DSH'])
+    expect(existsSync(f.requests)).toBe(false)
   } finally { rmSync(f.root, { recursive: true, force: true }) }
 })
 
@@ -94,10 +166,11 @@ it('leaves the entire old installation intact when rebootstrap downloads fail ve
   } finally { rmSync(f.root, { recursive: true, force: true }) }
 })
 
-it.each(['manual', 'manual dev', 'auto', 'auto stale target', 'force', 'repair', 'auto disabled'])('handles a same-version update without unnecessary installation: %s', scenario => {
+it.each(['manual', 'manual dev', 'auto', 'auto stale target', 'force', 'repair', 'native repair', 'auto disabled'])('handles a same-version update without unnecessary installation: %s', scenario => {
   const f = fixture()
   try {
     if (scenario === 'repair') rmSync(join(f.runtime, 'bin/dsh'))
+    if (scenario === 'native repair') rmSync(join(f.runtime, `node_modules/@deepseek-ai/node-addon-system-${process.platform}-${process.arch}/bin/helper`))
     if (scenario === 'manual dev') f.put(join(f.profile, 'bin/dscode'), `#!/bin/sh\necho 'dscode ${current.version}-dev'\n`, 0o755)
     if (scenario === 'auto disabled') f.put(join(f.profile, 'config.toml'), '[cli]\nauto_update=false\n')
     const args = ['update', '--alpha', ...(scenario.startsWith('auto') ? ['--auto'] : []), ...(scenario === 'force' ? ['--force'] : []), ...(scenario === 'auto stale target' ? ['--version', '0.0.1-alpha.1'] : [])]
@@ -105,7 +178,7 @@ it.each(['manual', 'manual dev', 'auto', 'auto stale target', 'force', 'repair',
     expect(result.status, result.stderr).toBe(0)
     const requests = existsSync(f.requests) ? readFileSync(f.requests, 'utf8') : ''
     if (scenario === 'auto disabled') expect(requests).toBe('')
-    else if (scenario === 'force' || scenario === 'repair' || scenario === 'manual dev') {
+    else if (scenario === 'force' || scenario === 'repair' || scenario === 'native repair' || scenario === 'manual dev') {
       expect(requests).toContain('dscode-runtime-')
       expect(installationMatches(f.profile, current.name, current.version)).toBe(true)
     } else {

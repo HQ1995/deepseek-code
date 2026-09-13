@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { AcpMcpConfigError, mountMcpConfigs, resolveAcpMcpConfigs } from '../src/mcp.ts'
 
 describe('ACP MCP adapter', () => {
   it('maps stdio and Streamable HTTP servers and mounts both', async () => {
-    const configs = resolveAcpMcpConfigs([
+    const configs = await resolveAcpMcpConfigs([
       {
         name: 'local tools',
         command: process.execPath,
@@ -37,8 +38,19 @@ describe('ACP MCP adapter', () => {
     [[{ name: 'same', command: process.execPath, args: [], env: [] }, { name: 'same', command: process.execPath, args: [], env: [] }], 'duplicate normalized name'],
     [[{ type: 'sse', name: 'legacy', url: 'https://example.test/sse', headers: [] }], 'transport sse is not supported'],
     [[{ type: 'http', name: 'web', url: 'file:///tmp/mcp', headers: [] }], 'absolute HTTP\\(S\\) URL'],
-  ])('rejects malformed declarations', (servers, message) => {
-    expect(() => resolveAcpMcpConfigs(servers, '/workspace')).toThrow(new RegExp(message))
-    expect(() => resolveAcpMcpConfigs(servers, '/workspace')).toThrow(AcpMcpConfigError)
+  ])('rejects malformed declarations', async (servers, message) => {
+    await expect(resolveAcpMcpConfigs(servers, '/workspace')).rejects.toThrow(new RegExp(message))
+    await expect(resolveAcpMcpConfigs(servers, '/workspace')).rejects.toThrow(AcpMcpConfigError)
+  })
+
+  it('keeps the MCP client off the boot path until a client declares servers', async () => {
+    const source = readFileSync(new URL('../src/mcp.ts', import.meta.url), 'utf8')
+    expect(source).toMatch(/^import type \* as McpClient from '@deepseek-ai\/dsh-mcp-client'$/m)
+    expect(source).not.toMatch(/^import \* as McpClient/m)
+    await expect(resolveAcpMcpConfigs(undefined, '/workspace')).resolves.toEqual([])
+    await expect(resolveAcpMcpConfigs([], '/workspace')).resolves.toEqual([])
+    const plugin = vi.fn(async () => undefined)
+    await mountMcpConfigs({ plugin } as unknown as Context, [])
+    expect(plugin).not.toHaveBeenCalled()
   })
 })

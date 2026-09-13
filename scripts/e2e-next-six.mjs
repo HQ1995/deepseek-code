@@ -96,6 +96,12 @@ export async function nextSixAcceptance(ui) {
   await resize(200, 60)
 
   console.log('[next-six] wrapped table link targets')
+  const vimConfig = () => readFile(join(scratch, 'dsc-contract/config.toml'), 'utf8')
+    .catch(error => { if (error.code === 'ENOENT') return ''; throw error })
+  if (process.platform === 'darwin') {
+    await send('/vim-mode')
+    await waitFor(vimConfig, value => /^vim_mode = true$/m.test(value), 'six-vim-on')
+  }
   await send('DSCODE_SIX_TABLE')
   await wait(/complete-target/)
   await waitState(value => value.status === 'idle', 'six-table-idle')
@@ -106,19 +112,34 @@ export async function nextSixAcceptance(ui) {
     const openedBefore = await readFile(mediaOpenerLog, 'utf8').catch(() => '')
     const row = rows.findIndex(line => line.includes('long-segment/') && !line.includes('https://'))
     assert.ok(row >= 0, 'URL must wrap across table lines')
-    await click(rows[row].indexOf('long-segment/') + 3, row, 16)
+    if (process.platform === 'darwin') {
+      // macOS link clicks require the physical Cmd key via CoreGraphics;
+      // tmux's Ctrl mouse bit cannot synthesize it. Exercise the real keyboard
+      // link path here; physical Cmd-click remains a dedicated GUI check.
+      if (!/(?:Space|Tab|i):prompt/.test(await capture())) await key('Tab')
+      await wait(/(?:Space|Tab|i):prompt/)
+      await key('o')
+      await waitFor(capture, value => value.split('\n').slice(0, 3).some(line => line.includes('https://example.invalid/')), 'six-url-highlight')
+      await key('Enter')
+    } else await click(rows[row].indexOf('long-segment/') + 3, row, 16)
     await waitFor(async () => { try { return await readFile(mediaOpenerLog, 'utf8') } catch { return '' } }, value => value.slice(openedBefore.length).includes(sixUrl), 'six-full-url-open')
     const emailRow = rows.findIndex(line => line.includes('segment-') && !line.includes('long-segment/'))
     assert.ok(emailRow >= 0, 'Email must remain in the rendered table')
-    await click(rows[emailRow].indexOf('segment-') + 3, emailRow, 16)
+    if (process.platform === 'darwin') {
+      await key('o'); await key('o')
+      await waitFor(capture, value => value.split('\n').slice(0, 3).some(line => line.includes('mailto:long-address-')), 'six-email-highlight')
+      await key('Enter')
+    } else await click(rows[emailRow].indexOf('segment-') + 3, emailRow, 16)
     await waitFor(async () => { try { return await readFile(mediaOpenerLog, 'utf8') } catch { return '' } }, value => value.slice(openedBefore.length).includes('mailto:' + sixEmail), 'six-full-email-open')
-    await artifact(`six-table-links-${width}`, { screen: await capture(), opened: await readFile(mediaOpenerLog, 'utf8') })
+    await artifact(`six-table-links-${width}`, { input: process.platform === 'darwin' ? 'keyboard (physical Cmd-click not covered)' : 'Ctrl-click', screen: await capture(), opened: await readFile(mediaOpenerLog, 'utf8') })
   }
   await resize(200, 60)
   console.log('[next-six] turn navigation')
   await key('Space')
-  await send('/vim-mode')
-  await wait(/Vim mode: on/)
+  if (process.platform !== 'darwin') {
+    await send('/vim-mode')
+    await wait(/Vim mode: on/)
+  }
   for (const turn of ['A', 'B']) {
     await send(`DSCODE_SIX_TURN_${turn}`)
     const turnRows = (await wait(new RegExp(`SIX_TURN_${turn}_BODY_`))).split('\n')
@@ -188,5 +209,5 @@ export async function nextSixAcceptance(ui) {
   assert.ok(results.slice(0, 3).every(result => String(result.content).includes('main.ts')))
   assert.match(String(results[3].content), /Greeter/)
   await artifact('six-lsp-real-server', { results, tools: lsp.tools?.map(tool => tool.function?.name) })
-  return { skills: 'native scoped injection', viewer: 'draft/undo/resume/resize', table: 'URL and email fragment clicks after resize', navigation: 'real turn boundaries', presets: 'native copy/read/external edit/restart', lsp: 'four real TypeScript queries' }
+  return { skills: 'native scoped injection', viewer: 'draft/undo/resume/resize', table: process.platform === 'darwin' ? 'URL and email keyboard opens after resize (physical Cmd-click not covered)' : 'URL and email fragment clicks after resize', navigation: 'real turn boundaries', presets: 'native copy/read/external edit/restart', lsp: 'four real TypeScript queries' }
 }

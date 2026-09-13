@@ -1,0 +1,275 @@
+import type { SessionWork } from './session-work.ts'
+import { randomUUID } from 'node:crypto'
+import { symbols } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { ToolCallId, errorChain } from '@deepseek-ai/dsh-llm'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { foldScheduleEvents } from '@deepseek-ai/dsh-schedule'
+import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
+import { invalidParams, internalError, paramRecord } from './acp.ts'
+import { parseReminder } from './reminders.ts'
+import type { SessionOutput } from './session-output.ts'
+
+interface TaskSession {
+  work: Pick<SessionWork, 'run'>
+  agent: Agent
+  output: Pick<SessionOutput, 'notify' | 'update'>
+}
+interface TaskHost<T extends TaskSession> {
+  sessions: ReadonlyMap<SessionId, T>
+  owned(clientId: number, sessionId: SessionId | undefined): T | undefined
+  jobs(record: T): unknown
+  tools(record: T): { runtime: Pick<ToolRuntime, 'execute'>; names: ReadonlySet<string> } | undefined
+  /** Passive collected output; never advances the model's native job cursor. */
+  output(registry: object, owner: Agent, id: string): string | undefined
+  logger: { warn(message: string): void }
+}
+const nonEmptyString = (value: unknown): value is string => typeof value === 'string' && value.length > 0
+
+/** Native task controls, reminder projection and passive job-output snapshots
+ * share one owner. The host supplies a single heartbeat; this module creates
+ * no timer and releases every registry subscription on disposal. */
+export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
+  let closed = false
+  let disposal: Promise<void> | undefined
+  const pending = new Set<Promise<unknown>>()
+  const invocations = new Map<AbortController, T>()
+  const request = <R>(operation: () => Promise<R>): Promise<R> => {
+    let resolve!: (value: R | PromiseLike<R>) => void, reject!: (reason: unknown) => void
+    const work = new Promise<R>((yes, no) => { resolve = yes; reject = no })
+    pending.add(work)
+    void work.then(() => pending.delete(work), () => pending.delete(work))
+    // Native code may reenter disposal before its first await.
+    try { resolve(operation()) } catch (error) { reject(error) }
+    return work
+  }
+  const isLive = (record: T) => !closed && host.sessions.get(record.agent.session.id) === record
+  const owned = (clientId: number, sessionId: SessionId | undefined): T | undefined =>
+    closed ? undefined : host.owned(clientId, sessionId)
+  const reminderSnapshots = new WeakMap<T, Map<string, string>>()
+  const emitReminders = (record: T): void => {
+    if (!isLive(record)) return
+    const { active, seenIds } = foldScheduleEvents(record.agent.session.ownEvents())
+    // Reconnect also clears native IDs that were deleted while the UI was away.
+    const previous = reminderSnapshots.get(record) ?? new Map<string, string>(seenIds.map(id => [id, '']))
+    const next = new Map<string, string>()
+    for (const reminder of active) {
+      const serialized = JSON.stringify(reminder)
+      next.set(reminder.id, serialized)
+      if (previous.get(reminder.id) === serialized) continue
+      record.output.notify('x.ai/session_notification', { update: {
+          sessionUpdate: 'scheduled_task_created', task_id: reminder.id, prompt: reminder.prompt,
+          human_schedule: reminder.kind === 'every' ? `every ${reminder.everySeconds}s` : 'once',
+          next_fire_at: reminder.scheduledAt,
+        } }, { nativeSchedule: true })
+    }
+    for (const id of previous.keys()) {
+      if (next.has(id)) continue
+      record.output.notify('x.ai/session_notification', { update: { sessionUpdate: 'scheduled_task_deleted', task_id: id, reason: 'deleted' } }, { nativeSchedule: true })
+    }
+    reminderSnapshots.set(record, next)
+  }
+
+  const reminders = async (clientId: number, method: string, params: unknown): Promise<unknown> => {
+    const p = paramRecord(params, method)
+    const record = owned(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+    if (record === undefined) throw invalidParams('unknown session')
+    return record.work.run(async scope => {
+      const available = host.tools(record)
+      if (available === undefined || !available.names.has('schedule_list')) throw invalidParams('Reminders are unavailable in this preset.')
+      const invoke = async (name: string, args: unknown) => {
+        scope.assertActive()
+        if (!isLive(record)) throw invalidParams('session closed')
+        const controller = new AbortController()
+        invocations.set(controller, record)
+        const signal = AbortSignal.any([scope.signal, controller.signal, AbortSignal.timeout(10_000)])
+        let result: Awaited<ReturnType<ToolRuntime['execute']>>
+        try {
+          result = await available.runtime.execute({ callId: ToolCallId('tui-' + randomUUID()), name, arguments: args, agent: record.agent, signal })
+        } finally { invocations.delete(controller) }
+        if (owned(clientId, record.agent.session.id) !== record) throw invalidParams('session closed')
+        if (result.isError) throw internalError(result.error.message)
+        const value = result.value
+        if (value !== null && !Array.isArray(value) && typeof value === 'object' && typeof value.code === 'string') {
+          throw invalidParams(String(value.message ?? value.code))
+        }
+        return value
+      }
+      if (method === 'x.ai/scheduler/create') {
+        if (typeof p.text !== 'string') throw invalidParams('A reminder is required.')
+        let args: Record<string, unknown>
+        try { args = parseReminder(p.text) } catch (error) { throw invalidParams(errorChain(error)) }
+        await invoke('schedule_create', args)
+      } else if (method === 'x.ai/scheduler/delete') {
+        if (!nonEmptyString(p.taskId)) throw invalidParams('taskId is required')
+        await invoke('schedule_delete', { id: p.taskId })
+      }
+      const rows = await invoke('schedule_list', {})
+      if (!Array.isArray(rows)) throw internalError('Invalid reminder list')
+      emitReminders(record)
+      return { title: 'Session reminders', items: rows.map(value => {
+        const row = value as Record<string, unknown>
+        return { id: row.id, text: row.prompt, detail: `${row.state} · ${row.scheduledAt} · ${row.kind === 'every' ? 'every ' + String(row.everySeconds) + 's' : 'once'}`, editable: false }
+      }) }
+    })
+  }
+
+  type JobSnapshotLike = {
+    id: string; kind: string; label: string; ownerSession?: string
+    status: 'running' | 'stopping' | 'completed' | 'killed' | 'failed'
+    detail?: string; startedAt: number; finishedAt?: number
+  }
+  type JobsLike = {
+    list(caller: Agent): JobSnapshotLike[]
+    get(id: string, caller: Agent): JobSnapshotLike
+    kill(id: string, caller: Agent, reason?: string): 'requested' | 'already-finished'
+    wait(id: string, timeoutMs: number, caller: Agent): Promise<JobSnapshotLike>
+    onJobsChanged(listener: (owner: Agent | undefined) => void): () => void
+  }
+  const jobsService = (record: T): JobsLike | undefined => {
+    let service = host.jobs(record) as JobsLike | undefined
+    // Cordis lookups can stack fresh context proxies. Subscribe once on the
+    // underlying registry so identity and listener scope cover every owner.
+    for (;;) {
+      const original = (service as (JobsLike & Record<symbol, JobsLike>) | undefined)?.[symbols.original]
+      if (original === undefined) break
+      service = original
+    }
+    return typeof service?.list === 'function' && typeof service.get === 'function'
+      && typeof service.kill === 'function' && typeof service.wait === 'function'
+      && typeof service.onJobsChanged === 'function' ? service : undefined
+  }
+  const jobSubscriptions = new Map<JobsLike, () => void>()
+  const jobSnapshots = new WeakMap<T, Map<string, string>>()
+  const jobOutputSnapshots = new WeakMap<T, Map<string, string>>()
+  const jobIsRunning = (job: JobSnapshotLike): boolean => job.status === 'running' || job.status === 'stopping'
+  const emitJobsForRecord = (record: T): void => {
+    if (!isLive(record)) return
+    const jobs = jobsService(record)
+    if (jobs === undefined) return
+    if (!jobSubscriptions.has(jobs)) {
+      // Some registries notify synchronously while subscribing. Reserve the
+      // identity before installing the listener, and roll it back on failure.
+      jobSubscriptions.set(jobs, () => {})
+      try {
+        const unsubscribe = jobs.onJobsChanged(owner => {
+          if (closed) return
+          for (const record of host.sessions.values()) {
+            if ((owner === undefined || record.agent === owner) && jobsService(record) === jobs) emitJobsForRecord(record)
+          }
+        })
+        if (closed) unsubscribe()
+        else jobSubscriptions.set(jobs, unsubscribe)
+      } catch (error) {
+        jobSubscriptions.delete(jobs)
+        throw error
+      }
+    }
+    if (!isLive(record)) return
+    let previous = jobSnapshots.get(record)
+    if (previous === undefined) { previous = new Map(); jobSnapshots.set(record, previous) }
+    const systemTime = (ms: number): unknown => ({ secs_since_epoch: Math.floor(ms / 1000), nanos_since_epoch: (ms % 1000) * 1_000_000 })
+    for (const job of jobs.list(record.agent)) {
+      // Settled producers are immutable; do not rescan their output every tick.
+      if (!jobIsRunning(job) && previous.get(job.id) === JSON.stringify([job, true])) continue
+      const output = host.output(jobs, record.agent, job.id)
+      const serialized = JSON.stringify([job, output !== undefined])
+      if (previous.get(job.id) === serialized) {
+        emitJobOutput(record, job.id, output)
+        continue
+      }
+      previous.set(job.id, serialized)
+      const cwd = record.agent.session.header.cwd ?? ''
+      if (jobIsRunning(job)) {
+        record.output.notify('x.ai/task_backgrounded', { update: { sessionUpdate: 'task_backgrounded', tool_call_id: job.id, task_id: job.id, command: job.label, cwd, description: job.label } })
+      } else {
+        record.output.notify('x.ai/task_completed', { update: {
+            sessionUpdate: 'task_completed',
+            task_snapshot: {
+              task_id: job.id, command: job.label, display_command: job.label, cwd,
+              start_time: systemTime(job.startedAt),
+              end_time: job.finishedAt === undefined ? null : systemTime(job.finishedAt),
+              exit_code: null, signal: null, completed: true, output: output ?? '',
+            },
+          } }, { nativeTask: { status: job.status, kind: job.kind, outputAvailable: output !== undefined, ...job.detail === undefined ? {} : { detail: job.detail } } })
+      }
+      emitJobOutput(record, job.id, output)
+    }
+  }
+  const emitJobOutput = (record: T, id: string, output: string | undefined): void => {
+    if (output === undefined) return
+    if (!isLive(record)) return
+    let previous = jobOutputSnapshots.get(record)
+    if (previous === undefined) { previous = new Map(); jobOutputSnapshots.set(record, previous) }
+    if (previous.get(id) === output) return
+    previous.set(id, output)
+    record.output.update({
+      sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed',
+      rawOutput: { type: 'Bash', output_for_prompt: output },
+    }, false)
+  }
+  const killTask = async (clientId: number, params: unknown): Promise<unknown> => {
+    const p = paramRecord(params, 'x.ai/task/kill')
+    if (!nonEmptyString(p.sessionId) || !nonEmptyString(p.taskId) || (p.source !== 'clientUi' && p.source !== 'teardown')) throw invalidParams('x.ai/task/kill requires sessionId, taskId and source')
+    const record = owned(clientId, SessionId(p.sessionId))
+    if (record === undefined) throw invalidParams('unknown session: ' + p.sessionId)
+    const taskId = p.taskId, source = p.source
+    return record.work.run(async scope => {
+      const jobs = jobsService(record)
+      if (jobs === undefined || !jobs.list(record.agent).some(job => job.id === taskId)) return { result: { taskId, outcome: 'not_found' } }
+      const before = jobs.get(taskId, record.agent)
+      if (!jobIsRunning(before)) { emitJobsForRecord(record); return { result: { taskId, outcome: 'already_exited' } } }
+      scope.assertActive()
+      if (!isLive(record)) throw invalidParams('session closed')
+      const requested = jobs.kill(taskId, record.agent, source)
+      const settled = requested === 'already-finished' ? jobs.get(taskId, record.agent) : await jobs.wait(taskId, 5000, record.agent)
+      if (!isLive(record)) throw invalidParams('session closed')
+      emitJobsForRecord(record)
+      if (jobIsRunning(settled)) throw internalError('task cancellation requested; producer has not settled yet')
+      return { result: { taskId, outcome: settled.status === 'killed' ? 'killed' : 'already_exited' } }
+    })
+  }
+
+  const taskOutput = (clientId: number, params: unknown): unknown => {
+    const p = paramRecord(params, 'x.ai/task/output')
+    if (!nonEmptyString(p.sessionId) || !nonEmptyString(p.taskId)) throw invalidParams('task output requires sessionId and taskId')
+    const record = owned(clientId, SessionId(p.sessionId))
+    if (record === undefined) throw invalidParams('unknown session')
+    const jobs = jobsService(record)
+    if (jobs === undefined) throw invalidParams('jobs unavailable')
+    const job = jobs.get(p.taskId, record.agent)
+    const output = host.output(jobs, record.agent, job.id)
+    return { taskId: job.id, status: job.status, available: output !== undefined, output: output ?? '' }
+  }
+  return {
+    snapshot(record: T): void { emitJobsForRecord(record); emitReminders(record) },
+    observe(record: T, event: SessionEvent): void {
+      if (String(event.type) === 'schedule/change') emitReminders(record)
+    },
+    poll(): void {
+      if (closed) return
+      for (const [controller, record] of invocations) if (!isLive(record)) controller.abort()
+      for (const record of host.sessions.values()) {
+        try { emitJobsForRecord(record) } catch (error) { host.logger.warn('TUI job output: ' + errorChain(error)) }
+      }
+    },
+    output: taskOutput,
+    kill: (clientId: number, params: unknown) => request(() => killTask(clientId, params)),
+    reminders: (clientId: number, method: string, params: unknown) => request(() => reminders(clientId, method, params)),
+    dispose(): Promise<void> {
+      if (disposal !== undefined) return disposal
+      closed = true
+      const failures: unknown[] = []
+      disposal = Promise.resolve().then(async () => {
+        while (pending.size > 0) await Promise.allSettled([...pending])
+        if (failures.length > 0) throw new AggregateError(failures, 'native task subscription disposal failed')
+      })
+      for (const controller of invocations.keys()) controller.abort()
+      for (const unsubscribe of jobSubscriptions.values()) {
+        try { unsubscribe() } catch (error) { failures.push(error) }
+      }
+      jobSubscriptions.clear()
+      return disposal
+    },
+  }
+}

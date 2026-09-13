@@ -1,6 +1,17 @@
 import { expect, it, vi } from 'vitest'
 import type { SubprocessTerminalHandle } from '@deepseek-ai/dsh-subprocess'
 import { retryForegroundSignal } from '../src/terminal-signal.ts'
+import { readFileSync } from 'node:fs'
+import { runInNewContext } from 'node:vm'
+import { load } from 'js-yaml'
+
+it.each(['darwin', 'linux'])('bounds %s polling cost without weakening the silence guard', platform => {
+  const patch = load(readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8').replace(/!!js\b/g, '')) as Array<{ insert?: Array<{ id: string; config?: Record<string, string> }> }>
+  const config = patch.flatMap(row => row.insert ?? []).find(row => row.id === 'terminal-bash')!.config!
+  expect(runInNewContext(config.pollIntervalMs!, { process: { platform } }, { timeout: 100 })).toBe(platform === 'darwin' ? 200 : 50)
+  expect(config).not.toHaveProperty('idleSilenceMs')
+  expect(config).not.toHaveProperty('exactProbeAfterMs')
+})
 
 it('reinspects an exited foreground group and preserves the actual successful target', async () => {
   const signal = vi.fn().mockRejectedValueOnce(Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' })).mockResolvedValue(456)

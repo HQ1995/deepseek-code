@@ -1,10 +1,10 @@
 // Read-only installation checks, shared by /doctor and the pre-startup CLI.
 import { spawnSync } from 'node:child_process'
 import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, release } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { validateRuntime } from './update.mjs'
+import { unsupportedPlatformMessage, validateRuntime } from './update.mjs'
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const json = path => JSON.parse(readFileSync(path, 'utf8'))
@@ -36,6 +36,8 @@ export const installationReport = ({
   const pkg = json(join(dir, 'package.json'))
   const expected = pkg.dscode?.release ?? pkg.version
   const repair = `Run dscode update --version ${expected} --force-reinstall, then restart dscode.`
+  add('INFO', 'Host', `${process.platform} ${release()} · Node ${process.versions.node} (${process.arch}) · ${process.execPath}`)
+  if (process.platform === 'darwin' && process.arch === 'x64') add('WARN', 'macOS architecture', unsupportedPlatformMessage())
   add('INFO', 'Bridge', `${pkg.version} · ${dir}`)
   check('Installed bridge', () => {
     const installed = json(join(profile, 'node_modules', ...pkg.name.split('/'), 'package.json'))
@@ -63,7 +65,7 @@ export const installationReport = ({
     } else {
       check('Runtime provenance', () => {
         validateRuntime(runtime, pkg)
-        return `${pkg.dsh.sourceCommit} · ${process.platform}/${process.arch} · native artifacts verified`
+        return `${pkg.dsh.sourceCommit} · ${process.platform}/${process.arch} · declared native files present (not a load/PTY smoke test)`
       }, repair)
     }
   }
@@ -72,8 +74,14 @@ export const installationReport = ({
     add(missing.length ? 'INFO' : 'OK', 'Shipped LSP preset', missing.length
       ? `Optional dependencies missing: ${missing.join(', ')}. Install typescript-language-server and typescript on PATH before selecting /preset lsp; e.g. npm install -g typescript-language-server typescript. Standard works without them.`
       : 'typescript-language-server and tsc found on PATH; servers start on the first LSP query.')
-    add(executable('/bin/bash') ? 'OK' : 'INFO', 'Shipped terminal preset', executable('/bin/bash')
-      ? '/bin/bash is executable. /doctor in a session also checks the registered PTY backend.'
+    const bash = executable('/bin/bash')
+    let bashVersion = '(version unavailable)'
+    if (bash) {
+      const probe = spawnSync(bash, ['--version'], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' }, timeout: 1000, maxBuffer: 65536 })
+      if (probe.status === 0) bashVersion = /^GNU bash, version (\S+)/m.exec(probe.stdout)?.[1] ?? bashVersion
+    }
+    add(bash ? 'OK' : 'INFO', 'Shipped terminal preset', bash
+      ? `/bin/bash ${bashVersion} · profile-free bash, not the login shell${process.env.SHELL ? ` (${process.env.SHELL})` : ''}. /doctor in a session also checks the registered PTY backend.`
       : 'Optional shell /bin/bash is missing. Install bash or configure terminal-bash.shellPath in the profile.')
   }
   return findings

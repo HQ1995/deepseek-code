@@ -21,7 +21,7 @@ export type GrokSessionUpdate =
     | { sessionUpdate: 'agent_message_chunk'; content: { type: 'text'; text: string } }
     | { sessionUpdate: 'agent_thought_chunk'; content: { type: 'text'; text: string } }
     | { sessionUpdate: 'tool_call'; toolCallId: string; title: string; kind: ToolKindWire; status: 'in_progress'; rawInput?: unknown }
-    | { sessionUpdate: 'tool_call_update'; toolCallId: string; status: 'completed' | 'error'; content?: Array<ToolResultContentBlock>; rawOutput?: unknown; error?: { name: string; code: string } }
+    | { sessionUpdate: 'tool_call_update'; toolCallId: string; status: 'completed' | 'failed'; content?: Array<ToolResultContentBlock>; rawOutput?: unknown; error?: { name: string; code: string } }
     | { sessionUpdate: 'plan'; entries: Array<{ content: string; priority: string; status: string }> }
 /** Non-rendering usage facts carried beside one session update. */
 export type ProjectedUpdate = GrokSessionUpdate & {
@@ -346,7 +346,7 @@ export function sessionEventToUpdates(
       return [{
         sessionUpdate: 'tool_call_update',
         toolCallId: callId,
-        status: event.data.error === undefined ? 'completed' : 'error',
+        status: event.data.error === undefined ? 'completed' : 'failed',
         ...contents.length > 0 ? { content: contents } : {},
         ...rawOutput === undefined ? {} : { rawOutput },
         ...event.data.error === undefined ? {} : { error: { name: event.data.error.name, code: event.data.error.code } },
@@ -381,7 +381,7 @@ export function sessionEventToUpdates(
       return [{
         sessionUpdate: 'tool_call_update',
         toolCallId: callId,
-        status: event.data.isError ? 'error' : 'completed',
+        status: event.data.isError ? 'failed' : 'completed',
         ...contents.length > 0 ? { content: contents } : {},
         ...rawOutput === undefined ? {} : { rawOutput },
       }]

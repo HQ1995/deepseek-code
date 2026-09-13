@@ -8,6 +8,12 @@ const text = message => typeof message.content === 'string' ? message.content :
   (message.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')
 const terminalId = results => text(results[0] ?? {}).match(/started terminal session (\S+)/)?.[1]
 
+export function processHasExited(pid, kill = process.kill) {
+  assert.ok(Number.isSafeInteger(pid) && pid > 1, 'Expected an owned child PID')
+  try { kill(pid, 0); return false }
+  catch (error) { if (error.code === 'ESRCH') return true; throw error }
+}
+
 export function archiveTerminalReply(body) {
   const messages = body.messages ?? []
   const start = messages.findLastIndex(message => message.role === 'user' && text(message) !== 'Attached image(s) from tool result:')
@@ -178,7 +184,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
     if (!/PTY backend[\s\S]*shell backend registered/.test(screen)) await key('NPage')
     return screen
   }, screen => /PTY backend[\s\S]*shell backend registered/.test(screen), 'polish-doctor-report', 40000)
-  assert.match(doctor, /Runtime provenance[\s\S]*native artifacts verified/)
+  assert.match(doctor, /Runtime provenance[\s\S]*declared native files present \(not a load\/PTY smoke test\)/)
   assert.match(doctor, /Shipped LSP preset[\s\S]*resolve in the execution host/)
   assert.equal((await readRequests()).length, modelCalls, '/doctor must not call the model')
   await artifact('polish-doctor', { screen: doctor })
@@ -219,10 +225,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
   await waitState(value => value.status === 'idle', 'polish-terminal-parent-idle')
   await restart()
   assert.equal((await state()).terminals.length, 0, 'A fresh runtime must not resurrect old PTYs')
-  await waitFor(async () => {
-    try { await stat(`/proc/${terminal.pid}`); return false }
-    catch (error) { if (error.code === 'ENOENT') return true; throw error }
-  }, Boolean, 'owned-pty-reaped')
+  await waitFor(() => processHasExited(terminal.pid), Boolean, 'owned-pty-reaped')
   await artifact('terminal-cleanup', { pid: terminal.pid, terminalId: terminal.sessionId, reaped: true, state: await state() })
   return { archive: JSON.parse(inspect.stdout), terminal: { sessionId: (await state()).id, repl: true, taskPreview: true, modelOutputIntact: true, ownerIsolation: true, interrupted: true, userControls: true, runtimeDoctor: true, reapedPid: terminal.pid } }
 }

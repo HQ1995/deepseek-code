@@ -69,7 +69,7 @@ it('renders PTC sub-dispatches as their own rows in live and replayed transcript
 it('keeps failed sub-calls errors and gives nested edits their diff block', () => {
   const failed = { type: 'tool/ptc-dispatch', time: 10, data: { rootCallId: 'code', parentCallId: 'code', subCallId: 'code:ptc:2', name: 'read', arguments: { path: 'missing.txt' }, isError: true, content: [{ type: 'text', text: 'ENOENT: no such file' }] } } as unknown as SessionEvent
   expect(sessionEventToUpdates(failed, { replay: false })).toMatchObject([{
-    status: 'error', toolCallId: 'code:ptc:2', content: [{ content: { text: 'ENOENT: no such file' } }],
+    status: 'failed', toolCallId: 'code:ptc:2', content: [{ content: { text: 'ENOENT: no such file' } }],
   }])
   const editArgs = { file_path: '/w/a.txt', old_string: 'a', new_string: 'b' }
   const edit = { type: 'tool/ptc-dispatch', time: 20, data: { rootCallId: 'code', parentCallId: 'code', subCallId: 'code:ptc:3', name: 'edit', arguments: editArgs, isError: false, content: [{ type: 'text', text: 'edited' }] } } as unknown as SessionEvent

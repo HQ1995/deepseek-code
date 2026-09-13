@@ -126,6 +126,12 @@ command -v typescript-language-server >/dev/null 2>&1 \
 DSH_VERSION="$("$NODE_BIN" -p "require('$ROOT/bridge/grok-leader/package.json').dsh.testedVersion")"
 
 mkdir -p "$OUT" "$SCRATCH" "$SCRATCH/e2e-bin" "$SCRATCH/fixture-plugin"
+if [[ "$(uname -s)" == Darwin ]]; then
+  # A HOME/tmux sandbox does not isolate NSPasteboard. Disable native content
+  # reads and route CLI fallbacks/copies to a private fixture; retain OSC8 tests.
+  export GROK_CLIPBOARD_NO_NATIVE_READ=1 GROK_CLIPBOARD_NO_OSC52=1
+  "$NODE_BIN" "$ROOT/scripts/e2e-macos-clipboard.mjs" "$SCRATCH/e2e-bin"
+fi
 mkdir -p "$SCRATCH/dsc-tui"
 cat >"$SCRATCH/dsc-tui/config.toml" <<'EOF'
 [ui]

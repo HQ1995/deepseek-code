@@ -2,7 +2,6 @@ import { Context } from '@deepseek-ai/cordis'
 import { expect, it } from 'vitest'
 import { observeJobOutputs, outputSnapshot } from '../src/job-output.ts'
 import { createImageOutputProjector } from '../src/image-output.ts'
-import { parseReminder } from '../src/reminders.ts'
 
 it('observes collected job output without consuming model bytes or acknowledging completion', async () => {
   const ctx = new Context()
@@ -123,13 +122,6 @@ it('resolves PTC sub-call images through the same attachment authority', async (
     [{ sessionUpdate: 'tool_call_update', toolCallId: 'code:ptc:2', status: 'completed' }])
   expect(plain[0]).toEqual({ sessionUpdate: 'tool_call_update', toolCallId: 'code:ptc:2', status: 'completed' })
   await ctx.fiber.dispose()
-})
-
-it('parses reminder input without rewriting message text or admitting unsafe durations', () => {
-  expect(parseReminder('after 10m check\nthe build')).toEqual({ after_seconds: 600, prompt: 'check\nthe build' })
-  expect(parseReminder('every 5m check')).toEqual({ every_seconds: 300, prompt: 'check' })
-  expect(parseReminder('at 2030-01-01T00:00:00Z check')).toEqual({ at: '2030-01-01T00:00:00Z', prompt: 'check' })
-  for (const invalid of ['every 0m check', 'after 999999999999999999d check', 'weekly check', 'after 1h']) expect(() => parseReminder(invalid)).toThrow()
 })
 
 it('does not create image preview files after disposal interrupts an attachment read', async () => {

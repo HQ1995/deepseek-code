@@ -1899,6 +1899,37 @@ describe('grok leader over a unix socket', () => {
     expect(listDescendants.mock.calls.length - baseline).toBe(2)
   })
 
+  it('discovers workflow children published after early lifecycle and membership events', async () => {
+    const rows: Array<{ kind: string; id: string; mode: string }> = []
+    const listDescendants = vi.fn(async () => [...rows])
+    const { registry, pluginCtx, client: c } = await start({ subagents: { listDescendants, interrupt() {} } })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const parent = registry.byId.get((created.result as { sessionId: string }).sessionId)!
+    await new Promise<void>(resolve => setImmediate(resolve))
+    const before = listDescendants.mock.calls.length
+    pluginCtx.emit('subagent/start', { id: 'workflow-child' } as never)
+    await waitFor(() => listDescendants.mock.calls.length > before)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(c.all.some(msg => JSON.stringify(msg).includes('subagent_spawned'))).toBe(false)
+    parent.session.append('tool-workflow/run-start', { runId: 'run', name: 'review' } as never)
+    const event = parent.session.append('tool-workflow/agent-start', { runId: 'run', seq: 1, childId: 'workflow-child', label: 'Reader' } as never)
+    pluginCtx.emit('session/event', parent.session, event as never)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(c.all.some(msg => JSON.stringify(msg).includes('workflow_updated'))).toBe(false)
+    await registry.create({ sessionId: SessionId('workflow-child'), meta: {} })
+    rows.push({ kind: 'child', id: 'workflow-child', mode: 'one-shot' })
+    // No further host-visible lifecycle edge: only reconciliation can find it.
+    const spawned = await waitForNotification(() => c.all.find(msg => JSON.stringify(msg).includes('subagent_spawned')))
+    expect(JSON.stringify(spawned)).toContain('workflow-child')
+    const workflow = await waitForNotification(() => c.all.find(msg => JSON.stringify(msg).includes('workflow_updated')))
+    expect(JSON.stringify(workflow)).toContain('workflow-child')
+    expect(c.all.indexOf(spawned)).toBeLessThan(c.all.indexOf(workflow))
+    const discovered = listDescendants.mock.calls.length
+    await new Promise(resolve => setTimeout(resolve, 600))
+    expect(listDescendants.mock.calls.length).toBe(discovered)
+  })
+
   it('refreshes picker metadata after an external durable revision changes', async () => {
     const { persistence, client: c } = await start()
     register(c); await c.next()
@@ -2317,6 +2348,36 @@ describe('grok leader over a unix socket', () => {
     })
     expect(resumedSwitch.error).toBeUndefined()
     expect(mockDefaultModel.saved).toEqual([{ provider: 'ocx', model: 'deepseek-v4-flash' }])
+  })
+
+  it('session/close drains an accepted model default write before disposing the native agent', async () => {
+    const { registry, client: c } = await start()
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    let release!: () => void, entered = false
+    const held = new Promise<void>(resolve => { release = resolve })
+    const save = mockDefaultModel.saveSelection
+    const spy = vi.spyOn(mockDefaultModel, 'saveSelection').mockImplementation(async selection => {
+      entered = true; await held; await save(selection)
+    })
+    try {
+      sendRequest(c, 2, 'session/set_model', { sessionId, modelId: 'pi-code' })
+      await waitFor(() => entered)
+      const notifications = c.all.length
+      sendRequest(c, 3, 'session/close', { sessionId })
+      await c.request(99, 'initialize', {})
+      expect(agent.internals.disposed).toBe(false)
+      expect(c.all.some(message => message.id === 3)).toBe(false)
+      release()
+      const replies = await collectIds(c, [2, 3])
+      expect(replies.get(2)?.error).toMatchObject({ code: -32602, message: 'session closed' })
+      expect(replies.get(3)?.error).toBeUndefined()
+      expect(agent.internals.disposed).toBe(true)
+      expect(mockSessionsStore.flushed).toContain(agent.session)
+      expect(c.all.slice(notifications).some(message => message.method === 'x.ai/models/update')).toBe(false)
+    } finally { release(); spy.mockRestore() }
   })
 
   it('reports the saved reasoning effort on the current model in models/list', async () => {
@@ -2924,6 +2985,72 @@ describe('grok leader over a unix socket', () => {
     expect(live.internals.disposed).toBe(false)
   })
 
+  it('rejects input during reload flush and preserves a usable owner after that flush fails', async () => {
+    let entered = false, release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    let fail = true
+    const sessionsStore = { flush: async () => { if (fail) { entered = true; await held; fail = false; throw new Error('reload storage failed') } } }
+    const setPermission = vi.fn(), setPlan = vi.fn()
+    const { registry, client: c } = await start({ sessionsStore, permissionPresets: { set: setPermission }, planMode: { set: setPlan } })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    try {
+      sendRequest(c, 2, 'session/load', { sessionId, cwd: process.cwd(), mcpServers: [] })
+      await waitFor(() => entered)
+      for (const [id, method, payload] of [
+        [3, 'session/prompt', { prompt: [{ type: 'text', text: 'during reload' }] }],
+        [4, 'x.ai/interject', { text: 'during reload' }],
+        [5, 'session/set_model', { modelId: 'pi-code' }],
+        [7, 'session/set_mode', { modeId: 'plan' }],
+      ] as const) {
+        expect((await c.request(id, method, { sessionId, ...payload })).error).toMatchObject({ code: -32602, message: 'session is already reloading' })
+      }
+      c.notify('x.ai/yolo_mode_changed', { sessionId, permission_mode: 'always-approve', yolo_mode: true })
+      await c.request(8, 'initialize', {}) // Same socket: notification has been dispatched.
+      expect(setPermission).not.toHaveBeenCalled(); expect(setPlan).not.toHaveBeenCalled()
+      expect(agent.internals.disposed).toBe(false)
+      expect(agent.internals.followups).toEqual([]); expect(agent.internals.steered).toEqual([])
+      release()
+      expect((await waitForId(c, 2)).error).toMatchObject({ code: -32603, message: expect.stringContaining('reload storage failed') })
+      expect(registry.byId.get(sessionId)).toBe(agent)
+      expect((await c.request(6, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'after failure' }] })).error).toBeUndefined()
+      expect(agent.internals.followups).toEqual(['after failure'])
+      c.notify('x.ai/yolo_mode_changed', { sessionId, permission_mode: 'always-approve', yolo_mode: true })
+      await waitFor(() => setPermission.mock.calls.length === 1)
+      expect(setPermission).toHaveBeenCalledWith(agent.session, 'danger-full-access')
+    } finally { release() }
+  })
+
+  it('settles an accepted model write before reload preflight and retains the selection in the resumed agent', async () => {
+    const { registry, client: c } = await start()
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    let entered = false, release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    const save = mockDefaultModel.saveSelection
+    const spy = vi.spyOn(mockDefaultModel, 'saveSelection').mockImplementation(async selection => { entered = true; await held; await save(selection) })
+    const idle = vi.spyOn(agent, 'whenIdle')
+    try {
+      sendRequest(c, 2, 'session/set_model', { sessionId, modelId: 'pi-code' })
+      await waitFor(() => entered)
+      sendRequest(c, 3, 'session/load', { sessionId, cwd: process.cwd(), mcpServers: [] })
+      await c.request(99, 'initialize', {})
+      await waitFor(() => agent.internals.cancelCalls > 0)
+      expect(idle).not.toHaveBeenCalled()
+      expect(agent.internals.disposed).toBe(false)
+      expect(c.all.some(message => message.id === 3)).toBe(false)
+      release()
+      const replies = await collectIds(c, [2, 3])
+      expect(replies.get(2)?.error).toBeUndefined(); expect(replies.get(3)?.error).toBeUndefined()
+      expect(agent.internals.disposed).toBe(true)
+      expect(registry.byId.get(sessionId)?.options).toMatchObject({ provider: 'pi', model: 'pi-code' })
+    } finally { release(); spy.mockRestore(); idle.mockRestore() }
+  })
+
   it('refuses to switch a persisted preset after the session has history', async () => {
     const { registry, persistence, presets, client: c } = await start({ presets: true })
     persistence.events.push({
@@ -2973,6 +3100,69 @@ describe('grok leader over a unix socket', () => {
       data: { agentPreset: 'minimal' },
     })
     expect(registry.byId.get(sessionId)?.internals.followups).toEqual([])
+  })
+
+  it('blocks new prompts and interjections while a preset recompose is pending', async () => {
+    const setPermission = vi.fn()
+    const { registry, pluginCtx, client: c } = await start({ presets: true, permissionPresets: { set: setPermission } })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const roster = pluginCtx.get('agentPresets')!
+    let release!: () => void, entered = false
+    const held = new Promise<void>(resolve => { release = resolve })
+    const recompose = roster.recompose.bind(roster)
+    const spy = vi.spyOn(roster, 'recompose').mockImplementation(async (ctx, id) => { entered = true; await held; return recompose(ctx, id) })
+    try {
+      sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/preset minimal' }] })
+      await waitFor(() => entered)
+      for (const [id, method, payload] of [
+        [3, 'session/prompt', { prompt: [{ type: 'text', text: 'do not admit yet' }] }],
+        [4, 'x.ai/interject', { text: 'do not steer yet' }],
+        [5, 'x.ai/goal', { prompt: [{ type: 'text', text: '/goal do not start yet' }] }],
+        [6, 'x.ai/btw', { question: 'do not delegate yet' }],
+        [7, 'session/set_mode', { modeId: 'plan' }],
+      ] as const) {
+        const reply = await c.request(id, method, { sessionId, ...payload })
+        expect(reply.error).toMatchObject({ code: -32602, message: 'agent-preset-locked: a preset change is in progress' })
+      }
+      expect(agent.internals.followups).toEqual([])
+      expect(agent.internals.steered).toEqual([])
+      c.notify('x.ai/yolo_mode_changed', { sessionId, permission_mode: 'always-approve' })
+      await c.request(8, 'initialize', {})
+      expect(setPermission).not.toHaveBeenCalled()
+      release()
+      expect((await waitForId(c, 2)).error).toBeUndefined()
+    } finally { release(); spy.mockRestore() }
+  })
+
+  it('session/close drains an accepted preset default write before native disposal', async () => {
+    let release!: () => void, entered = false
+    const held = new Promise<void>(resolve => { release = resolve })
+    const settings = { mutate: async () => { entered = true; await held } }
+    const { registry, client: c } = await start({ presets: true, settings })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    try {
+      sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/preset minimal' }] })
+      await waitFor(() => entered)
+      const notifications = c.all.length
+      sendRequest(c, 3, 'session/close', { sessionId })
+      await c.request(99, 'initialize', {})
+      expect(agent.internals.disposed).toBe(false)
+      expect(c.all.some(message => message.id === 3)).toBe(false)
+      release()
+      const replies = await collectIds(c, [2, 3])
+      expect(replies.get(2)?.error).toMatchObject({ code: -32602, message: 'session closed' })
+      expect(replies.get(3)?.error).toBeUndefined()
+      expect(agent.internals.disposed).toBe(true)
+      expect(mockSessionsStore.flushed).toContain(agent.session)
+      expect(c.all.slice(notifications).some(message => message.method === 'session/update'
+        && JSON.stringify(message).includes('Switched to preset'))).toBe(false)
+    } finally { release() }
   })
 
   it('keeps the persisted preset on session/load when no preset is explicitly requested', async () => {
@@ -3217,6 +3407,82 @@ describe('grok leader over a unix socket', () => {
       expect(live).toBe(false)
       expect((await c.request(8, 'x.ai/terminals', { sessionId, terminalId: 'pty-1' })).result).toMatchObject({ items: [] })
     } finally { foreign.socket.destroy() }
+  })
+
+  it('closing a session stops runtime diagnostics before later execution-host lookups and PTY projection', async () => {
+    let release!: () => void, signal: AbortSignal | undefined
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const { ctx, client: c } = await start()
+    const resolveExecutable = vi.fn(async (_command: string, _env: object, received: AbortSignal) => {
+      signal = received; await gate; return '/host/executable'
+    })
+    const listBackends = vi.fn(() => ['shell'])
+    Object.assign(new (class extends Service {})(ctx, 'subprocess'), { resolveExecutable, spawnTerminal: vi.fn() })
+    Object.assign(new (class extends Service {})(ctx, 'terminals'), { listBackends, list: () => [] })
+    try {
+      register(c); await c.next()
+      const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      const sessionId = (created.result as { sessionId: string }).sessionId
+      sendRequest(c, 2, 'x.ai/doctor', { sessionId, tuiVersion: packageVersion })
+      await waitFor(() => signal !== undefined)
+      sendRequest(c, 3, 'session/close', { sessionId })
+      await waitFor(() => signal?.aborted === true)
+      release()
+      const replies = await collectIds(c, [2, 3])
+      expect(replies.get(2)?.error).toMatchObject({ code: -32602 })
+      expect(replies.get(3)?.error).toBeUndefined()
+      expect(resolveExecutable).toHaveBeenCalledOnce()
+      expect(listBackends).not.toHaveBeenCalled()
+    } finally { release() }
+  })
+
+  it.each(['resetToAuto', 'reset_to_auto'])('signals automatic title refresh on session close and waits before flush (%s)', async resetKey => {
+    let release!: () => void, entered = false, signal: AbortSignal | undefined
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const flush = vi.fn(async () => {})
+    const { registry, client: c } = await start({ sessionsStore: { flush }, sessionTitle: {
+      rename: vi.fn(), refresh: async (_session: unknown, received?: AbortSignal) => { entered = true; signal = received; await gate },
+    } })
+    try {
+      register(c); await c.next()
+      const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      const sessionId = (created.result as { sessionId: string }).sessionId, agent = registry.byId.get(sessionId)!
+      sendRequest(c, 2, 'x.ai/session/rename', { sessionId, [resetKey]: true })
+      await waitFor(() => entered)
+      const cancellations = agent.internals.cancelCalls
+      sendRequest(c, 3, 'session/close', { sessionId })
+      await waitFor(() => agent.internals.cancelCalls > cancellations)
+      const aborted = signal?.aborted === true, flushedEarly = flush.mock.calls.length, disposedEarly = agent.internals.disposed
+      release()
+      const replies = await collectIds(c, [2, 3])
+      expect(aborted).toBe(true); expect(flushedEarly).toBe(0); expect(disposedEarly).toBe(false)
+      expect(replies.get(2)?.error).toMatchObject({ code: -32602 })
+      expect(replies.get(3)?.error).toBeUndefined()
+      expect(flush).toHaveBeenCalledOnce(); expect(agent.internals.disposed).toBe(true)
+    } finally { release() }
+  })
+
+  it('drains an accepted reference query before session close releases the native owner', async () => {
+    let release!: () => void, signal: AbortSignal | undefined
+    const gate = new Promise<void>(resolve => { release = resolve }), flush = vi.fn(async () => {})
+    const { ctx, registry, client: c } = await start({ sessionsStore: { flush } })
+    const query = vi.fn(async (_agent: Agent, _query: string, received: AbortSignal) => { signal = received; await gate; return [] })
+    ctx.provide('sessionReferenceResolver', { remoteExportCandidates: query } as never)
+    try {
+      register(c); await c.next()
+      const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      const sessionId = (created.result as { sessionId: string }).sessionId, agent = registry.byId.get(sessionId)!
+      sendRequest(c, 2, 'x.ai/session/references', { sessionId, query: 'needle' })
+      await waitFor(() => signal !== undefined)
+      expect(query).toHaveBeenCalledWith(agent, 'needle', signal)
+      sendRequest(c, 3, 'session/close', { sessionId })
+      await waitFor(() => signal?.aborted === true)
+      expect(flush).not.toHaveBeenCalled(); expect(agent.internals.disposed).toBe(false)
+      release()
+      const replies = await collectIds(c, [2, 3])
+      expect(replies.get(2)?.error).toMatchObject({ code: -32602 }); expect(replies.get(3)?.error).toBeUndefined()
+      expect(flush).toHaveBeenCalledOnce(); expect(agent.internals.disposed).toBe(true)
+    } finally { release() }
   })
 
   it('uses native preset authoring APIs and refuses unowned or shipped edit requests', async () => {
@@ -3886,6 +4152,58 @@ describe('grok leader over a unix socket', () => {
     await waitForId(c, 4)
   })
 
+  it.each([false, true])('passes prototype-named unknown slash commands to the model (native registry: %s)', async withRegistry => {
+    const execute = vi.fn(async () => undefined)
+    const { registry, client: c } = await start(withRegistry ? { commands: { list: () => [], execute } } : {})
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const texts = ['/constructor inspect this', '/__proto__ inspect that']
+    for (const [index, text] of texts.entries()) {
+      const result = await c.request(index + 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text }] })
+      expect(result.error).toBeUndefined()
+      // The turnless model mock settles cancelled at idle, unlike a handled
+      // native command. The exact followups below prove model admission.
+      expect(result.result).toMatchObject({ stopReason: 'cancelled' })
+    }
+    expect(registry.byId.get(sessionId)!.internals.followups).toEqual(texts)
+    expect(execute).toHaveBeenCalledTimes(withRegistry ? 2 : 0)
+  })
+
+  it('coalesces registry changes across a delayed skill read before advertising over the socket', async () => {
+    let release!: () => void, entered = false, name = 'initial'
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const list = vi.fn(async () => [] as Array<{ name: string; description: string }>)
+    const { ctx, client: c } = await start({
+      commands: { list: () => [{ name, description: name }], execute: async () => undefined },
+      skills: { list },
+    })
+    const advertisements = () => c.all.flatMap(message => {
+      const params = message.params as { sessionId: string; update?: { sessionUpdate?: string; availableCommands?: Array<{ name: string }> } } | undefined
+      return message.method === 'session/update' && params?.update?.sessionUpdate === 'available_commands_update' ? [params] : []
+    })
+    try {
+      register(c); await c.next()
+      const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      expect(created.error).toBeUndefined()
+      await waitFor(() => advertisements().some(params => params.update?.availableCommands?.some(command => command.name === 'initial')))
+      const before = advertisements().length
+      list.mockImplementationOnce(async () => { entered = true; await gate; return [] })
+      name = 'stale'
+      ctx.emit('commands/change' as never)
+      await waitFor(() => entered)
+      name = 'fresh'
+      ctx.emit('commands/change' as never); ctx.emit('skills/change' as never)
+      release()
+      await waitFor(() => advertisements().some(params => params.update?.availableCommands?.some(command => command.name === 'fresh')))
+      const updates = advertisements().slice(before)
+      expect(updates).toHaveLength(1)
+      expect(updates[0]!.update?.availableCommands?.map(command => command.name)).toEqual(['dsh', 'subagents', 'fresh'])
+      expect(updates[0]).not.toHaveProperty('eventSeq'); expect(updates[0]).not.toHaveProperty('promptId')
+      expect(list).toHaveBeenCalledTimes(3)
+    } finally { release() }
+  })
+
   it('executes x.ai/goal immediately beside a held model prompt and queued prompt without settling or notifying either', async () => {
     const execute = vi.fn(async (_agent: Agent, _line: string, _images: unknown[], _signal: AbortSignal) => ({
       commandId: 'native-goal', result: { kind: 'success', text: 'native goal updated' },
@@ -4148,6 +4466,139 @@ describe('grok leader over a unix socket', () => {
     expect((await waitForId(c, 3)).result).toEqual({ result: { kind: 'success', text: 'native completed after cancel' } })
     expect(signal.aborted).toBe(false)
     expect(agent.internals.followups).toEqual(['held'])
+  })
+
+  it.each([
+    ['x.ai/goal', '/goal status'], ['session/prompt', '/guard'],
+  ])('session/close drains an accepted %s command before final flush without blocking another session', async (method, line) => {
+    let release!: () => void, signal: AbortSignal | undefined
+    const held = new Promise<void>(resolve => { release = resolve }), order: string[] = []
+    const flush = vi.fn(async () => { order.push('flush') })
+    const execute = vi.fn(async (_agent: Agent, _line: string, _images: unknown, accepted: AbortSignal) => {
+      signal = accepted; await held; order.push('native finished')
+      return { result: { kind: 'success', text: 'late command result' } }
+    })
+    const { registry, client: c } = await start({ commands: { list: () => [], execute }, sessionsStore: { flush } })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId, agent = registry.byId.get(sessionId)!
+    flush.mockClear(); order.length = 0
+    try {
+      sendRequest(c, 2, method, { sessionId, prompt: [{ type: 'text', text: line }] })
+      await waitFor(() => signal !== undefined)
+      sendRequest(c, 3, 'session/close', { sessionId })
+      await waitFor(() => signal?.aborted === true)
+      expect(flush).not.toHaveBeenCalled(); expect(agent.internals.disposed).toBe(false)
+      expect((await c.request(4, 'session/new', { cwd: process.cwd(), mcpServers: [] })).error).toBeUndefined()
+      expect(c.all.some(message => message.id === 3)).toBe(false)
+      release()
+      const replies = await collectIds(c, [2, 3])
+      expect(replies.get(2)?.error).toMatchObject({ code: -32602, message: 'session closed' })
+      expect(replies.get(3)?.error).toBeUndefined()
+      expect(order.indexOf('native finished')).toBeLessThan(order.indexOf('flush'))
+      expect(agent.internals.disposed).toBe(true)
+    } finally { release() }
+  })
+
+  it('reload drains an unknown slash lookup and prevents its late fallback from becoming model input', async () => {
+    let release!: () => void, signal: AbortSignal | undefined, fail = true
+    const held = new Promise<void>(resolve => { release = resolve }), order: string[] = []
+    const flush = vi.fn(async () => { order.push('flush'); if (fail) { fail = false; throw new Error('reload flush failed') } })
+    const execute = vi.fn(async (_agent: Agent, _line: string, _images: unknown, accepted: AbortSignal) => {
+      signal = accepted; await held; order.push('lookup finished'); return undefined
+    })
+    const { registry, client: c } = await start({ commands: { list: () => [], execute }, sessionsStore: { flush } })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId, agent = registry.byId.get(sessionId)!
+    try {
+      sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/unknown held' }] })
+      await waitFor(() => signal !== undefined)
+      sendRequest(c, 3, 'session/load', { sessionId, cwd: process.cwd(), mcpServers: [] })
+      await waitFor(() => signal?.aborted === true)
+      expect(flush).not.toHaveBeenCalled(); expect(agent.internals.disposed).toBe(false)
+      release()
+      const replies = await collectIds(c, [2, 3])
+      expect(replies.get(2)?.error).toMatchObject({ code: -32602 })
+      expect(replies.get(3)?.error).toMatchObject({ code: -32603, message: expect.stringContaining('reload flush failed') })
+      expect(order).toEqual(['lookup finished', 'flush'])
+      expect(agent.internals.followups).toEqual([])
+      expect(registry.byId.get(sessionId)).toBe(agent)
+      expect((await c.request(4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'recovered' }] })).error).toBeUndefined()
+      expect(agent.internals.followups).toEqual(['recovered'])
+    } finally { release() }
+  })
+
+  it('close releases an already-returned btw handle while its result is still pending', async () => {
+    let releaseResult!: () => void, releaseDispose!: () => void
+    let signal: AbortSignal | undefined, disposing = false
+    const result = new Promise<{ output: Array<{ type: string; text: string }>; stopReason: string }>(resolve => {
+      releaseResult = () => { resolve({ output: [], stopReason: 'cancelled' }) }
+    })
+    const disposal = new Promise<void>(resolve => { releaseDispose = resolve })
+    const dispose = vi.fn(async () => { disposing = true; await disposal })
+    const flush = vi.fn(async () => {})
+    const { registry, client: c } = await start({
+      tools: { schemas: () => [{ name: 'subagent' }] }, sessionsStore: { flush },
+      subagents: { list: () => ['spawn'], start: async (_provider: string, request: { signal: AbortSignal }) => {
+        signal = request.signal; return { result, dispose }
+      } },
+    })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId, agent = registry.byId.get(sessionId)!
+    try {
+      sendRequest(c, 2, 'x.ai/btw', { sessionId, question: 'held result' })
+      await waitFor(() => signal !== undefined)
+      sendRequest(c, 3, 'session/close', { sessionId })
+      await waitFor(() => signal?.aborted === true)
+      // A same-socket dispatch barrier, not a sleep-based assertion.
+      await c.request(4, 'x.ai/session/info', { sessionId })
+      const releasedBeforeResult = disposing
+      expect(flush).not.toHaveBeenCalled(); expect(agent.internals.disposed).toBe(false)
+      releaseResult(); await waitFor(() => disposing)
+      expect(flush).not.toHaveBeenCalled(); expect(c.all.some(message => message.id === 3)).toBe(false)
+      releaseDispose()
+      const replies = await collectIds(c, [2, 3])
+      expect(replies.get(2)?.error).toMatchObject({ code: -32602 })
+      expect(replies.get(3)?.error).toBeUndefined()
+      expect(flush).toHaveBeenCalledOnce(); expect(agent.internals.disposed).toBe(true)
+      expect(releasedBeforeResult).toBe(true); expect(dispose).toHaveBeenCalledOnce()
+    } finally { releaseResult(); releaseDispose() }
+  })
+
+  it('close releases a late btw handle before parent flush without waiting for its cancelled result', async () => {
+    let releaseStart!: () => void, releaseDispose!: () => void, rejectResult!: (error: unknown) => void
+    let signal: AbortSignal | undefined, disposing = false
+    const starting = new Promise<void>(resolve => { releaseStart = resolve })
+    const disposal = new Promise<void>(resolve => { releaseDispose = resolve })
+    const result = new Promise<never>((_resolve, reject) => { rejectResult = reject })
+    const flush = vi.fn(async () => {})
+    const { registry, client: c } = await start({
+      tools: { schemas: () => [{ name: 'subagent' }] }, sessionsStore: { flush },
+      subagents: { list: () => ['spawn'], start: async (_provider: string, request: { signal: AbortSignal }) => {
+        signal = request.signal; await starting
+        return { result, dispose: async () => { disposing = true; await disposal } }
+      } },
+    })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId, agent = registry.byId.get(sessionId)!
+    try {
+      sendRequest(c, 2, 'x.ai/btw', { sessionId, question: 'held question' })
+      await waitFor(() => signal !== undefined)
+      sendRequest(c, 3, 'session/close', { sessionId })
+      await waitFor(() => signal?.aborted === true)
+      expect(flush).not.toHaveBeenCalled(); expect(agent.internals.disposed).toBe(false)
+      releaseStart(); await waitFor(() => disposing)
+      expect(flush).not.toHaveBeenCalled(); expect(c.all.some(message => message.id === 3)).toBe(false)
+      releaseDispose()
+      const replies = await collectIds(c, [2, 3])
+      expect(replies.get(2)?.error).toMatchObject({ code: -32602 })
+      expect(replies.get(3)?.error).toBeUndefined()
+      expect(flush).toHaveBeenCalledOnce(); expect(agent.internals.disposed).toBe(true)
+      rejectResult(new Error('late cancelled result'))
+    } finally { releaseStart(); releaseDispose() }
   })
 
   it('discovers and executes the preset-scoped dsh compact command', async () => {
@@ -4803,7 +5254,7 @@ describe('grok leader over a unix socket', () => {
       limit: 20,
       includeContent: true,
     })
-    expect(searchSessions).toHaveBeenCalledWith({ query: 'needle', limit: 20 })
+    expect(searchSessions).toHaveBeenCalledWith({ query: 'needle', limit: 20 }, { signal: expect.any(AbortSignal) })
     expect(searched.result).toEqual({
       results: [{
         sessionId: 'matched-session',
@@ -4824,7 +5275,7 @@ describe('grok leader over a unix socket', () => {
       query: 'needle',
       limit: 20,
       cursor: 'cursor-2',
-    })
+    }, { signal: expect.any(AbortSignal) })
   })
 
   it('x.ai/session/list resolves an exact id outside the launch cwd', async () => {
@@ -4967,6 +5418,46 @@ describe('grok leader over a unix socket', () => {
     expect(replayUpdates).toHaveLength(5)
   })
 
+  it.each(['session/new', 'session/load', 'x.ai/session/fork'])('%s finishes child/workflow snapshots before its response', async method => {
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    const listDescendants = vi.fn(async () => {
+      await held
+      return [{ kind: 'child', id: 'restored-child', mode: 'continuable' }]
+    })
+    const { registry, client: c } = await start({ subagents: { listDescendants, interrupt() {} } })
+    await registry.create({ sessionId: SessionId('restored-child'), meta: {} })
+    const operation = method === 'session/load' ? 'resume' : 'create'
+    const original = registry[operation].bind(registry)
+    vi.spyOn(registry, operation).mockImplementation(async options => {
+      const handle = await original(options)
+      handle.agent.session.append('tool-workflow/run-start', { runId: 'restored-run', name: 'review' } as never)
+      handle.agent.session.append('tool-workflow/agent-start', { runId: 'restored-run', seq: 0, childId: 'restored-child', label: 'worker' } as never)
+      return handle
+    })
+    register(c); await c.next()
+    const params = method === 'x.ai/session/fork'
+      ? { sourceSessionId: 'persisted-session', newCwd: '/tmp/proj' }
+      : { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [] }
+    sendRequest(c, 1, method, params)
+    try {
+      await waitFor(() => listDescendants.mock.calls.length > 0)
+      // A separate request proves the socket is still responsive and drains
+      // any prematurely emitted lifecycle response before this assertion.
+      await c.request(99, 'initialize', {})
+      expect(c.all.some(message => message.id === 1)).toBe(false)
+    } finally { release() }
+    expect((await waitForId(c, 1)).error).toBeUndefined()
+    const kind = (message: Record<string, unknown>) => (message.params as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate
+    const child = c.all.findIndex(message => kind(message) === 'subagent_spawned')
+    const workflow = c.all.findIndex(message => kind(message) === 'workflow_updated')
+    const response = c.all.findIndex(message => message.id === 1)
+    expect(child).toBeGreaterThanOrEqual(0)
+    expect(workflow).toBeGreaterThan(child)
+    expect(response).toBeGreaterThan(workflow)
+    expect(c.all[workflow]).toMatchObject({ params: { _meta: { isReplay: true } } })
+  })
+
   it('session/load noReplay rebuilds history without emitting prior transcript updates', async () => {
     const { persistence, client: c } = await start()
     register(c)
@@ -5104,6 +5595,63 @@ describe('grok leader over a unix socket', () => {
     expect(settled).toBe(false)
     c.notify('session/cancel', { sessionId })
     await expect(decision).resolves.toBe('cancelled')
+  })
+
+  it('native cancellation failure cannot strand an already-issued permission request', async () => {
+    const { registry, pluginCtx, client: c } = await start()
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId, agent = registry.byId.get(sessionId)!
+    const waterfall = pluginCtx.waterfall as unknown as (name: string, ...args: unknown[]) => unknown
+    const decision = waterfall('approval/request', { agent, callId: 'cancel-failure', toolName: 'bash' }, async () => 'rejected') as Promise<string>
+    await waitFor(() => c.all.some(message => message.method === 'session/request_permission'))
+    let settled = false
+    void decision.then(() => { settled = true })
+    vi.spyOn(agent, 'cancel').mockImplementationOnce(() => { throw new Error('native cancellation failed') })
+    c.notify('session/cancel', { sessionId })
+    // A later response on the same socket is a barrier after notification
+    // dispatch. Clean up with another cancel even when reviewing old wiring.
+    await c.request(2, 'x.ai/session/info', { sessionId })
+    const settledAfterFirstCancel = settled
+    c.notify('session/cancel', { sessionId })
+    await expect(decision).resolves.toBe('cancelled')
+    expect(settledAfterFirstCancel).toBe(true)
+  })
+
+  it('cancels an individual native human request without cancelling a sibling in the same session', async () => {
+    const { registry, pluginCtx, client: c } = await start()
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId, agent = registry.byId.get(sessionId)!
+    const waterfall = pluginCtx.waterfall as unknown as (name: string, ...args: unknown[]) => Promise<unknown>
+    const abort = new AbortController()
+    const answer = waterfall('user-questions/request', { agent, signal: abort.signal, questions: [{ id: 'q', question: 'Continue?' }] }, async () => ({ answers: [] }))
+    const cancelled = expect(answer).rejects.toMatchObject({ code: 'ASK_CANCELLED' })
+    const decision = waterfall('approval/request', { agent, callId: 'sibling', toolName: 'bash' }, async () => 'rejected')
+    await waitFor(() => c.all.some(m => m.method === 'x.ai/ask_user_question') && c.all.some(m => m.method === 'session/request_permission'))
+    const question = c.all.find(m => m.method === 'x.ai/ask_user_question')!, permission = c.all.find(m => m.method === 'session/request_permission')!
+    abort.abort(); await cancelled
+    c.send({ type: 'acp', payload: JSON.stringify({ id: question.id, result: { outcome: 'accepted', answers: { 'Continue?': ['Yes'] } } }) })
+    c.send({ type: 'acp', payload: JSON.stringify({ id: permission.id, result: { outcome: { outcome: 'selected', optionId: 'allow-once' } } }) })
+    await expect(decision).resolves.toBe('allowed-once')
+    expect(agent.internals.disposed).toBe(false)
+  })
+
+  it('refuses further input after a partial native permission change until the session is reloaded', async () => {
+    const plan = { set: vi.fn() }
+    const { registry, client: c } = await start({ planMode: plan, permissionPresets: { set: vi.fn() } })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId, agent = registry.byId.get(sessionId)!
+    plan.set.mockImplementationOnce(() => { throw new Error('native plan append failed') })
+    c.notify('x.ai/yolo_mode_changed', { sessionId, permission_mode: 'always-approve' })
+    await c.request(2, 'initialize', {})
+    expect((await c.request(3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'must not run' }] })).error)
+      .toMatchObject({ code: -32602, message: expect.stringContaining('permission state is inconsistent') })
+    expect(agent.internals.followups).toEqual([])
+    expect((await c.request(4, 'session/load', { sessionId, cwd: process.cwd(), mcpServers: [] })).error).toBeUndefined()
+    expect(agent.internals.disposed).toBe(true)
+    expect((await c.request(5, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'resumed' }] })).error).toBeUndefined()
   })
 })
 
@@ -6073,7 +6621,8 @@ describe('sessionEventToUpdates tool-result diff fallback', () => {
       name: 'edit',
       arguments: { file_path: '/tmp/a.ts', old_string: 'a', new_string: 'b' },
     })
-    expect((updates[0] as { status: string }).status).toBe('error')
+    // ACP accepts failed, not error; the latter drops the whole result frame.
+    expect((updates[0] as { status: string }).status).toBe('failed')
     expect(diffs(updates)).toEqual([])
   })
 
@@ -6159,7 +6708,7 @@ describe('sessionEventToUpdates tool-result diff fallback', () => {
   })
 })
 
-describe('analyzeBundlePatch (static pre-install patch analysis)', () => {
+describe('shipped composition', () => {
   const analyze = GrokLeader.analyzeBundlePatch
 
   it('mounts native session services before the preset catalog', () => {
@@ -6167,79 +6716,168 @@ describe('analyzeBundlePatch (static pre-install patch analysis)', () => {
     const analysis = analyze(patch)
     expect(analysis.insertedRows).toEqual(['session-reference', 'schedule', 'terminals', 'terminal-bash', 'subagent-model-selection-settings', 'code-runtime', 'agent-presets', 'cordis-host-runner', 'grok-leader'])
   })
-
-  it('classifies inserts, overrides, disables, and flags the security spine', () => {
-    const patch = [
-      '- insert:',
-      '    - id: my-tool',
-      "      name: 'dsh-plugin-mytool'",
-      '    - id: my-service',
-      "      name: 'dsh-plugin-mytool/service'",
-      '    - id: sandbox-policy',
-      "      name: 'dsh-plugin-risky-policy'",
-      '- id: system-prompt',
-      '  config:',
-      '    persona: hacked',
-      '- id: approval',
-      '  disabled: true',
-      '- id: sandbox',
-      '  config:',
-      '    mode: off',
-    ].join('\n')
-    const analysis = analyze(patch)
-    expect(analysis.insertedRows).toEqual(['my-tool', 'my-service', 'sandbox-policy'])
-    expect(analysis.overriddenRows).toEqual(['system-prompt', 'sandbox'])
-    expect(analysis.disabledRows).toEqual(['approval'])
-    // Both the disable AND the config override of spine rows are flagged.
-    expect(analysis.sensitiveRows).toEqual(['sandbox-policy', 'approval', 'sandbox'])
-    expect(analysis.jsExprCount).toBe(0)
-  })
-
-  it('counts !!js expressions (boot-time code) while still parsing the structure', () => {
-    const patch = [
-      '- insert:',
-      '    - id: row-a',
-      "      name: 'pkg-a'",
-      '      config:',
-      '        port: !!js process.env.PORT ?? 3080',
-      '- id: hmr',
-      '  disabled: !!js process.platform === "win32"',
-    ].join('\n')
-    const analysis = analyze(patch)
-    expect(analysis.jsExprCount).toBe(2)
-    expect(analysis.insertedRows).toEqual(['row-a'])
-    // A !!js disabled value is not literal true, so it reads as an override —
-    // the jsExprCount warning covers the ambiguity.
-    expect(analysis.overriddenRows).toEqual(['hmr'])
-  })
-
-  it('throws on the shapes loadProfile refuses (anti-brick gate)', () => {
-    expect(() => analyze('just a scalar')).toThrow(/not a YAML array/)
-    expect(() => analyze('- 42')).toThrow(/not a mapping/)
-    expect(() => analyze('{ not: [valid')).toThrow()
-  })
 })
-
-describe('parseCommandLine', () => {
-  const parse = GrokLeader.parseCommandLine
-
-  it('preserves quoted package paths and escaped whitespace', () => {
-    expect(parse('/dsh add --trust "file:../plugin with spaces" file:plain\\ path')).toEqual([
-      '/dsh',
-      'add',
-      '--trust',
-      'file:../plugin with spaces',
-      'file:plain path',
-    ])
-  })
-
-  it('rejects unterminated quoting instead of changing the package spec', () => {
-    expect(() => parse('/dsh add "file:broken')).toThrow('unterminated quote')
-  })
-})
-
 
 describe('lifecycle boundary regressions', () => {
+  it('host shutdown waits for an accepted provider credential write and its route continuation', async () => {
+    let release!: () => void, started = false
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const mutate = vi.fn(async () => {})
+    const made = await makeHarness({ settings: { mutate }, credentials: {
+      set: async () => { started = true; await gate },
+    } })
+    const client = await makeClient(made.socketPath)
+    try {
+      register(client); await client.next()
+      sendRequest(client, 1, 'x.ai/providers/add', { id: 'held', apiKey: 'fixture-only' })
+      await waitFor(() => started)
+      let closed = false
+      const closing = made.pluginCtx.fiber.dispose().then(() => { closed = true })
+      await waitFor(() => client.socket.destroyed)
+      const closedBeforeWrite = closed
+      release(); await closing
+      expect(closedBeforeWrite).toBe(false)
+      expect(mutate).toHaveBeenCalledWith('llm-pi-ai', [{ op: 'set', path: ['providers', 'held'], value: { apiKeyEnv: 'HELD_API_KEY' } }])
+    } finally { release(); client.socket.destroy(); await made.ctx.fiber.dispose() }
+  })
+
+  it('idle host exit waits for an accepted background model catalog write', async () => {
+    mockAppExit.calls.length = 0
+    let release!: () => void, started = false
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const made = await makeHarness({ idleExitMs: 5,
+      llm: { ...mockLlm,
+        listProviders: () => [{ id: 'custom' }],
+        listModels: async () => [{ id: 'existing', name: 'Existing' }],
+        discoverModels: async () => [{ id: 'discovered' }],
+      },
+      settings: {
+        describe: () => [{ ns: 'llm-pi-ai', user: { providers: { custom: {
+          api: 'openai-completions', baseURL: 'https://fixture.invalid/v1', models: [{ id: 'existing' }],
+        } } } }],
+        mutate: async () => { started = true; await gate },
+      },
+    })
+    const client = await makeClient(made.socketPath)
+    try {
+      register(client); await client.next()
+      await client.request(1, 'initialize', {})
+      await waitFor(() => started)
+      client.socket.destroy()
+      // The existing real-socket idle-exit contract uses a grace observation;
+      // completion still depends on releasing the actual persistence promise.
+      await new Promise(resolve => setTimeout(resolve, 35))
+      const exitedBeforeWrite = mockAppExit.calls.length
+      release(); await waitFor(() => mockAppExit.calls.length === 1)
+      expect(exitedBeforeWrite).toBe(0); expect(mockAppExit.calls).toEqual([0])
+    } finally { release(); client.socket.destroy(); await made.ctx.fiber.dispose() }
+  })
+
+  it('host shutdown drains an accepted terminal close before flushing and disposing its session', async () => {
+    let release!: () => void, entered = false
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const flush = vi.fn(async () => {})
+    const made = await makeHarness({ sessionsStore: { flush } })
+    const list = vi.fn(() => [{ sessionId: 'pty', type: 'shell', status: { kind: 'running' } }])
+    const kill = vi.fn(async () => { entered = true; await gate; return true })
+    Object.assign(new (class extends Service {})(made.ctx, 'terminals'), { list, kill })
+    const client = await makeClient(made.socketPath)
+    try {
+      register(client); await client.next()
+      const created = await client.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      const sessionId = (created.result as { sessionId: string }).sessionId, agent = made.registry.byId.get(sessionId)!
+      sendRequest(client, 2, 'x.ai/terminals', { sessionId, action: 'close', terminalId: 'pty' })
+      await waitFor(() => entered)
+      const closing = made.pluginCtx.fiber.dispose()
+      await waitFor(() => client.socket.destroyed)
+      expect(agent.internals.disposed).toBe(false); expect(flush).not.toHaveBeenCalled()
+      release(); await closing
+      expect(agent.internals.disposed).toBe(true); expect(flush).toHaveBeenCalledOnce()
+      expect(kill).toHaveBeenCalledOnce(); expect(list).toHaveBeenCalledOnce()
+    } finally { release(); client.socket.destroy(); await made.ctx.fiber.dispose() }
+  })
+
+  it.each(['initialize', 'x.ai/commands/list'])('%s without a session keeps shutdown waiting for the accepted preset catalog read', async method => {
+    let release!: () => void, entered = false, completed = false
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const made = await makeHarness({ presets: true })
+    const presets = made.ctx.get('agentPresets')!
+    const list = presets.list.bind(presets)
+    vi.spyOn(presets, 'list').mockImplementation(async () => {
+      entered = true; await gate; const result = await list(); completed = true; return result
+    })
+    const client = await makeClient(made.socketPath)
+    try {
+      register(client); await client.next()
+      sendRequest(client, 1, method, {})
+      await waitFor(() => entered)
+      expect(made.registry.byId.size).toBe(0)
+      let disposed = false
+      const closing = made.pluginCtx.fiber.dispose().then(() => { disposed = true })
+      await waitFor(() => client.socket.destroyed)
+      const disposedEarly = disposed
+      expect(completed).toBe(false)
+      release(); await closing
+      expect(disposedEarly).toBe(false); expect(completed).toBe(true)
+      expect(client.all.some(message => message.id === 1 && message.error === undefined)).toBe(false)
+    } finally { release(); client.socket.destroy(); await made.ctx.fiber.dispose() }
+  })
+
+  it.each(['session/list', 'x.ai/session/list', 'x.ai/sessions/list', 'x.ai/session/search'])('%s without a published session still holds host shutdown until its native read finishes', async method => {
+    let release!: () => void, entered = false, signal: AbortSignal | undefined
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const made = await makeHarness({ sessionQuery: { searchSessions: async (_request: unknown, exec?: { signal?: AbortSignal }) => {
+      signal = exec?.signal; entered = true; await gate; return { items: [] }
+    } } })
+    const list = made.persistence.list.bind(made.persistence)
+    made.persistence.list = async (options?: { signal?: AbortSignal }) => {
+      signal = options?.signal; entered = true; await gate; return list()
+    }
+    const client = await makeClient(made.socketPath)
+    try {
+      register(client); await client.next()
+      sendRequest(client, 1, method, { query: 'needle' })
+      await waitFor(() => entered)
+      expect(made.registry.byId.size).toBe(0)
+      let disposed = false
+      const closing = made.pluginCtx.fiber.dispose().then(() => { disposed = true })
+      await waitFor(() => client.socket.destroyed)
+      const disposedEarly = disposed
+      release(); await closing
+      expect(disposedEarly).toBe(false)
+      expect(signal?.aborted).toBe(true)
+      expect(made.persistence.loaded).toEqual([])
+      expect(client.all.some(message => message.id === 1 && message.error === undefined)).toBe(false)
+    } finally { release(); client.socket.destroy(); await made.ctx.fiber.dispose() }
+  })
+
+  it('host shutdown waits for a picker handle returned after cancellation to close without reading it', async () => {
+    let releaseOpen!: () => void, releaseClose!: () => void, opened = false, closingRead = false, reads = 0
+    const openGate = new Promise<void>(resolve => { releaseOpen = resolve })
+    const closeGate = new Promise<void>(resolve => { releaseClose = resolve })
+    const made = await makeHarness(), open = made.persistence.open.bind(made.persistence)
+    made.persistence.open = async (...args) => {
+      const handle = await open(...args); opened = true; await openGate
+      return { ...handle, read: async () => { reads++; return handle.read() }, close: async () => {
+        closingRead = true; await closeGate; await handle.close()
+      } }
+    }
+    const client = await makeClient(made.socketPath)
+    try {
+      register(client); await client.next()
+      sendRequest(client, 1, 'x.ai/session/list', {})
+      await waitFor(() => opened)
+      let disposed = false
+      const closing = made.pluginCtx.fiber.dispose().then(() => { disposed = true })
+      await waitFor(() => client.socket.destroyed)
+      releaseOpen(); await waitFor(() => closingRead)
+      const disposedEarly = disposed
+      releaseClose(); await closing
+      expect(disposedEarly).toBe(false); expect(reads).toBe(0)
+      expect(made.persistence.closed).toEqual(['persisted-session'])
+    } finally { releaseOpen(); releaseClose(); client.socket.destroy(); await made.ctx.fiber.dispose() }
+  })
+
   it('disposes live agents when shutdown persistence flush fails', async () => {
     let flushes = 0
     const made = await makeHarness({ sessionsStore: { async flush() {

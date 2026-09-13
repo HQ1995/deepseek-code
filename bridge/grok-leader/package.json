@@ -54,9 +54,14 @@
     "@deepseek-ai/dsh-llm": "0.1.5-rc.2",
     "@deepseek-ai/dsh-llm-retry": "0.1.5-rc.2",
     "@deepseek-ai/dsh-mcp-client": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-schedule": "0.1.5-rc.2",
     "@deepseek-ai/dsh-session": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-session-log-export": "0.1.5-rc.2",
     "@deepseek-ai/dsh-session-persistence": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-session-reference": "0.1.5-rc.2",
     "@deepseek-ai/dsh-subagent": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-terminal": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-terminal-bash": "0.1.5-rc.2",
     "@deepseek-ai/dsh-user-approval": "0.1.5-rc.2",
     "@deepseek-ai/dsh-user-questions": "0.1.5-rc.2",
     "@deepseek-ai/schemastery": "3.18.2"
@@ -87,7 +92,12 @@
     "@deepseek-ai/dsh-jobs": "0.1.5-rc.2",
     "@deepseek-ai/dsh-subprocess": "0.1.5-rc.2",
     "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-tool-present": "0.1.5-rc.2"
+    "@deepseek-ai/dsh-tool-present": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-schedule": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-session-log-export": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-session-reference": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-terminal": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-terminal-bash": "0.1.5-rc.2"
   },
   "dsh": {
     "bundle": {
@@ -98,8 +108,6 @@
     "sourceCommit": "fb2c4b9e698e30edb738bca4cf0618587db7d203"
   },
   "dependencies": {
-    "@deepseek-ai/dsh-schedule": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-session-reference": "0.1.5-rc.2",
     "@deepseek-ai/dsh-tool-session-query": "0.1.5-rc.2",
     "js-yaml": "^5.3.0",
     "smol-toml": "1.8.0",
@@ -107,9 +115,6 @@
     "@deepseek-ai/dsh-lsp": "0.1.5-rc.2",
     "@deepseek-ai/dsh-lsp-stdio": "0.1.5-rc.2",
     "@deepseek-ai/dsh-tool-lsp": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-session-log-export": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-terminal": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-terminal-bash": "0.1.5-rc.2",
     "@deepseek-ai/dsh-tool-terminal": "0.1.5-rc.2"
   }
 }

@@ -520,6 +520,13 @@ try {
   }
   const goalUi = {
     send, key, wait, capture, state, waitState, settle, artifact,
+    receivedToolFailure: async name => {
+      const receipt = await waitFor(() => readFile(join(artifacts, `tui-${generation}.log`), 'utf8'), log => {
+        const call = [...log.matchAll(/\[acp\] tool_call id=(\S+)[^\n]* title="([^"]+)"/g)].findLast(match => match[2] === name)
+        return call && log.includes(`tool_call_update id=${call[1]} status=Some(Failed)`)
+      }, 'tui-tool-failure-received')
+      await artifact('tui-tool-failure-received', { name, receipt })
+    },
     restart: async (delay = 0) => { await stop(); if (delay) await settle(delay); await boot(true) },
     captureHistory: () => tmux('capture-pane', '-p', '-S', '-', '-t', `${session}:main.0`),
     releaseModel: async () => {

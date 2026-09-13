@@ -11,6 +11,8 @@ runtime.
 
 Requires macOS Apple Silicon or Linux x86-64, Node.js `>=22.19.0`, npm, and
 GitHub access for the first install.
+On Apple Silicon, use native ARM64 Node (`node -p process.arch` should print
+`arm64`); x64 Node under Rosetta does not select the Mac ARM64 payload.
 
 ```sh
 npx @hqzhao95/dscode

@@ -34,7 +34,7 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { createGunzip } from 'node:zlib'
 import { installationReport, formatInstallationReport } from './doctor.mjs'
-import { compareVersions, installationMatches, installRelease, needsUpdateWithChannel, resolveRelease, saveUpdateChannel, updateOptions, validateRuntime, withProfileLock } from './update.mjs'
+import { compareVersions, installationFilesMatch, installationMatches, installRelease, needsUpdateWithChannel, resolveRelease, saveUpdateChannel, unsupportedPlatformMessage, updateOptions, validateRuntime, withProfileLock } from './update.mjs'
 
 const RELEASE_REPO = 'HQ1995/deepseek-code'
 const here = dirname(fileURLToPath(import.meta.url))
@@ -242,7 +242,8 @@ const reconcileProfileManifest = () => {
   const manifest = readJsonFile(profileManifestPath)
   if (manifest === undefined) throw new Error(`invalid profile manifest: ${profileManifestPath}`)
   const bundles = manifest.dsh?.profile?.bundles ?? ['@deepseek-ai/dsh-base']
-  if (!bundles.includes(pkg.name)) bundles.push(pkg.name)
+  if (bundles.includes(pkg.name)) return
+  bundles.push(pkg.name)
   manifest.dsh = {
     ...manifest.dsh,
     profile: { ...manifest.dsh?.profile, bundles },
@@ -450,7 +451,7 @@ export const uninstallInstallation = () => {
 export const ensureBinary = async () => {
   const asset = assetName()
   if (asset === undefined) {
-    throw new Error(`no prebuilt TUI for ${process.platform}/${process.arch}; build from the repo (scripts/build-deepseek-tui.sh)`)
+    throw new Error(unsupportedPlatformMessage())
   }
   const pinned = pinnedRelease()
   const current = cachedVersion()
@@ -546,29 +547,39 @@ const main = async () => {
   if (!nodeVersionSupported(process.versions.node)) {
     throw new Error(`the pinned dsh runtime requires node >=22.19.0; found ${process.versions.node}. dscode will not install or switch node for you`)
   }
-  if (process.env.DSCODE_BIN === undefined || process.env.DSCODE_BIN === '') {
-    if (pkg.dsh?.sourceCommit && pinnedRelease() && !installationMatches(profileDir, pkg.name, pinnedRelease(), pkg.dsh)) {
-      const options = updateOptions([], profileDir, pkg.version)
-      await installRelease({ profile: profileDir, packageName: pkg.name, version: pinnedRelease(), channel: options.channel, asset: assetName() })
-      healLauncherLink()
-      spawnAndExit(profileLauncher, args, process.env)
-      return
-    }
+  const managedRelease = !process.env.DSCODE_BIN && pkg.dsh?.sourceCommit && pinnedRelease()
+  const rebootstrapManaged = async () => {
+    const options = updateOptions([], profileDir, pkg.version)
+    await installRelease({ profile: profileDir, packageName: pkg.name, version: managedRelease, channel: options.channel, asset: assetName() })
+    healLauncherLink()
+    spawnAndExit(profileLauncher, args, process.env)
   }
-  const [dshBin, bin] = await withProfileLock(profileDir, async () => {
+  if (managedRelease && !installationFilesMatch(profileDir, pkg.name, managedRelease, pkg.dsh)) {
+    await rebootstrapManaged()
+    return
+  }
+  const prepared = await withProfileLock(profileDir, async () => {
+    // Check actual versions once, under the same lock as profile preparation.
+    // Repair must happen after unlocking: installRelease acquires its own lock.
+    if (managedRelease && !installationMatches(profileDir, pkg.name, managedRelease, pkg.dsh)) return undefined
     if (!process.env.DSCODE_BIN) {
       // Published source-backed installs are reconciled as one transaction above.
       // Keep the npm bootstrap only for unpinned development/legacy packages.
-      if (!(pkg.dsh?.sourceCommit && pinnedRelease())) ensureProfilePlugin()
+      if (!managedRelease) ensureProfilePlugin()
       else { scaffoldProfile(); reconcileProfileManifest() }
       healLauncherLink()
       migrateLegacyTuiHome()
     }
     return await Promise.all([
-      ensureDshCli(),
-      process.env.DSCODE_BIN ? Promise.resolve(process.env.DSCODE_BIN) : ensureBinary(),
+      managedRelease && !process.env.DSH_BIN ? Promise.resolve(dshRuntimeBin) : ensureDshCli(),
+      managedRelease ? Promise.resolve(binPath) : process.env.DSCODE_BIN ? Promise.resolve(process.env.DSCODE_BIN) : ensureBinary(),
     ])
   })
+  if (prepared === undefined) {
+    await rebootstrapManaged()
+    return
+  }
+  const [dshBin, bin] = prepared
   const localBin = join(homedir(), '.local', 'bin')
   const path = process.env.PATH ?? ''
   const pathParts = path.split(delimiter)

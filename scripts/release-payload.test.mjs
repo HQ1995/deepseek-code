@@ -9,6 +9,31 @@ import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { copyClosure, recordConsumerProvenance, validateConsumer, releaseAssets, releaseChannel, sourceBuildEnvironment } from './build-release-payload.mjs';
 import { assertReleaseRun, releasedManifest, verifyReleaseAssets } from './verify-release-assets.mjs';
+import { processHasExited } from './e2e-archive-terminal.mjs';
+import { prepareMacClipboard } from './e2e-macos-clipboard.mjs';
+
+test('Mac product E2E uses private clipboard helpers, not the machine clipboard', () => {
+  const bin = mkdtempSync(join(tmpdir(), 'dscode-clipboard-fixture-'));
+  try {
+    prepareMacClipboard(bin);
+    const run = (name, args = [], input) => execFileSync(process.execPath, [join(bin, name), ...args], { encoding: 'utf8', input });
+    assert.equal(run('pbpaste'), '');
+    run('pbcopy', [], 'private test clipboard');
+    assert.equal(run('pbpaste'), 'private test clipboard');
+    assert.equal(run('osascript', ['-e', 'get the clipboard']), '');
+    assert.throws(() => run('osascript', ['-e', 'unexpected automation']));
+    const script = readFileSync(fileURLToPath(new URL('./e2e-tui-bridge.sh', import.meta.url)), 'utf8');
+    assert.match(script, /export GROK_CLIPBOARD_NO_NATIVE_READ=1 GROK_CLIPBOARD_NO_OSC52=1/);
+    assert.match(script, /e2e-macos-clipboard\.mjs.*SCRATCH\/e2e-bin/);
+  } finally { rmSync(bin, { recursive: true, force: true }); }
+});
+
+test('PTY cleanup checks live processes on macOS instead of absent /proc entries', () => {
+  assert.equal(processHasExited(process.pid), false);
+  assert.equal(processHasExited(123, () => { throw Object.assign(new Error(), { code: 'ESRCH' }); }), true);
+  assert.throws(() => processHasExited(123, () => { throw Object.assign(new Error(), { code: 'EPERM' }); }), { code: 'EPERM' });
+  assert.throws(() => processHasExited(0));
+});
 
 test('consumer reuse requires the exact source, installed bytes, and copied runtime tree', () => {
   const root = mkdtempSync(join(tmpdir(), 'dscode-consumer-provenance-'));

@@ -187,14 +187,19 @@ node scripts/e2e-update-channels.mjs --plugin dist/dscode-plugin.tgz \
   --runtime dist/dscode-runtime-linux-x86_64.tar.gz --tui dist/dscode-linux-x86_64
 ```
 
-CI runs script, bridge, and Rust checks on Ubuntu and macOS. Tagged releases
+CI runs script, bridge, Rust, managed-update and real TUI/runtime checks on
+Ubuntu and macOS with Node 22.19.0; macOS also runs bridge tests on Node 24.
+Tagged releases
 build `dscode-linux-x86_64` and `dscode-macos-aarch64` in
 `.github/workflows/release.yml`.
 
 Linux Rust tests require user/PID namespace isolation; `scripts/check-rust.sh`
 fails if `unshare` cannot provide it. Process-lifecycle tests must not share the
-host PID namespace. The full Linux product suite also needs tmux and the
+host PID namespace. The full product suite on both platforms also needs tmux
+>=3.4 and the
 [LSP dependencies](../bridge/grok-leader/README.md#optional-lsp).
+Mac table links use keyboard acceptance; physical Cmd-click requires a GUI
+runner. See [macOS review and validation boundaries](macos-review.md).
 
 `DSCODE_RELEASE_DIR` selects existing payloads for product E2Es.
 `DSCODE_E2E_DSH_BIN` and `DSCODE_E2E_PLUGIN_TGZ` select explicit runtime/plugin
