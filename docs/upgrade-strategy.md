@@ -176,7 +176,7 @@ Product and release checks:
 
 ```sh
 scripts/check.sh
-node --test scripts/release-payload.test.mjs
+node --test scripts/release-payload.test.mjs scripts/test-runtime.test.mjs
 scripts/check-rust.sh
 scripts/e2e-product.sh
 scripts/e2e-product.sh --full --provider-ui
@@ -206,6 +206,15 @@ runner. See [macOS review and validation boundaries](macos-review.md).
 artifacts. Source tarball policies in `DSCODE_E2E_PNPM_CONFIG` may override
 ordinary dependency edges only; global `file:` peer overrides duplicate DSH
 scope identities and are invalid.
+
+Both product E2Es share `scripts/test-runtime.mjs`: it builds only missing
+artifacts, or consumes an explicitly supplied release directory without network
+fallback. Plugin name/version/release and SDK pins must match the checkout;
+the runtime descriptor, CLI package/entrypoint and host architecture must agree.
+These are metadata/layout checks, not a replacement for release checksums or
+native-runtime validation. Explicit CLI paths must belong to a source-pinned
+release runtime, not an unrelated global DSH installation.
+Run `node --test scripts/test-runtime.test.mjs` for the local fixture matrix.
 
 The product matrix above uses simulated model replies; it is not live-model
 certification. Run `node scripts/e2e-live-models.mjs --help` for the separate,

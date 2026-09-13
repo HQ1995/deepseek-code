@@ -123,7 +123,6 @@ command -v typescript-language-server >/dev/null 2>&1 \
   || fail "LSP acceptance requires typescript-language-server and typescript on PATH (see bridge/grok-leader/README.md)"
 "$NODE_BIN" -e 'const a=process.versions.node.split(".").map(Number), b=[22,19,0]; process.exit(a[0]>b[0] || (a[0]===b[0] && (a[1]>b[1] || (a[1]===b[1] && a[2]>=b[2]))) ? 0 : 1)' \
   || fail "pinned dsh requires Node >=22.19.0 (got $($NODE_BIN --version))"
-DSH_VERSION="$("$NODE_BIN" -p "require('$ROOT/bridge/grok-leader/package.json').dsh.testedVersion")"
 
 mkdir -p "$OUT" "$SCRATCH" "$SCRATCH/e2e-bin" "$SCRATCH/fixture-plugin"
 if [[ "$(uname -s)" == Darwin ]]; then
@@ -187,52 +186,8 @@ printf '#!/bin/sh\nexec "%s" "$@"\n' "$NODE_BIN" >"$SCRATCH/e2e-bin/node"
 chmod +x "$SCRATCH/e2e-bin/node"
 export PATH="$SCRATCH/e2e-bin:$(dirname "$NODE_BIN"):$PATH"
 
-if command -v pnpm >/dev/null 2>&1; then
-  :
-elif command -v corepack >/dev/null 2>&1; then
-  COREPACK_BIN="$(command -v corepack)"
-  cat >"$SCRATCH/e2e-bin/pnpm" <<EOF
-#!/bin/sh
-exec "$COREPACK_BIN" pnpm "\$@"
-EOF
-  chmod +x "$SCRATCH/e2e-bin/pnpm"
-else
-  fail "pnpm or corepack is required to create the isolated dsh profile"
-fi
-
-SOURCE_COMMIT="$("$NODE_BIN" -p "require('$ROOT/bridge/grok-leader/package.json').dsh?.sourceCommit || ''")"
-RELEASE_DIR="${DSCODE_RELEASE_DIR:-$SCRATCH/release-assets}"
-if [[ -n "$SOURCE_COMMIT" && ( -z "${DSCODE_E2E_DSH_BIN:-}" || -z "${DSCODE_E2E_PLUGIN_TGZ:-}" ) ]]; then
-  if [[ -z "${DSCODE_RELEASE_DIR:-}" ]]; then
-    BUILD_ARGS=(--out "$RELEASE_DIR" --version "$(cat "$ROOT/VERSION")")
-    [[ -z "${DSCODE_SOURCE_DIR:-}" ]] || BUILD_ARGS+=(--source "$DSCODE_SOURCE_DIR")
-    [[ -z "${DSCODE_RUNTIME_CONSUMER:-}" ]] || BUILD_ARGS+=(--consumer "$DSCODE_RUNTIME_CONSUMER")
-    [[ -z "${DSCODE_E2E_DSH_BIN:-}" ]] || BUILD_ARGS+=(--plugin-only)
-    [[ -z "${DSCODE_E2E_PLUGIN_TGZ:-}" ]] || BUILD_ARGS+=(--runtime-only)
-    "$NODE_BIN" "$ROOT/scripts/build-release-payload.mjs" "${BUILD_ARGS[@]}" \
-      >"$OUT/payload-build-$RUN_ID.log" 2>&1 || fail "could not build the source release payload"
-  fi
-fi
-if [[ -n "${DSCODE_E2E_DSH_BIN:-}" ]]; then
-  DSH_BIN="$DSCODE_E2E_DSH_BIN"
-elif [[ -n "$SOURCE_COMMIT" ]]; then
-  PLATFORM="$("$NODE_BIN" -p "({'linux/x64':'linux-x86_64','darwin/arm64':'macos-aarch64'})[process.platform+'/'+process.arch] || ''")"
-  [[ -n "$PLATFORM" ]] || fail "unsupported runtime platform"
-  mkdir -p "$SCRATCH/dsh-cli"
-  tar -xzf "$RELEASE_DIR/dscode-runtime-$PLATFORM.tar.gz" -C "$SCRATCH/dsh-cli" \
-    || fail "could not extract the source runtime"
-  DSH_BIN="$SCRATCH/dsh-cli/bin/dsh"
-elif command -v dsh >/dev/null 2>&1 \
-  && [[ "$(dsh --version 2>/dev/null | head -1 || true)" == "$DSH_VERSION" ]]; then
-  DSH_BIN="$(command -v dsh)"
-else
-  DSH_PREFIX="$SCRATCH/dsh-cli"
-  npm install --prefix "$DSH_PREFIX" --ignore-scripts --no-audit --no-fund \
-    "@deepseek-ai/dsh@$DSH_VERSION" >"$OUT/dsh-install-$RUN_ID.log" 2>&1 \
-    || fail "could not install the pinned dsh CLI"
-  DSH_BIN="$DSH_PREFIX/node_modules/.bin/dsh"
-fi
-[[ -x "$DSH_BIN" ]] || fail "dsh executable is invalid: $DSH_BIN"
+dscode_prepare_test_runtime "$ROOT" "$SCRATCH" "$NODE_BIN" "$OUT/payload-build-$RUN_ID.log" \
+  || fail "could not prepare the pinned test runtime"
 
 # Source tarballs must override ordinary parent>dependency edges only: global
 # file: overrides promote SDK peers into copies that break native scope identity.
@@ -240,20 +195,6 @@ if [[ -n "${DSCODE_E2E_PNPM_CONFIG:-}" ]]; then
   mkdir -p "$SCRATCH/profiles/dscode"
   cp "$DSCODE_E2E_PNPM_CONFIG" "$SCRATCH/profiles/dscode/pnpm-workspace.yaml"
 fi
-
-# Install the bridge as the tarball users receive, not as a live file: link.
-# A later `dsh add` must not make pnpm resolve runtime peers from the checkout.
-BRIDGE_ARCHIVE="${DSCODE_E2E_PLUGIN_TGZ:-}"
-if [[ -z "$BRIDGE_ARCHIVE" && -n "$SOURCE_COMMIT" ]]; then
-  BRIDGE_ARCHIVE="$RELEASE_DIR/dscode-plugin.tgz"
-elif [[ -z "$BRIDGE_ARCHIVE" ]]; then
-  BRIDGE_ARCHIVE_NAME="$(npm pack --silent --pack-destination "$SCRATCH" "$ROOT/bridge/grok-leader")" \
-    || fail "could not pack the local bridge"
-  BRIDGE_ARCHIVE_NAME="${BRIDGE_ARCHIVE_NAME##*$'\n'}"
-  BRIDGE_ARCHIVE="$SCRATCH/$BRIDGE_ARCHIVE_NAME"
-fi
-[[ -f "$BRIDGE_ARCHIVE" ]] || fail "packed bridge archive is missing: $BRIDGE_ARCHIVE"
-BRIDGE_ARCHIVE="$("$NODE_BIN" -p 'require("node:path").resolve(process.argv[1])' "$BRIDGE_ARCHIVE")"
 
 SHIPPED_MINIMAL="$("$NODE_BIN" -e '
   const { createRequire } = require("node:module")
@@ -897,9 +838,12 @@ boot() {
   # Like the upstream PTY fixtures, advertise a known OSC8-capable terminal;
   # TERM=xterm-256color alone deliberately disables hyperlinks as Unknown.
   # Cell triple-click uses the existing word-select setting; default double-click folds.
-  cmd="cd '$BOOT_CWD' && exec env PATH='$PATH' DSH_HOME='$SCRATCH' DSC_HOME='$SCRATCH/dsc-tui' DSCODE_SOCKET='$socket' DSCODE_LOG='$LEADER_LOG' DSH_BIN='$DSH_BIN' VISUAL='$SCRATCH/e2e-bin/prompt-editor' EDITOR='$SCRATCH/e2e-bin/prompt-editor' PAGER='$SCRATCH/e2e-bin/prompt-editor' FAKE_KEY='e2e-key' DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 TERM=xterm-256color TERM_PROGRAM=WezTerm '$TUI_BIN'"
-  for argument in "$@"; do cmd="$cmd '$argument'"; done
-  tmux -L "$SESSION" -f /dev/null new-session -d -s "$SESSION" -x 180 -y 48 "$cmd"
+  local cmd
+  cmd="$(dscode_shell_command env "PATH=$PATH" "DSH_HOME=$SCRATCH" "DSC_HOME=$SCRATCH/dsc-tui" \
+    "DSCODE_SOCKET=$socket" "DSCODE_LOG=$LEADER_LOG" "DSH_BIN=$DSH_BIN" \
+    "VISUAL=$SCRATCH/e2e-bin/prompt-editor" "EDITOR=$SCRATCH/e2e-bin/prompt-editor" "PAGER=$SCRATCH/e2e-bin/prompt-editor" \
+    FAKE_KEY=e2e-key DSH_TELEMETRY_DISABLED=1 NO_COLOR=1 TERM=xterm-256color TERM_PROGRAM=WezTerm "$TUI_BIN" "$@")"
+  tmux -L "$SESSION" -f /dev/null new-session -d -s "$SESSION" -x 180 -y 48 -c "$BOOT_CWD" "exec $cmd"
   for _ in $(seq 1 120); do
     if [[ -S "$socket" ]]; then
       wait_frame "boot" 'Fake Model|fake-model' 100
@@ -953,7 +897,7 @@ echo "[tui] booting CLI-managed worktree"
 trust_store="$SCRATCH/dsc-tui/trusted_folders.toml"
 mkdir -p "$(dirname "$trust_store")"
 if [[ ! -f "$trust_store" ]]; then
-  printf '[folders."%s"]\ntrusted = true\ndecided_at = 0\n' "$BOOT_CWD" >"$trust_store"
+  "$NODE_BIN" -e 'console.log(`[folders.${JSON.stringify(process.argv[1])}]\ntrusted = true\ndecided_at = 0`)' "$BOOT_CWD" >"$trust_store"
 fi
 boot "$SOCKET" "--worktree=$WORKTREE_LABEL" --worktree-ref HEAD
 wait_frame "default preset" 'preset: standard'

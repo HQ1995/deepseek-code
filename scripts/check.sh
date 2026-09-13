@@ -22,7 +22,7 @@ done
 echo "  Node script syntax ok"
 
 repo_version="$(tr -d '[:space:]' < "$ROOT/VERSION")"
-package_version="$(node -p "require('$ROOT/bridge/grok-leader/package.json').version")"
+package_version="$(node -p 'require(process.argv[1]).version' "$ROOT/bridge/grok-leader/package.json")"
 [[ "$repo_version" == "$package_version" ]] \
   || fail "VERSION ($repo_version) != bridge package version ($package_version)"
 echo "  version sources agree: $repo_version"

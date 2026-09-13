@@ -36,7 +36,7 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
   echo "error: VERSION file is not semver: '$VERSION'" >&2
   exit 1
 fi
-PACKAGE_VERSION="$(node -p "require('$ROOT/bridge/grok-leader/package.json').version")"
+PACKAGE_VERSION="$(node -p 'require(process.argv[1]).version' "$ROOT/bridge/grok-leader/package.json")"
 if [[ "$PACKAGE_VERSION" != "$VERSION" ]]; then
   echo "error: VERSION ($VERSION) and bridge package version ($PACKAGE_VERSION) differ" >&2
   exit 1
@@ -66,7 +66,7 @@ fi
 
 echo "releasing deepseek-code $TAG"
 bash "$ROOT/scripts/check.sh"
-node --test "$ROOT/scripts/release-payload.test.mjs"
+node --test "$ROOT/scripts/release-payload.test.mjs" "$ROOT/scripts/test-runtime.test.mjs"
 DIST="$ROOT/dist"
 mkdir -p "$DIST"
 
