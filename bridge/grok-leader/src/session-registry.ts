@@ -32,7 +32,7 @@ export function createSessionRegistry<T extends OwnedSession>(dependencies: Sess
   const reloading = new WeakSet<T>()
   // Preflight borrows the native session until its idle/flush/capture phase
   // settles. Explicit close must not release that session underneath it.
-  const reloadDrains = new WeakMap<T, Promise<void>>()
+  const reloadDrains = new WeakMap<T, { done: Promise<void>; controller: AbortController }>()
   let closed = false
   let disposal: Promise<void> | undefined
   let shutdownTeardowns: Set<Promise<void>> | undefined
@@ -85,6 +85,7 @@ export function createSessionRegistry<T extends OwnedSession>(dependencies: Sess
     let resolve!: () => void, reject!: (reason: unknown) => void
     const pending = trackTeardown(record, new Promise<void>((yes, no) => { resolve = yes; reject = no }))
     const failures: unknown[] = []
+    try { reloadDrain?.controller.abort() } catch (error) { failures.push(error) }
     try { dependencies.cancelRequests(record.clientId, record.agent.session.id) } catch (error) { failures.push(error) }
     let promptDrain: Promise<void> | undefined
     try { promptDrain = record.queue.dispose() } catch (error) { failures.push(error) }
@@ -92,7 +93,7 @@ export function createSessionRegistry<T extends OwnedSession>(dependencies: Sess
     try { controlDrain = record.work.dispose() } catch (error) { failures.push(error) }
     void (async () => {
       try {
-        const drains = await Promise.allSettled([promptDrain, controlDrain, reloadDrain])
+        const drains = await Promise.allSettled([promptDrain, controlDrain, reloadDrain?.done])
         for (const result of drains) if (result.status === 'rejected') failures.push(result.reason as unknown)
         if (!alreadyFlushed) {
           try { await dependencies.flush(record.agent.session) } catch (error) { failures.push(error) }
@@ -119,7 +120,7 @@ export function createSessionRegistry<T extends OwnedSession>(dependencies: Sess
     assertOpen, assertReady, acceptsInput, owned, ownedAgent, close, drain,
     /** A failed preflight keeps the exact live owner and its usable queue.
      * Only after idle + durable flush + capture succeeds does retirement commit. */
-    async reload<R>(record: T, capture: () => R, settle?: () => Promise<void>): Promise<R> {
+    async reload<R>(record: T, capture: (signal: AbortSignal) => R | Promise<R>, settle?: () => Promise<void>): Promise<R> {
       assertOpen()
       if (records.get(record.agent.session.id) !== record) throw invalidParams('unknown session')
       if (reloading.has(record)) throw invalidParams('session is already reloading')
@@ -128,7 +129,7 @@ export function createSessionRegistry<T extends OwnedSession>(dependencies: Sess
       // completion-only: preflight errors belong to the reload caller, while
       // explicit close still performs its own final flush and cleanup.
       let release!: () => void
-      const preflight = new Promise<void>(resolve => { release = resolve })
+      const preflight = { done: new Promise<void>(resolve => { release = resolve }), controller: new AbortController() }
       reloadDrains.set(record, preflight)
       const finishPreflight = () => {
         if (reloadDrains.get(record) === preflight) reloadDrains.delete(record)
@@ -154,7 +155,7 @@ export function createSessionRegistry<T extends OwnedSession>(dependencies: Sess
         if (records.get(record.agent.session.id) !== record) throw invalidParams('session closed')
         await dependencies.flush(record.agent.session)
         if (records.get(record.agent.session.id) !== record) throw invalidParams('session closed')
-        const result = capture()
+        const result = await capture(preflight.controller.signal)
         if (records.get(record.agent.session.id) !== record) throw invalidParams('session closed')
         // Release the borrow before retiring ourselves, otherwise retirement
         // would wait for the reload that is itself awaiting retirement.

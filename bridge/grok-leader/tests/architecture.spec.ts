@@ -171,7 +171,7 @@ describe('architecture ownership and dependency gate', () => {
     // new callers or conceal a complete log read behind a synchronous alias.
     expect(reads).toEqual({
       'src/native-children.ts:snapshotEvents': 2, // live child pages and interruption overview
-      'src/session-lifecycle.ts:snapshotEvents': 3, // reload, fork and rewind
+      'src/session-lifecycle.ts:snapshotEvents': 1, // rewind points
       'src/workflows.ts:snapshotEvents': 1, // bounded incremental seed/tail
       'src/native-tasks.ts:ownEvents': 1, // optional Schedule projection absence
     })

@@ -1,4 +1,4 @@
-import { SessionId, type Session, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
+import { SessionId, type Session, type SessionEvent, type SessionHeader, type SessionLogOffset } from '@deepseek-ai/dsh-session'
 import {
   SessionFormatUnsupportedError, SessionPersistenceCorruptionError, SessionPersistenceNotFoundError,
   type SessionInspection, type SessionPersistence,
@@ -18,6 +18,11 @@ export interface SessionQueryLike {
 }
 type DiscoveryPersistence = Pick<SessionPersistence, 'list' | 'open'>
 type ListMethod = 'session/list' | 'x.ai/session/list' | 'x.ai/sessions/list'
+interface InspectionOptions {
+  /** Complete prefix required by a live lifecycle snapshot, never a moving tail. */
+  end?: SessionLogOffset
+  signal?: AbortSignal
+}
 interface DiscoveryHost {
   persistence(): DiscoveryPersistence | undefined
   query(): SessionQueryLike | undefined
@@ -62,12 +67,15 @@ export function createSessionDiscovery(host: DiscoveryHost) {
   }
   const unavailableArtifact = (error: unknown) => error instanceof SessionPersistenceNotFoundError
     || error instanceof SessionPersistenceCorruptionError || error instanceof SessionFormatUnsupportedError
-  function inspect(store: DiscoveryPersistence, id: SessionId): Promise<SessionInspection>
+  function inspect(store: DiscoveryPersistence, id: SessionId, skipUnavailable?: false, options?: InspectionOptions): Promise<SessionInspection>
   function inspect(store: DiscoveryPersistence, id: SessionId, skipUnavailable: true): Promise<SessionInspection | undefined>
-  async function inspect(store: DiscoveryPersistence, id: SessionId, skipUnavailable = false): Promise<SessionInspection | undefined> {
-    assertOpen()
+  async function inspect(store: DiscoveryPersistence, id: SessionId, skipUnavailable = false, options: InspectionOptions = {}): Promise<SessionInspection | undefined> {
+    const signal = options.signal === undefined ? shutdown.signal : AbortSignal.any([shutdown.signal, options.signal])
+    const assertActive = () => { assertOpen(); signal.throwIfAborted() }
+    assertActive()
+    if (options.end !== undefined && (!Number.isSafeInteger(options.end) || options.end < 0)) throw internalError('invalid session inspection end')
     let handle: Awaited<ReturnType<DiscoveryPersistence['open']>>
-    try { handle = await store.open(id, 'read', { signal: shutdown.signal }) }
+    try { handle = await store.open(id, 'read', { signal }) }
     catch (error) {
       if (skipUnavailable && unavailableArtifact(error)) return
       throw error
@@ -76,9 +84,10 @@ export function createSessionDiscovery(host: DiscoveryHost) {
     let cleanupFailed = false
     let inspection: SessionInspection | undefined
     try {
-      assertOpen()
-      const { events } = await handle.read(undefined, undefined, { signal: shutdown.signal })
-      assertOpen()
+      assertActive()
+      const { events } = await handle.read(undefined, options.end, { signal })
+      assertActive()
+      if (options.end !== undefined && events.length !== options.end) throw internalError('session history does not contain the required durable prefix')
       inspection = { meta: handle.header, inheritedEventCount: handle.inheritedEventCount, events }
     } catch (error) { failures.push(error) }
     // Even a late open after cancellation owns a real handle that must close.
@@ -92,7 +101,7 @@ export function createSessionDiscovery(host: DiscoveryHost) {
     if (!cleanupFailed && failures.length === 1 && skipUnavailable && unavailableArtifact(failures[0])) return
     if (failures.length === 1) throw failures[0]
     if (failures.length > 1) throw new AggregateError(failures, 'session inspection and read-handle cleanup failed')
-    assertOpen()
+    assertActive()
     return inspection!
   }
   const list = async (method: ListMethod, params: unknown) => {
@@ -170,7 +179,7 @@ export function createSessionDiscovery(host: DiscoveryHost) {
     if (!closed && host.owns(session)) index.recordEvent(session.header.id, session.header.createdAt, event)
   })
   return {
-    inspect: (id: SessionId) => accepted(() => inspect(persistence(), id)),
+    inspect: (id: SessionId, options?: InspectionOptions) => accepted(() => inspect(persistence(), id, false, options)),
     list: (method: ListMethod, params?: unknown) => accepted(() => list(method, params)),
     search: (params: unknown) => accepted(() => search(params)),
     dispose(): Promise<void> {

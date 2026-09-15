@@ -20,6 +20,7 @@ function fixture() {
   const order: string[] = [], notify = vi.fn(), client = { closed: false, notify }
   const clients = new Map([[1, client], [2, { closed: false, notify: vi.fn() }]])
   const native = new Map<string, Agent>(), durable = new Map<string, SessionInspection>()
+  const histories = new WeakMap<Agent['session'], readonly SessionEvent[]>()
   const nativeDisposals = new Map<string, ReturnType<typeof vi.fn>>()
   const sessions = createSessionRegistry<SessionRecord>({
     clientIsLive: id => clients.get(id)?.closed === false,
@@ -27,14 +28,14 @@ function fixture() {
   })
   const flush = vi.fn(async (session: Agent['session']) => {
     order.push('flush:' + session.id)
-    durable.set(session.id, { meta: session.header, inheritedEventCount: session.inheritedEventCount, events: [...session.snapshotEvents()] })
+    durable.set(session.id, { meta: session.header, inheritedEventCount: session.inheritedEventCount, events: [...histories.get(session)!] })
   })
   stops.push(() => sessions.dispose())
   const closeRead = vi.fn(async () => { order.push('close read') })
-  const read = vi.fn(async (id: string) => ({ events: durable.get(id)!.events }))
+  const read = vi.fn(async (id: string, offset = 0, length = Number.MAX_SAFE_INTEGER, _options?: { signal?: AbortSignal }) => ({ events: durable.get(id)!.events.slice(offset, offset + length) }))
   const persistence = {
     list: vi.fn(async () => [...durable.values()].map(inspection => ({ header: inspection.meta }))),
-    open: vi.fn(async (id: string) => ({ header: durable.get(id)!.meta, inheritedEventCount: durable.get(id)!.inheritedEventCount, read: () => read(id), close: closeRead })),
+    open: vi.fn(async (id: string) => ({ header: durable.get(id)!.meta, inheritedEventCount: durable.get(id)!.inheritedEventCount, read: (offset?: number, length?: number, options?: { signal?: AbortSignal }) => read(id, offset, length, options), close: closeRead })),
     stat: vi.fn(),
   }
   const install = vi.fn((ctx: Context) => { order.push('model install'); void ctx })
@@ -61,9 +62,11 @@ function fixture() {
     const events = [...(inspection?.events ?? options.seed ?? [])]
     const header = inspection?.meta ?? { id, createdAt: 1, version: 3, isSeeded: false, ...options.meta }
     const session = { id, header, inheritedEventCount: inspection?.inheritedEventCount ?? options.inheritedEventCount ?? SessionLogOffset(0),
+      get seq() { return SessionLogOffset(events.length) },
       snapshotEvents: () => events, append: (type: string, data: unknown) => { const next = event(type, data, events.length); events.push(next); return next } }
     const agent = { id, session, ctx, options: options.agentOptions, status: 'idle', cancel: vi.fn(),
       followup: vi.fn(), steer: vi.fn(), whenIdle: vi.fn(async () => {}) } as unknown as Agent
+    histories.set(agent.session, events)
     await options.setup?.(ctx, agent)
     native.set(id, agent)
     const dispose = vi.fn(async () => { order.push('native dispose:' + id); if (native.get(id) === agent) native.delete(id) })
@@ -85,7 +88,7 @@ function fixture() {
   const discovery = createSessionDiscovery({ persistence: () => persistence as never, query: () => undefined,
     owns: () => false, onEvent: () => () => {} })
   stops.push(() => discovery.dispose())
-  const host = { discovery, agents, registry: sessions, models, presets, persistence: (): PersistenceLike | undefined => persistence as unknown as PersistenceLike,
+  const host = { discovery, agents, registry: sessions, models, presets, flush, persistence: (): PersistenceLike | undefined => persistence as unknown as PersistenceLike,
     client: (id: number) => clients.get(id), queue: { combineQueued: false, followUpSteer: false },
     permissions: { validateMeta: vi.fn(), apply: permissions, assertReady: vi.fn() }, views, contextValues: () => ({}), projectImages: vi.fn(async (_event: SessionEvent, updates: unknown[]) => updates) as never,
     logger: { warn: vi.fn() } }
@@ -293,5 +296,66 @@ describe('session lifecycle ownership', () => {
     expect(source.agent.session.snapshotEvents()).toHaveLength(6)
     source.agent.session.append('turn/start', { turn: 2 })
     await expect(f.lifecycle.fork(1, { sourceSessionId: 'root' })).rejects.toThrow('turn is open')
+  })
+
+  it('reloads from a flushed storage snapshot without any live transcript reads', async () => {
+    const f = fixture(), source = await f.add()
+    source.agent.session.append('model/selection', { provider: 'saved', model: 'choice' })
+    vi.spyOn(source.agent.session, 'snapshotEvents').mockImplementation(() => { throw new Error('no live history reads') })
+    await f.lifecycle.load(1, { sessionId: 'root', cwd: '/tmp/workspace' })
+    expect(f.read).toHaveBeenCalledWith('root', undefined, 1, { signal: expect.any(AbortSignal) })
+    expect(f.models.prepare.mock.calls.at(-1)?.[1]).toEqual([expect.objectContaining({ type: 'model/selection' })])
+    expect(f.order.indexOf('flush:root')).toBeLessThan(f.order.indexOf('close read'))
+    expect(f.order.indexOf('close read')).toBeLessThan(f.order.indexOf('native dispose:root'))
+  })
+
+  it('fixes a live fork at its pre-flush cursor even when the source appends during storage work', async () => {
+    const f = fixture(), source = await f.add(), gate = deferred()
+    source.agent.session.append('session/title', { title: 'captured' })
+    vi.spyOn(source.agent.session, 'snapshotEvents').mockImplementation(() => { throw new Error('no live history reads') })
+    const flush = f.flush.getMockImplementation()!
+    f.flush.mockImplementationOnce(async session => { await gate.promise; return flush(session) })
+    const fork = f.lifecycle.fork(1, { sourceSessionId: 'root', newSessionId: 'fork' })
+    await vi.waitFor(() => expect(f.flush).toHaveBeenCalledOnce())
+    source.agent.session.append('turn/start', { turn: 0 })
+    gate.resolve(); await fork
+    expect(f.agents.create.mock.calls.at(-1)![0]).toMatchObject({ inheritedEventCount: 1, seed: [expect.objectContaining({ type: 'session/title' })] })
+    expect(f.read).toHaveBeenCalledWith('root', undefined, 1, { signal: expect.any(AbortSignal) })
+  })
+
+  it.each(['load', 'fork'] as const)('keeps the live source usable after a %s storage short read', async kind => {
+    const f = fixture(), source = await f.add()
+    source.agent.session.append('session/title', { title: 'required prefix' })
+    f.read.mockResolvedValueOnce({ events: [] })
+    const request = kind === 'load' ? f.lifecycle.load(1, { sessionId: 'root', cwd: '/tmp/workspace' })
+      : f.lifecycle.fork(1, { sourceSessionId: 'root' })
+    await expect(request).rejects.toThrow('required durable prefix')
+    expect(f.sessions.ownedAgent(source.agent)).toBe(source)
+    f.lifecycle.assertReady(source)
+    expect(f.nativeDisposals.get('root')).not.toHaveBeenCalled()
+    expect(f.agents.resume).not.toHaveBeenCalled(); expect(f.agents.create).toHaveBeenCalledOnce()
+    expect(f.closeRead).toHaveBeenCalledOnce()
+  })
+
+  it.each(['load', 'fork'] as const)('cancels a %s storage read on close but drains its real read and handle cleanup', async kind => {
+    const f = fixture(), source = await f.add(), readGate = deferred(), closeGate = deferred()
+    const read = f.read.getMockImplementation()!
+    f.read.mockImplementationOnce(async (...args) => { await readGate.promise; return read(...args) })
+    f.closeRead.mockImplementationOnce(async () => { await closeGate.promise; f.order.push('closed delayed read') })
+    const request = kind === 'load' ? f.lifecycle.load(1, { sessionId: 'root', cwd: '/tmp/workspace' })
+      : f.lifecycle.fork(1, { sourceSessionId: 'root' })
+    const failed = request.catch(error => error)
+    try {
+      await vi.waitFor(() => expect(f.read).toHaveBeenCalledOnce())
+      const closing = f.lifecycle.close(1, { sessionId: 'root' })
+      expect(f.read.mock.calls[0]![3]!.signal!.aborted).toBe(true)
+      expect(f.nativeDisposals.get('root')).not.toHaveBeenCalled()
+      readGate.resolve()
+      await vi.waitFor(() => expect(f.closeRead).toHaveBeenCalledOnce())
+      expect(f.nativeDisposals.get('root')).not.toHaveBeenCalled()
+      closeGate.resolve(); expect(await failed).toBeInstanceOf(Error); await closing
+      expect(f.order.indexOf('closed delayed read')).toBeLessThan(f.order.indexOf('native dispose:root'))
+      expect(f.agents.resume).not.toHaveBeenCalled(); expect(f.agents.create).toHaveBeenCalledOnce()
+    } finally { readGate.resolve(); closeGate.resolve() }
   })
 })

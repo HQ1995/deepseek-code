@@ -190,6 +190,28 @@ describe('owned session registry', () => {
     await f.registry.dispose()
   })
 
+  it('keeps async capture borrowed and input closed until capture resolves, then retires', async () => {
+    const f = fixture(), record = f.record(), gate = deferred<string>(), entered = deferred<void>()
+    await f.registry.publish(record.agent.session.id, record)
+    const reload = f.registry.reload(record, async () => { entered.resolve(); return gate.promise })
+    await entered.promise
+    const before = { owned: f.registry.ownedAgent(record.agent), ready: f.registry.acceptsInput(record), disposals: vi.mocked(record.dispose).mock.calls.length }
+    gate.resolve('complete prefix')
+    await expect(reload).resolves.toBe('complete prefix')
+    expect(before).toEqual({ owned: record, ready: false, disposals: 0 })
+    expect(record.dispose).toHaveBeenCalledOnce()
+    await f.registry.dispose()
+  })
+
+  it('reopens admission after async capture rejects without retiring the native owner', async () => {
+    const f = fixture(), record = f.record(), failure = new Error('read failed')
+    await f.registry.publish(record.agent.session.id, record)
+    await expect(f.registry.reload(record, async () => { await Promise.resolve(); throw failure })).rejects.toBe(failure)
+    expect(f.registry.acceptsInput(record)).toBe(true)
+    expect(record.dispose).not.toHaveBeenCalled()
+    await f.registry.dispose()
+  })
+
   it('releases the reload borrow on flush failure while close retains its own cleanup failure', async () => {
     const f = fixture(), record = f.record(), entered = deferred<void>(), gate = deferred<void>()
     const reloadError = new Error('reload storage failure'), closeError = new Error('close storage failure')

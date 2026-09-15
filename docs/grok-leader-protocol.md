@@ -107,6 +107,11 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
 - Interactive loads replay persisted updates with `isReplay`. Headless loads
   set `_meta.noReplay` so old assistant text does not contaminate the new JSON
   result; projection state and sequence high-water marks are still rebuilt.
+- Live reload holds its native session through async durable-history capture
+  and read-handle cleanup before retirement. Closing cancels that read but waits
+  for actual completion; read failure keeps the original owner usable. Live
+  fork fixes its event cursor before flushing, then reads exactly that complete
+  durable prefix. Concurrent appends are excluded and short reads fail closed.
 - Goal hydration replays durable ID, revision, phase, and round counters and reads
   process-local activation; restore neither rearms continuation nor repeats
   completion celebration.

@@ -49,6 +49,7 @@ interface LifecycleHost {
   models: Pick<ReturnType<typeof createSessionModels<SessionRecord>>, 'prepare'>
   presets: Presets
   persistence(): PersistenceLike | undefined
+  flush(session: Agent['session']): Promise<unknown>
   discovery: Pick<SessionDiscovery, 'inspect'>
   client(id: number): { readonly closed: boolean; notify(method: string, params: unknown): void; drain?(): Promise<void> | undefined } | undefined
   queue: { combineQueued: boolean; followUpSteer: boolean }
@@ -257,10 +258,12 @@ export function createSessionLifecycle(host: LifecycleHost) {
       const meta = p._meta as Meta
       host.permissions.validateMeta(meta, 'session/load')
       if (persistence() === undefined) throw internalError('session persistence is not configured')
-      const capture = (): SessionInspection => ({ meta: existing!.agent.session.header, inheritedEventCount: existing!.agent.session.inheritedEventCount, events: existing!.agent.session.snapshotEvents() })
-      let inspection = existing === undefined ? await host.discovery.inspect(sessionId) : capture()
+      // Live preset policy is already maintained; no preflight transcript copy.
+      let inspection: SessionInspection = existing === undefined ? await host.discovery.inspect(sessionId)
+        : { meta: existing.agent.session.header, inheritedEventCount: existing.agent.session.inheritedEventCount, events: [] }
       const preset = await sessionPresets.prepare({ kind: 'load', meta, source: { header: inspection.meta, events: inspection.events }, live: existing })
-      if (existing !== undefined) inspection = await registry.reload(existing, capture, () => existing.model.settle())
+      if (existing !== undefined) inspection = await registry.reload(existing,
+        signal => host.discovery.inspect(sessionId, { end: existing.agent.session.seq, signal }), () => existing.model.settle())
       await activate(clientId, meta, inspection.events, preset, { kind: 'load', sessionId, noReplay: meta?.noReplay === true }, mcpConfigs)
       return {}
     })
@@ -277,8 +280,16 @@ export function createSessionLifecycle(host: LifecycleHost) {
     let sourceHeader: { agentPreset?: string; cwd?: string }
     let events: readonly SessionEvent[]
     if (liveSource !== undefined) {
-      sourceHeader = liveSource.agent.session.header
-      events = liveSource.agent.session.snapshotEvents()
+      const inspection = await liveSource.work.read(async scope => {
+        const { header, seq } = liveSource.agent.session
+        await host.flush(liveSource.agent.session)
+        scope.assertActive()
+        const snapshot = await host.discovery.inspect(sourceId, { end: seq, signal: scope.signal })
+        // Retain the request-time header and prefix even if the live source appends.
+        return { ...snapshot, meta: header }
+      })
+      sourceHeader = inspection.meta
+      events = inspection.events
     } else {
       const store = persistence()
       if (store === undefined) throw internalError('session persistence is not configured')

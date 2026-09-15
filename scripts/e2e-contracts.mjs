@@ -13,6 +13,7 @@ import { goalAcceptance, goalStreamAcceptance } from './e2e-goals.mjs'
 import { historyAcceptance } from './e2e-history.mjs'
 import { nativeTuiAcceptance } from './e2e-native-tui.mjs'
 import { nativeControlsAcceptance } from './e2e-native-controls.mjs'
+import { sessionLifecycleAcceptance } from './e2e-session-lifecycle.mjs'
 
 const execute = promisify(execFile)
 const env = process.env
@@ -509,6 +510,8 @@ process.once('SIGTERM', () => { void cleanup().finally(() => process.exit(143)) 
 try {
   await packaging()
   await boot()
+  const lifecycle = env.DSCODE_E2E_NEXT_SIX_ONLY !== '1' && !extraOnly
+    ? await sessionLifecycleAcceptance({ socketPath: socket, cwd, artifact }) : undefined
   let childId
   if (env.DSCODE_E2E_NEXT_SIX_ONLY !== '1' && !extraOnly) {
     await contextAcceptance()
@@ -576,7 +579,7 @@ try {
     kittyBin: env.DSCODE_E2E_KITTY_BIN, tuiBin: env.DSCODE_TUI_BIN, baseEnv, cwd, artifacts, waitFor, artifact, sockets, children,
   }) : { skipped: 'DSCODE_E2E_KITTY_BIN is not configured' }
   if (env.DSCODE_E2E_NEXT_SIX_ONLY !== '1' && !extraOnly) history = await historyAcceptance({ runHeadless, readRequests, scratch, artifactDir: artifacts })
-  await artifact('PASS', { sessionId: id, history, nativeTui, nativeControls, nextSix, archiveTerminal, kittyImages })
+  await artifact('PASS', { sessionId: id, lifecycle, history, nativeTui, nativeControls, nextSix, archiveTerminal, kittyImages })
   console.log(`PASS runtime acceptance: ${artifacts}`)
 } catch (error) {
   await artifact('FAIL', { error: error.stack ?? String(error), state: await state().catch(() => null), screen: await capture().catch(() => '') })

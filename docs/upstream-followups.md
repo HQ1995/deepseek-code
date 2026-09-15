@@ -237,6 +237,63 @@ window, so replacing live bounded pages with that method would not preserve
 their cost bound. Neither this SDK observation nor a green state migration
 completes the remaining reader work or the Linux/systemd validation gate.
 
+## Execution: lifecycle storage snapshots
+
+Live reload and live fork now use the existing discovery read owner for explicit
+complete storage snapshots. Live preset preflight uses the native policy state,
+so it no longer copies the transcript before reload begins. The registry holds
+its reload borrow across the awaited capture and handle close, aborts capture
+when explicit close wins, and retains the original usable owner if the read or
+flush fails before retirement. Live fork captures its cursor before flushing
+and borrows the source through `SessionWork`; a later appended turn is excluded.
+The required prefix length is checked rather than accepting partial history.
+Neither path adds a synchronous alias or uses the query engine's full-log loader.
+
+The codebase-design skill kept storage-handle cleanup in the existing discovery
+module and cancellation/draining with the existing session owners. Full replay
+and fork still deliberately materialize complete histories; this is removal of
+deprecated live readers and explicit lifecycle ownership, not a claim of lower
+latency or elimination of DSH's in-memory history.
+
+Validation on macOS arm64:
+
+- Pinned-SDK build passed. Node 22.19.0 and 24.19.0 each passed 47 files / 887
+  tests, including the compiled CLI. New tests cover async-capture settlement,
+  close during uncooperative read and handle cleanup, per-request cancellation,
+  short-read recovery, no live transcript reads, and fixed-cursor fork under
+  concurrent append.
+- Plugin SHA-256
+  `ac27cb6abe82af6d39e359503d940a3503000a46850ad0f04fe616b21adaaf04`;
+  all 135 source/compiled/bin/preset files matched. The archive is 1,443,677
+  bytes and retains the unbundled host dependencies.
+- New installed acceptance in `scripts/e2e-session-lifecycle.mjs` passed through
+  a second real socket client with its own isolated sessions: live reload with
+  exactly-once user replay, live fork, seeded live reload, protocol-level
+  conversation rewind, source preservation, and closed-fork resume. Evidence:
+  `/tmp/dsc-follow-work.nYBS9C/lifecycle/full/contracts-78589/session-lifecycle.json`.
+  This is not interactive TUI rewind coverage. Full outer/runtime regression
+  also passed without scenario-only flags, run 78589:
+  `/tmp/dsc-follow-work.nYBS9C/lifecycle/full.log` and
+  `/tmp/dsc-follow-work.nYBS9C/lifecycle/full/contracts-78589/PASS.json`.
+  It covers isolated installation, cold resume/fork, TUI streaming and input,
+  goals, child/workflow controls, reminders, real LSP, native history queries,
+  archives, terminal/Python and owner-isolated interruption. Graphical Kitty,
+  physical Cmd-click, nonempty compaction and Linux remain unverified here.
+- Script tests: 37 passed, one Linux-only skip. `scripts/check.sh` and
+  `git diff --check` passed. No version, runtime pin, daily profile or release
+  changed.
+
+Five production reader calls remain: rewind-point enumeration (1), child
+history/interruption (2), incremental workflow indexing (1), and optional
+Schedule fallback (1). Requested content must next move to bounded storage
+reads without replacing it with an unbounded query-engine scan.
+
+The user selected `swoop` for Linux validation. A read-only SSH probe confirmed
+Linux x86_64 and a running user systemd manager, but its login notice reserves
+the host for interference-sensitive evaluations and requires prior approval.
+No build, workload or cancellation tests were started there; confirmation is
+pending before using that host. This does not block the local reader migration.
+
 ## DSH
 
 Local runtime/SDK pin: `0.1.5-rc.2` at
@@ -426,11 +483,13 @@ inspection, not an upstream build or proof every other change is irrelevant.
   would add or replace backend capabilities, not just improve the current TUI.
   They are outside a minimal compatibility/bugfix update.
 
-## Validation boundary
+## Initial assessment validation boundary
 
-Only this research note was added; product sources, pins, installed profiles
-and Git history were not changed. No tests or benchmarks were run for a new
-candidate. The cited upstream tests are source evidence, not locally verified
-passes. Follow-up implementation should use selective ports plus the existing
+The initial assessment only added this research note; it did not change product
+sources, pins, installed profiles or Git history. No local tests or benchmarks
+were run for a new runtime candidate during that assessment. The cited upstream
+tests are source evidence, not locally verified
+passes. Subsequent implementation and local results are recorded in the execution
+sections above. Follow-up implementation should use selective ports plus the existing
 Node 22/24, Rust, managed-update and macOS product gates, with a real Linux run
 for the systemd-specific fixes.

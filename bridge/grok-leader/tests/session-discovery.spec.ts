@@ -21,7 +21,7 @@ function fixture(cleanupError?: string) {
   const headers = new Map<string, SessionHeader>(), logs = new Map<string, readonly SessionEvent[]>()
   const revisions = new Map<string, string>(), owned = new Set<Session>()
   let active = 0, peak = 0, listener!: (session: Session, event: SessionEvent) => void
-  const read = vi.fn(async (id: string) => ({ events: logs.get(id) ?? [], eventState: 'owned' as const }))
+  const read = vi.fn(async (id: string, offset = 0, length = Number.MAX_SAFE_INTEGER, _options?: { signal?: AbortSignal }) => ({ events: (logs.get(id) ?? []).slice(offset, offset + length), eventState: 'owned' as const }))
   const close = vi.fn(async (_id: string) => { active-- })
   const open = vi.fn(async (id: SessionId, access: string, _options?: { signal?: AbortSignal }): Promise<SessionHandle> => {
     if (!headers.has(id)) throw new SessionPersistenceNotFoundError(id)
@@ -29,7 +29,7 @@ function fixture(cleanupError?: string) {
     peak = Math.max(peak, ++active)
     return {
       id, header: headers.get(id)!, inheritedEventCount: SessionLogOffset(3), access: 'read',
-      read: async () => read(id), close: () => close(id), [Symbol.asyncDispose]: () => close(id),
+      read: async (...args) => read(id, ...args), close: () => close(id), [Symbol.asyncDispose]: () => close(id),
       append: async () => { throw new Error('unexpected write') }, flush: async () => { throw new Error('unexpected flush') },
     }
   })
@@ -195,6 +195,34 @@ describe('owned session discovery', () => {
     const failure = new Error('read failed'), close = new Error('close failed')
     f.read.mockRejectedValueOnce(failure); f.close.mockRejectedValueOnce(close)
     await expect(f.discovery.inspect(SessionId('a'))).rejects.toMatchObject({ errors: [failure, close] })
+  })
+
+  it('reads an explicit complete prefix and refuses a short prefix instead of returning partial history', async () => {
+    const f = fixture(); f.add('a', '/work', [prompt('first'), title('later')])
+    await expect(f.discovery.inspect(SessionId('a'), { end: SessionLogOffset(1) })).resolves.toMatchObject({ events: [prompt('first')] })
+    expect(f.read).toHaveBeenCalledWith('a', undefined, 1, { signal: expect.any(AbortSignal) })
+    await expect(f.discovery.inspect(SessionId('a'), { end: SessionLogOffset(3) })).rejects.toThrow('required durable prefix')
+    await expect(f.discovery.inspect(SessionId('a'), { end: SessionLogOffset(0) })).resolves.toMatchObject({ events: [] })
+    expect(f.active).toBe(0); expect(f.close).toHaveBeenCalledTimes(3)
+  })
+
+  it('honors caller cancellation after a late open, closes its handle, and keeps other inspections usable', async () => {
+    const f = fixture(), gate = deferred(), controller = new AbortController(); f.add('a')
+    const open = f.open.getMockImplementation()!
+    f.open.mockImplementationOnce(async (...args) => { const handle = await open(...args); await gate.promise; return handle })
+    const request = f.discovery.inspect(SessionId('a'), { signal: controller.signal }), failed = request.catch(error => error)
+    await tick(); controller.abort(new Error('caller closed'))
+    expect(f.open.mock.calls[0]![2]!.signal!.aborted).toBe(true)
+    gate.resolve(); expect(await failed).toMatchObject({ message: 'caller closed' })
+    expect(f.read).not.toHaveBeenCalled(); expect(f.active).toBe(0)
+    await expect(f.discovery.inspect(SessionId('a'))).resolves.toMatchObject({ events: [prompt('a')] })
+  })
+
+  it('rejects an already-cancelled inspection before native open', async () => {
+    const f = fixture(), controller = new AbortController(); f.add('a')
+    controller.abort(new Error('not admitted'))
+    await expect(f.discovery.inspect(SessionId('a'), { signal: controller.signal })).rejects.toThrow('not admitted')
+    expect(f.open).not.toHaveBeenCalled()
   })
 
   it('cancels listing before any subsequent log open but waits for an uncooperative backend', async () => {

@@ -232,6 +232,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   })
   const lifecycle = createSessionLifecycle({
     agents, registry, models: sessionModels, presets: sessionPresets, persistence, discovery,
+    flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),
     client: id => connections.get(id),
     queue: { combineQueued, followUpSteer },
     permissions: interactions,

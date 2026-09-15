@@ -245,14 +245,18 @@ function makeMockPersistence() {
   const loaded: string[] = []
   const events: SessionEvent[] = []
   const closed: string[] = []
+  const flushed = new Map<SessionId, { header: Agent['session']['header']; events: readonly SessionEvent[]; inheritedEventCount: SessionLogOffset }>()
   const persistence = {
     header,
     loaded,
     closed,
     events,
+    capture(session: Agent['session']) {
+      flushed.set(session.id, { header: session.header, events: session.snapshotEvents(), inheritedEventCount: session.inheritedEventCount ?? SessionLogOffset(0) })
+    },
     list: async (): Promise<readonly SessionPersistenceSnapshot[]> => [{ header, revision: SessionPersistenceRevision('mock') }],
     stat: async (id: SessionId) => (await persistence.list()).find(snapshot => snapshot.header.id === id),
-    readEvents: async (_id: SessionId): Promise<readonly SessionEvent[]> => Object.freeze([...events]),
+    readEvents: async (id: SessionId): Promise<readonly SessionEvent[]> => Object.freeze([...(flushed.get(id)?.events ?? events)]),
     open: async (id: SessionId, access: SessionAccess): Promise<SessionHandle> => {
       expect(access).toBe('read')
       loaded.push(id)
@@ -265,8 +269,8 @@ function makeMockPersistence() {
       }
       return {
         id,
-        header: Object.freeze({ ...(snapshot?.header ?? header) }),
-        inheritedEventCount: SessionLogOffset(0),
+        header: Object.freeze({ ...(flushed.get(id)?.header ?? snapshot?.header ?? header) }),
+        inheritedEventCount: flushed.get(id)?.inheritedEventCount ?? SessionLogOffset(0),
         access,
         read: async (offset = 0, length = Number.MAX_SAFE_INTEGER) => {
           expect(isClosed).toBe(false)
@@ -536,7 +540,12 @@ async function makeHarness(
   if (options.sessionTitle !== undefined) ctx.provide('sessionTitle', options.sessionTitle as never)
   if (options.sessionQuery !== undefined) ctx.provide('sessionQuery', options.sessionQuery as never)
   ctx.provide('sessionPersistence', persistence as unknown as Context['sessionPersistence'])
-  ctx.provide('sessions', (options.sessionsStore ?? mockSessionsStore) as unknown as Context['sessions'])
+  const sessionsStore = (options.sessionsStore ?? mockSessionsStore) as typeof mockSessionsStore
+  ctx.provide('sessions', { ...sessionsStore, flush: async (session: Agent['session']) => {
+    const result = await sessionsStore.flush(session)
+    persistence.capture(session)
+    return result
+  } } as unknown as Context['sessions'])
   Object.assign(new SessionProjectionRegistry(ctx), options.sessionProjections)
   if (presets !== undefined) Object.assign(new (class extends Service {})(ctx, 'agentPresets'), presets)
   ctx.provide('agentDefaultModel', mockDefaultModel as unknown as Context['agentDefaultModel'])
@@ -3106,16 +3115,22 @@ describe('grok leader over a unix socket', () => {
     })
   })
 
-  it('switches a live blank session without requiring a persistence load first', async () => {
+  it('prepares a live blank preset before reading its flushed reload history', async () => {
     const { registry, persistence, presets, client: c } = await start({ presets: true })
     register(c)
     await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'ptc' } })
     const sessionId = (created.result as { sessionId: string }).sessionId
     const live = registry.byId.get(sessionId)!
+    const open = persistence.open
+    persistence.open = async (...args) => {
+      expect(presets?.recomposed).toEqual(['minimal'])
+      expect(mockSessionsStore.flushed).toContain(live.session)
+      return open(...args)
+    }
     const loaded = await c.request(2, 'session/load', { sessionId, cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'minimal' } })
     expect(loaded.error).toBeUndefined()
-    expect(persistence.loaded).not.toContain(sessionId)
+    expect(persistence.loaded).toEqual([sessionId])
     expect(presets?.recomposed).toEqual(['minimal'])
     expect(mockSessionsStore.flushed).toContain(live.session)
     expect(live.session.snapshotEvents().at(-1)).toMatchObject({
