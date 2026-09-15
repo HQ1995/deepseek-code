@@ -397,6 +397,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return await lifecycle.new(clientId, params)
       case WIRE.sessionPrompt:
         return await input.prompt(clientId, params)
+      case 'x.ai/session/cancel_prompt':
+        return input.cancelPrompt(clientId, params)
       case WIRE.sessionLoad:
         return await lifecycle.load(clientId, params)
       case WIRE.sessionList:

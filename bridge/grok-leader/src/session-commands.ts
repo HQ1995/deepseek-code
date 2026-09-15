@@ -168,7 +168,7 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
     notify(record, message)
     return { stopReason: 'end_turn', _meta: { sessionId: String(record.agent.session.id), promptId } }
   }
-  const execute = (record: S, params: Record<string, unknown>, parsed: ParsedPrompt): Promise<PromptSettleResult | undefined> | undefined => {
+  const execute = (record: S, params: Record<string, unknown>, parsed: ParsedPrompt, signal?: AbortSignal): Promise<PromptSettleResult | undefined> | undefined => {
     if (closed) return Promise.reject(internalError('session commands have been disposed'))
     const text = parsed.text.trim()
     // Ordinary prompts must enter the queue synchronously: an added await here
@@ -182,7 +182,11 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
     const registry = reserved ? undefined : host.registry()
     assertOpen()
     if (!reserved && registry === undefined && name !== 'compact') return undefined
-    return accepted(() => record.work.run(async scope => {
+    return accepted(() => record.work.run(async owner => {
+      const scope: SessionOperation = signal === undefined ? owner : {
+        signal: AbortSignal.any([owner.signal, signal]),
+        assertActive() { owner.assertActive(); signal.throwIfAborted() },
+      }
       active(record, scope)
       const textOnly = (command: string) => { if (parsed.images.length > 0) throw invalidParams(command + ' does not accept image attachments') }
       if (dsh) {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { setImmediate } from 'node:timers/promises'
 import type { SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-session'
 import { createPromptQueues, type DurablePromptBlock, type PromptQueue, type PromptQueueHost } from '../src/prompt-queue.ts'
 
@@ -43,13 +44,133 @@ function fixture(options: { combineQueued?: boolean; followUpSteer?: boolean; fl
   const idle = () => { status = 'idle'; idleWait.resolve() }
   const finish = (turn: number) => { claim(turn); observe(turn); idle() }
   const control = (name: string, params: Record<string, unknown> = {}) => queue.control('x.ai/queue/' + name, params)
-  const snapshot = () => notes.filter(note => note.method === 'x.ai/queue/changed').at(-1)!.params as unknown as Snapshot
+  // Reentrant notifications can arrive out of order; the client keeps the highest seq.
+  const snapshot = () => notes.filter(note => note.method === 'x.ai/queue/changed')
+    .toSorted((a, b) => Number(a.params.seq) - Number(b.params.seq)).at(-1)!.params as unknown as Snapshot
   return { queue, agent, messages, steered, notes, echoes, submit, observe, claim, idle, finish, control, snapshot, followup,
     unpublish: () => { live = false } }
 }
-const tick = async () => { for (let i = 0; i < 12; i++) await Promise.resolve() }
+// Flush the event-loop turn, not an implementation-specific number of awaits.
+const tick = () => setImmediate()
 
 describe('owned prompt queue', () => {
+  it('releases targeted preparation without losing its native drain or admitting late content', async () => {
+    const f = fixture(), gate = deferred<void>(), write = vi.fn()
+    const request = f.queue.submit({ _meta: { promptId: 'image' } }, 'image', async admission => {
+      await gate.promise; admission.assertActive(); write(); return []
+    })
+    await tick()
+    expect(f.queue.cancelPrompt('image')).toBe('cancelled')
+    await expect(request).resolves.toMatchObject({ stopReason: 'cancelled', _meta: { promptId: 'image' } })
+    const next = f.submit('next'); await tick()
+    expect(f.echoes).toEqual(['next']); expect(f.agent.cancel).not.toHaveBeenCalled()
+    f.finish(1); await next
+    let drained = false
+    const disposal = f.queue.dispose().then(() => { drained = true })
+    await tick(); const early = drained
+    gate.resolve(); await disposal
+    expect(early).toBe(false); expect(write).not.toHaveBeenCalled()
+  })
+
+  it('retires a cancelled waiting admission without letting later input overtake its predecessor', async () => {
+    const f = fixture(), gate = deferred<DurablePromptBlock[]>(), prepare = vi.fn(async () => [])
+    const first = f.submit('first', {}, () => gate.promise)
+    const second = f.submit('second', {}, prepare), third = f.submit('third')
+    expect(f.queue.cancelPrompt('second')).toBe('cancelled')
+    await expect(second).resolves.toMatchObject({ stopReason: 'cancelled' })
+    await tick(); const early = [...f.echoes]
+    gate.resolve([{ type: 'text', text: 'first' }]); await tick()
+    expect(early).toEqual([]); expect(prepare).not.toHaveBeenCalled()
+    expect(f.echoes).toEqual(['first'])
+    expect(f.snapshot().entries.map(row => row.id)).toEqual(['third'])
+    f.finish(1); await first; await tick(); f.finish(2); await third
+  })
+
+  it('removes only the targeted held row and preserves its running owner and queued successor', async () => {
+    const f = fixture(), first = f.submit('first'), second = f.submit('second'), third = f.submit('third')
+    await tick(); await tick()
+    f.control('hold_edit', { id: 'second' })
+    expect(f.queue.cancelPrompt('second')).toBe('cancelled')
+    await expect(second).resolves.toMatchObject({ stopReason: 'cancelled' })
+    expect(f.agent.cancel).not.toHaveBeenCalled()
+    expect(f.snapshot().entries.map(row => row.id)).toEqual(['third'])
+    f.finish(1); await first; await tick(); f.finish(2); await third
+  })
+
+  it('cancels only the running owner and ignores a repeated late cancellation after promotion', async () => {
+    const f = fixture(), first = f.submit('first'), second = f.submit('second')
+    await tick(); await tick()
+    expect(f.queue.cancelPrompt('first')).toBe('cancelled')
+    await expect(first).resolves.toMatchObject({ stopReason: 'cancelled' })
+    expect(f.echoes).toEqual(['first'])
+    f.idle(); await tick()
+    expect(f.echoes).toEqual(['first', 'second'])
+    expect(f.queue.cancelPrompt('first')).toBe('not_found')
+    expect(f.agent.cancel).toHaveBeenCalledTimes(1)
+    f.finish(2); await second
+  })
+
+  it('does not cancel another turn to retract an already-submitted steering prompt', async () => {
+    const f = fixture({ followUpSteer: true }), first = f.submit('first')
+    await tick(); const second = f.submit('second'); await tick()
+    expect(f.queue.cancelPrompt('second')).toBe('already_submitted')
+    expect(f.agent.cancel).not.toHaveBeenCalled()
+    f.finish(1); await first; await second
+  })
+
+  it('honors cancellation reentered from a steering acknowledgment without dropping other queued rows', async () => {
+    const notify = vi.fn(), f = fixture({ notify }), first = f.submit('first')
+    await tick(); const queued = f.submit('queued'); await tick()
+    notify.mockImplementationOnce(() => { expect(f.queue.cancelPrompt('steer')).toBe('cancelled') })
+    const steer = f.submit('steer', { followUp: 'steer' })
+    await expect(steer).resolves.toMatchObject({ stopReason: 'cancelled' })
+    expect(f.steered).toEqual([]); expect(f.agent.cancel).not.toHaveBeenCalled()
+    expect(f.snapshot().entries.map(row => row.id)).toEqual(['queued'])
+    f.finish(1); await first; await tick(); f.finish(2); await queued
+  })
+
+  it('publishes steering ownership before native callbacks can reenter cancellation', async () => {
+    const f = fixture({ followUpSteer: true }), first = f.submit('first')
+    await tick()
+    vi.mocked(f.agent.steer).mockImplementationOnce(() => { expect(f.queue.cancelPrompt('steer')).toBe('already_submitted') })
+    const steer = f.submit('steer'); await tick()
+    expect(f.agent.cancel).not.toHaveBeenCalled()
+    f.finish(1); await first; await expect(steer).resolves.toMatchObject({ stopReason: 'end_turn' })
+  })
+
+  it('keeps a settling owner distinct from an active turn during output hydration', async () => {
+    const gate = deferred<void>(), f = fixture({ flushOutput: () => gate.promise }), first = f.submit('first')
+    await tick(); f.claim(1); f.observe(1); await tick()
+    expect(f.queue.cancelPrompt('first')).toBe('already_submitted')
+    expect(f.agent.cancel).not.toHaveBeenCalled()
+    gate.resolve(); f.idle(); await first
+  })
+
+  it('rejects duplicate active ids without replacing the original cancellation owner', async () => {
+    const f = fixture(), first = f.submit('same')
+    await expect(f.submit('same')).rejects.toThrow('duplicate active prompt')
+    expect(f.queue.cancelPrompt('same')).toBe('cancelled')
+    await first
+  })
+
+  it('drains late failed preparation after targeted cancellation without reviving the row', async () => {
+    const f = fixture(), gate = deferred<DurablePromptBlock[]>(), first = f.submit('image', {}, () => gate.promise)
+    await tick(); f.queue.cancelPrompt('image'); await first
+    const disposal = f.queue.dispose()
+    gate.reject(new Error('late storage failure')); await disposal
+    expect(f.messages).toEqual([])
+  })
+
+  it('still settles the targeted running RPC if native cancellation throws, preserving queued input', async () => {
+    const f = fixture(), first = f.submit('first'), second = f.submit('second')
+    await tick(); await tick()
+    vi.mocked(f.agent.cancel).mockImplementationOnce(() => { throw new Error('native cancellation failed') })
+    expect(() => f.queue.cancelPrompt('first')).toThrow('native cancellation failed')
+    await expect(first).resolves.toMatchObject({ stopReason: 'cancelled' })
+    expect(f.snapshot().entries.map(row => row.id)).toEqual(['second'])
+    f.idle(); await tick(); f.finish(2); await second
+  })
+
   it('lets accepted preparation stop before its next write when its queue generation is cancelled', async () => {
     const f = fixture(), gate = deferred<void>(), write = vi.fn()
     const request = f.queue.submit({ _meta: { promptId: 'guarded' } }, 'image', async admission => {

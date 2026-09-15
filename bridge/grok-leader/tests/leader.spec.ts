@@ -1068,6 +1068,45 @@ describe('grok leader over a unix socket', () => {
     expect(await c.next()).toEqual({ type: 'pong' })
   })
 
+  it('targets only the selected prompt over the socket and ignores late cancellation after promotion', async () => {
+    const { registry, client: c } = await start({ manualIdle: true, followUpBehavior: 'queue' })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId, agent = registry.byId.get(sessionId)!
+    for (const [id, text] of [[2, 'first'], [3, 'second'], [4, 'third']] as const) {
+      sendRequest(c, id, 'session/prompt', { sessionId, _meta: { promptId: text }, prompt: [{ type: 'text', text }] })
+    }
+    await waitFor(() => (c.broadcasts.at(-1)?.params as { entries?: unknown[] })?.entries?.length === 2)
+    expect((await c.request(5, '_x.ai/session/cancel_prompt', { sessionId, promptId: 'second' })).result).toEqual({ status: 'cancelled' })
+    expect((await waitForId(c, 3)).result).toMatchObject({ stopReason: 'cancelled', _meta: { promptId: 'second' } })
+    expect(agent.internals.cancelCalls).toBe(0)
+    expect((await c.request(6, '_x.ai/session/cancel_prompt', { sessionId, promptId: 'first' })).result).toEqual({ status: 'cancelled' })
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
+    expect(agent.internals.followups).toEqual(['first'])
+    for (const idle of agent.internals.idleWaiters.splice(0)) idle()
+    await waitFor(() => agent.internals.followups.length === 2)
+    expect(agent.internals.followups).toEqual(['first', 'third'])
+    expect((await c.request(7, '_x.ai/session/cancel_prompt', { sessionId, promptId: 'first' })).result).toEqual({ status: 'not_found' })
+    expect(agent.internals.cancelCalls).toBe(1)
+    for (const idle of agent.internals.idleWaiters.splice(0)) idle()
+    await waitForId(c, 4)
+  })
+
+  it('registers prompt ownership before a cancellation frame from the same socket write', async () => {
+    const { registry, client: c } = await start({ manualIdle: true })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId, agent = registry.byId.get(sessionId)!
+    const frame = (id: number, method: string, params: unknown) => encodeJsonFrame({ type: 'acp', payload: JSON.stringify({ jsonrpc: '2.0', id, method, params }) })
+    c.socket.write(Buffer.concat([
+      frame(2, 'session/prompt', { sessionId, _meta: { promptId: 'early' }, prompt: [{ type: 'text', text: 'do not admit' }] }),
+      frame(3, '_x.ai/session/cancel_prompt', { sessionId, promptId: 'early' }),
+    ]))
+    expect((await waitForId(c, 3)).result).toEqual({ status: 'cancelled' })
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled', _meta: { promptId: 'early' } })
+    expect(agent.internals.followups).toEqual([]); expect(agent.internals.cancelCalls).toBe(0)
+  })
+
   it('broadcasts x.ai/queue/changed while a prompt runs and when it settles', async () => {
     const { registry, client: c } = await start()
     register(c)

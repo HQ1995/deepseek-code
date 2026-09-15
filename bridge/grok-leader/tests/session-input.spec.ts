@@ -35,7 +35,7 @@ function fixture() {
   const host = {
     owned: vi.fn((id: number, sessionId: SessionId | undefined) => id === 1 && sessionId === 'one' ? owner : undefined),
     assertReady: vi.fn(() => { if (!ready.value) throw new Error('initializing') }),
-    commands: { execute: vi.fn<(_record: typeof record, _params: Record<string, unknown>, _parsed: ParsedPrompt) => Promise<PromptSettleResult | undefined> | undefined>(() => undefined) },
+    commands: { execute: vi.fn<(_record: typeof record, _params: Record<string, unknown>, _parsed: ParsedPrompt, _signal?: AbortSignal) => Promise<PromptSettleResult | undefined> | undefined>(() => undefined) },
     models: { current: vi.fn(async () => catalog) }, attachments: vi.fn(() => attachments),
     notify: vi.fn(), cancelHuman: vi.fn(), goal: { pauseGoal: vi.fn(), refresh: vi.fn() },
   }
@@ -48,6 +48,77 @@ function fixture() {
 }
 
 describe('session input routing', () => {
+  it('targets same-tick ordinary input without cancelling the native agent, human requests or goal', async () => {
+    const f = fixture(), request = f.prompt()
+    expect(f.input.cancelPrompt(1, { sessionId: 'one', promptId: 'request' })).toEqual({ status: 'cancelled' })
+    await expect(request).resolves.toMatchObject({ stopReason: 'cancelled', _meta: { promptId: 'request' } })
+    expect(f.followup).not.toHaveBeenCalled(); expect(f.cancelAgent).not.toHaveBeenCalled()
+    expect(f.host.cancelHuman).not.toHaveBeenCalled(); expect(f.host.goal.pauseGoal).not.toHaveBeenCalled()
+    await f.prompt('fresh'); expect(f.followup).toHaveBeenCalledOnce()
+  })
+
+  it('rejects foreign, malformed and duplicate active prompt ownership', async () => {
+    const f = fixture(), gate = deferred<undefined>()
+    f.host.commands.execute.mockReturnValueOnce(gate.promise)
+    const request = f.prompt('/unknown')
+    expect(() => f.input.cancelPrompt(2, { sessionId: 'one', promptId: 'request' })).toThrow('unknown session')
+    expect(() => f.input.cancelPrompt(1, { sessionId: 'one', promptId: '' })).toThrow('required')
+    await expect(f.prompt('duplicate')).rejects.toThrow('duplicate active prompt')
+    expect(f.input.cancelPrompt(1, { sessionId: 'one', promptId: 'absent' })).toEqual({ status: 'not_found' })
+    expect(f.record.prompts).toEqual(['/unknown'])
+    gate.resolve(undefined); await request
+  })
+
+  it('cancels asynchronous command dispatch before its unhandled fallback reaches the queue', async () => {
+    const f = fixture(), gate = deferred<undefined>()
+    f.host.commands.execute.mockReturnValueOnce(gate.promise)
+    const request = f.prompt('/unknown')
+    const signal = f.host.commands.execute.mock.calls[0]![3]!
+    expect(f.input.cancelPrompt(1, { sessionId: 'one', promptId: 'request' })).toEqual({ status: 'cancelling' })
+    expect(signal.aborted).toBe(true)
+    gate.resolve(undefined)
+    await expect(request).resolves.toMatchObject({ stopReason: 'cancelled', _meta: { promptId: 'request' } })
+    expect(f.followup).not.toHaveBeenCalled(); expect(f.cancelAgent).not.toHaveBeenCalled()
+    expect(f.host.goal.pauseGoal).not.toHaveBeenCalled()
+  })
+
+  it('keeps cancelled native command work in the input disposal drain and preserves native failures', async () => {
+    const f = fixture(), gate = deferred<undefined>(), failure = new Error('native failure')
+    f.host.commands.execute.mockReturnValueOnce(gate.promise)
+    const request = f.prompt('/command'), rejected = expect(request).rejects.toBe(failure)
+    f.input.cancelPrompt(1, { sessionId: 'one', promptId: 'request' })
+    let drained = false; const disposal = f.input.dispose().then(() => { drained = true })
+    await tick(); const early = drained
+    gate.reject(failure); await rejected; await disposal
+    expect(early).toBe(false)
+  })
+
+  it('releases a targeted model lookup so fresh input runs without saving the late image', async () => {
+    const f = fixture(), gate = deferred<ModelCatalog>()
+    f.host.models.current.mockReturnValueOnce(gate.promise)
+    const request = f.prompt('image', true)
+    await tick()
+    expect(f.input.cancelPrompt(1, { sessionId: 'one', promptId: 'request' })).toEqual({ status: 'cancelled' })
+    await expect(request).resolves.toMatchObject({ stopReason: 'cancelled' })
+    await f.prompt('fresh')
+    gate.resolve(f.catalog); await tick()
+    expect(f.saveImages).not.toHaveBeenCalled()
+    expect(f.followup).toHaveBeenCalledOnce()
+    expect(f.followup.mock.calls[0]![0].content).toEqual([{ type: 'text', text: 'fresh' }])
+    expect(f.host.goal.pauseGoal).not.toHaveBeenCalled()
+  })
+
+  it('still cancels the running owner human request and pauses its goal when native cancellation fails', async () => {
+    const f = fixture(), gate = deferred<void>(), error = new Error('native cancel failed')
+    vi.spyOn(f.record.agent, 'whenIdle').mockReturnValue(gate.promise)
+    const request = f.prompt(); await tick()
+    f.cancelAgent.mockImplementationOnce(() => { throw error })
+    expect(() => f.input.cancelPrompt(1, { sessionId: 'one', promptId: 'request' })).toThrow(error)
+    gate.resolve(); await expect(request).resolves.toMatchObject({ stopReason: 'cancelled' })
+    expect(f.host.cancelHuman).toHaveBeenCalledWith(1, 'one')
+    expect(f.host.goal.pauseGoal).toHaveBeenCalledOnce(); expect(f.host.goal.refresh).toHaveBeenCalledOnce()
+  })
+
   it('admits ordinary prompts synchronously before a same-tick cancel', async () => {
     const f = fixture(), request = f.prompt()
     expect(f.record.queue.busy).toBe(true)

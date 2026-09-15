@@ -15,6 +15,9 @@ export interface PromptSettleResult {
   _meta: { sessionId: string; promptId: string }
 }
 
+/** Already-submitted steering/settling input cannot be retracted independently. */
+export type PromptCancelResult = 'cancelled' | 'not_found' | 'already_submitted'
+
 interface PromptState {
   /** Serializes pre-enqueue image admission so later text prompts cannot overtake it. */
   promptAdmissionTail: Promise<void>
@@ -77,6 +80,8 @@ export interface PromptQueue {
   claimed(messageId: string, turn: number): void
   failed(turn: number, error: unknown): void
   cancel(): void
+  /** Retire only this prompt; never fall back to whole-session cancellation. */
+  cancelPrompt(promptId: string): PromptCancelResult
   dispose(): Promise<void>
 }
 
@@ -111,6 +116,8 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
   let disposal: Promise<void> | undefined
   let admissionEpoch = 0, admissions = 0
   const runs = new Set<Promise<PromptSettleResult>>()
+  const preparations = new Set<Promise<DurablePromptBlock[]>>()
+  const preparing = new Map<string, () => void>()
   const state: PromptState = {
     promptAdmissionTail: Promise.resolve(),
     promptQueue: [],
@@ -355,17 +362,23 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
         // confirmed to the pager once — so its optimistic echo retires by id —
         // and then leaves the queue as it joins the live turn; its RPC settles
         // with the host turn (see the steered drain in runPrompt).
-        state.promptQueue.push({ resolve, reject, id, text, content, version: 0 })
+        const row = { resolve, reject, id, text, content, version: 0 }
+        state.promptQueue.push(row)
         broadcastQueueChanged()
-        state.promptQueue.pop()
+        const index = state.promptQueue.indexOf(row)
+        if (index < 0) return // A reentrant cancellation retired this advertised row.
+        state.promptQueue.splice(index, 1)
+        const steered = { id, resolve }
+        state.steered.push(steered)
         try {
           host.agent.steer(createUserMessage({ content, source: { kind: 'user' } }))
         } catch (error: unknown) {
+          const index = state.steered.indexOf(steered)
+          if (index >= 0) state.steered.splice(index, 1)
           broadcastQueueChanged()
           reject(internalError('prompt was not steered: ' + (error instanceof Error ? error.message : String(error))))
           return
         }
-        state.steered.push({ id, resolve })
         // Echo into the live turn's stream: steered text belongs to the
         // running transcript, mirroring runPrompt's admission echo.
         host.echo(text)
@@ -576,38 +589,85 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
     if (failures.length > 1) throw new AggregateError(failures, 'prompt cancellation failed')
   }
 
+  const cancelPrompt = (id: string): PromptCancelResult => {
+    if (disposed || !host.isLive()) return 'not_found'
+    // Enqueue can synchronously publish a notification before submit
+    // retires its admission. The actual running/queued owner wins in that gap.
+    if (state.inflight?.promptId === id) {
+      try { host.agent.cancel({ kind: 'user' }) }
+      finally { settlePrompt('cancelled') }
+      return 'cancelled'
+    }
+    const index = state.promptQueue.findIndex(entry => entry.id === id)
+    if (index >= 0) {
+      const entry = state.promptQueue.splice(index, 1)[0]!
+      state.editHolds.delete(id)
+      entry.resolve(promptSettled(id, 'cancelled'))
+      promoteWhenIdle()
+      broadcastQueueChanged()
+      return 'cancelled'
+    }
+    if (state.runningPromptId === id || state.steered.some(entry => entry.id === id)) return 'already_submitted'
+    const stop = preparing.get(id)
+    if (stop === undefined) return 'not_found'
+    stop()
+    return 'cancelled'
+  }
+
   return {
     get busy() { return admissions > 0 || state.promptQueue.length > 0 || state.inflight !== undefined || state.runningPromptId !== undefined },
     get promptId() { return state.inflight?.promptId },
-    async submit(params, text, prepare) {
+    submit(params, text, prepare) {
+      if (disposed || !host.isLive()) return Promise.reject(invalidParams('unknown session: ' + host.sessionId))
       const epoch = admissionEpoch
       const meta = params._meta as Record<string, unknown> | null | undefined
       const id = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
+      if (preparing.has(id) || state.runningPromptId === id || state.promptQueue.some(entry => entry.id === id)
+        || state.steered.some(entry => entry.id === id)) return Promise.reject(invalidParams('duplicate active prompt: ' + id))
       admissions++
       const previous = state.promptAdmissionTail
       let release = (): void => {}
       state.promptAdmissionTail = new Promise<void>(resolve => { release = resolve })
-      await previous
-      let settlement: Promise<PromptSettleResult>
+      let resolve!: (value: PromptSettleResult | PromiseLike<PromptSettleResult>) => void, reject!: (error: unknown) => void
+      const result = new Promise<PromptSettleResult>((yes, no) => { resolve = yes; reject = no })
       const cancelled = Symbol('cancelled prompt preparation')
+      let targeted = false, retired = false, predecessorDone = false
+      const retire = () => {
+        if (retired) return
+        retired = true; preparing.delete(id); admissions--
+        // A cancelled waiting slot cannot let successors overtake its predecessor.
+        if (predecessorDone) release()
+      }
+      preparing.set(id, () => { targeted = true; resolve(promptSettled(id, 'cancelled')); retire() })
       const admission = { assertActive() {
         if (disposed || !host.isLive()) throw invalidParams('unknown session: ' + host.sessionId)
-        if (epoch !== admissionEpoch) throw cancelled
+        if (targeted || epoch !== admissionEpoch) throw cancelled
       } }
-      try {
-        if (disposed || !host.isLive()) throw invalidParams('unknown session: ' + host.sessionId)
-        if (epoch !== admissionEpoch) return promptSettled(id, 'cancelled')
-        const content = await prepare(admission)
-        if (disposed || !host.isLive()) throw invalidParams('unknown session: ' + host.sessionId)
-        if (epoch !== admissionEpoch) return promptSettled(id, 'cancelled')
-        settlement = enqueuePrompt(params, text, content, id)
-      } catch (error) {
-        // Preparation may stop before its next external write. Preserve the
-        // normal cancelled response without masking unrelated native failures.
-        if (error === cancelled) return promptSettled(id, 'cancelled')
-        throw error
-      } finally { admissions--; release() }
-      return await settlement
+      const failed = (error: unknown) => {
+        if (retired) return
+        // Whole-session cancellation must not mask an unrelated native failure.
+        if (error === cancelled) resolve(promptSettled(id, 'cancelled'))
+        else reject(error)
+        retire()
+      }
+      void previous.then(() => {
+        predecessorDone = true
+        if (retired) { release(); return }
+        try {
+          admission.assertActive()
+          // Keep actual IO in the drain even when cancellation retires its slot.
+          // No extra admission awaits: preserve completion/promotion wire order.
+          const preparation = prepare(admission)
+          preparations.add(preparation)
+          void preparation.then(content => {
+            preparations.delete(preparation)
+            if (retired) return
+            try { admission.assertActive(); resolve(enqueuePrompt(params, text, content, id)); retire() }
+            catch (error) { failed(error) }
+          }, error => { preparations.delete(preparation); failed(error) })
+        } catch (error) { failed(error) }
+      })
+      return result
     },
     control(method, params) { if (!disposed && host.isLive()) control(method, params) },
     observe(event) {
@@ -633,6 +693,7 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
       inflight.reject(internalError('turn failed: ' + errorChain(error)))
     },
     cancel,
+    cancelPrompt,
     dispose() {
       if (disposal !== undefined) return disposal
       disposed = true
@@ -641,6 +702,7 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
       // even if a hook failed. Native run errors belong to their prompt RPCs.
       disposal = Promise.resolve().then(async () => {
         await Promise.allSettled([...runs, state.promptAdmissionTail])
+        while (preparations.size > 0) await Promise.allSettled([...preparations])
         if (failures.length > 0) throw failures[0]
       })
       try { cancel() } catch (error) { failures.push(error) }

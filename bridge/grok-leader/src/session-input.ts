@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -5,7 +6,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams, paramRecord } from './acp.ts'
 import { modelEffortKey, type createModelCatalog } from './model-catalog.ts'
 import { admitPromptContent, parsePrompt, type ParsedPrompt, type DurablePromptBlock } from './prompt-content.ts'
-import type { PromptQueue, PromptSettleResult } from './prompt-queue.ts'
+import type { PromptCancelResult, PromptQueue, PromptSettleResult } from './prompt-queue.ts'
 import type { SessionModel } from './session-models.ts'
 import { acpPromptToText } from './projection.ts'
 
@@ -13,13 +14,13 @@ interface InputSession {
   agent: Agent
   clientId: number
   prompts: string[]
-  queue: Pick<PromptQueue, 'submit' | 'cancel' | 'control'>
+  queue: Pick<PromptQueue, 'submit' | 'cancel' | 'cancelPrompt' | 'promptId' | 'control'>
   model: Pick<SessionModel, 'current'>
 }
 interface InputHost<S extends InputSession> {
   owned(clientId: number, sessionId: SessionId | undefined): S | undefined
   assertReady(record: S): void
-  commands: { execute(record: S, params: Record<string, unknown>, parsed: ParsedPrompt): Promise<PromptSettleResult | undefined> | undefined }
+  commands: { execute(record: S, params: Record<string, unknown>, parsed: ParsedPrompt, signal?: AbortSignal): Promise<PromptSettleResult | undefined> | undefined }
   models: Pick<ReturnType<typeof createModelCatalog>, 'current'>
   attachments(): AttachmentStore | undefined
   notify(record: S, method: string, params: unknown): void
@@ -34,6 +35,9 @@ interface InputHost<S extends InputSession> {
 export function createSessionInput<S extends InputSession>(host: InputHost<S>) {
   let closed = false, disposal: Promise<void> | undefined
   const pending = new Set<Promise<unknown>>()
+  // Published before command discovery can await; the queue takes over content
+  // preparation and turns. Keep native command completion attached to our drain.
+  const requests = new WeakMap<S, Map<string, { controller: AbortController; queued: boolean }>>()
   const assertOpen = () => { if (closed) throw internalError('session input has been disposed') }
   const active = (record: S) => {
     assertOpen()
@@ -63,38 +67,56 @@ export function createSessionInput<S extends InputSession>(host: InputHost<S>) {
         const parsed = parsePrompt(p.prompt)
         const text = parsed.text.trim().length > 0 ? parsed.text : parsed.images.length > 0 ? '[Image]' : ''
         if (text.length === 0) throw invalidParams('empty prompt')
-        // History records accepted composer input, including queued commands.
-        record.prompts.push(text)
-        const execution = host.commands.execute(record, p, parsed)
-        if (execution !== undefined) {
-          const handled = await execution
-          if (handled !== undefined) return handled
-          active(record); host.assertReady(record)
-        }
-        if (record.model.current === undefined) throw invalidParams('no model selected; use /provider to add or choose a provider first')
-        return record.queue.submit(p, text, async admission => {
-          const check = () => { assertOpen(); admission.assertActive() }
-          check()
-          if (parsed.images.length > 0) {
-            const selected = record.model.current
-            if (selected === undefined) throw invalidParams('no model selected; use /provider to add or choose a provider first')
-            const current = await host.models.current()
-            check()
-            const wireId = current.providerModelToWireId.get(modelEffortKey(selected.provider, selected.model))
-            const advertised = current.availableModels.find(model => model.modelId === wireId)
-            if (advertised?._meta?.acceptsImages !== true) throw invalidParams('selected model does not support image input: ' + selected.provider + '/' + selected.model)
+        const meta = typeof p._meta === 'object' && p._meta !== null && !Array.isArray(p._meta) ? p._meta as Record<string, unknown> : {}
+        const id = typeof meta.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
+        const requestParams = { ...p, _meta: { ...meta, promptId: id } }
+        let ownedRequests = requests.get(record)
+        if (ownedRequests === undefined) { ownedRequests = new Map(); requests.set(record, ownedRequests) }
+        if (ownedRequests.has(id)) throw invalidParams('duplicate active prompt: ' + id)
+        const request = { controller: new AbortController(), queued: false }
+        ownedRequests.set(id, request)
+        try {
+          // History records accepted composer input, including queued commands.
+          record.prompts.push(text)
+          const execution = host.commands.execute(record, requestParams, parsed, request.controller.signal)
+          if (execution !== undefined) {
+            const handled = await execution
+            active(record)
+            request.controller.signal.throwIfAborted()
+            if (handled !== undefined) return handled
+            host.assertReady(record)
           }
-          if (parsed.images.length > 0) {
-            const attachments = host.attachments()
+          request.controller.signal.throwIfAborted()
+          if (record.model.current === undefined) throw invalidParams('no model selected; use /provider to add or choose a provider first')
+          request.queued = true
+          return await record.queue.submit(requestParams, text, async admission => {
+            const check = () => { assertOpen(); admission.assertActive() }
             check()
-            return admitPromptContent(attachments, parsed)
-          }
-          return parsed.blocks.map((block): DurablePromptBlock => {
-            if (block.type === 'text') return block
-            if (block.type === 'resource_link') return { type: 'text', text: acpPromptToText([block]) }
-            throw internalError('image prompt admission state drifted')
+            if (parsed.images.length > 0) {
+              const selected = record.model.current
+              if (selected === undefined) throw invalidParams('no model selected; use /provider to add or choose a provider first')
+              const current = await host.models.current()
+              check()
+              const wireId = current.providerModelToWireId.get(modelEffortKey(selected.provider, selected.model))
+              const advertised = current.availableModels.find(model => model.modelId === wireId)
+              if (advertised?._meta?.acceptsImages !== true) throw invalidParams('selected model does not support image input: ' + selected.provider + '/' + selected.model)
+            }
+            if (parsed.images.length > 0) {
+              const attachments = host.attachments()
+              check()
+              return admitPromptContent(attachments, parsed)
+            }
+            return parsed.blocks.map((block): DurablePromptBlock => {
+              if (block.type === 'text') return block
+              if (block.type === 'resource_link') return { type: 'text', text: acpPromptToText([block]) }
+              throw internalError('image prompt admission state drifted')
+            })
           })
-        })
+        } catch (error) {
+          if (!request.controller.signal.aborted || error !== request.controller.signal.reason) throw error
+          active(record)
+          return { stopReason: 'cancelled', _meta: { sessionId: String(record.agent.session.id), promptId: id } }
+        } finally { ownedRequests.delete(id) }
       })
     },
     interject(clientId: number, params: unknown) {
@@ -121,6 +143,31 @@ export function createSessionInput<S extends InputSession>(host: InputHost<S>) {
       }
       if (failures.length === 1) throw failures[0]
       if (failures.length > 1) throw new AggregateError(failures, 'prompt cancellation failed')
+    },
+    /** A separate request method makes old leaders fail closed (method-not-found)
+     * instead of ignoring metadata and clearing their entire session queue. */
+    cancelPrompt(clientId: number, params: unknown): { status: PromptCancelResult | 'cancelling' } {
+      assertOpen()
+      const p = paramRecord(params, 'x.ai/session/cancel_prompt')
+      if (typeof p.sessionId !== 'string' || typeof p.promptId !== 'string' || p.promptId.length === 0) throw invalidParams('sessionId and promptId are required')
+      const record = host.owned(clientId, SessionId(p.sessionId))
+      if (record === undefined) throw invalidParams('unknown session: ' + p.sessionId)
+      active(record)
+      const request = requests.get(record)?.get(p.promptId)
+      if (request !== undefined && !request.queued) {
+        request.controller.abort()
+        return { status: 'cancelling' }
+      }
+      const running = record.queue.promptId === p.promptId
+      let status: PromptCancelResult = 'not_found'
+      const failures: unknown[] = []
+      const steps = [() => { status = record.queue.cancelPrompt(p.promptId as string) }]
+      if (running) steps.push(() => host.goal.pauseGoal(record),
+        () => host.cancelHuman(clientId, record.agent.session.id), () => host.goal.refresh(record))
+      for (const step of steps) { try { step() } catch (error) { failures.push(error) } }
+      if (failures.length === 1) throw failures[0]
+      if (failures.length > 1) throw new AggregateError(failures, 'prompt cancellation failed')
+      return { status }
     },
     control(clientId: number, method: string, params: unknown): void {
       if (closed) return

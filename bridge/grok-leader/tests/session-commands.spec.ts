@@ -65,6 +65,20 @@ function fixture(disposalError?: string) {
 }
 
 describe('owned session commands', () => {
+  it('passes per-prompt cancellation to native commands and suppresses their late output', async () => {
+    const f = fixture(), gate = deferred<Awaited<ReturnType<NativeCommands['execute']>>>(), controller = new AbortController()
+    f.execute.mockReturnValueOnce(gate.promise)
+    const params = { sessionId: 'one', _meta: { promptId: 'cancelled' } }
+    const request = f.commands.execute(f.record, params, parsePrompt([{ type: 'text', text: '/build' }]), controller.signal)!
+    const rejected = expect(request).rejects.toBeDefined()
+    controller.abort()
+    expect(f.execute.mock.calls[0]![3].aborted).toBe(true)
+    gate.resolve({ result: { kind: 'success', text: 'late output' } }); await rejected
+    expect(f.record.output.update).not.toHaveBeenCalled()
+    await f.request('/goal show')
+    expect(f.record.output.update).toHaveBeenCalledOnce()
+  })
+
   it('merges bridge, native and user-invocable skill commands with case-insensitive precedence', async () => {
     const f = fixture()
     f.list.mockReturnValue([{ name: 'DSH', description: 'shadow' }, { name: 'build', description: 'native', input: { hint: 'target' } }])

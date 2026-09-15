@@ -203,6 +203,31 @@ uses `cancelTrigger=send_now`. Steering merges text at the next native step
 without cancellation. Queued steering leaves the row queued if no turn is active.
 Combined rows are limited to plain text; image-bearing prompts remain separate.
 
+`x.ai/session/cancel_prompt` is a dscode extension **request** with
+`{sessionId, promptId}`. It requires the owning client and returns `{status}`:
+
+- `cancelled`: retired this preparing/queued prompt, or requested cancellation
+  of its active native turn. It does not prove that earlier effects never ran.
+- `cancelling`: signalled a native command; accepted atomic operations may finish
+  before cancellation settles. No late unhandled-command fallback is admitted.
+- `already_submitted`: the prompt is settling or was merged as steering, so it
+  cannot be independently retracted without affecting another turn.
+- `not_found`: no current owner for that ID; this is not proof of non-execution.
+
+It never falls back to session-wide cancellation. Unrelated queued rows and edit
+holds survive; only cancelling the active owner also cancels its human requests
+and pauses its goal. A cancelled preparation releases its FIFO slot immediately,
+but real native storage remains in the shutdown drain and cannot later submit
+the prompt. Cancelling a waiting slot cannot let successors overtake earlier
+preparation. Prompt IDs must be unique among active requests; use fresh IDs for
+retries, never automatic resends after an uncertain timeout.
+
+Old leaders reject this method with method-not-found, safely leaving their queue
+intact. Clients must not retry it as legacy `session/cancel` with extra metadata:
+old bridges ignore that metadata and cancel the whole session queue. Legacy
+`session/cancel` retains its existing whole-session semantics. The TUI/headless
+acknowledgment watchdog is a separate follow-up, not enabled by this endpoint.
+
 Session-picker cold reads share at most four open logs. Each response owns its
 projection snapshots so cache eviction cannot erase rows in a concurrent request.
 

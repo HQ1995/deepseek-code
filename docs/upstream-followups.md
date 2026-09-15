@@ -52,9 +52,59 @@ Validation on macOS arm64 (TUI on Node 24.19.0):
 - The isolated plugin archive's 132 source/compiled/bin/preset files match this
   checkout. No bridge code, DSH pin, package version or daily profile changed.
 
-Next separate slice: prompt-ack recovery and prompt-specific cancellation.
-History-read migration and the Linux/systemd runtime candidate remain pending;
-no timer-only port or runtime upgrade is included in this UI slice.
+## Execution: prompt-specific cancellation foundation
+
+The bridge now implements the owned `x.ai/session/cancel_prompt` request; see
+[the protocol contract](grok-leader-protocol.md#prompt-queue). The queue owns
+preparing, queued, active and steering states; session input only tracks native
+command dispatch before queue handoff. This follows the codebase-design skill's
+single-owner boundary and adds only a routing case to the shared entry point.
+
+Targeted cancellation retires one preparation/row without clearing its siblings.
+A waiting cancelled row cannot let later input overtake earlier preparation.
+Actual image IO and native commands stay in their shutdown drains; late results
+cannot revive admission. Commands receive a per-prompt abort signal, while
+accepted atomic profile operations retain their completion semantics. Duplicate
+active prompt IDs are rejected. Steering and already-settling prompts report
+that independent retraction is unavailable; late unknown IDs never cancel a new
+turn. Only the active owner also cancels its human request and pauses its goal.
+
+This deliberately uses a new request, not legacy cancellation metadata. An old
+bridge fails with method-not-found instead of silently clearing its entire queue.
+The legacy whole-session cancel path is unchanged. No TUI/headless watchdog or
+automatic retry is enabled by this foundation commit.
+
+Review caught and corrected two edge cases: extra preparation awaits initially
+changed very-short-turn completion/promotion ordering; reentrant cancellation
+during steering acknowledgment needed exact row ownership before native dispatch.
+Existing socket-order tests remain unchanged and pass. The queue test helper now
+flushes an event-loop turn rather than assuming a fixed number of microtasks.
+
+Validation on macOS arm64:
+
+- Pinned-SDK TypeScript build passed. Full bridge suites on Node 22.19.0 and
+  24.19.0 each passed all 46 files / 866 tests, including compiled CLI tests.
+  New cases cover cancellation before preparation, FIFO, image lookup, command
+  fallback, disposal, steering, failed native cancellation and late IDs.
+- Real Unix-socket tests exercise the new request, including prompt/cancel frames
+  in one write and preserving a queued successor after active cancellation.
+  These socket tests use the existing mock native agent, not a real model.
+- Repacked isolated plugin SHA-256:
+  `c838cbc3985eb105da08038c92b5697ed31c4e774317cd4c18bcc19fdc378ba9`.
+  Its 132 source/compiled/bin/preset files match this checkout/build; the five
+  runtime host peers remain unbundled.
+- Real installed TUI/DSH regression passed with `DSCODE_E2E_NEXT_SIX_ONLY=1`:
+  `/tmp/dsc-follow-work.nYBS9C/ack/e2e/contracts-76497/PASS.json`. This validates
+  the existing product loop and interruption isolation against the new package;
+  it does not yet exercise the new endpoint through TUI timeout recovery.
+  Full goals/history/provider acceptance and graphical Kitty were not run in
+  this slice. The Rust TUI itself is unchanged from the verified UI build above.
+- `scripts/check.sh` and `git diff --check` passed. No SDK pin, package version,
+  daily profile, remote branch or release changed.
+
+Next separate slice: TUI/headless prompt-ack deadlines, safe draft recovery and
+the new request's client integration, with delayed/lost-ack acceptance.
+History-read migration and the Linux/systemd runtime candidate remain pending.
 
 ## DSH
 
