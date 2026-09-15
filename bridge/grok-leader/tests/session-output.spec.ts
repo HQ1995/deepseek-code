@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createHook } from 'node:async_hooks'
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { createSessionOutput } from '../src/session-output.ts'
@@ -37,6 +38,36 @@ function fixture() {
 }
 
 describe('session output ownership', () => {
+  it.each([false, true])('uses a constant-sized Promise drain for long ordinary replay (visible=%s)', async visible => {
+    const f = fixture()
+    const history = Array.from({ length: 4000 }, (_, seq) => visible
+      ? assistantEvent(seq, String(seq)) : event(seq, 'fixture/no-output', {}))
+    let promises = 0
+    const hook = createHook({ init(_id, type) { if (type === 'PROMISE') promises++ } })
+    hook.enable()
+    try { await f.output.restore(history) } finally { hook.disable() }
+    expect(promises).toBeLessThan(100)
+    expect(f.notes).toHaveLength(visible ? 4000 : 0)
+    expect(f.projectImages).not.toHaveBeenCalled()
+    if (visible) {
+      expect(f.content()).toEqual(history.map((_, index) => String(index)))
+      expect(f.notes.map(note => note.params._meta.eventSeq)).toEqual(history.map((_, index) => index + 1))
+      expect(f.notes[0]!.params._meta.contextInfo).toMatchObject({ messageCount: 4000 })
+    }
+  })
+
+  it('retains reentrant successors behind reserved history across slow-reader queue compaction', async () => {
+    const f = fixture(), held = deferred<void>()
+    f.drain.mockImplementationOnce(() => { f.output.update(text('reentrant')); return held.promise })
+    const replay = f.output.restore(Array.from({ length: 2500 }, (_, index) => assistantEvent(index, String(index))))
+    await vi.waitFor(() => expect(f.content()).toEqual(['0']))
+    f.setPrompt('next')
+    held.resolve(); await replay
+    expect(f.content()).toEqual([...Array.from({ length: 2500 }, (_, index) => String(index)), 'reentrant'])
+    expect(f.notes.map(note => note.params._meta.promptId)).toEqual(Array.from({ length: 2501 }, () => 'prompt'))
+    expect(f.notes.map(note => note.params._meta.eventSeq)).toEqual(Array.from({ length: 2501 }, (_, index) => index + 1))
+  })
+
   it('admits each event once while preserving all blocks and live/replay meter dedup', async () => {
     const f = fixture()
     const prompt = event(0, 'user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: 'one' }, { type: 'text', text: 'two' }] })

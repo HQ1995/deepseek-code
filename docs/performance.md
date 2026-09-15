@@ -1,10 +1,104 @@
-# Performance work (2026-09-13)
+# Performance work
 
 This pass covers macOS terminal CPU and latency, long-session/streaming work,
 startup, and runtime/package footprint.
 Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
+
+## 2026-09-15: long-session output replay
+
+`session-output.ts` now drains one owned FIFO instead of building a Promise
+chain for every replayed text update. Ordinary and nonvisual events do not
+create per-event hydration promises; image hydration remains sequential.
+Consumed queue slots are released immediately and compacted amortized-linearly.
+The existing interface still owns replay/live deduplication, prompt and turn
+stamps, socket backpressure, flush, and disposal. There is no protocol change,
+text batching, extra scheduler, or runtime-pin change.
+
+Local Darwin ARM64 measurements: 20,000 synthetic events through the real
+output module and length-prefixed JSON encoder into a Writable sink. Each
+median uses six alternating fresh processes per revision, without async-hooks
+instrumentation; before is `4d7639bf`, after is this FIFO change.
+
+| Node | Text completion, before → after | First update, before → after | Admission heap delta, before → after |
+| --- | ---: | ---: | ---: |
+| 22.19.0 | 75.30 → 44.45ms | 27.77 → 8.41ms | 34.24 → 16.24MiB |
+| 24.19.0 | 74.05 → 46.58ms | 18.23 → 7.20ms | 40.33 → 13.93MiB |
+
+Text completion decreased about 37–41%, and admission heap delta about
+53–65%. The heap figure is the change in `heapUsed` immediately after replay
+admission, with one GC before measurement; it is not retained heap, cumulative
+allocation, or whole-process RSS. Slow-reader completion medians were 337.94 → 308.06ms
+(Node 22) and 346.77 → 317.82ms (Node 24); maximum queued writable bytes stayed
+16,926 with the same 16KiB high-water mark. Nonvisual replay completion was
+9.21 → 3.95ms and 6.88 → 2.78ms, respectively.
+
+All text and slow-reader runs produced the same 10,928,784 wire bytes and
+SHA-256 `ac1b00dafa3a0765e230f11fc6f8878c5c35386e9c48776f4631ec552ccb4c02`.
+A separate instrumented text run counted 160,014 → 16 Promise allocations.
+Regression tests enforce constant-sized Promise overhead, full-history folding
+before the first notification, ordered sequence/prompt ownership, and reentrant
+successors behind a slow-reader replay across queue compaction. Existing tests
+cover hydration, failures, early rejection observation, and disposal.
+
+Reproduce against two SDK-linked source snapshots with Node >=22.19:
+
+```sh
+node --experimental-strip-types --expose-gc scripts/bench-session-output.mjs /path/to/bridge/src/session-output.ts 20000 text
+node --experimental-strip-types --expose-gc scripts/bench-session-output.mjs /path/to/bridge/src/session-output.ts 20000 slow
+node --experimental-strip-types --expose-gc scripts/bench-session-output.mjs /path/to/bridge/src/session-output.ts 20000 metadata
+node --experimental-strip-types --expose-gc scripts/bench-session-output.mjs /path/to/bridge/src/session-output.ts 20000 text --count-promises
+```
+
+These are local synthetic replay/transport results, not a measurement of disk
+loading, model response time, TUI painting, daily CPU use, or overall speedup.
+Evidence is in `/tmp/dscode-output-perf.s3djRK/replay-interleaved.jsonl`.
+Pinned-SDK TypeScript compilation passed; Node 22.19.0 and 24.19.0 each passed
+925 bridge tests (4 skipped), plus 4 separately enabled compiled-CLI tests.
+Release/runtime/gateway script tests passed 37 with one Linux-only skip.
+The plugin and Darwin runtime were freshly source-built at the unchanged DSH
+0.1.5-rc.2 pin `fb2c4b9e698e30edb738bca4cf0618587db7d203`.
+
+The first full Mac E2E exposed a clipboard-isolation regression: TUI namespace
+isolation scrubbed the harness's inherited `GROK_CLIPBOARD_*` switches, allowing
+a host clipboard image into a synthetic draft sent to the local mock gateway.
+The fix adds explicit `DSCODE_CLIPBOARD_NO_NATIVE_READ` and
+`DSCODE_CLIPBOARD_NO_OSC52` aliases, updates the harness, and tests both explicit
+alias preservation and ambient Grok-variable removal. This does not alter the
+user's clipboard or the product's paste heuristic. Native clipboard/IME testing
+remains separate from the generic isolated product suite.
+
+The next full run exposed an existing child-lifecycle race, independent of the
+output FIFO: an asynchronous history read fixed its event prefix while the
+child was running, then combined that old prefix with a later idle status.
+This could emit a false `cancelled` before the real `completed`; the TUI
+correctly rejected the second finish as a duplicate and retained the wrong
+terminal row. The history reader now captures activity at the same cut as
+the event count. No TUI dedup relaxation, new polling, or timeout increase was
+needed. A deterministic held-flush test first reproduced `cancelled, completed`
+on the old code and now requires exactly one `completed` finish. Existing
+latest-attempt interruption and durable-history tests still pass.
+
+Final re-review: pinned-SDK compilation, both Node suites above, the 3 Rust
+startup/alias tests, `scripts/check.sh`, Rust formatting, and `git diff --check`
+passed. The freshly rebuilt TUI and final plugin passed the **full Mac product
+E2E, run 89498**, with the owning process exiting 0:
+`/tmp/dscode-output-perf.s3djRK/mac3/contracts-89498/PASS.json`.
+This includes child stop/resume and history restart, workflows, real TypeScript
+LSP, persistent Python REPL, terminal interrupt/reuse, owner isolation, process
+cleanup, rewind, and durable headless history. Clipboard-contaminated failed
+artifacts were moved to the local Trash (recoverable), not uploaded.
+Native clipboard/IME, physical Cmd-click, optional Kitty rendering and Linux
+systemd behavior were not validated by this Mac run. Nothing was published or
+installed into the daily-use profile; the Inspector/browser candidate is
+unchanged. The separate Darwin native process-inspection cost remains deferred.
+
+## Historical results (2026-09-13)
+
+The sections below record the earlier snapshots and their verification counts;
+they are not measurements of the current checkout. Their implemented changes
+have since been committed. Temporary evidence paths may no longer exist.
 
 ## Implemented: incremental workflow projection
 
@@ -46,7 +140,7 @@ with profiling enabled, run **11197**:
 `/tmp/dscmac-perf/contracts-11197/PASS.json`. This includes live/repeated and
 restarted workflows, real PTYs, interrupt/reuse, owner isolation and process
 reaping. The existing optional Kitty/physical Cmd-click coverage limitations
-still apply. These changes are not committed, published or installed.
+still apply. That run did not publish or install the changes.
 
 ## Implemented: managed startup without duplicate probes
 
@@ -165,9 +259,9 @@ are not covered by this generic run; the remaining host/version boundaries in
 failed-run artifacts were moved to the local Trash, not uploaded. No Rust or
 DSH native source was changed or rebuilt. CI changes have not run remotely.
 
-These are uncommitted checkout changes and a temporary test package. The
-installed `0.0.14-alpha.12` launcher was checked and does **not** include the
-startup optimization; no patched release was published or installed.
+At that verification, these were uncommitted checkout changes in a temporary
+test package. The installed `0.0.14-alpha.12` launcher did not include the
+startup optimization; that run did not publish or install a patched release.
 
 ## Implemented: leader boot without the MCP SDK and updater
 
@@ -372,5 +466,5 @@ used different baselines (the first "after" home is this run's "before").
   Census/benchmark homes: `/tmp/dscboot.GXFtBc` (before),
   `/tmp/dscboot-after.W4JAWw` (after), log `ab-interleaved.log`.
 
-Still uncommitted source changes; the installed `0.0.14-alpha.12` and the
-published release do not contain them.
+At that verification, the source changes were uncommitted and neither the
+installed `0.0.14-alpha.12` nor the published release contained them.

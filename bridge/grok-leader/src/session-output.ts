@@ -45,6 +45,8 @@ export function createSessionOutput(host: SessionOutputHost) {
   const { logger } = host
   let closed = false
   let outputTail: Promise<void> | undefined
+  const outputQueue: Array<(() => void | Promise<void>) | undefined> = []
+  let outputHead = 0
   let streamState: { attemptId: string; revision: number; turn: number; step: number; delivered: Set<number>; closed: boolean; pending: SessionEvent[] } | undefined
   let lastUsage: { turn: number; step: number; usage: TokenUsage } | undefined
   const state: OutputState = {
@@ -77,6 +79,35 @@ export function createSessionOutput(host: SessionOutputHost) {
     if (seq <= state.lastSeq) return false
     state.lastSeq = seq
     return true
+  }
+
+  // One drain owns the FIFO, rather than a Promise chain per text update.
+  // Start in a microtask so restore can reserve the complete replay prefix
+  // before live output or reentrant notifications can overtake that history.
+  const enqueue = (emit: () => void | Promise<void>): void => {
+    outputQueue.push(emit)
+    if (outputTail !== undefined) return
+    outputTail = Promise.resolve().then(async () => {
+      try {
+        while (outputHead < outputQueue.length) {
+          const next = outputQueue[outputHead]!
+          outputQueue[outputHead++] = undefined
+          try {
+            const pending = next()
+            if (pending !== undefined) await pending
+          } catch (error) { logger.warn('TUI output projection: ' + errorChain(error)) }
+          // Reentrant/live producers may keep a slow-reader drain nonempty.
+          // Release consumed slots with amortized linear compaction.
+          if (outputHead >= 1024 && outputHead >= outputQueue.length / 2) {
+            outputQueue.splice(0, outputHead)
+            outputHead = 0
+          }
+        }
+      } finally {
+        outputQueue.length = outputHead = 0
+        outputTail = undefined
+      }
+    })
   }
 
   /**
@@ -113,24 +144,21 @@ export function createSessionOutput(host: SessionOutputHost) {
       })
       return isReplay ? host.drain?.() : undefined
     }
-    const previous = outputTail
-    if (previous !== undefined || item instanceof Promise) {
+    if (item instanceof Promise) {
       // Hydrate a tool result once, before its completion and subsequent text.
       // The pager discards further updates after completing that tool call.
       // Observe rejection at admission, not after an earlier preview finishes.
       // Retain FIFO even when a later projection fails first.
-      const projected = Promise.resolve(item).then(
+      const projected = item.then(
         value => ({ status: 'fulfilled' as const, value }),
         reason => ({ status: 'rejected' as const, reason }),
       )
-      const tail = (previous ?? Promise.resolve()).then(() => projected).then(result => {
+      enqueue(() => projected.then(result => {
         if (result.status === 'rejected') throw result.reason
         if (!closed && host.isLive()) return send(result.value)
-      }).catch(error => logger.warn('TUI output projection: ' + errorChain(error)))
-      outputTail = tail
-      void tail.then(() => {
-        if (outputTail === tail) outputTail = undefined
-      })
+      }))
+    } else if (outputTail !== undefined || isReplay) {
+      enqueue(() => { if (!closed && host.isLive()) return send(item) })
     } else send(item)
   }
 
@@ -294,7 +322,7 @@ export function createSessionOutput(host: SessionOutputHost) {
       notify('session/update', { update: { sessionUpdate: 'session_info_update' } }, { sessionRunning: running })
     },
     async restore(events: readonly SessionEvent[], send = true): Promise<void> {
-      let hydration: Promise<unknown> = Promise.resolve()
+      let hydration: Promise<ProjectedUpdate[]> | undefined
       for (const event of events) {
         if (closed || !host.isLive()) return
         // Reserve each durable event once before either counters or async
@@ -302,14 +330,18 @@ export function createSessionOutput(host: SessionOutputHost) {
         if (!admitEvent(event.seq)) continue
         if (event.type === 'turn/start') state.turnStartMs = event.time
         const items = mapEvent(event, true)
-        if (!send) continue
+        if (!send || items.length === 0) continue
         // Reserve the complete replay prefix and its wire positions before
         // yielding. Otherwise a live successor raises lastSeq while an image
         // is loading and causes the remaining history to be dropped. Keep
         // image I/O sequential instead of opening every attachment at once.
-        const projected = hydration.then(() => closed || !host.isLive() || !hasToolImages(event) ? items : host.projectImages(event, items))
-        hydration = projected
-        for (let index = 0; index < items.length; index++) update(projected.then(values => values[index]!), true, event.time)
+        if (hasToolImages(event)) {
+          const projected = (hydration ?? Promise.resolve()).then(() => closed || !host.isLive() ? items : host.projectImages(event, items))
+          hydration = projected
+          for (let index = 0; index < items.length; index++) update(projected.then(values => values[index]!), true, event.time)
+        } else {
+          for (const item of items) update(item, true, event.time)
+        }
       }
       await hydration
       await flush()
