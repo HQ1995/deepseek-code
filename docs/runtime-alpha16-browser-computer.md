@@ -2,6 +2,8 @@
 
 2026-09-15；官方 tag `dsh-v0.1.6-alpha.1`，commit `0a15e36e7f82b6ed45af6fa9759f29b40dcd965d`。本文核实该 checkout 的源码、声明和官方上游文档。没有挂载、启用、启动这些后端，也没有截图、输入或操作真实浏览器/桌面；后续隔离产物检查见下文。文中“可接入”是静态结论，不代表 dscode 已经通过对应端到端测试。
 
+后续进展：[Playwright opt-in 源码审计](runtime-playwright-optin-audit.md)与[独立候选实现/真实浏览器验证](runtime-playwright-candidate.md)已完成；基础路径跑通，但取消返回后仍有页面活动，暂不合入默认功能。本文保留此前静态核实范围，computer use 仍未启用。
+
 ## 已有能力与默认状态
 
 确实存在 browser use 和 computer use。共享服务分别是 `@deepseek-ai/dsh-browser-use`、`@deepseek-ai/dsh-computer-use`；它们只登记一个 provider，不提供统一动作 API，也没有让模型切换后端的工具。实际后端是下列公开 experimental 包，版本均为 `0.1.6-alpha.1`。[Browser subsystem][browser]、[computer subsystem][computer]。
