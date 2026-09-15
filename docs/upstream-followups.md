@@ -497,6 +497,33 @@ remain pending. `swoop` still has a working user manager, but its reservation
 notice requires workload approval; this follow-up launched no remote jobs.
 The daily profile, package version, main pin and remote remain unchanged.
 
+## Execution: refreshed Linux cancellation candidate
+
+The Linux owner has newer follow-up fixes than the original two-commit
+assessment. Candidate `5922e6a2` adds their minimum dependency closure to the
+image candidate: requested early termination, empty-scope settlement,
+signal-invalidated queries, consumed requests with delayed exit notifications,
+and independently acknowledged direct termination before final scope failure.
+Only two production files change relative to the image candidate. New control
+pipes, terminal APIs, CI changes, manifests and lockfiles are excluded. The
+source repository's documentation skills kept the paired README and existing
+containment note aligned with these decisions.
+
+See [the exact patch scope, negative controls and artifacts](runtime-linux-candidate.md).
+Node 22.19.0 and 24.19.0 each passed 440 runtime-owner/consumer tests (17
+platform/tool-availability skips) and all 923 bridge tests. The official build,
+documentation checks, built startup-timeout snapshot, packaged dependency-tree
+verification and image migration probe passed. Full installed macOS TUI/DSH
+acceptance passed, run 88327, including terminal interruption and interactive
+rewind. Four restored obsolete decisions made the corresponding regression
+tests fail; restoring the candidate passed again.
+
+These tests include mocked systemd observations and real macOS fallback
+processes, not real Linux scope validation. `swoop` workload approval and an
+exact-source distribution/adoption decision remain outstanding. The verified
+source bundle is retained locally; no main pin, daily installation, version,
+remote branch or release changed.
+
 ## DSH
 
 Local runtime/SDK pin: `0.1.5-rc.2` at
