@@ -23,8 +23,9 @@ test('Mac product E2E uses private clipboard helpers, not the machine clipboard'
     assert.equal(run('osascript', ['-e', 'get the clipboard']), '');
     assert.throws(() => run('osascript', ['-e', 'unexpected automation']));
     const script = readFileSync(fileURLToPath(new URL('./e2e-tui-bridge.sh', import.meta.url)), 'utf8');
-    assert.match(script, /export GROK_CLIPBOARD_NO_NATIVE_READ=1 GROK_CLIPBOARD_NO_OSC52=1/);
+    assert.match(script, /export DSCODE_CLIPBOARD_NO_NATIVE_READ=1 DSCODE_CLIPBOARD_NO_OSC52=1/);
     assert.match(script, /e2e-macos-clipboard\.mjs.*SCRATCH\/e2e-bin/);
+    assert.match(script, /Unexpected clipboard image in text-only draft/);
   } finally { rmSync(bin, { recursive: true, force: true }); }
 });
 

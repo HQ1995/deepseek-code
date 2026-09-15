@@ -1849,13 +1849,18 @@ fn unsupported_dscode_cli(args: &PagerArgs) -> Option<&'static str> {
          snapshots; use --worktree to copy the current checkout state",
     )
 }
-const DSCODE_ENV_ALIASES: [(&str, &str); 3] = [
+const DSCODE_ENV_ALIASES: [(&str, &str); 5] = [
     ("DSCODE_CONFIG", "GROK_CONFIG"),
     ("DSCODE_CONFIG_PATH", "GROK_CONFIG_PATH"),
     (
         "DSCODE_CONNECT_UI_TIMEOUT_SECS",
         "GROK_CONNECT_UI_TIMEOUT_SECS",
     ),
+    (
+        "DSCODE_CLIPBOARD_NO_NATIVE_READ",
+        "GROK_CLIPBOARD_NO_NATIVE_READ",
+    ),
+    ("DSCODE_CLIPBOARD_NO_OSC52", "GROK_CLIPBOARD_NO_OSC52"),
 ];
 
 /// Keep dscode and a co-installed grok-build process in separate environment
@@ -2964,6 +2969,44 @@ mod tests {
         }
         isolate_dscode_environment();
         assert!(std::env::var_os("GROK_CONFIG").is_none());
+    }
+
+    #[test]
+    #[serial_test::serial(dscode_env_aliases)]
+    fn dscode_aliases_preserve_explicit_clipboard_isolation_only() {
+        let aliases = [
+            (
+                "DSCODE_CLIPBOARD_NO_NATIVE_READ",
+                "GROK_CLIPBOARD_NO_NATIVE_READ",
+            ),
+            ("DSCODE_CLIPBOARD_NO_OSC52", "GROK_CLIPBOARD_NO_OSC52"),
+        ];
+        let names: Vec<_> = aliases
+            .iter()
+            .flat_map(|&(public, internal)| [public, internal])
+            .collect();
+        let _restore = EnvRestore::capture(&names);
+        // SAFETY: this test holds the shared alias lock and restores all names.
+        unsafe {
+            for (public, internal) in aliases {
+                std::env::set_var(public, "1");
+                std::env::set_var(internal, "ambient");
+            }
+        }
+        isolate_dscode_environment();
+        for (_, internal) in aliases {
+            assert_eq!(std::env::var(internal).as_deref(), Ok("1"));
+        }
+        unsafe {
+            for (public, internal) in aliases {
+                std::env::remove_var(public);
+                std::env::set_var(internal, "ambient-again");
+            }
+        }
+        isolate_dscode_environment();
+        for (_, internal) in aliases {
+            assert!(std::env::var_os(internal).is_none(), "{internal}");
+        }
     }
 
     #[test]

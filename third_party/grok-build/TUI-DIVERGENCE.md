@@ -127,8 +127,11 @@ after entering the namespace to handle older util-linux launchers.
   managed JS updater apply the same policy.
 - Environment namespace isolation: pager-bin strips every inherited `GROK_*`
   variable before configuration loads, then maps only `DSCODE_CONFIG`,
-  `DSCODE_CONFIG_PATH`, and `DSCODE_CONNECT_UI_TIMEOUT_SECS` to their internal
-  Grok names. The dsh child also strips those internal names before spawning.
+  `DSCODE_CONFIG_PATH`, `DSCODE_CONNECT_UI_TIMEOUT_SECS`,
+  `DSCODE_CLIPBOARD_NO_NATIVE_READ`, and `DSCODE_CLIPBOARD_NO_OSC52` to their
+  internal Grok names. The clipboard switches let isolated terminal tests avoid
+  reading NSPasteboard or writing through OSC52. The dsh child also strips
+  those internal names before spawning.
   Parent-shell state is untouched; recovery copy uses the DSCODE timeout name.
 - Leader mode: --leader/--leader-socket flags connect the TUI to our bridge
   over the grok leader unix-socket protocol instead of x.ai; local xai auth

@@ -128,7 +128,7 @@ mkdir -p "$OUT" "$SCRATCH" "$SCRATCH/e2e-bin" "$SCRATCH/fixture-plugin"
 if [[ "$(uname -s)" == Darwin ]]; then
   # A HOME/tmux sandbox does not isolate NSPasteboard. Disable native content
   # reads and route CLI fallbacks/copies to a private fixture; retain OSC8 tests.
-  export GROK_CLIPBOARD_NO_NATIVE_READ=1 GROK_CLIPBOARD_NO_OSC52=1
+  export DSCODE_CLIPBOARD_NO_NATIVE_READ=1 DSCODE_CLIPBOARD_NO_OSC52=1
   "$NODE_BIN" "$ROOT/scripts/e2e-macos-clipboard.mjs" "$SCRATCH/e2e-bin"
 fi
 mkdir -p "$SCRATCH/dsc-tui"
@@ -1058,12 +1058,18 @@ done
 "$NODE_BIN" -e '
   const fs = require("node:fs")
   const prefix = "POST /v1/chat/completions "
-  const texts = fs.readFileSync(process.argv[1], "utf8").split("\n")
+  const messages = fs.readFileSync(process.argv[1], "utf8").split("\n")
     .filter(line => line.startsWith(prefix))
     .flatMap(line => JSON.parse(line.slice(prefix.length)).messages)
     .filter(message => message.role === "user")
-    .map(message => typeof message.content === "string" ? message.content
+  const texts = messages.map(message => typeof message.content === "string" ? message.content
       : message.content.filter(part => part.type === "text").map(part => part.text).join(""))
+  messages.forEach((message, index) => {
+    if (/E2E_(CRLF|EDITOR)_/.test(texts[index]) && Array.isArray(message.content)
+      && message.content.some(part => part.type === "image_url")) {
+      throw new Error("Unexpected clipboard image in text-only draft")
+    }
+  })
   for (const expected of ["E2E_CRLF_DRAFT\nE2E_AFTER_CRLF", "E2E_EDITOR_DRAFT\nsecond line", "E2E_EDITOR_PASTE\npaste second line"]) {
     if (!texts.some(text => text.includes(expected))) throw new Error("Draft changed before provider delivery: " + expected)
   }
