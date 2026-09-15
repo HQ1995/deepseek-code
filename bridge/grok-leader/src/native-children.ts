@@ -1,9 +1,9 @@
-import type { SessionWork } from './session-work.ts'
+import type { SessionOperation, SessionWork } from './session-work.ts'
 import { hasToolImages } from './image-output.ts'
 import { randomUUID } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { errorChain } from '@deepseek-ai/dsh-llm'
-import { SessionId, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionInspection, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { SubagentRuntime, SubagentPromptRequestId } from '@deepseek-ai/dsh-subagent'
 import { invalidParams, internalError, paramRecord } from './acp.ts'
@@ -49,6 +49,7 @@ const nonEmptyString = (value: unknown): value is string => typeof value === 'st
 export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>) {
   let closed = false
   let disposal: Promise<void> | undefined
+  const shutdown = new AbortController(), disposalFailures: unknown[] = []
   const admissions = new Map<AbortController, S>()
   const pending = new Set<Promise<unknown>>()
   const unsubscribes: Array<() => void> = []
@@ -130,6 +131,9 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
   // Bound retries so a broken/deleted child cannot scan the corpus forever.
   const workflowChildDiscovery = new WeakMap<S, { ids: Set<string>; deadline: number }>()
   const childSettlements = new WeakMap<Agent, Set<(status: string) => void>>()
+  // Only interruption reads need the latest turn arriving across their await.
+  // This is transient control state, not another retained history projection.
+  const turnWatches = new Map<Agent['session'], Set<{ latest?: SessionEvent<'turn/start'> }>>()
   const childTerminalStatus = (kind: string): string => kind === 'completed' || kind === 'max-tokens' ? 'completed'
     : kind === 'aborted' || kind === 'interrupted' ? 'cancelled' : 'failed'
   const childOverview = (id: string, events: readonly SessionEvent[], agent?: Agent): Pick<ChildState, 'attemptId' | 'status'> => {
@@ -142,42 +146,82 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
           ? childTerminalStatus(end.data.reason.kind) : 'cancelled',
     }
   }
-  const childLogs = new WeakMap<S, Map<string, { source: object; index: ChildHistoryIndex }>>()
-  const withChildLog = async <T>(record: S, id: string,
+  const childLogs = new WeakMap<S, Map<string, { source?: object; index: ChildHistoryIndex; tail: Promise<unknown> }>>()
+  const withChildLog = async <T>(record: S, id: string, scope: SessionOperation,
     action: (index: ChildHistoryIndex, meta: SessionInspection['meta'], read: ChildEventReader) => Promise<T> | T,
   ): Promise<T> => {
-    if (!isLive(record)) throw invalidParams('session closed')
-    const live = host.agent(SessionId(id))
-    const store = host.persistence()
-    if (store === undefined) throw internalError('session persistence is not configured')
+    const signal = AbortSignal.any([scope.signal, shutdown.signal])
+    const assertActive = () => {
+      if (!isLive(record) || signal.aborted) throw invalidParams('session closed')
+      scope.assertActive()
+    }
+    assertActive()
     let cache = childLogs.get(record)
     if (cache === undefined) { cache = new Map(); childLogs.set(record, cache) }
-    const source = live?.session ?? store
-    let cached = cache.get(id)
-    if (cached?.source !== source) cached = { source, index: new ChildHistoryIndex() }
+    const cached = cache.get(id) ?? { index: new ChildHistoryIndex(), tail: Promise.resolve() }
     cache.delete(id)
     cache.set(id, cached)
     // ponytail: bound metadata to 64 children per root; evicted histories rebuild on demand.
     if (cache.size > 64) cache.delete(cache.keys().next().value!)
-    const index = cached.index
-    return index.run(async () => {
-      if (!isLive(record)) throw invalidParams('session closed')
+    const work = cached.tail.then(async () => {
+      assertActive()
+      // Resolve after earlier reads/cleanup settle: a completed child can
+      // leave the native store while this operation is waiting in the queue.
+      // Serialization belongs to the child entry, not its replaceable index.
+      const live = host.agent(SessionId(id)), store = host.persistence()
+      if (store === undefined) throw internalError('session persistence is not configured')
+      const source = live?.session ?? store
+      if (cached.source !== source) { cached.source = source; cached.index = new ChildHistoryIndex() }
+      const index = cached.index
+      assertActive()
+      // Fix the live prefix before flushing; later appends belong to the next
+      // refresh. Cold storage uses its revision/count and the same read owner.
+      let count: number | undefined, revision: string | undefined
       if (live !== undefined) {
-        const count = live.session.seq
-        const read: ChildEventReader = async (offset, length) => live.session.snapshotEvents(SessionLogOffset(offset), SessionLogOffset(offset + length))
-        await index.sync(read, String(count), count)
-        return await action(index, live.session.header, read)
+        count = live.session.seq
+        revision = String(count)
+        await host.flush(live.session)
+      } else {
+        const snapshot = await store.stat(SessionId(id), { signal })
+        count = snapshot?.eventCount
+        revision = snapshot?.revision
       }
-      const snapshot = await store.stat(SessionId(id))
-      if (!isLive(record)) throw invalidParams('session closed')
-      const handle = await store.open(SessionId(id), 'read')
+      assertActive()
+      const handle = await store.open(SessionId(id), 'read', { signal })
+      const failures: unknown[] = []
+      let result!: T
       try {
-        if (!isLive(record)) throw invalidParams('session closed')
-        const read: ChildEventReader = async (offset, length) => (await handle.read(offset, length)).events
-        await index.sync(read, snapshot?.revision, snapshot?.eventCount)
-        return await action(index, handle.header, read)
-      } finally { await handle.close() }
+        assertActive()
+        const read: ChildEventReader = async (offset, length) => {
+          assertActive()
+          if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 0 || length > CHILD_HISTORY_PAGE_SIZE
+            || (count !== undefined && offset + length > count)) throw internalError('invalid child history page')
+          if (length === 0) return []
+          const { events } = await handle.read(offset, length, { signal })
+          assertActive()
+          if (events.length > length || (count !== undefined && events.length !== length)) throw internalError('child reader did not return the required page')
+          if (events.some((event, position) => event.seq !== offset + position)) throw internalError('child reader returned a noncontiguous page')
+          return events
+        }
+        await index.sync(read, revision, count)
+        // Unknown cold lengths become fixed after the index reaches EOF.
+        count = index.nextSeq
+        result = await action(index, handle.header, read)
+        assertActive()
+      } catch (error) { failures.push(error) }
+      // Close is deliberately uncancellable and always awaited, even after a
+      // late open or projection failure. Preserve both errors when it fails.
+      try { await handle.close() } catch (error) {
+        failures.push(error)
+        if (closed) disposalFailures.push(error)
+      }
+      if (failures.length === 1) throw failures[0]
+      if (failures.length > 1) throw new AggregateError(failures, 'child history read and cleanup failed')
+      assertActive()
+      return result
     })
+    cached.tail = work.catch(() => {})
+    return work
   }
   const emitChildFinished = (record: S, id: string, status: string, output?: unknown, attemptId?: string): void => {
     const state = childStates.get(record)?.get(id)
@@ -193,7 +237,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
         ...state.output === undefined ? {} : { output: state.output },
       } }, { subagentMetricsAvailable: false, nativeAttemptId: state.attemptId })
   }
-  const emitChildrenForRecord = async (record: S): Promise<void> => {
+  const emitChildrenForRecord = async (record: S, scope: SessionOperation): Promise<void> => {
     const service = subagentsService(record)
     if (service === undefined) return
     const rows = await service.listDescendants(record.agent.session.id)
@@ -203,7 +247,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     let discoveredWorkflowChild = false
     for (const row of rows) {
       if (row.kind !== 'child') continue
-      const overview = await withChildLog(record, row.id, index => childOverview(row.id, index.overviewEvents, host.agent(SessionId(row.id))))
+      const overview = await withChildLog(record, row.id, scope, index => childOverview(row.id, index.overviewEvents, host.agent(SessionId(row.id))))
       if (!isLive(record)) return
       const discovery = workflowChildDiscovery.get(record)
       if (discovery?.ids.delete(row.id)) {
@@ -234,7 +278,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       try {
         while (state.dirty && isLive(record) && !scope.signal.aborted) {
           state.dirty = false
-          try { await emitChildrenForRecord(record) } catch (error) {
+          try { await emitChildrenForRecord(record, scope) } catch (error) {
             if (isLive(record)) host.logger.warn('grok-leader: subagent snapshot failed: ' + errorChain(error))
           }
         }
@@ -246,6 +290,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     return state.promise
   }
   on('session/event', (session, event: SessionEvent) => {
+    if (event.type === 'turn/start') for (const watch of turnWatches.get(session) ?? []) watch.latest = event
     const record = host.sessions.get(session.header.id)
     if (record !== undefined && record.agent.session === session) {
       if (String(event.type).startsWith('tool-workflow/')) {
@@ -292,7 +337,8 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       if (!rows?.some(row => row.kind === 'child' && row.id === p.childSessionId)) throw invalidParams('unknown subagent')
       const after = p.after ?? 0
       if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0) throw invalidParams('invalid child history cursor')
-      return withChildLog(record, childSessionId, async (index, meta, read) => {
+      scope.assertActive()
+      return withChildLog(record, childSessionId, scope, async (index, meta, read) => {
         if (owned(clientId, sessionId) !== record) throw invalidParams('unknown session')
         if (after > index.nextSeq) throw invalidParams('child history cursor is ahead of the stored transcript')
         const nextSeq = Math.min(after + CHILD_HISTORY_PAGE_SIZE, index.nextSeq)
@@ -300,9 +346,11 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
         let turnStartMs = index.turnStartAt(after)
         for (const event of await read(after, nextSeq - after)) {
           if (!isLive(record)) throw invalidParams('unknown session')
+          scope.assertActive()
           if (event.type === 'turn/start') turnStartMs = event.time
           const mapped = sessionEventToUpdates(event, { replay: true, cwd: meta.cwd, toolCall: id => index.toolCallAt(id, event.seq) })
           const updates = hasToolImages(event) ? await host.projectImages(event, mapped) : mapped
+          scope.assertActive()
           for (const update of updates) entries.push({ update, meta: { isReplay: true, agentTimestampMs: event.time, turnStartMs, streamStartMs: turnStartMs } })
           if (event.type === 'turn/end') entries.push({ turnEnded: true })
         }
@@ -310,12 +358,10 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
         const live = host.agent(childSessionId)
         let durable = live === undefined
         if (live !== undefined && live.status !== 'running' && index.durableSeq < index.nextSeq) {
-          await host.flush(live.session)
-          const handle = await host.persistence()!.open(childSessionId, 'read')
-          try {
-            const tail = (await handle.read(Math.max(0, index.nextSeq - 1), 1)).events
-            if (index.nextSeq === 0 || tail[0]?.seq === index.nextSeq - 1) index.durableSeq = index.nextSeq
-          } finally { await handle.close() }
+          // The live prefix was already flushed. Verify its tail through the
+          // same owned handle, including when the metadata index was cached.
+          if (index.nextSeq > 0) await read(index.nextSeq - 1, 1)
+          index.durableSeq = index.nextSeq
         }
         durable ||= index.durableSeq >= index.nextSeq
         if (owned(clientId, sessionId) !== record) throw invalidParams('unknown session')
@@ -342,9 +388,25 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       const child = host.agent(SessionId(subagentId))
       if (child === undefined || child.status !== 'running') return result(false, 'already_finished', child?.status ?? 'inactive')
       if (row.mode !== 'continuable') throw internalError('one-shot subagents are not interruptible through the released subagent service')
+      const watch: { latest?: SessionEvent<'turn/start'> } = {}
+      const watches = turnWatches.get(child.session) ?? new Set()
+      turnWatches.set(child.session, watches); watches.add(watch)
+      let overview: Pick<ChildState, 'attemptId' | 'status'>
+      try {
+        overview = await withChildLog(record, subagentId, scope, index => childOverview(subagentId, index.overviewEvents, child))
+      } finally {
+        watches.delete(watch)
+        if (watches.size === 0) turnWatches.delete(child.session)
+      }
+      scope.assertActive()
+      if (!isLive(record)) throw invalidParams('session closed')
+      if (host.agent(SessionId(subagentId)) !== child || child.status !== 'running') return result(false, 'already_finished', child.status)
+      // No await from this reconciliation through listener setup and interrupt.
+      // A newer turn may have started even while the read handle was closing.
+      if (watch.latest !== undefined) overview.attemptId = subagentId + ':' + String(watch.latest.data.turn)
       let known = childStates.get(record)
       if (known === undefined) { known = new Map(); childStates.set(record, known) }
-      known.set(subagentId, { agent: child, label: row.label ?? '', ...childOverview(subagentId, child.session.snapshotEvents(), child) })
+      known.set(subagentId, { agent: child, label: row.label ?? '', ...overview, status: 'running' })
       let listeners = childSettlements.get(child)
       if (listeners === undefined) { listeners = new Set(); childSettlements.set(child, listeners) }
       let settle!: (status: string) => void
@@ -563,18 +625,18 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     dispose(): Promise<void> {
       if (disposal !== undefined) return disposal
       closed = true
-      const failures: unknown[] = []
       disposal = Promise.resolve().then(async () => {
         while (pending.size > 0) await Promise.allSettled([...pending])
-        if (failures.length > 0) throw new AggregateError(failures, 'native child subscription disposal failed')
+        if (disposalFailures.length > 0) throw new AggregateError(disposalFailures, 'native child subscription or read cleanup failed')
       })
+      shutdown.abort()
       for (const admission of admissions.keys()) admission.abort()
       for (const interruption of interruptions) interruption.abort()
       for (const timer of deferredWorkflowEnds) clearTimeout(timer)
       deferredWorkflowEnds.clear()
       liveWorkflows.clear()
       for (const stop of unsubscribes.splice(0)) {
-        try { stop() } catch (error) { failures.push(error) }
+        try { stop() } catch (error) { disposalFailures.push(error) }
       }
       return disposal
     },

@@ -64,11 +64,11 @@ function fixture() {
     interrupt: vi.fn(),
     prompt: vi.fn(async (_request: unknown, _signal: AbortSignal) => ({ messageId: 'accepted' })),
   }
-  const read = vi.fn(async (id: string, offset = 0, length?: number) => ({ events: logs.get(id)!.slice(offset, length === undefined ? undefined : offset + length) }))
+  const read = vi.fn(async (id: string, offset = 0, length?: number, _options?: { signal?: AbortSignal }) => ({ events: logs.get(id)!.slice(offset, length === undefined ? undefined : offset + length) }))
   const close = vi.fn(async () => {})
   const store = {
-    stat: vi.fn(async (id: string) => ({ eventCount: logs.get(id)!.length, revision: String(logs.get(id)!.length) })),
-    open: vi.fn(async (id: string) => ({ header: { id, cwd: '/workspace', createdAt: 1000 }, read: (offset?: number, length?: number) => read(id, offset, length), close })),
+    stat: vi.fn(async (id: string, _options?: { signal?: AbortSignal }) => ({ eventCount: logs.get(id)!.length, revision: String(logs.get(id)!.length) })),
+    open: vi.fn(async (id: string, _mode?: string, _options?: { signal?: AbortSignal }) => ({ header: { id, cwd: '/workspace', createdAt: 1000 }, read: (offset?: number, length?: number, options?: { signal?: AbortSignal }) => read(id, offset, length, options), close })),
   }
   const notify = vi.fn(), warn = vi.fn(), flush = vi.fn(async (_session: unknown) => {})
   const projectImages = vi.fn(async (_event: SessionEvent, updates: ProjectedUpdate[]) => updates)
@@ -191,7 +191,7 @@ describe('native child/workflow ownership', () => {
     f.append(child, 'turn/start', { turn: 2 })
     await f.children.snapshot(f.root)
     const cancellation = f.children.cancel(1, { sessionId: 'root', subagentId: 'child' })
-    await Promise.resolve()
+    await vi.waitFor(() => expect(f.service.interrupt).toHaveBeenCalledOnce())
     expect(f.service.interrupt).toHaveBeenCalledWith('child', { kind: 'ancestor', agent: f.root.agent })
     let finished = false
     void cancellation.then(() => { finished = true })
@@ -235,18 +235,19 @@ describe('native child/workflow ownership', () => {
     for (let seq = 0; seq < 600; seq++) events.push({ seq, time: seq, type: 'assistant/message', data: { turn: 0, step: seq, stream: [], message: { role: 'assistant', content: [{ type: 'text', text: 'line ' + seq }] } } } as SessionEvent)
     const request = { sessionId: 'root', childSessionId: 'child', after: 256 }
     await expect(f.children.history(1, request)).resolves.toMatchObject({ nextSeq: 512, totalSeq: 600, durable: false })
-    const reads = f.readers.get('child')!
-    expect(reads.mock.calls.every(([from, to]) => to - from <= 256)).toBe(true)
-    const previous = reads.mock.calls.length
+    expect(f.read.mock.calls.map(([, offset, length]) => [offset, length])).toEqual([[0, 256], [256, 256], [512, 88], [256, 256]])
+    const previous = f.read.mock.calls.length
     await f.children.history(1, request)
-    expect(reads).toHaveBeenCalledTimes(previous + 1)
+    expect(f.read).toHaveBeenCalledTimes(previous + 1)
+    expect(f.readers.get('child')).not.toHaveBeenCalled()
     Object.assign(child, { status: 'idle' })
     await expect(f.children.history(1, request)).resolves.toMatchObject({ durable: true })
     expect(f.flush).toHaveBeenCalledWith(child.session)
-    expect(f.read).toHaveBeenLastCalledWith('child', 599, 1)
-    expect(f.close).toHaveBeenCalledOnce()
+    expect(f.read).toHaveBeenLastCalledWith('child', 599, 1, { signal: expect.any(AbortSignal) })
+    expect(f.close).toHaveBeenCalledTimes(3)
     await f.children.history(1, request)
-    expect(f.flush).toHaveBeenCalledOnce()
+    expect(f.flush).toHaveBeenCalledTimes(4)
+    expect(f.store.open).toHaveBeenCalledTimes(4)
     await expect(f.children.history(1, { ...request, after: 601 })).rejects.toThrow('ahead of')
     await f.children.dispose()
   })
@@ -264,11 +265,159 @@ describe('native child/workflow ownership', () => {
     const preview = deferred<ProjectedUpdate[]>()
     f.projectImages.mockImplementationOnce(() => preview.promise)
     const history = f.children.history(1, request)
-    const rejected = expect(history).rejects.toThrow('unknown session')
+    const rejected = expect(history).rejects.toThrow('session closed')
     await vi.waitFor(() => expect(f.projectImages).toHaveBeenCalledTimes(2))
     f.sessions.delete(f.root.agent.session.id)
     preview.resolve([]); await rejected
     expect(f.close).toHaveBeenCalledTimes(2)
+    await f.children.dispose()
+  })
+
+  it('fixes the live prefix before flush and only indexes new events on the next request', async () => {
+    const f = fixture(), child = f.add('child'), gate = deferred<void>()
+    const events = f.logs.get('child')!
+    events.push({ seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent)
+    f.readers.get('child')!.mockImplementation(() => { throw new Error('no synchronous child reads') })
+    f.flush.mockImplementationOnce(() => gate.promise)
+    const first = f.children.history(1, { sessionId: 'root', childSessionId: 'child' })
+    await vi.waitFor(() => expect(f.flush).toHaveBeenCalledOnce())
+    events.push({ seq: 1, time: 1001, type: 'turn/end', data: { turn: 0, reason: { kind: 'completed' } } } as SessionEvent)
+    gate.resolve()
+    await expect(first).resolves.toMatchObject({ nextSeq: 1, totalSeq: 1, durable: false })
+    expect(f.read.mock.calls.map(([, offset, length]) => [offset, length])).toEqual([[0, 1], [0, 1]])
+    f.read.mockClear()
+    await expect(f.children.history(1, { sessionId: 'root', childSessionId: 'child', after: 1 }))
+      .resolves.toMatchObject({ nextSeq: 2, totalSeq: 2, entries: [{ turnEnded: true }] })
+    expect(f.read.mock.calls.map(([, offset, length]) => [offset, length])).toEqual([[1, 1], [1, 1]])
+    expect(f.store.open).toHaveBeenCalledTimes(2); expect(f.close).toHaveBeenCalledTimes(2)
+    await f.children.dispose()
+  })
+
+  it('serializes through cleanup and re-resolves a queued live child after it becomes cold', async () => {
+    const f = fixture(), child = f.add('child'), gate = deferred<void>()
+    f.logs.get('child')!.push({ seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent)
+    f.flush.mockImplementation(async () => { if (!f.agents.has(child.session.id)) throw new Error('not live in this store') })
+    f.close.mockImplementationOnce(() => gate.promise)
+    const request = { sessionId: 'root', childSessionId: 'child' }
+    const first = f.children.history(1, request)
+    await vi.waitFor(() => expect(f.close).toHaveBeenCalledOnce())
+    const second = f.children.history(1, request)
+    await vi.waitFor(() => expect(f.service.listDescendants).toHaveBeenCalledTimes(2))
+    expect(f.store.open).toHaveBeenCalledOnce()
+    f.agents.delete(child.session.id); gate.resolve()
+    await expect(first).resolves.toMatchObject({ totalSeq: 1 })
+    await expect(second).resolves.toMatchObject({ totalSeq: 1, durable: true })
+    expect(f.flush).toHaveBeenCalledOnce(); expect(f.store.stat).toHaveBeenCalledOnce()
+    expect(f.store.open).toHaveBeenCalledTimes(2); expect(f.close).toHaveBeenCalledTimes(2)
+    f.read.mockRejectedValueOnce(new Error('offline'))
+    await expect(f.children.history(1, request)).rejects.toThrow('offline')
+    await expect(f.children.history(1, request)).resolves.toMatchObject({ totalSeq: 1, durable: true })
+    await f.children.dispose()
+  })
+
+  it.each(['short', 'oversized', 'gap'])('rejects a %s requested page even with an already cached index', async kind => {
+    const f = fixture(); f.add('child')
+    const event = { seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent
+    f.logs.get('child')!.push(event)
+    const request = { sessionId: 'root', childSessionId: 'child' }
+    await f.children.history(1, request)
+    f.read.mockResolvedValueOnce({ events: kind === 'short' ? [] : kind === 'oversized' ? [event, event] : [{ ...event, seq: 1 } as SessionEvent] })
+    await expect(f.children.history(1, request)).rejects.toThrow(kind === 'gap' ? 'noncontiguous page' : 'required page')
+    expect(f.close).toHaveBeenCalledTimes(2)
+    await expect(f.children.history(1, request)).resolves.toMatchObject({ nextSeq: 1, totalSeq: 1 })
+    await f.children.dispose()
+  })
+
+  it.each(['open', 'read', 'close'])('cancels an uncooperative %s but drains the actual read handle before disposal', async phase => {
+    const f = fixture(), gate = deferred<void>(); f.add('child')
+    f.logs.get('child')!.push({ seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent)
+    const open = f.store.open.getMockImplementation()!, read = f.read.getMockImplementation()!
+    if (phase === 'open') f.store.open.mockImplementationOnce(async (...args) => { await gate.promise; return open(...args) })
+    if (phase === 'read') f.read.mockImplementationOnce(async (...args) => { await gate.promise; return read(...args) })
+    if (phase === 'close') f.close.mockImplementationOnce(() => gate.promise)
+    const request = f.children.history(1, { sessionId: 'root', childSessionId: 'child' })
+    const rejected = expect(request).rejects.toThrow('session closed')
+    const entered = phase === 'open' ? f.store.open : phase === 'read' ? f.read : f.close
+    await vi.waitFor(() => expect(entered).toHaveBeenCalled())
+    let done = false
+    const disposal = f.children.dispose().then(() => { done = true })
+    expect(f.store.open.mock.calls[0]![2]!.signal!.aborted).toBe(true)
+    if (phase !== 'open') expect(f.read.mock.calls[0]![3]!.signal!.aborted).toBe(true)
+    await Promise.resolve(); expect(done).toBe(false)
+    gate.resolve(); await rejected; await disposal
+    expect(f.close).toHaveBeenCalledOnce(); expect(done).toBe(true)
+    if (phase === 'open') expect(f.read).not.toHaveBeenCalled()
+  })
+
+  it('cancels a live-owner read after flush without opening storage and accepts a fresh request', async () => {
+    const f = fixture(), gate = deferred<void>(); f.add('child')
+    f.flush.mockImplementationOnce(() => gate.promise)
+    const request = f.children.history(1, { sessionId: 'root', childSessionId: 'child' })
+    const rejected = expect(request).rejects.toThrow('session closed')
+    await vi.waitFor(() => expect(f.flush).toHaveBeenCalledOnce())
+    f.root.work.cancel(); gate.resolve(); await rejected; await f.root.work.settle()
+    expect(f.store.open).not.toHaveBeenCalled()
+    await expect(f.children.history(1, { sessionId: 'root', childSessionId: 'child' })).resolves.toMatchObject({ nextSeq: 0, entries: [] })
+    await f.children.dispose()
+  })
+
+  it('preserves read and close failures, including cleanup that finishes after disposal starts', async () => {
+    const f = fixture(), gate = deferred<void>(); f.add('child')
+    f.logs.get('child')!.push({ seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent)
+    const failure = new Error('read failed'), cleanup = new Error('close failed')
+    f.read.mockRejectedValueOnce(failure)
+    f.close.mockImplementationOnce(async () => { await gate.promise; throw cleanup })
+    const request = f.children.history(1, { sessionId: 'root', childSessionId: 'child' })
+    const rejected = expect(request).rejects.toMatchObject({ errors: [failure, cleanup] })
+    await vi.waitFor(() => expect(f.close).toHaveBeenCalledOnce())
+    const disposal = f.children.dispose(), rejectedDisposal = expect(disposal).rejects.toMatchObject({ errors: [cleanup] })
+    gate.resolve(); await rejected; await rejectedDisposal
+  })
+
+  it('stops projecting subsequent images when the live owner cancels during an image read', async () => {
+    const f = fixture(), gate = deferred<ProjectedUpdate[]>(); f.add('child')
+    for (let seq = 0; seq < 2; seq++) f.logs.get('child')!.push({ seq, time: 1000, type: 'tool/ptc-dispatch', data: {
+      subCallId: `image-${seq}`, name: 'read', content: [{ type: 'image', mimeType: 'image/png', data: 'fixture' }],
+    } } as unknown as SessionEvent)
+    f.projectImages.mockImplementationOnce(() => gate.promise)
+    const request = f.children.history(1, { sessionId: 'root', childSessionId: 'child' })
+    const rejected = expect(request).rejects.toThrow('session closed')
+    await vi.waitFor(() => expect(f.projectImages).toHaveBeenCalledOnce())
+    f.root.work.cancel(); gate.resolve([]); await rejected; await f.root.work.settle()
+    expect(f.projectImages).toHaveBeenCalledOnce(); expect(f.close).toHaveBeenCalledOnce()
+    await f.children.dispose()
+  })
+
+  it('interrupts the latest exact attempt when a new turn starts while its history handle closes', async () => {
+    const f = fixture(), child = f.add('child'), gate = deferred<void>()
+    f.logs.get('child')!.push({ seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent)
+    f.readers.get('child')!.mockImplementation(() => { throw new Error('no synchronous interruption read') })
+    f.close.mockImplementationOnce(() => gate.promise)
+    const request = f.children.cancel(1, { sessionId: 'root', subagentId: 'child' })
+    await vi.waitFor(() => expect(f.close).toHaveBeenCalledOnce())
+    f.append(child, 'turn/end', { turn: 0, reason: { kind: 'completed' } })
+    f.append(child, 'turn/start', { turn: 1 })
+    gate.resolve()
+    await vi.waitFor(() => expect(f.service.interrupt).toHaveBeenCalledOnce())
+    let done = false
+    void request.then(() => { done = true })
+    f.emit('session/event', child.session, { seq: 1, time: 1001, type: 'turn/end', data: { turn: 0, reason: { kind: 'completed' } } })
+    await Promise.resolve(); expect(done).toBe(false)
+    f.append(child, 'turn/end', { turn: 1, reason: { kind: 'aborted' } })
+    await expect(request).resolves.toMatchObject({ result: { cancelled: true } })
+    await f.children.dispose()
+  })
+
+  it.each(['finished', 'replaced'])('does not interrupt a child that was %s during the storage read', async kind => {
+    const f = fixture(), child = f.add('child'), gate = deferred<void>()
+    f.close.mockImplementationOnce(() => gate.promise)
+    const request = f.children.cancel(1, { sessionId: 'root', subagentId: 'child' })
+    await vi.waitFor(() => expect(f.close).toHaveBeenCalledOnce())
+    if (kind === 'finished') Object.assign(child, { status: 'idle' })
+    else f.agents.set(child.session.id, { ...child } as Agent)
+    gate.resolve()
+    await expect(request).resolves.toMatchObject({ result: { cancelled: false, outcome: { kind: 'already_finished' } } })
+    expect(f.service.interrupt).not.toHaveBeenCalled()
     await f.children.dispose()
   })
 
@@ -321,7 +470,7 @@ describe('native child/workflow ownership', () => {
     const command = f.command('/subagents queue child later')
     const cancel = f.children.cancel(1, { sessionId: 'root', subagentId: 'child' })
     const rejected = expect(cancel).rejects.toThrow('session closed')
-    await Promise.resolve()
+    await vi.waitFor(() => expect(f.service.interrupt).toHaveBeenCalledOnce())
     f.emit('workflow/end', { id: 'run' })
     expect(vi.getTimerCount()).toBe(2)
     await f.children.dispose(); await rejected
@@ -332,7 +481,7 @@ describe('native child/workflow ownership', () => {
   it('releases all subscriptions and pending refreshes even if one unsubscribe fails', async () => {
     const f = fixture()
     f.stops[0]!.mockImplementation(() => { throw new Error('unsubscribe failed') })
-    await expect(f.children.dispose()).rejects.toThrow('subscription disposal failed')
+    await expect(f.children.dispose()).rejects.toThrow('subscription or read cleanup failed')
     expect(f.stops.every(stop => stop.mock.calls.length === 1)).toBe(true)
     f.emit('subagent/start', { id: 'late' }); f.children.poll()
     expect(f.service.listDescendants).not.toHaveBeenCalled()
@@ -348,7 +497,7 @@ describe('native child/workflow ownership', () => {
     const command = f.command('/subagents queue child later')
     const cancel = f.children.cancel(1, { sessionId: 'root', subagentId: 'child' })
     const rejected = expect(cancel).rejects.toThrow('session closed')
-    await Promise.resolve()
+    await vi.waitFor(() => expect(f.service.interrupt).toHaveBeenCalledOnce())
     f.sessions.delete(f.root.agent.session.id)
     f.children.poll()
     await rejected

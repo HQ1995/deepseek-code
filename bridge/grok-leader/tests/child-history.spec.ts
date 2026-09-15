@@ -32,12 +32,3 @@ it('indexes a long child once, reads only appended events, and preserves tool/tu
   expect(index.toolCallAt('cross-page', 256)).toEqual({ name: 'bash', arguments: { command: 'pwd' } })
   expect(index.toolCallAt('cross-page', 4097)).toEqual({ name: 'read_file', arguments: { path: 'new' } })
 })
-
-it('serializes overlapping readers and retries after a failed read', async () => {
-  const index = new ChildHistoryIndex()
-  let reads = 0
-  const read = async () => { reads++; return [] }
-  await expect(index.run(() => index.sync(async () => { throw Error('offline') }, 'r1'))).rejects.toThrow('offline')
-  await Promise.all([index.run(() => index.sync(read, 'r1')), index.run(() => index.sync(read, 'r1'))])
-  expect(reads).toBe(1)
-})

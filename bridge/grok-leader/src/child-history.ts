@@ -24,13 +24,6 @@ export class ChildHistoryIndex {
   private start?: SessionEvent
   private end?: SessionEvent
   private revision?: string
-  private tail: Promise<unknown> = Promise.resolve()
-
-  run<T>(action: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(action)
-    this.tail = result.catch(() => {})
-    return result
-  }
 
   get overviewEvents(): readonly SessionEvent[] {
     return [this.start, this.end].filter((event): event is SessionEvent => event !== undefined)

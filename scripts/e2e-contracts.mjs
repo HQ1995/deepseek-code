@@ -433,11 +433,13 @@ async function childHistoryAcceptance(childId) {
   const close = async () => { await key('Escape'); await key('C-g') }
   await send(`/subagents queue ${childId} DSCODE_CHILD_HISTORY_LIVE`)
   await waitFor(() => state(childId), value => value?.status === 'running', 'history-live-child')
-  await waitFor(readRequests, requests => requests.some(body => JSON.stringify(body.messages).includes('DSCODE_CHILD_HISTORY_TOOL')), 'history-child-real-tool')
+  await waitFor(readRequests, requests => requests.some(body => body.messages?.some(message => message.role === 'tool'
+    && JSON.stringify(message.content).includes('DSCODE_CHILD_HISTORY_TOOL_63'))), 'history-child-real-tool-pages', 60000)
+  const pagedChild = await waitFor(() => state(childId), value => value?.status === 'running' && value.eventCount > 256, 'history-child-paged-prefix')
   await open()
   await tmux('send-keys', '-N', '10', '-t', `${session}:main.0`, 'NPage')
   await wait(/DSCODE_CHILD_HISTORY_TOOL/)
-  await artifact('child-history-running', { screen: await capture() })
+  await artifact('child-history-running', { childId, eventCount: pagedChild.eventCount, nativeToolSteps: 64, screen: await capture() })
   const release = await fetch(`${env.DSCODE_E2E_GATEWAY}/preset-probe/release?key=child-history`, { method: 'POST' })
   assert.ok(release.ok)
   await wait(/DSCODE_CHILD_HISTORY_START[\s\S]*DSCODE_CHILD_HISTORY_END/)

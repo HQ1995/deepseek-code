@@ -170,7 +170,6 @@ describe('architecture ownership and dependency gate', () => {
     // Remove entries as their owners migrate. Do not copy these exceptions to
     // new callers or conceal a complete log read behind a synchronous alias.
     expect(reads).toEqual({
-      'src/native-children.ts:snapshotEvents': 2, // live child pages and interruption overview
       'src/workflows.ts:snapshotEvents': 1, // bounded incremental seed/tail
       'src/native-tasks.ts:ownEvents': 1, // optional Schedule projection absence
     })

@@ -351,6 +351,76 @@ requested-page behavior when migrated; it must not use a full-log query wrapper.
 The Linux/systemd, native image estimator and disposable-image cache follow-ups
 remain separate runtime work, not completed by this local migration.
 
+## Execution: owned async child history
+
+Both synchronous readers in `native-children.ts` are removed. The existing
+child-history module still owns its 64-child metadata cache and per-child
+serialization; live and cold reads now share its private read-handle lifetime.
+The codebase-design skill guided reuse of this existing owner without exporting
+a native handle or adding another full-log loader. A live read fixes its cursor
+before flushing. Index synchronization, the requested page and a settled-tail
+durability check use one handle, with pages capped at 256 events. Cache hits
+still read only the requested page (and a tail check when needed), rather than
+rebuilding the complete index. Live reads now require a durability flush; this
+is compatibility/ownership work, not a measured latency or RSS improvement.
+
+Both session cancellation and module shutdown reach the native open/read signal.
+Actual read/close settlement is awaited, including uncooperative backends and
+late opens. Read/projection and close errors are retained together. Cancellation
+during image projection prevents subsequent image reads, even when the owning
+session remains live.
+
+Stopping a child cannot use a pre-await attempt number blindly. A temporary
+watch records turn starts arriving while its history read/cleanup is pending,
+then reconciles the latest attempt and exact live Agent before native interrupt,
+with no await in between. The watch is removed after the read; it is not a new
+retained history cache. Ended/replaced children are not interrupted, and stale
+turn ends cannot settle a newer interruption. Pending input remains untouched.
+
+The first installed run (`58504`) exposed a real live-to-cold queue race: a
+child completed and left its store while a read waited behind another handle's
+cleanup, then the queued read attempted to flush its captured, retired Session.
+The per-child queue is now independent of the replaceable metadata index, and
+the native Agent/storage source is resolved when the queued read actually
+starts. A regression test holds the first close, queues a second read, retires
+the child, and checks cold reopening without another live flush. Serialization
+and failed-read retry are now tested through the child module's interface; the
+old index-only serialization test was removed with that index responsibility.
+
+Validation on macOS arm64:
+
+- Pinned-SDK build passed. Node 22.19.0 and 24.19.0 each passed 47 files / 911
+  tests, including the compiled CLI. Tests cover bounded pages and incremental
+  reuse, live-to-cold queued reads, malformed pages despite cache hits, fixed
+  cursors, uncooperative open/read/close, projection cancellation, combined read/
+  cleanup errors, latest-turn interruption and ended/replaced child ownership.
+- Final plugin SHA-256
+  `ac0fff335b0e2f2718c794fc7f87ca206207a1142db7771a9d5452a767b6024a`;
+  135 source/compiled/bin/preset files matched. The archive is 1,446,377 bytes,
+  1,800 bytes above the rewind slice, with host peers and Zod unbundled.
+- The installed child-history fixture now uses 64 ordinary native shell steps
+  to cross page boundaries instead of injecting log events. The first run
+  reached 382 events before detecting the retirement race above. The final
+  complete installed macOS regression passed (run `74169`). Actual TUI replies
+  advanced `256 -> 382` while running, then `385` with `durable: true` after
+  completion. Reopening and a fresh leader each replayed `256 -> 385`, with one
+  completion message and no history-load error. Evidence: `tui-1.log`,
+  `tui-2.log`, `child-history-running.json`, `child-history-refreshed.json`,
+  `child-history-restarted.json` and `PASS.json` under
+  `/tmp/dsc-follow-work.nYBS9C/children/final/e2e/contracts-74169/`;
+  outer log: `/tmp/dsc-follow-work.nYBS9C/children/final/e2e.log`.
+  The complete run also retained child Stop/queue ownership, image history,
+  workflow, task/terminal, rewind and the other existing UI acceptance cases.
+  Graphical Kitty, physical Cmd-click, nonempty compaction and Linux were not
+  verified by this run.
+- Script tests passed 37 cases with one Linux-only skip. `scripts/check.sh` and
+  `git diff --check` passed.
+
+Two production readers remain: the bounded incremental workflow seed/tail and
+optional Schedule fallback. Linux/systemd, native image estimator and disposable
+image-cache follow-ups also remain; no SDK pin, version or daily profile changes
+are included in this slice.
+
 ## DSH
 
 Local runtime/SDK pin: `0.1.5-rc.2` at

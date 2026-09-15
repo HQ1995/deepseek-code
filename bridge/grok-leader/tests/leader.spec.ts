@@ -2156,7 +2156,16 @@ describe('grok leader over a unix socket', () => {
     child.session.append('turn/start', { turn: 0 })
     for (let index = 0; index < 260; index++) child.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: `message-${index}` }], source: { kind: 'user' } }))
     rows.push({ kind: 'child', id: child.session.id, mode: 'continuable' })
-    const snapshots = vi.spyOn(child.session, 'snapshotEvents')
+    const pages: Array<[number | undefined, number | undefined]> = []
+    const open = persistence.open
+    persistence.open = async (...args) => {
+      const handle = await open(...args), read = handle.read
+      handle.read = (offset, length, options) => {
+        if (args[0] === child.session.id) pages.push([offset, length])
+        return read(offset, length, options)
+      }
+      return handle
+    }
     pluginCtx.emit('subagent/start', { id: child.session.id } as never)
     await waitForNotification(() => c.all.find(msg => JSON.stringify(msg).includes('subagent_spawned')))
     const request = (id: number, after: unknown = 0, childSessionId: string = child.session.id, parent: string = sessionId) => c.request(id, 'x.ai/subagent/history', { sessionId: parent, childSessionId, after })
@@ -2170,8 +2179,8 @@ describe('grok leader over a unix socket', () => {
     expect(second).toMatchObject({ nextSeq: 261, totalSeq: 261 })
     expect(second.entries).toHaveLength(5)
     expect(JSON.stringify(second.entries)).toContain('message-259')
-    expect(snapshots.mock.calls.every(([from, to]) => from !== undefined && to !== undefined && to - from <= 256)).toBe(true)
-    expect(snapshots.mock.results.reduce((sum, result) => sum + (result.value as SessionEvent[]).length, 0)).toBe(522)
+    expect(pages.every(([offset, length]) => offset !== undefined && length !== undefined && length <= 256)).toBe(true)
+    expect(pages.reduce((sum, [, length]) => sum + length!, 0)).toBe(522)
     const nextTurn = child.session.append('turn/start', { turn: 1 })
     pluginCtx.emit('session/event', child.session, nextTurn)
     await waitForNotification(() => c.all.find(msg => JSON.stringify(msg).includes('history-child:1')))
@@ -2181,7 +2190,6 @@ describe('grok leader over a unix socket', () => {
     expect(c.all.some(msg => JSON.stringify(msg).includes('subagent_finished'))).toBe(false)
     child.internals.status = 'idle'
     const end = child.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-    persistence.events.push(...child.session.snapshotEvents())
     pluginCtx.emit('session/event', child.session, end)
     pluginCtx.emit('agent/status', { agent, status: 'idle' })
     expect((await request(8, second.nextSeq)).result).toMatchObject({ durable: true, nextSeq: 263 })

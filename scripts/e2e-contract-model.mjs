@@ -33,7 +33,11 @@ export function contractReply(body) {
   if (prompt.includes('exercise live screen switch')) return { text: 'DSCODE_MODE_RUNNING', hold: true, releaseText: ' DSCODE_MODE_COMPLETE' }
   if (prompt.includes('exercise active preset selection')) return { text: 'PRESET_SWITCH_RUNNING', hold: true, releaseText: ' PRESET_SWITCH_COMPLETE' }
   if (prompt.includes('DSCODE_CHILD_HISTORY_LIVE')) {
-    if (!results.length) return { name: 'bash', arguments: { command: 'printf DSCODE_CHILD_HISTORY_TOOL', description: 'DSCODE_CHILD_HISTORY_TOOL' } }
+    // Ordinary native steps grow the child's real history across page bounds.
+    // The model alone is scripted; no session events or storage are injected.
+    if (results.length < 64) return { name: 'bash', arguments: {
+      command: `printf DSCODE_CHILD_HISTORY_TOOL_${results.length}`, description: `DSCODE_CHILD_HISTORY_TOOL_${results.length}`,
+    } }
     return { text: 'DSCODE_CHILD_HISTORY_START', hold: true, releaseKey: 'child-history', releaseText: ' DSCODE_CHILD_HISTORY_END' }
   }
   if (prompt.includes('DSCODE_CHILD_CONTROL_HOLD')) return { text: 'DSCODE_CHILD_CONTROL_RUNNING', hold: true, releaseKey: 'child', releaseText: ' DSCODE_CHILD_CONTROL_END' }

@@ -180,6 +180,9 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
   derived from the child session ID and native turn number. A finish must match
   that attempt; a late finish cannot end a subsequent turn. Completed children
   are rediscovered from native persistence when their parent is restored.
+  Stop reads its initial attempt asynchronously and tracks turn starts during
+  that read, including handle cleanup. It rechecks the exact live Agent before
+  interrupting; an ended/replaced child is not interrupted.
 - `x.ai/subagent/history` accepts the owning `sessionId`, a descendant
   `childSessionId`, and an optional nonnegative `after` cursor. Responses contain
   `entries` (ACP updates with replay metadata or `turnEnded` boundaries),
@@ -188,6 +191,10 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
   an open view fetches committed native events on notification. Closed finished
   views release transcript memory only after a successful durable read. Failed
   reads retain existing history and can be retried by reopening the view.
+  Live reads fix their cursor before flushing and use the same owned storage
+  handle as cold reads. Incremental metadata and requested pages remain bounded
+  to 256 events; short/noncontiguous pages fail closed. Session cancellation or
+  shutdown aborts reads and drains actual handle cleanup before returning.
 - Goal activation changes use native `goal/activation-changed` notifications;
   there is no periodic Goal reconciliation timer. New model selections append
   native `model/selection` events. For historical V0/V1/V2 logs the bridge adapts
