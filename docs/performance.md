@@ -6,6 +6,75 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-15: macOS current-identity checks
+
+The source runtime backport selects one PID for `isAlive` instead of reading
+the full process table. It compares the same start timestamp immediately before
+signalling, without a cache or polling change. Tree snapshots still enumerate
+all processes. Only status 1 with empty stdout/stderr from a selected-PID query
+means absence; other failures propagate. Existing macOS timestamp precision
+and observational containment limits are unchanged.
+
+Six alternating fresh-process pairs per Node version exercised the actual
+`LocalTerminalHandle` with a real `node-pty` bash and eight sleep children.
+All nine observed identities were checked absent after teardown in every run.
+Baseline is official DSH `fb2c4b9e698e30edb738bca4cf0618587db7d203`; candidate
+is that commit plus the [source backport](../patches/README.md).
+
+| Node | Teardown median, before → after | Full-table / point queries, before → after |
+| --- | ---: | ---: |
+| 22.19.0 | 351.59 → 182.81ms | 15 / 0 → 7 / 8 |
+| 24.19.0 | 298.64 → 153.38ms | 15 / 0 → 7 / 8 |
+
+These are local macOS adapter measurements, not overall application speedups
+or sustained CPU claims. Host process count/load affects absolute timings;
+the Node 22 run overlapped documentation/build checks. Full-table readiness
+polls remain a separate cost. A 40-pair raw `ps` probe on this host (~1089 rows)
+measured 19.11ms full-table versus 1.79ms selected-PID medians.
+
+Reproduce with dependencies installed in both source checkouts:
+
+```sh
+node --experimental-transform-types scripts/bench-macos-process.mjs /path/to/dsh-source 6
+```
+
+Focused inspector/terminal suites passed 50 tests on each Node version.
+Upstream documentation checks passed all 16 quick and 34 full gates; lint
+passed. Fresh official-source plugin and macOS runtime builds include the
+verified patch; the compiled runtime's identity check uses the selected PID.
+An old, unpatched consumer at the same upstream revision was rejected.
+
+Final acceptance:
+
+- Node 22.19.0 and 24.19.0 each passed the SDK TypeScript build and all 931
+  bridge tests, including the four compiled-CLI tests. Each passed 42 script
+  tests with one Linux-only skip. `scripts/check.sh` and whitespace checks passed.
+- Full macOS TUI → DSH → bridge → private mock gateway passed, exit 0,
+  run **9848**. Coverage includes paged child history, quote/undo, native goals,
+  workflows, real TypeScript LSP, persistent bash/Python REPL, cancellation,
+  reuse, owner isolation, process reaping, rewind and durable history.
+- Managed-update E2E passed installation, same-version no-op, native-file
+  repair, corrupt-native repair, legacy-overlay repair, corrupt-asset rejection,
+  installed launcher, composed profile and preservation of user fixture files.
+- Earlier run **73548** also passed the complete product loop. Runs **60145**
+  and **89820** stopped at child quotation: a collapsed group consumes the first
+  viewer action as expansion. A retained-session reproduction confirmed
+  `Enter:expand` → `Enter:open` → `Enter:quote`; acceptance now expands only
+  when that state is shown, then separately asserts opening and quoting.
+  An attempted selection-only test change did not fix it and was removed.
+  No product key binding or quote assertion was weakened.
+
+Evidence lives under `/tmp/dscode-mac-process.5yK4n1`: `bench22.jsonl`,
+`bench24.jsonl`, source/build/test logs, the source-built `consumer` and
+`packages`, `update-e2e.log`, and `mac4/contracts-9848/PASS.json`. Failed-run
+artifacts remain available. The benchmark is separate from these functional
+acceptance runs.
+
+Linux/systemd and Linux packaging were not rerun in this macOS pass. Optional
+Kitty-image acceptance was skipped; physical Cmd-click, IME and the host's
+native clipboard were not exercised. Clipboard fixtures stayed isolated.
+No remote push, publication or daily-profile installation was performed.
+
 ## 2026-09-15: long-session output replay
 
 `session-output.ts` now drains one owned FIFO instead of building a Promise
@@ -417,10 +486,10 @@ used different baselines (the first "after" home is this run's "before").
   inspector answers `isAlive` / `snapshot` with a full `ps -axo
   pid=,ppid=,lstart=` table (≈23ms median on this host with ~1300 processes)
   while `foregroundPgid` uses a targeted `ps -o tpgid= -p <pid>` (≈1.2ms).
-  Point-querying the identity check would remove most of the per-poll cost
-  documented earlier without touching the polling interval, but it lives in
-  the runtime dependency, not in this repository; it is an upstream/backport
-  recommendation, not a change made here.
+  Point-querying addresses fresh identity checks, not full-table readiness
+  snapshots. This was an upstream/backport recommendation at that checkpoint;
+  the subsequent source backport and its measured teardown gain are recorded
+  at the top of this document. The polling interval remains unchanged.
 - **cordis hot-path overhead.** Profiles did not surface it above module
   compilation and synchronous child-process calls; deprioritized.
 

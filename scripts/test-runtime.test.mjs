@@ -117,11 +117,24 @@ test('failed build reports its log, never publishes partial paths', t => {
   assert.match(readFileSync(join(f.base, 'build.log'), 'utf8'), /fixture build log/);
 });
 
-for (const field of ['name', 'version', 'release', 'testedVersion', 'sourceCommit']) test(`rejects wrong plugin ${field}`, t => {
+test('accepts a coherent patched tuple and rejects the unpatched runtime of the same version', t => {
+  const f = fixture(t);
+  f.manifest.dsh.sourcePatchSha256 = 'b'.repeat(64);
+  save(join(f.root, 'bridge/grok-leader/package.json'), f.manifest);
+  f.packPlugin(f.manifest);
+  f.packRuntime({ ...f.descriptor, sourcePatchSha256: f.manifest.dsh.sourcePatchSha256 });
+  assert.equal(f.invoke({ DSCODE_RELEASE_DIR: f.release }).status, 0);
+  f.packRuntime();
+  const result = f.invoke({ DSCODE_RELEASE_DIR: f.release });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /runtime provenance/);
+});
+
+for (const field of ['name', 'version', 'release', 'testedVersion', 'sourceCommit', 'sourcePatchSha256']) test(`rejects wrong plugin ${field}`, t => {
   const f = fixture(t);
   const pkg = structuredClone(f.manifest);
   if (field === 'release') pkg.dscode.release = 'wrong';
-  else if (field in pkg.dsh) pkg.dsh[field] = 'wrong';
+  else if (field in pkg.dsh || field === 'sourcePatchSha256') pkg.dsh[field] = 'wrong';
   else pkg[field] = 'wrong';
   f.packPlugin(pkg);
   const result = f.invoke({ DSCODE_E2E_DSH_BIN: f.dsh, DSCODE_E2E_PLUGIN_TGZ: f.plugin });
@@ -129,7 +142,7 @@ for (const field of ['name', 'version', 'release', 'testedVersion', 'sourceCommi
   assert.match(result.stderr, /plugin release provenance mismatch/);
 });
 
-for (const field of ['schema', 'dshVersion', 'sourceCommit', 'platform', 'arch']) test(`rejects wrong runtime ${field}`, t => {
+for (const field of ['schema', 'dshVersion', 'sourceCommit', 'sourcePatchSha256', 'platform', 'arch']) test(`rejects wrong runtime ${field}`, t => {
   const f = fixture(t);
   f.packRuntime({ ...f.descriptor, [field]: 'wrong' });
   const result = f.invoke({ DSCODE_RELEASE_DIR: f.release });

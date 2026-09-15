@@ -79,6 +79,7 @@ const pkg = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
 if (pkg.name !== '@hqzhao95/dscode' || pkg.version !== process.argv[4] || pkg.dscode?.release !== process.argv[4]) throw new Error('Plugin identity/release pin mismatch');
 const sourceCommit = pkg.dsh?.sourceCommit;
 if (sourceCommit !== undefined && !/^[a-f0-9]{40}$/.test(sourceCommit)) throw new Error('Invalid source revision');
+if (pkg.dsh?.sourcePatchSha256 !== undefined && (!sourceCommit || !/^[a-f0-9]{64}$/.test(pkg.dsh.sourcePatchSha256))) throw new Error('Invalid source patch');
 const required = releaseAssets(sourceCommit).filter(name => name !== 'dscode-plugin.tgz.sha256' || sourceCommit || process.argv[5] === 'sidecar');
 console.log(required.join('\n'));
 JS

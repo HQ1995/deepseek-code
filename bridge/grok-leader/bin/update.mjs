@@ -205,7 +205,8 @@ export const extractArchive = (archive, dest) => {
 const validateRuntimeFiles = (runtime, metadata, platform, arch) => {
   const descriptor = json(join(runtime, 'dscode-runtime.json'))
   if (descriptor.schema !== 1 || descriptor.platform !== platform || descriptor.arch !== arch
-    || descriptor.sourceCommit !== metadata.dsh.sourceCommit || descriptor.dshVersion !== metadata.dsh.testedVersion) throw new Error('runtime provenance/platform mismatch')
+    || descriptor.sourceCommit !== metadata.dsh.sourceCommit || descriptor.dshVersion !== metadata.dsh.testedVersion
+    || descriptor.sourcePatchSha256 !== metadata.dsh.sourcePatchSha256) throw new Error('runtime provenance/platform mismatch')
   if (!existsSync(join(runtime, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
     || !existsSync(join(runtime, 'bin', 'dsh'))) throw new Error('runtime CLI entrypoint missing')
   validateNativeArtifacts(runtime, platform, arch)
@@ -222,7 +223,7 @@ const matchesInstallation = (profile, packageName, version, expectedDsh, probeVe
       || !existsSync(join(plugin, 'bin/dscode.mjs'))
       || !existsSync(join(profile, 'bin/dscode'))
       || (probeVersions && (tuiVersion ?? binaryVersion(join(profile, 'bin/dscode'))) !== version)) return false
-    if (expectedDsh && ['testedVersion', 'sourceCommit', 'supportedRange'].some(key => metadata.dsh?.[key] !== expectedDsh[key])) return false
+    if (expectedDsh && ['testedVersion', 'sourceCommit', 'supportedRange', 'sourcePatchSha256'].some(key => metadata.dsh?.[key] !== expectedDsh[key])) return false
     const runtime = join(profile, 'runtime')
     if (metadata.dsh?.sourceCommit) validateRuntimeFiles(runtime, metadata, process.platform, process.arch)
     if (!metadata.dsh?.testedVersion || !existsSync(join(runtime, 'bin/dsh'))
@@ -443,6 +444,7 @@ export const installRelease = async ({ profile, packageName, version, channel, a
     if (!versionPattern.test(metadata.dsh?.testedVersion ?? '')) throw new Error('missing exact dsh runtime version')
     const source = metadata.dsh.sourceCommit
     if (source !== undefined && !/^[0-9a-f]{40}$/.test(source)) throw new Error('invalid runtime source commit')
+    if (metadata.dsh.sourcePatchSha256 !== undefined && (!source || !/^[0-9a-f]{64}$/.test(metadata.dsh.sourcePatchSha256))) throw new Error('invalid runtime source patch')
     const tui = join(prepared, 'bin', 'dscode')
     await downloadVerified(base, asset, tui, fetcher, true)
     chmodSync(tui, 0o755)

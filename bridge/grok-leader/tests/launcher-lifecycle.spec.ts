@@ -95,7 +95,7 @@ describe('launcher lifecycle', () => {
     symlinkSync(fileURLToPath(new URL('../bin/launcher-files.mjs', import.meta.url)), join(dirname(normalLauncher), 'launcher-files.mjs'))
     symlinkSync(fileURLToPath(new URL('../bin/update.mjs', import.meta.url)), join(dirname(normalLauncher), 'update.mjs'))
     symlinkSync(fileURLToPath(new URL('../bin/doctor.mjs', import.meta.url)), join(dirname(normalLauncher), 'doctor.mjs'))
-    writeFileSync(join(home, 'launcher', 'package.json'), JSON.stringify({ ...packageJson, dsh: { ...packageJson.dsh, sourceCommit: undefined } }))
+    writeFileSync(join(home, 'launcher', 'package.json'), JSON.stringify({ ...packageJson, dsh: { ...packageJson.dsh, sourceCommit: undefined, sourcePatchSha256: undefined } }))
     const profile = join(dshHome, 'profiles', 'dscode')
     const cachedTui = join(profile, 'bin', 'dscode')
     const fakeBin = join(home, 'fake-bin')

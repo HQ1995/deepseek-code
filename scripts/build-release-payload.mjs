@@ -86,6 +86,7 @@ export function consumerTreeDigest(modules) {
 }
 export function recordConsumerProvenance(consumer, manifest) {
   save(join(consumer, 'dscode-consumer.json'), { schema: 1, sourceCommit: manifest.dsh.sourceCommit,
+    sourcePatchSha256: manifest.dsh.sourcePatchSha256,
     dshVersion: manifest.dsh.testedVersion, platform: process.platform, arch: process.arch,
     tree: consumerTreeDigest(join(consumer, 'node_modules')) });
 }
@@ -94,11 +95,29 @@ export function validateConsumer(consumer, manifest, modules = join(consumer, 'n
   if (!existsSync(path)) throw new Error('Consumer has no build provenance; omit --consumer or use a new consumer directory to rebuild');
   const record = json(path);
   if (record.schema !== 1 || record.sourceCommit !== manifest.dsh.sourceCommit || record.dshVersion !== manifest.dsh.testedVersion
+    || record.sourcePatchSha256 !== manifest.dsh.sourcePatchSha256
     || record.platform !== process.platform || record.arch !== process.arch || record.tree !== consumerTreeDigest(modules)) {
     throw new Error('Consumer provenance/content mismatch; rebuild from the pinned source');
   }
 }
-function sourceConsumer(source, consumer, manifest, reuse) {
+// Backports are versioned build inputs, never edits to a caller's source or an
+// installed consumer. The optional digest also fences consumer/runtime reuse.
+export function readSourcePatch(manifest, directory = join(root, 'patches')) {
+  const { sourceCommit, sourcePatchSha256 } = manifest.dsh;
+  if (sourcePatchSha256 === undefined) return undefined;
+  if (!/^[a-f0-9]{40}$/.test(sourceCommit) || !/^[a-f0-9]{64}$/.test(sourcePatchSha256)) throw new Error('Invalid source patch identity');
+  const patch = readFileSync(join(directory, `dsh-${sourceCommit}.patch`));
+  if (createHash('sha256').update(patch).digest('hex') !== sourcePatchSha256) throw new Error('Source patch checksum mismatch');
+  return patch;
+}
+export function stageSourcePatch(source, destination, commit, patch) {
+  if (run('git', ['rev-parse', 'HEAD'], source) !== commit || run('git', ['status', '--porcelain', '--untracked-files=no'], source)) throw new Error('Upstream source must be clean and exactly pinned');
+  run('git', ['clone', '--no-hardlinks', '--no-checkout', source, destination]);
+  run('git', ['checkout', '--detach', commit], destination);
+  for (const args of [['apply', '--check', '-'], ['apply', '-']]) execFileSync('git', args, { cwd: destination, input: patch, stdio: ['pipe', 'pipe', 'pipe'] });
+  return destination;
+}
+function sourceConsumer(source, consumer, manifest, reuse, work) {
   const commit = manifest.dsh.sourceCommit;
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('dsh.sourceCommit must be a full revision');
   if (!existsSync(source)) {
@@ -107,10 +126,12 @@ function sourceConsumer(source, consumer, manifest, reuse) {
   }
   if (run('git', ['rev-parse', 'HEAD'], source) !== commit || run('git', ['status', '--porcelain', '--untracked-files=no'], source)) throw new Error('Upstream source must be clean and exactly pinned');
   if (json(join(source, 'package.json')).version !== manifest.dsh.testedVersion) throw new Error('Source version mismatch');
+  const patch = readSourcePatch(manifest);
   if (reuse) {
     validateConsumer(consumer, manifest);
     return;
   }
+  if (patch) source = stageSourcePatch(source, join(work, 'patched-source'), commit, patch);
   const env = sourceBuildEnvironment(join(consumer, '.bin'));
   run('pnpm', ['install', '--frozen-lockfile'], source, env);
   run('pnpm', ['run', 'build:official'], source, { ...env, DSH_CLIENT_COMMIT_HASH: commit });
@@ -165,7 +186,7 @@ function buildRuntime(consumer, source, manifest, out, work) {
   if (process.platform === 'linux' && !prebuilds.binaries.some(binary => binary.tool === 'landlock-run' && binary.kind === 'static-musl')) throw new Error('Native helper platform/format mismatch');
   const version = run(process.execPath, [join(stage, 'bin/dsh'), '--version'], stage);
   if (version !== manifest.dsh.testedVersion) throw new Error(`Runtime CLI reports ${version}`);
-  save(join(stage, 'dscode-runtime.json'), { schema: 1, dshVersion: version, sourceCommit: manifest.dsh.sourceCommit, platform: process.platform, arch: process.arch });
+  save(join(stage, 'dscode-runtime.json'), { schema: 1, dshVersion: version, sourceCommit: manifest.dsh.sourceCommit, sourcePatchSha256: manifest.dsh.sourcePatchSha256, platform: process.platform, arch: process.arch });
   for (const name of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md']) if (existsSync(join(source, name))) cpSync(join(source, name), join(stage, name));
   const asset = join(out, `dscode-runtime-${platform}.tar.gz`);
   run('tar', ['-czf', asset, '-C', stage, '.']);
@@ -214,7 +235,7 @@ function main() {
   try {
     const source = resolve(values.source || join(work, 'source'));
     const consumer = resolve(values.consumer || join(work, 'consumer'));
-    if (manifest.dsh?.sourceCommit) sourceConsumer(source, consumer, manifest, Boolean(values.consumer && existsSync(join(consumer, 'node_modules'))));
+    if (manifest.dsh?.sourceCommit) sourceConsumer(source, consumer, manifest, Boolean(values.consumer && existsSync(join(consumer, 'node_modules'))), work);
     else {
       mkdirSync(consumer, { recursive: true });
       save(join(consumer, 'package.json'), { ...manifest, private: true, scripts: {} });

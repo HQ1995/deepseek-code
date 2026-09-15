@@ -41,7 +41,8 @@ export const installationReport = ({
   add('INFO', 'Bridge', `${pkg.version} · ${dir}`)
   check('Installed bridge', () => {
     const installed = json(join(profile, 'node_modules', ...pkg.name.split('/'), 'package.json'))
-    if (installed.version !== pkg.version || installed.dsh?.testedVersion !== pkg.dsh?.testedVersion || installed.dsh?.sourceCommit !== pkg.dsh?.sourceCommit) throw new Error('Installed bridge differs from the loaded package')
+    if (installed.version !== pkg.version || installed.dsh?.testedVersion !== pkg.dsh?.testedVersion || installed.dsh?.sourceCommit !== pkg.dsh?.sourceCommit
+      || installed.dsh?.sourcePatchSha256 !== pkg.dsh?.sourcePatchSha256) throw new Error('Installed bridge differs from the loaded package')
     return `${installed.version} · ${profile}`
   }, repair)
   try {

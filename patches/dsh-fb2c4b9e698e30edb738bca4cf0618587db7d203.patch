@@ -1,0 +1,221 @@
+diff --git a/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.i18n.yaml b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.i18n.yaml
+new file mode 100644
+index 0000000000..df272dd87f
+--- /dev/null
++++ b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.i18n.yaml
+@@ -0,0 +1,6 @@
++# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
++# side as of the last confirmed-consistent state. Both languages carry equal authority;
++# after editing either side, bring the other along and re-record with:
++#   pnpm run verify-translation-pairing --write .agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.md
++2026-09-15-macos-identity-point-query.md: de5931a2515f266b4e05006389d5cfdbe09c456e
++2026-09-15-macos-identity-point-query.zh.md: 40f21503fb98bb5fffb8a92479b1e2b5142ab919
+diff --git a/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.md b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.md
+new file mode 100644
+index 0000000000..de5931a251
+--- /dev/null
++++ b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.md
+@@ -0,0 +1,25 @@
++# Agent Note: macOS identity point queries
++
++Status: implemented
++
++English | [中文](2026-09-15-macos-identity-point-query.zh.md)
++
++## Problem
++
++The macOS inspector reads the whole process table to check one retained identity before signalling. Cleanup repeats that cost for each target even though it already has a tree snapshot.
++
++## Decision
++
++Current identity checks select one PID with `ps -p` and retain the existing start-timestamp comparison. Tree snapshots still enumerate the full table. A headerless selected-PID query returning status `1` with empty stdout and stderr means absence; all other query errors propagate.
++
++The [persistent PTY](../feature/2026-07-16-persistent-pty-sessions.md) and [native containment](../architecture/2026-08-28-subprocess-native-containment.md) decisions remain active: this query change does not alter readiness, managed-range ownership, or fallback cleanup guarantees.
++
++## Alternatives considered
++
++**Reuse the snapshot before signalling.** Rejected because an earlier observation cannot detect PID reuse between discovery and signal delivery.
++
++**Treat every query failure as absence.** Rejected because an unreadable process table does not prove that the managed range is empty.
++
++## Consequences
++
++Each fresh macOS identity check avoids full-table enumeration without adding a cache, configuration, or lifecycle owner. Tree discovery costs and the existing timestamp precision remain unchanged. Focused tests cover current identities, changed start timestamps, absent PIDs, query failures, and full-table snapshots.
+diff --git a/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.zh.md b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.zh.md
+new file mode 100644
+index 0000000000..40f21503fb
+--- /dev/null
++++ b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.zh.md
+@@ -0,0 +1,25 @@
++# Agent Note: macOS 身份单点查询
++
++Status: implemented
++
++[English](2026-09-15-macos-identity-point-query.md) | 中文
++
++## Problem
++
++macOS 检查器在发送信号前，为检查单个保留身份读取整个进程表。即使已有进程树快照，清理仍会为每个目标重复支付这一成本。
++
++## Decision
++
++当前身份检查通过 `ps -p` 选择单个 PID，并保留既有启动时间戳比较。进程树快照仍枚举全表。无表头的单 PID 查询若返回状态码 `1` 且 stdout、stderr 均为空，则表示进程不存在；所有其他查询错误均向上传播。
++
++[持久 PTY](../feature/2026-07-16-persistent-pty-sessions.zh.md) 与[原生 containment](../architecture/2026-08-28-subprocess-native-containment.zh.md) 决策仍有效：此查询变更不改变就绪判断、受管范围所有权或 fallback 清理保证。
++
++## Alternatives considered
++
++**发送信号前复用快照。** 未采用，因为较早的观察无法发现进程发现与信号投递之间的 PID 复用。
++
++**将所有查询失败视为进程不存在。** 未采用，因为进程表不可读不能证明受管范围已为空。
++
++## Consequences
++
++每次新的 macOS 身份检查均避免全表枚举，且不引入缓存、配置或生命周期 owner。进程树发现成本与既有时间戳精度保持不变。定向测试覆盖当前身份、启动时间戳变化、PID 不存在、查询失败和全表快照。
+diff --git a/packages/subprocess/subprocess-local/README.i18n.yaml b/packages/subprocess/subprocess-local/README.i18n.yaml
+index 7979b68d4d..fc60efb3f7 100644
+--- a/packages/subprocess/subprocess-local/README.i18n.yaml
++++ b/packages/subprocess/subprocess-local/README.i18n.yaml
+@@ -2,5 +2,5 @@
+ # side as of the last confirmed-consistent state. Both languages carry equal authority;
+ # after editing either side, bring the other along and re-record with:
+ #   pnpm run verify-translation-pairing --write packages/subprocess/subprocess-local/README.md
+-README.md: 63d4d5d403d3559778dcad76a8c96cf677f1a977
+-README.zh.md: f0a8b629b2ed17b6a6e9385a6eb565443c21ab26
++README.md: f10db2c0c682d5799838b707f001ab6b49964150
++README.zh.md: ae99f3760d6291a530737347f159c5a78e8a96c8
+diff --git a/packages/subprocess/subprocess-local/README.md b/packages/subprocess/subprocess-local/README.md
+index 63d4d5d403..f10db2c0c6 100644
+--- a/packages/subprocess/subprocess-local/README.md
++++ b/packages/subprocess/subprocess-local/README.md
+@@ -96,6 +96,8 @@ A spawn synchronously validates the final argv, cwd, and environment, selects co
+ 
+ Spill files are opened `0600` with `O_EXCL` and random names under a `0700` per-process directory, defeating symlink planting in shared temp dirs; a failed final close withholds the spill path. Fallback process identities carry start times, so cleanup never follows PID reuse. A selected native failure is reported instead of replaying argv through fallback, and a range is removed from the live set only after cleanup completes or the failure remains observable. Host-exit finalization creates no promises or timers, preserves the host exit code and diagnostic, contains each target's failure, and does not claim quiescence.
+ 
++On macOS, a current identity check selects one PID through `ps` and compares its start timestamp; tree snapshots still read the full table. Only a selected-PID query exiting with status `1` and empty stdout and stderr means absence. Other query failures propagate. Signals retain a fresh identity check, not a cached snapshot.
++
+ </details>
+ 
+ -----
+diff --git a/packages/subprocess/subprocess-local/README.zh.md b/packages/subprocess/subprocess-local/README.zh.md
+index f0a8b629b2..ae99f3760d 100644
+--- a/packages/subprocess/subprocess-local/README.zh.md
++++ b/packages/subprocess/subprocess-local/README.zh.md
+@@ -96,6 +96,8 @@ kind: "package-reference"
+ 
+ spill 文件以 `0600` 权限、`O_EXCL` 与随机名称在 `0700` 每进程目录下创建，可抵御共享临时目录中的符号链接植入；最终关闭失败时不公布 spill 路径。fallback 进程身份携带启动时间，因此清理绝不会跟随 PID 复用。选定的 native 路径失败时会报告错误，而不会通过 fallback 重放 argv；受管范围只有在清理完成后才从存活集合移除，否则失败仍保持可观察。宿主退出最终清理不创建 Promise 或定时器，保留宿主退出码与诊断，分别包含每个目标的失败，也不会声称已经完全停稳。
+ 
++在 macOS 上，当前身份检查通过 `ps` 选择单个 PID 并比较其启动时间戳；进程树快照仍读取全表。只有单 PID 查询以状态码 `1` 退出且 stdout、stderr 均为空时，才表示进程不存在。其他查询失败会向上传播。发送信号仍需重新检查身份，而不使用缓存快照。
++
+ </details>
+ 
+ -----
+diff --git a/packages/subprocess/subprocess-local/src/process-inspector.ts b/packages/subprocess/subprocess-local/src/process-inspector.ts
+index 08cec3b4ab..a492ce158b 100644
+--- a/packages/subprocess/subprocess-local/src/process-inspector.ts
++++ b/packages/subprocess/subprocess-local/src/process-inspector.ts
+@@ -479,8 +479,22 @@ class LinuxProcessInspector extends PosixProcessInspector {
+ 
+ // `ps` exposes neither the session id nor a state column in this format, so a
+ // macOS row can answer presence and parentage but never session membership.
+-function macProcessTable(internals: ProcessInspectorInternals): ProcessRow[] {
+-  return internals.exec('/bin/ps', ['-axo', 'pid=,ppid=,lstart=']).split('\n').flatMap((line) => {
++function macProcessTable(internals: ProcessInspectorInternals, pid?: number): ProcessRow[] {
++  let output: string
++  try {
++    output = internals.exec('/bin/ps', pid === undefined
++      ? ['-axo', 'pid=,ppid=,lstart=']
++      : ['-p', String(pid), '-o', 'pid=,ppid=,lstart='])
++  } catch (error) {
++    // Headerless ps exits 1 with no output when the selected PID is absent.
++    // Other failures must not be mistaken for an empty managed process range.
++    if (pid !== undefined && typeof error === 'object' && error !== null
++      && 'status' in error && error.status === 1
++      && 'stdout' in error && error.stdout === ''
++      && 'stderr' in error && error.stderr === '') return []
++    throw error
++  }
++  return output.split('\n').flatMap((line) => {
+     const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line)
+     if (match?.[1] === undefined || match[2] === undefined || match[3] === undefined) return []
+     return [{
+@@ -508,7 +522,7 @@ class MacProcessInspector extends PosixProcessInspector {
+   }
+ 
+   isAlive(identity: ProcessIdentity): boolean {
+-    return macProcessTable(this.internals)
++    return macProcessTable(this.internals, identity.pid)
+       .some(entry => entry.pid === identity.pid && entry.started === identity.started)
+   }
+ 
+diff --git a/packages/subprocess/subprocess-local/tests/process-inspector.spec.ts b/packages/subprocess/subprocess-local/tests/process-inspector.spec.ts
+index 797076ebfc..757a737f49 100644
+--- a/packages/subprocess/subprocess-local/tests/process-inspector.spec.ts
++++ b/packages/subprocess/subprocess-local/tests/process-inspector.spec.ts
+@@ -37,6 +37,7 @@ function fakeInternals() {
+   const memories = new Map<string, Buffer>()
+   const fds = new Map<number, string>()
+   const kills: Array<[number, NodeJS.Signals]> = []
++  const executions: Array<[string, string[]]> = []
+   let nextFd = 10
+   let ps = ''
+   let tpgid = '0'
+@@ -75,14 +76,15 @@ function fakeInternals() {
+       return source.copy(buffer, 0, position, Math.min(source.length, position + length))
+     },
+     close(fd) { fds.delete(fd) },
+-    exec(_file, args) {
++    exec(file, args) {
++      executions.push([file, args])
+       if (args.includes('tpgid=')) return tpgid
+       return ps
+     },
+     kill(pid, signal) { kills.push([pid, signal]) },
+   }
+   return {
+-    internals, files, dirs, links, devices, memories, kills,
++    internals, files, dirs, links, devices, memories, kills, executions,
+     setPs(value: string) { ps = value },
+     setTpgid(value: string) { tpgid = value },
+   }
+@@ -282,6 +284,40 @@ describe('Linux process inspector', () => {
+ })
+ 
+ describe('macOS process inspector', () => {
++  it('queries only the selected identity while retaining fresh signal fences and full snapshots', () => {
++    const fake = fakeInternals(), identity = { pid: 11, started: 'Mon Jul 21 10:00:01 2026' }
++    fake.setPs(' 11 10 Mon Jul 21 10:00:01 2026\n')
++    const inspector = createProcessInspector('darwin', 'arm64', fake.internals)
++    expect(inspector.isAlive(identity)).toBe(true)
++    inspector.signalProcess(identity, 'SIGTERM')
++    fake.setPs(' 11 10 Mon Jul 21 10:00:02 2026\n')
++    inspector.signalProcess(identity, 'SIGKILL')
++    expect(fake.kills).toEqual([[11, 'SIGTERM']])
++    expect(fake.executions).toEqual(Array.from({ length: 3 }, () => ['/bin/ps', ['-p', '11', '-o', 'pid=,ppid=,lstart=']]))
++    inspector.snapshot()
++    expect(fake.executions.at(-1)).toEqual(['/bin/ps', ['-axo', 'pid=,ppid=,lstart=']])
++  })
++
++  it('distinguishes an absent selected PID from a failed process query', () => {
++    const fake = fakeInternals(), identity = { pid: 11, started: 'Mon Jul 21 10:00:01 2026' }
++    const inspector = createProcessInspector('darwin', 'arm64', fake.internals)
++    const absent = Object.assign(new Error('no selected process'), { status: 1, stdout: '', stderr: '' })
++    fake.internals.exec = () => { throw absent }
++    expect(inspector.isAlive(identity)).toBe(false)
++    inspector.signalProcess(identity, 'SIGKILL')
++    expect(fake.kills).toEqual([])
++    expect(() => inspector.snapshot()).toThrow(absent)
++    for (const error of [new Error('spawn failed'),
++      Object.assign(new Error('query failed'), { status: 2, stdout: '', stderr: '' }),
++      Object.assign(new Error('query denied'), { status: 1, stdout: '', stderr: 'denied' }),
++      Object.assign(new Error('partial query'), { status: 1, stdout: 'partial', stderr: '' })]) {
++      fake.internals.exec = () => { throw error }
++      expect(() => inspector.isAlive(identity)).toThrow(error)
++      expect(() => { inspector.signalProcess(identity, 'SIGKILL') }).toThrow(error)
++    }
++    expect(fake.kills).toEqual([])
++  })
++
+   it('reads tpgid and process trees, contains cycles, and identity-fences signals', () => {
+     const fake = fakeInternals()
+     fake.setTpgid('55\n')

@@ -49,10 +49,12 @@ export async function verifyReleaseAssets(directory, manifest) {
   }
   const plugin = archiveJson(join(directory, 'dscode-plugin.tgz'), 'package/package.json')
   if (plugin.name !== manifest.name || plugin.version !== manifest.version || plugin.dscode?.release !== manifest.version
-    || plugin.dsh?.sourceCommit !== manifest.dsh.sourceCommit || plugin.dsh?.testedVersion !== manifest.dsh.testedVersion) throw new Error('plugin release provenance mismatch')
+    || plugin.dsh?.sourceCommit !== manifest.dsh.sourceCommit || plugin.dsh?.testedVersion !== manifest.dsh.testedVersion
+    || plugin.dsh?.sourcePatchSha256 !== manifest.dsh.sourcePatchSha256) throw new Error('plugin release provenance mismatch')
   if (manifest.dsh.sourceCommit) for (const [asset, platform, arch] of [['linux-x86_64', 'linux', 'x64'], ['macos-aarch64', 'darwin', 'arm64']]) {
     const runtime = archiveJson(join(directory, `dscode-runtime-${asset}.tar.gz`), './dscode-runtime.json')
-    if (runtime.schema !== 1 || runtime.platform !== platform || runtime.arch !== arch || runtime.sourceCommit !== manifest.dsh.sourceCommit || runtime.dshVersion !== manifest.dsh.testedVersion) throw new Error(`runtime release provenance mismatch: ${asset}`)
+    if (runtime.schema !== 1 || runtime.platform !== platform || runtime.arch !== arch || runtime.sourceCommit !== manifest.dsh.sourceCommit || runtime.dshVersion !== manifest.dsh.testedVersion
+      || runtime.sourcePatchSha256 !== manifest.dsh.sourcePatchSha256) throw new Error(`runtime release provenance mismatch: ${asset}`)
   }
 }
 

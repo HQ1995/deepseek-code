@@ -6,3 +6,7 @@
 # trailing whitespace and final blank lines in upstream files are not ours
 # to reformat, and git diff --check must not gate them.
 third_party/grok-build/** -whitespace
+
+# Unified diffs encode an empty context line as one space. Source whitespace
+# is checked in the upstream checkout before generating these pinned patches.
+patches/*.patch whitespace=-blank-at-eol

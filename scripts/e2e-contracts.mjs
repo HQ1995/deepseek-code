@@ -465,6 +465,13 @@ async function childHistoryAcceptance(childId) {
   await tmux('send-keys', '-N', '10', '-t', `${session}:main.0`, 'NPage')
   // The child frame appears before its asynchronous history replay completes.
   await wait(/DSCODE_CHILD_HISTORY_START[\s\S]*DSCODE_CHILD_HISTORY_END/)
+  // PageDown can select a collapsed group header rather than the message.
+  // Its OpenBlockViewer action expands the group first; that is not quoting.
+  const quoteTarget = await wait(/Enter:(?:expand|open)/)
+  if (quoteTarget.includes('Enter:expand')) {
+    await key('Enter')
+    await wait(/Enter:open/)
+  }
   await key('C-f')
   await wait(/Enter:quote/)
   await key('Enter')

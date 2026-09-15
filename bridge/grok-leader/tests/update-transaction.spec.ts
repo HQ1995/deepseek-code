@@ -260,6 +260,13 @@ it.each(['host', 'darwin-arm64'])('reports a matching %s runtime and detects a m
     expect(report().filter(f => f.status === 'ERROR')).toEqual([])
     expect(report('1.2.3-dev').find(f => f.name === 'TUI')?.status).toBe('INFO')
     expect(report('0.9.0').find(f => f.name === 'TUI')?.status).toBe('ERROR')
+    const patched = { ...metadata.dsh, sourcePatchSha256: 'b'.repeat(64) }
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ ...pkg, dsh: patched }))
+    expect(report().find(f => f.name === 'Installed bridge')?.status).toBe('ERROR')
+    expect(report().find(f => f.name === 'Runtime provenance')?.status).toBe('ERROR')
+    writeFileSync(join(profile, 'node_modules/test-package/package.json'), JSON.stringify({ ...pkg, dsh: patched }))
+    writeFileSync(join(root, 'dscode-runtime.json'), JSON.stringify({ ...descriptor, sourcePatchSha256: patched.sourcePatchSha256 }))
+    expect(report().filter(f => f.status === 'ERROR')).toEqual([])
     writeFileSync(join(root, 'dscode-runtime.json'), JSON.stringify({ ...descriptor, platform: 'wrong-platform' }))
     expect(report().find(f => f.name === 'Runtime provenance')?.status).toBe('ERROR')
   } finally {

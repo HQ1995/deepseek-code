@@ -35,7 +35,8 @@ function prepare(root, scratch, buildLog) {
   }
   const packed = JSON.parse(execFileSync('tar', ['-xOf', plugin, 'package/package.json'], { encoding: 'utf8', maxBuffer: 1024 * 1024 }));
   if (packed.name !== manifest.name || packed.version !== version || packed.dscode?.release !== version
-    || packed.dsh?.testedVersion !== manifest.dsh.testedVersion || packed.dsh?.sourceCommit !== manifest.dsh.sourceCommit) {
+    || packed.dsh?.testedVersion !== manifest.dsh.testedVersion || packed.dsh?.sourceCommit !== manifest.dsh.sourceCommit
+    || packed.dsh?.sourcePatchSha256 !== manifest.dsh.sourcePatchSha256) {
     throw new Error('plugin release provenance mismatch; rebuild the payload for this checkout');
   }
   if (!dsh) {
@@ -55,6 +56,7 @@ function prepare(root, scratch, buildLog) {
   const record = json(join(runtime, 'dscode-runtime.json'));
   const cli = json(join(runtime, 'node_modules/@deepseek-ai/dsh/package.json'));
   if (record.schema !== 1 || record.sourceCommit !== manifest.dsh.sourceCommit || record.dshVersion !== manifest.dsh.testedVersion
+    || record.sourcePatchSha256 !== manifest.dsh.sourcePatchSha256
     || record.platform !== process.platform || record.arch !== process.arch || cli.version !== manifest.dsh.testedVersion
     || realpathSync(dsh) !== realpathSync(join(runtime, 'node_modules/@deepseek-ai/dsh', cli.bin.dsh))) {
     throw new Error('runtime provenance, executable or host mismatch; rebuild the payload for this checkout');

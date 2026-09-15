@@ -73,6 +73,7 @@ tar --no-same-owner -xzf "$TGZ" -C "$RUNTIME"
 import { readFileSync } from 'node:fs';
 const [pkg, runtime] = process.argv.slice(2).map(path => JSON.parse(readFileSync(path, 'utf8')));
 if (runtime.schema !== 1 || runtime.dshVersion !== pkg.dsh.testedVersion || runtime.sourceCommit !== pkg.dsh.sourceCommit
+  || runtime.sourcePatchSha256 !== pkg.dsh.sourcePatchSha256
   || runtime.platform !== process.platform || runtime.arch !== process.arch) {
   throw new Error('Runtime payload does not match the checkout SDK pin and host');
 }

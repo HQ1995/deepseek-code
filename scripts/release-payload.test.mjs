@@ -7,7 +7,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
-import { copyClosure, recordConsumerProvenance, validateConsumer, releaseAssets, releaseChannel, sourceBuildEnvironment } from './build-release-payload.mjs';
+import { copyClosure, recordConsumerProvenance, validateConsumer, releaseAssets, releaseChannel, sourceBuildEnvironment, readSourcePatch, stageSourcePatch } from './build-release-payload.mjs';
 import { assertReleaseRun, releasedManifest, verifyReleaseAssets } from './verify-release-assets.mjs';
 import { processHasExited } from './e2e-archive-terminal.mjs';
 import { prepareMacClipboard } from './e2e-macos-clipboard.mjs';
@@ -62,6 +62,15 @@ test('terminal acceptance disables updates in profile files, not the filtered en
   assert.match(providers, /printf '\[cli\]\\nauto_update = false\\n' >"\$SCRATCH\/profiles\/dscode\/config\.toml"/);
 });
 
+test('child quote acceptance distinguishes expanding a group from opening its message', () => {
+  const script = readFileSync(new URL('./e2e-contracts.mjs', import.meta.url), 'utf8');
+  const quote = script.slice(script.indexOf('const beforeQuote ='), script.indexOf("await artifact('child-viewer-quote-parent'"));
+  assert.match(quote, /if \(quoteTarget.includes\('Enter:expand'\)\) \{\s+await key\('Enter'\)\s+await wait\(\/Enter:open\/\)/);
+  assert.ok(quote.indexOf("await key('C-f')") > quote.indexOf('await wait(/Enter:open/)'));
+  assert.match(quote, /await wait\(\/Enter:quote\/\)/);
+  assert.match(quote, /Child quote must only edit the parent draft/);
+});
+
 test('documented unavailable TUI commands match the registry boundary', () => {
   const root = new URL('../third_party/grok-build/', import.meta.url);
   const registry = readFileSync(new URL('crates/codegen/xai-grok-pager/src/slash/registry.rs', root), 'utf8');
@@ -87,6 +96,12 @@ test('consumer reuse requires the exact source, installed bytes, and copied runt
     assert.throws(() => validateConsumer(root, manifest), /no build provenance/);
     recordConsumerProvenance(root, manifest);
     validateConsumer(root, manifest);
+    const patched = { dsh: { ...manifest.dsh, sourcePatchSha256: 'c'.repeat(64) } };
+    assert.throws(() => validateConsumer(root, patched), /mismatch/);
+    recordConsumerProvenance(root, patched);
+    validateConsumer(root, patched);
+    assert.throws(() => validateConsumer(root, manifest), /mismatch/);
+    recordConsumerProvenance(root, manifest);
     assert.throws(() => validateConsumer(root, { dsh: { ...manifest.dsh, sourceCommit: 'b'.repeat(40) } }), /mismatch/);
     cpSync(modules, join(root, 'copied'), { recursive: true });
     validateConsumer(root, manifest, join(root, 'copied'));
@@ -95,6 +110,38 @@ test('consumer reuse requires the exact source, installed bytes, and copied runt
     writeFileSync(pkg, JSON.stringify({ version: manifest.dsh.testedVersion, stale: true }));
     assert.throws(() => validateConsumer(root, manifest), /mismatch/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('source backports are digest-pinned and applied only to an isolated exact-base checkout', () => {
+  const work = mkdtempSync(join(tmpdir(), 'dscode-source-patch-'));
+  const source = join(work, 'source');
+  mkdirSync(source);
+  const git = args => execFileSync('git', args, { cwd: source, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  try {
+    git(['init']);
+    writeFileSync(join(source, 'fixture'), 'before\n');
+    git(['add', 'fixture']);
+    git(['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '-m', 'fixture']);
+    const commit = git(['rev-parse', 'HEAD']);
+    const patch = Buffer.from('diff --git a/fixture b/fixture\n--- a/fixture\n+++ b/fixture\n@@ -1 +1 @@\n-before\n+after\n');
+    const manifest = { dsh: { sourceCommit: commit, sourcePatchSha256: createHash('sha256').update(patch).digest('hex') } };
+    const patchFile = join(work, `dsh-${commit}.patch`);
+    writeFileSync(patchFile, patch);
+    assert.deepEqual(readSourcePatch(manifest, work), patch);
+    assert.equal(readSourcePatch({ dsh: { sourceCommit: commit } }, work), undefined);
+    assert.throws(() => readSourcePatch({ dsh: { ...manifest.dsh, sourcePatchSha256: 'bad' } }, work), /Invalid source patch/);
+    const stage = stageSourcePatch(source, join(work, 'stage'), commit, patch);
+    assert.equal(readFileSync(join(stage, 'fixture'), 'utf8'), 'after\n');
+    assert.equal(readFileSync(join(source, 'fixture'), 'utf8'), 'before\n');
+    assert.equal(git(['status', '--porcelain']), '');
+    assert.throws(() => stageSourcePatch(source, join(work, 'conflict'), commit, Buffer.from(patch.toString().replace('-before', '-not-the-base'))));
+    assert.equal(readFileSync(join(source, 'fixture'), 'utf8'), 'before\n');
+    assert.throws(() => stageSourcePatch(source, join(work, 'wrong-base'), 'f'.repeat(40), patch), /exactly pinned/);
+    writeFileSync(join(source, 'fixture'), 'dirty\n');
+    assert.throws(() => stageSourcePatch(source, join(work, 'dirty-base'), commit, patch), /clean/);
+    writeFileSync(patchFile, 'tampered');
+    assert.throws(() => readSourcePatch(manifest, work), /checksum mismatch/);
+  } finally { rmSync(work, { recursive: true, force: true }); }
 });
 
 test('terminal acceptance rejects old tmux before creating a test profile', () => {
@@ -248,6 +295,11 @@ test('draft validation detects missing, corrupted, mixed-version and mismatched 
       archive(`dscode-runtime-${asset}.tar.gz`, './dscode-runtime.json', { ...descriptor, platform, arch });
     }
     await verifyReleaseAssets(work, manifest);
+    const patched = { ...manifest, dsh: { ...manifest.dsh, sourcePatchSha256: 'b'.repeat(64) } };
+    await assert.rejects(verifyReleaseAssets(work, patched), /plugin release provenance/);
+    archive('dscode-plugin.tgz', 'package/package.json', { ...plugin, dsh: patched.dsh });
+    await assert.rejects(verifyReleaseAssets(work, patched), /runtime release provenance/);
+    archive('dscode-plugin.tgz', 'package/package.json', plugin);
     writeFileSync(join(work, 'dscode-linux-x86_64'), 'corrupt');
     await assert.rejects(verifyReleaseAssets(work, manifest), /checksum mismatch/);
     writeAsset('dscode-linux-x86_64', 'fixture TUI');

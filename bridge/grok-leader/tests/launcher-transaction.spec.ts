@@ -33,7 +33,7 @@ const fixture = () => {
   put(join(runtime, 'node_modules/@deepseek-ai/dsh/lib/bin.js'), `#!/bin/sh\necho '${current.dsh.testedVersion}'\n`, 0o755)
   mkdirSync(join(runtime, 'bin'), { recursive: true })
   symlinkSync('../node_modules/@deepseek-ai/dsh/lib/bin.js', join(runtime, 'bin/dsh'))
-  const descriptor = { schema: 1, platform: process.platform, arch: process.arch, sourceCommit: current.dsh.sourceCommit, dshVersion: current.dsh.testedVersion }
+  const descriptor = { schema: 1, platform: process.platform, arch: process.arch, sourceCommit: current.dsh.sourceCommit, dshVersion: current.dsh.testedVersion, sourcePatchSha256: current.dsh.sourcePatchSha256 }
   put(join(runtime, 'dscode-runtime.json'), JSON.stringify(descriptor))
   {
     const native = join(runtime, `node_modules/@deepseek-ai/node-addon-system-${process.platform}-${process.arch}`)
@@ -67,11 +67,14 @@ globalThis.fetch = async url => {
   return { root, profile, plugin, runtime, remote, descriptor, metadata, put, run, requests }
 }
 
-it.each(['old bridge', 'old runtime', 'missing TUI', 'missing native', 'wrong TUI version', 'wrong CLI version'])('reconciles an existing npx installation as a complete tuple: %s', scenario => {
+it.each(['old bridge', 'old runtime', 'old bridge patch', 'old runtime patch', 'missing TUI', 'missing native', 'wrong TUI version', 'wrong CLI version'])('reconciles an existing npx installation as a complete tuple: %s', scenario => {
   const f = fixture()
   try {
     if (scenario === 'old bridge') f.put(join(f.plugin, 'package.json'), JSON.stringify({ ...f.metadata, version: '0.0.1' }))
     if (scenario === 'old runtime') f.put(join(f.runtime, 'dscode-runtime.json'), JSON.stringify({ ...f.descriptor, sourceCommit: 'a'.repeat(40) }))
+    const oldPatch = current.dsh.sourcePatchSha256 ? undefined : 'a'.repeat(64)
+    if (scenario === 'old bridge patch') f.put(join(f.plugin, 'package.json'), JSON.stringify({ ...f.metadata, dsh: { ...current.dsh, sourcePatchSha256: oldPatch } }))
+    if (scenario === 'old runtime patch') f.put(join(f.runtime, 'dscode-runtime.json'), JSON.stringify({ ...f.descriptor, sourcePatchSha256: oldPatch }))
     if (scenario === 'missing TUI') rmSync(join(f.profile, 'bin/dscode'))
     if (scenario === 'missing native') rmSync(join(f.runtime, `node_modules/@deepseek-ai/node-addon-system-${process.platform}-${process.arch}/bin/helper`))
     if (scenario === 'wrong TUI version') f.put(join(f.profile, 'bin/dscode'), '#!/bin/sh\necho "dscode 0.0.1"\n', 0o755)
