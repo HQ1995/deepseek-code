@@ -5,7 +5,8 @@ settlement fixes to [image candidate `079a0d76`](runtime-image-candidate.md).
 It is an isolated local backport over pinned DSH `fb2c4b9e` (`0.1.5-rc.2`), not
 an adopted SDK pin or published runtime. Its initial validation did not change
 main product code or daily profiles; the subsequent updater correction is
-recorded below. Real Linux/user-systemd acceptance remains pending.
+recorded below. Real Linux/user-systemd source and built-library acceptance on
+`swoop` passed after explicit workload approval; distribution remains separate.
 
 ## Refreshed scope
 
@@ -82,11 +83,21 @@ manager behavior.
   It was not hidden by increasing the listener limit or claimed fixed here.
 
 Source checkout: `/tmp/dscode-linux-follow.YzBIHE/source`, retained by
-`candidate/images-linux`. The self-contained local backup is
-`.git/integration-backups/dsh-images-linux-5922e6a2.bundle`, verified by
-`git bundle verify`, SHA-256
-`7b6e31d71ec3b1efb5fa51eb08dfc8cf633c67354a63398a94297fe82c33558c`.
-The image-only backup remains intact.
+`candidate/images-linux`. The authoritative standalone local backup is now
+`.git/integration-backups/dsh-images-linux-5922e6a2-full.bundle`, SHA-256
+`924bdfb0080aecb5332353bbf824e31dae4f07fbab519378968886097e07a1cb`.
+Fresh independent clones on macOS and swoop are non-shallow, pass
+`git fsck --full --no-reflogs`, and reproduce the candidate commit and tree
+`3ec479e056a960b62f7fa3f7717183096e4b5ab2`. The image candidate is an ancestor
+and is preserved in this bundle too.
+
+The earlier `dsh-images-linux-5922e6a2.bundle` passed `git bundle verify` inside
+an existing repository but failed a fresh swoop clone with missing parent
+`183f08e9c6dde7e36cd2318eaee70b0da08fb35e`. Its source repository was shallow;
+that earlier check did not establish standalone restoration. Fetching the
+missing upstream history and creating the full bundle changed neither the
+candidate commit nor its source tree. Both older bundles remain intact as
+superseded backups, not the recovery authority.
 
 Logs are under `/tmp/dscode-linux-follow.YzBIHE/`: `owners22.log`,
 `owners24.log`, `focused24-final.log`, `mutation-early-cancel.log`,
@@ -153,21 +164,75 @@ differs only in `bin/update.mjs`; it uses the identical candidate runtime archiv
 above. This does not change the native cancellation candidate, main SDK pin or
 the distinction between local validation and adoption.
 
+## Real Linux acceptance on swoop
+
+The user explicitly approved this workload despite the host's evaluation
+reservation. The run used Linux x86_64, systemd 255 and the running user manager.
+All downloads, caches, builds and test workspaces are inside
+`/home/hanqing/dscode-linux-acceptance.rz57N7` on the spacious `/home` volume.
+Private Node 22.19.0 and 24.19.0 archives were checked against their official
+SHA-256 lists; the host's global Node 20 installation was not replaced. Tests
+used one worker, builds used reduced native concurrency, and jobs ran at nice
+15. No model credentials, sudo, daily profile changes or unrelated cleanup
+were needed. The restored source remained clean at `5922e6a2`.
+
+Results on **each** Node version:
+
+- Bootstrap, scope and native capability probes all returned `true` before
+  the source selection. The same owner/consumer selection passed 448 tests
+  in 20 files, with one file and 9 cases skipped: 6 Windows-specific cases and
+  3 optional PowerShell cases. All 4 real Linux native-containment cases ran,
+  including cancellation before bootstrap consumption, `setsid` descendant
+  cleanup, genuine ENOENT/EACCES, and PTY identity/readiness with a reparented
+  descendant. Host direct exit, uncaught exception, unhandled rejection and
+  PTY host exit checks also passed; these are included in the 448 total.
+- After the native addon and host libraries were built, a separate plain-Node
+  test-only program resolved the provider and runner from `lib/`. All 15 cases
+  passed: ordinary and PTY native cancellation, five immediate disposals of
+  each kind, immediate ordinary abort, genuine startup errors, and direct
+  exit 7 while an escaped descendant remained alive until explicit cleanup.
+  `/proc` identities/cgroups and external `systemctl show` observations prove
+  actual native selection for the established ordinary, PTY and escaped-child
+  cases. Every case ended with its owned scopes collected. This is an
+  in-process built-provider test, not an installed dscode distribution test.
+- The existing runner artifact and real Loader/PTY shutdown selection passed
+  all 3 cases in 2 files: source runner, built `./runner`, and second Ctrl+C
+  forcing exit while the first signal drains. No cases skipped or retried.
+- The authored `bash-startup-timeout` recorded Session passed through the
+  shipped headless profile in built-library replay mode. Each run selected
+  one scenario; 138 others were unselected, not passes.
+
+The snapshot required two test-environment corrections. A host-only build
+omitted the Typert registry/gateway loader entries emitted by the client build;
+the normal `build:lib:client` completed those artifacts. Then skill discovery
+reached the host home, which is itself a Git repository with unrelated skills.
+Initializing an empty Git repository at this run's private temporary root
+stopped project-root discovery there. The `dsh-ci-test-reliability` isolation
+rules guided this fixture correction; HOME, user skills, production source,
+snapshot oracle and normalizers were unchanged. Initial failed logs are
+retained alongside the passing runs.
+
+Post-run inspection found no new scopes relative to the pre-run inventory and
+no surviving processes whose cwd/argv belonged to this workspace. Re-reading
+all six captured process identities confirmed they had stopped. This agrees
+with the per-case scope checks; no unrelated unit or process was stopped.
+The inactive remote workspace is retained for reproduction.
+
+Scripts, commands, original failures, pass logs and the independent audit are
+archived in `.git/integration-backups/dsh-linux-swoop-5922e6a2-evidence.tar.gz`,
+SHA-256 `658664aca3e6b1f2d76cc4b71913b963bcc153181fe9f7dd577473bfd1a87074`.
+The inspected local copy is `/tmp/dscode-linux-follow.YzBIHE/swoop/`; key files
+are `logs/identity.txt`, `logs/probe-*.log`, `logs/owners-*.log`,
+`built-*/PASS.json`, `logs/built-entries-*.log`, `logs/startup-isolated-*.log`
+and `logs/post-run-audit.json`. These are local evidence, not published assets.
+
 ## Remaining adoption gates
 
-The user selected `swoop`, whose user systemd manager was verified running.
-Its login notice reserves the server for interference-sensitive evaluations
-and requires prior workload approval; that confirmation remains outstanding.
-No remote build, scope probe that launches a payload, cancellation test or
-cleanup job has been started. The last read-only disk check reported only about
-3.4 GB free on the root filesystem, so an approved run must also choose adequate
-scratch storage without deleting unrelated data.
-
-On an approved Linux host, validate the actual native selection, ordinary and
-PTY early cancellation, genuine pre-exec failure, repeated immediate disposal,
-independent direct outcomes, escaped-descendant cleanup, and shutdown through
-the built/runtime entry. Inspect the owned scope and processes externally after
-each run; a passing mock suite or fallback run cannot satisfy this gate.
+The real Linux source/built-library gate is now satisfied within the stated
+coverage; re-review found no additional cancellation failure requiring a
+production patch. This was not the full upstream suite, a live-model test, or
+an installed Linux dscode release acceptance run. Linux release packaging and
+installed-product validation remain required before distributing that target.
 
 Exact-source distribution is also unresolved. This local backport is not an
 official remotely fetchable revision; changing the main pin without supplying

@@ -145,11 +145,15 @@ affected packages match their respective upstream targets byte-for-byte; all
 package manifests and the lockfile remain unchanged. Only bilingual README and
 pairing conflicts needed resolution. The source checkout is clean at
 `/tmp/dscode-image-follow.MKEh5o/source`; `candidate/images` retains the commit.
-The verified self-contained Git bundle is
+The original local Git bundle is
 `.git/integration-backups/dsh-images-079a0d76.bundle`, SHA-256
 `0d147b1fbd852914d9162a743cb1d796920baf32455406635bae5ec986cc440b`.
-This local backup preserves the source independently of the temporary build
-directory; it is not a tracked release asset or a remote publication.
+Its earlier in-repository verification did not prove standalone restoration.
+The [full combined candidate backup](runtime-linux-candidate.md#executed-local-checks)
+now preserves this image commit and all its ancestry, with independent clones
+and full object checks on macOS and Linux. The original bundle is retained but
+superseded as the recovery authority. Neither backup is a tracked release asset
+or remote publication.
 This is a local candidate, not an official upstream revision to publish as a pin.
 
 macOS arm64 evidence:

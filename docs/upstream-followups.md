@@ -490,11 +490,12 @@ fresh-leader transcript verification. These are controlled-provider product
 tests plus separate native pricing probes, not live billing or image-quality
 measurements.
 
-The source is preserved in a verified local Git bundle. This is still an isolated
+The source is preserved in the independently restored full Git bundle documented
+with the Linux candidate. This is still an isolated
 local candidate, not an official published revision or an adopted runtime pin.
-Linux/systemd cancellation and the exact-source distribution/adoption decision
-remain pending. `swoop` still has a working user manager, but its reservation
-notice requires workload approval; this follow-up launched no remote jobs.
+Linux/systemd source and built-library acceptance subsequently passed on
+`swoop` with explicit workload approval, as recorded below. The exact-source
+distribution/adoption decision remains pending.
 The daily profile, package version, main pin and remote remain unchanged.
 
 ## Execution: refreshed Linux cancellation candidate
@@ -523,11 +524,24 @@ macOS staged-tree flush cost. A [minimal product-side correction](macos-update-d
 retains every durability call and the transaction interface while bounding
 concurrent flushes and draining failures. The runtime archive itself is unchanged.
 
-These tests include mocked systemd observations and real macOS fallback
-processes, not real Linux scope validation. `swoop` workload approval and an
-exact-source distribution/adoption decision remain outstanding. The verified
-source bundle is retained locally; no main pin, daily installation, version,
-remote branch or release changed.
+Those macOS tests include mocked systemd observations and real fallback
+processes. Subsequent approved swoop acceptance supplied real Linux evidence:
+Node 22.19.0 and 24.19.0 each passed 448 source tests (9 Windows/optional-pwsh
+skips), 15 built native cases, 3 runner/shutdown checks, and the selected built
+startup-timeout Session replay. Native probes were positive; external cgroup,
+process-identity and manager observations verified containment and cleanup.
+The final audit found no owned process or new scope left behind. Snapshot
+setup needed the normal client-library build and a private Git boundary to
+exclude the host home's project skills; no production fix or oracle change
+was needed. Full details and the retained failure/pass logs are in
+[the Linux acceptance record](runtime-linux-candidate.md#real-linux-acceptance-on-swoop).
+
+Fresh-clone verification also corrected the earlier source-backup claim: the
+old Linux bundle lacked shallow-boundary parents. The new full bundle restores
+both candidates independently, with unchanged commit/tree identities and full
+object checks on macOS and Linux. Exact-source distribution and installed
+Linux release acceptance remain separate gates. No main pin, daily
+installation, version, remote branch or release changed.
 
 ## DSH
 
