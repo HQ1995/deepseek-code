@@ -471,6 +471,32 @@ Verification on macOS arm64:
 Linux/systemd, the native image estimator and disposable image-cache follow-ups
 remain. There is no SDK pin, version, daily-profile update or upstream push here.
 
+## Execution: isolated image runtime candidate
+
+The estimator pair and disposable request-image cache are now selectively
+backported over the unchanged pin and validated as candidate `079a0d76`; see
+[the source assessment and executed evidence](runtime-image-candidate.md).
+The research skill's primary-source check identified the estimator's correction
+commit and the cache path helper prerequisite. All upstream package manifests
+and the lockfile remain unchanged; no whole-master update was taken.
+
+On macOS arm64, Node 22.19.0 and 24.19.0 each passed 456 focused runtime tests
+with one Windows-only skip and the full 923-test bridge suite. Official build,
+documentation checks and ten selected recorded image snapshots passed. A
+release-shaped build and dependency-tree verification passed, as did real Sharp
+old-to-new cache regeneration checks through the packaged exports. Full
+installed TUI/DSH acceptance passed, run 41234, including interactive rewind and
+fresh-leader transcript verification. These are controlled-provider product
+tests plus separate native pricing probes, not live billing or image-quality
+measurements.
+
+The source is preserved in a verified local Git bundle. This is still an isolated
+local candidate, not an official published revision or an adopted runtime pin.
+Linux/systemd cancellation and the exact-source distribution/adoption decision
+remain pending. `swoop` still has a working user manager, but its reservation
+notice requires workload approval; this follow-up launched no remote jobs.
+The daily profile, package version, main pin and remote remain unchanged.
+
 ## DSH
 
 Local runtime/SDK pin: `0.1.5-rc.2` at
