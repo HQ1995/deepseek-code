@@ -548,11 +548,14 @@ installation, version, remote branch or release changed.
 Local runtime/SDK pin: `0.1.5-rc.2` at
 `fb2c4b9e698e30edb738bca4cf0618587db7d203` in
 [the plugin manifest](../bridge/grok-leader/package.json).
-The official master checked today is
+The official master checked at the initial assessment was
 [`c291e7961a515f6d7af9304e7fd1d257929aef26`](https://github.com/deepseek-ai/deepseek-harness/commit/c291e7961a515f6d7af9304e7fd1d257929aef26)
 (2026-09-10), 139 reachable commits ahead of that pin, including merge commits.
-The newest published prerelease remains
+The newest published prerelease at that assessment was
 [`dsh-v0.1.5-rc.2`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.5-rc.2).
+The [2026-09-15 release refresh](dsh-upstream-refresh-2026-09-15.md) supersedes
+those version facts: `0.1.6-alpha.1` is now published, with additional migration
+requirements beyond the validated selective backport.
 Identical version strings do not make master interchangeable with the pinned
 runtime: retain exact source provenance and release-shaped validation.
 
