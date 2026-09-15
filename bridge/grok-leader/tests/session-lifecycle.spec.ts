@@ -323,13 +323,13 @@ describe('session lifecycle ownership', () => {
     expect(f.read).toHaveBeenCalledWith('root', undefined, 1, { signal: expect.any(AbortSignal) })
   })
 
-  it.each(['load', 'fork'] as const)('keeps the live source usable after a %s storage short read', async kind => {
+  it.each(['load', 'fork', 'points'] as const)('keeps the live source usable after a %s storage short read', async kind => {
     const f = fixture(), source = await f.add()
     source.agent.session.append('session/title', { title: 'required prefix' })
     f.read.mockResolvedValueOnce({ events: [] })
     const request = kind === 'load' ? f.lifecycle.load(1, { sessionId: 'root', cwd: '/tmp/workspace' })
-      : f.lifecycle.fork(1, { sourceSessionId: 'root' })
-    await expect(request).rejects.toThrow('required durable prefix')
+      : kind === 'fork' ? f.lifecycle.fork(1, { sourceSessionId: 'root' }) : f.lifecycle.points(1, { sessionId: 'root' })
+    await expect(request).rejects.toThrow(/required durable (prefix|page)/)
     expect(f.sessions.ownedAgent(source.agent)).toBe(source)
     f.lifecycle.assertReady(source)
     expect(f.nativeDisposals.get('root')).not.toHaveBeenCalled()
@@ -337,13 +337,14 @@ describe('session lifecycle ownership', () => {
     expect(f.closeRead).toHaveBeenCalledOnce()
   })
 
-  it.each(['load', 'fork'] as const)('cancels a %s storage read on close but drains its real read and handle cleanup', async kind => {
+  it.each(['load', 'fork', 'points'] as const)('cancels a %s storage read on close but drains its real read and handle cleanup', async kind => {
     const f = fixture(), source = await f.add(), readGate = deferred(), closeGate = deferred()
+    source.agent.session.append('session/title', { title: 'read required' })
     const read = f.read.getMockImplementation()!
     f.read.mockImplementationOnce(async (...args) => { await readGate.promise; return read(...args) })
     f.closeRead.mockImplementationOnce(async () => { await closeGate.promise; f.order.push('closed delayed read') })
     const request = kind === 'load' ? f.lifecycle.load(1, { sessionId: 'root', cwd: '/tmp/workspace' })
-      : f.lifecycle.fork(1, { sourceSessionId: 'root' })
+      : kind === 'fork' ? f.lifecycle.fork(1, { sourceSessionId: 'root' }) : f.lifecycle.points(1, { sessionId: 'root' })
     const failed = request.catch(error => error)
     try {
       await vi.waitFor(() => expect(f.read).toHaveBeenCalledOnce())
@@ -357,5 +358,40 @@ describe('session lifecycle ownership', () => {
       expect(f.order.indexOf('closed delayed read')).toBeLessThan(f.order.indexOf('native dispose:root'))
       expect(f.agents.resume).not.toHaveBeenCalled(); expect(f.agents.create).toHaveBeenCalledOnce()
     } finally { readGate.resolve(); closeGate.resolve() }
+  })
+
+  it('enumerates rewind points across page boundaries without live reads and preserves fork/resume parity', async () => {
+    const f = fixture(), source = await f.add(), userSeqs = [255, 256, 767, 1029]
+    for (let seq = 0; seq < 1030; seq++) {
+      if (userSeqs.includes(seq) || seq === 500) source.agent.session.append('user/message', {
+        source: { kind: seq === 500 ? 'system' : 'user' }, content: [{ type: 'text', text: `prompt-${seq}\n` }, { type: 'text', text: '尾' }],
+      })
+      else source.agent.session.append('session/title', { title: 'irrelevant'.repeat(1024) })
+    }
+    vi.spyOn(source.agent.session, 'snapshotEvents').mockImplementation(() => { throw new Error('must page durable history') })
+    const expected = { rewindPoints: userSeqs.map((seq, promptIndex) => ({ promptIndex, createdAt: new Date(1).toISOString(),
+      numFileSnapshots: 0, promptPreview: `prompt-${seq}\n尾`, hasFileChanges: false })) }
+    await expect(f.lifecycle.points(1, { sessionId: 'root' })).resolves.toEqual(expected)
+    expect(f.read.mock.calls.map(([, offset, length]) => [offset, length])).toEqual([[0, 256], [256, 256], [512, 256], [768, 256], [1024, 6]])
+    expect(f.closeRead).toHaveBeenCalledOnce()
+    await f.lifecycle.fork(1, { sourceSessionId: 'root', newSessionId: 'fork' })
+    await expect(f.lifecycle.points(1, { sessionId: 'fork' })).resolves.toEqual(expected)
+    await f.lifecycle.close(1, { sessionId: 'fork' })
+    await f.lifecycle.load(1, { sessionId: 'fork', cwd: '/tmp/workspace' })
+    await expect(f.lifecycle.points(1, { sessionId: 'fork' })).resolves.toEqual(expected)
+  })
+
+  it('excludes prompts appended during a rewind-point flush and rejects foreign owners before I/O', async () => {
+    const f = fixture(), source = await f.add(), gate = deferred()
+    source.agent.session.append('user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: 'captured' }] })
+    await expect(f.lifecycle.points(2, { sessionId: 'root' })).rejects.toThrow('unknown session')
+    expect(f.flush).not.toHaveBeenCalled(); expect(f.read).not.toHaveBeenCalled()
+    const flush = f.flush.getMockImplementation()!
+    f.flush.mockImplementationOnce(async session => { await gate.promise; return flush(session) })
+    const request = f.lifecycle.points(1, { sessionId: 'root' })
+    source.agent.session.append('user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: 'too late' }] })
+    gate.resolve()
+    await expect(request).resolves.toMatchObject({ rewindPoints: [{ promptIndex: 0, promptPreview: 'captured' }] })
+    expect(f.read).toHaveBeenCalledWith('root', 0, 1, { signal: expect.any(AbortSignal) })
   })
 })

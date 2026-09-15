@@ -225,6 +225,70 @@ describe('owned session discovery', () => {
     expect(f.open).not.toHaveBeenCalled()
   })
 
+  it('selects compact values from bounded contiguous pages with one handle and a fixed end', async () => {
+    const f = fixture(), events = Array.from({ length: 1030 }, (_, seq) => event('session/title', { title: 'body'.repeat(2048) }, seq))
+    f.add('a', '/work', events)
+    const selected = await f.discovery.select(SessionId('a'), { end: SessionLogOffset(1027) }, event => event.seq % 256 === 0 ? event.seq : undefined)
+    expect(selected).toEqual([0, 256, 512, 768, 1024])
+    expect(f.read.mock.calls.map(([, offset, length]) => [offset, length])).toEqual([[0, 256], [256, 256], [512, 256], [768, 256], [1024, 3]])
+    expect(f.open).toHaveBeenCalledOnce(); expect(f.close).toHaveBeenCalledOnce()
+    expect(f.peak).toBe(1); expect(f.active).toBe(0); expect(f.query).not.toHaveBeenCalled()
+  })
+
+  it.each(['short', 'oversized', 'gap'])('rejects a %s page without publishing partial selected history', async kind => {
+    const f = fixture(); f.add('a', '/work', [])
+    const events = Array.from({ length: kind === 'short' ? 1 : kind === 'oversized' ? 3 : 2 }, (_, seq) => title('value', kind === 'gap' ? seq + 1 : seq))
+    f.read.mockResolvedValueOnce({ events, eventState: 'owned' })
+    await expect(f.discovery.select(SessionId('a'), { end: SessionLogOffset(2) }, event => event.seq)).rejects.toThrow(kind === 'gap' ? 'noncontiguous page' : 'required durable page')
+    expect(f.close).toHaveBeenCalledOnce(); expect(f.active).toBe(0)
+  })
+
+  it('cancels between pages, waits for an uncooperative read and close, and never projects the cancelled page', async () => {
+    const f = fixture(), gate = deferred(), closeGate = deferred(), controller = new AbortController()
+    f.add('a', '/work', Array.from({ length: 300 }, (_, seq) => title('value', seq)))
+    const read = f.read.getMockImplementation()!
+    f.read.mockImplementation(async (...args) => { if (args[1] === 256) await gate.promise; return read(...args) })
+    f.close.mockImplementationOnce(async () => closeGate.promise)
+    const project = vi.fn((event: SessionEvent) => event.seq)
+    let done = false
+    const request = f.discovery.select(SessionId('a'), { end: SessionLogOffset(300), signal: controller.signal }, project)
+    const failed = request.catch(error => { done = true; return error })
+    try {
+      await vi.waitFor(() => expect(f.read).toHaveBeenCalledTimes(2))
+      controller.abort(new Error('caller closed'))
+      expect(f.read.mock.calls[1]![3]!.signal!.aborted).toBe(true)
+      expect(done).toBe(false); expect(project).toHaveBeenCalledTimes(256)
+      gate.resolve(); await vi.waitFor(() => expect(f.close).toHaveBeenCalledOnce())
+      expect(done).toBe(false); expect(project).toHaveBeenCalledTimes(256)
+      closeGate.resolve(); expect(await failed).toMatchObject({ message: 'caller closed' })
+    } finally { gate.resolve(); closeGate.resolve() }
+  })
+
+  it('retains projection and cleanup errors and checks cancellation after asynchronous close', async () => {
+    const f = fixture(); f.add('a', '/work', [title('value', 0)])
+    const failure = new Error('projection failed'), cleanup = new Error('cleanup failed')
+    f.close.mockRejectedValueOnce(cleanup)
+    await expect(f.discovery.select(SessionId('a'), { end: SessionLogOffset(1) }, () => { throw failure }))
+      .rejects.toMatchObject({ errors: [failure, cleanup] })
+    const gate = deferred(), controller = new AbortController()
+    f.close.mockImplementationOnce(async () => gate.promise)
+    const request = f.discovery.select(SessionId('a'), { end: SessionLogOffset(1), signal: controller.signal }, event => event.seq)
+    const failed = request.catch(error => error)
+    await vi.waitFor(() => expect(f.close).toHaveBeenCalledTimes(2))
+    controller.abort(new Error('closed before publication')); gate.resolve()
+    expect(await failed).toMatchObject({ message: 'closed before publication' })
+  })
+
+  it('supports an empty prefix and rejects invalid cursors before opening storage', async () => {
+    const f = fixture(); f.add('a')
+    await expect(f.discovery.select(SessionId('a'), { end: SessionLogOffset(0) }, () => 'unreachable')).resolves.toEqual([])
+    expect(f.read).not.toHaveBeenCalled(); expect(f.close).toHaveBeenCalledOnce()
+    for (const end of [-1, NaN, Infinity, 1.5]) {
+      await expect(f.discovery.select(SessionId('a'), { end: end as SessionLogOffset }, () => 0)).rejects.toThrow('invalid session inspection end')
+    }
+    expect(f.open).toHaveBeenCalledOnce()
+  })
+
   it('cancels listing before any subsequent log open but waits for an uncooperative backend', async () => {
     const f = fixture(), gate = deferred(); f.add('a')
     const list = f.list.getMockImplementation()!

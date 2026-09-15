@@ -1,7 +1,7 @@
 import { SessionId, type Session, type SessionEvent, type SessionHeader, type SessionLogOffset } from '@deepseek-ai/dsh-session'
 import {
   SessionFormatUnsupportedError, SessionPersistenceCorruptionError, SessionPersistenceNotFoundError,
-  type SessionInspection, type SessionPersistence,
+  type SessionHandle, type SessionInspection, type SessionPersistence,
 } from '@deepseek-ai/dsh-session-persistence'
 import { internalError, invalidParams, paramRecord } from './acp.ts'
 import { SessionListIndex } from './session-list.ts'
@@ -20,9 +20,10 @@ type DiscoveryPersistence = Pick<SessionPersistence, 'list' | 'open'>
 type ListMethod = 'session/list' | 'x.ai/session/list' | 'x.ai/sessions/list'
 interface InspectionOptions {
   /** Complete prefix required by a live lifecycle snapshot, never a moving tail. */
-  end?: SessionLogOffset
-  signal?: AbortSignal
+  readonly end?: SessionLogOffset
+  readonly signal?: AbortSignal
 }
+type ReadOperation<T> = (handle: SessionHandle, signal: AbortSignal, assertActive: () => void) => Promise<T>
 interface DiscoveryHost {
   persistence(): DiscoveryPersistence | undefined
   query(): SessionQueryLike | undefined
@@ -67,9 +68,9 @@ export function createSessionDiscovery(host: DiscoveryHost) {
   }
   const unavailableArtifact = (error: unknown) => error instanceof SessionPersistenceNotFoundError
     || error instanceof SessionPersistenceCorruptionError || error instanceof SessionFormatUnsupportedError
-  function inspect(store: DiscoveryPersistence, id: SessionId, skipUnavailable?: false, options?: InspectionOptions): Promise<SessionInspection>
-  function inspect(store: DiscoveryPersistence, id: SessionId, skipUnavailable: true): Promise<SessionInspection | undefined>
-  async function inspect(store: DiscoveryPersistence, id: SessionId, skipUnavailable = false, options: InspectionOptions = {}): Promise<SessionInspection | undefined> {
+  function read<T>(store: DiscoveryPersistence, id: SessionId, options: InspectionOptions, operation: ReadOperation<T>): Promise<T>
+  function read<T>(store: DiscoveryPersistence, id: SessionId, options: InspectionOptions, operation: ReadOperation<T>, skipUnavailable: true): Promise<T | undefined>
+  async function read<T>(store: DiscoveryPersistence, id: SessionId, options: InspectionOptions, operation: ReadOperation<T>, skipUnavailable = false): Promise<T | undefined> {
     const signal = options.signal === undefined ? shutdown.signal : AbortSignal.any([shutdown.signal, options.signal])
     const assertActive = () => { assertOpen(); signal.throwIfAborted() }
     assertActive()
@@ -82,13 +83,11 @@ export function createSessionDiscovery(host: DiscoveryHost) {
     }
     const failures: unknown[] = []
     let cleanupFailed = false
-    let inspection: SessionInspection | undefined
+    let result: T | undefined
     try {
       assertActive()
-      const { events } = await handle.read(undefined, options.end, { signal })
+      result = await operation(handle, signal, assertActive)
       assertActive()
-      if (options.end !== undefined && events.length !== options.end) throw internalError('session history does not contain the required durable prefix')
-      inspection = { meta: handle.header, inheritedEventCount: handle.inheritedEventCount, events }
     } catch (error) { failures.push(error) }
     // Even a late open after cancellation owns a real handle that must close.
     try { await handle.close() } catch (error) {
@@ -102,8 +101,35 @@ export function createSessionDiscovery(host: DiscoveryHost) {
     if (failures.length === 1) throw failures[0]
     if (failures.length > 1) throw new AggregateError(failures, 'session inspection and read-handle cleanup failed')
     assertActive()
-    return inspection!
+    return result!
   }
+  /** Full materialization is deliberate for replay/fork and the cold picker. */
+  const inspection = (end?: SessionLogOffset): ReadOperation<SessionInspection> => async (handle, signal, assertActive) => {
+    const { events } = await handle.read(undefined, end, { signal })
+    assertActive()
+    if (end !== undefined && events.length !== end) throw internalError('session history does not contain the required durable prefix')
+    return { meta: handle.header, inheritedEventCount: handle.inheritedEventCount, events }
+  }
+  /** One handle and a fixed prefix; only selected values survive each page.
+   * Projection is synchronous and must not publish partial results. */
+  const select = <T>(id: SessionId, { end, signal }: InspectionOptions & { end: SessionLogOffset }, project: (event: SessionEvent) => T | undefined): Promise<T[]> =>
+    accepted(() => read(persistence(), id, { end, signal }, async (handle, signal, assertActive) => {
+      const selected: T[] = []
+      for (let offset = 0; offset < end;) {
+        assertActive()
+        const length = Math.min(256, end - offset)
+        const { events } = await handle.read(offset, length, { signal })
+        assertActive()
+        if (events.length !== length) throw internalError('session history does not contain the required durable page')
+        for (const event of events) {
+          assertActive()
+          if (event.seq !== offset++) throw internalError('session history returned a noncontiguous page')
+          const value = project(event)
+          if (value !== undefined) selected.push(value)
+        }
+      }
+      return selected
+    }))
   const list = async (method: ListMethod, params: unknown) => {
     const p = method === 'x.ai/session/list' ? paramRecord(params, method) : {}
     const store = persistence(), projectionIndex = indexFor(store)
@@ -130,7 +156,7 @@ export function createSessionDiscovery(host: DiscoveryHost) {
       || (query !== undefined && header.id.toLowerCase() === query))
     const projections = await Promise.all(candidates.map(({ header, revision }) => accepted(() =>
       projectionIndex.inspect(header.id, header.createdAt,
-        async () => (await inspect(store, SessionId(header.id), true))?.events, revision))))
+        async () => (await read(store, SessionId(header.id), {}, inspection(), true))?.events, revision))))
     let rows = candidates.map(({ header }, position) => {
       const projection = projections[position]!
       return {
@@ -179,7 +205,8 @@ export function createSessionDiscovery(host: DiscoveryHost) {
     if (!closed && host.owns(session)) index.recordEvent(session.header.id, session.header.createdAt, event)
   })
   return {
-    inspect: (id: SessionId, options?: InspectionOptions) => accepted(() => inspect(persistence(), id, false, options)),
+    inspect: (id: SessionId, { end, signal }: InspectionOptions = {}) => accepted(() => read(persistence(), id, { end, signal }, inspection(end))),
+    select,
     list: (method: ListMethod, params?: unknown) => accepted(() => list(method, params)),
     search: (params: unknown) => accepted(() => search(params)),
     dispose(): Promise<void> {

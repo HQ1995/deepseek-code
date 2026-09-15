@@ -20,7 +20,7 @@ export function apply(ctx) {
         const descendants = await ctx.subagents.listDescendants(agent.id)
         if (ctx.agents.get(listed.id) !== agent) continue
         agents.push({
-          id: agent.id, status: agent.status,
+          id: agent.id, status: agent.status, eventCount: agent.session.seq,
           cwd: agent.session.header.cwd,
           skills: await (ctx.get('agentPresets')?.serviceFor(agent, 'skills') ?? ctx.get('skills'))?.list({ cwd: agent.session.header.cwd, scope: agent }),
           inbox: { nextTurn: agent.inbox.nextTurn, nextStep: agent.inbox.nextStep },

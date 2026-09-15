@@ -112,6 +112,11 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
   for actual completion; read failure keeps the original owner usable. Live
   fork fixes its event cursor before flushing, then reads exactly that complete
   durable prefix. Concurrent appends are excluded and short reads fail closed.
+- Rewind-point enumeration fixes its cursor before flushing and selects user
+  prompt previews from storage pages of at most 256 events. It keeps the same
+  complete point list, indices and preview text; unrelated transcript bodies
+  are not collected. Short/noncontiguous pages fail the request. Close cancels
+  and drains the read and handle cleanup before disposing the source session.
 - Goal hydration replays durable ID, revision, phase, and round counters and reads
   process-local activation; restore neither rearms continuation nor repeats
   completion celebration.

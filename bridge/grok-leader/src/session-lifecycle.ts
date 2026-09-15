@@ -50,7 +50,7 @@ interface LifecycleHost {
   presets: Presets
   persistence(): PersistenceLike | undefined
   flush(session: Agent['session']): Promise<unknown>
-  discovery: Pick<SessionDiscovery, 'inspect'>
+  discovery: Pick<SessionDiscovery, 'inspect' | 'select'>
   client(id: number): { readonly closed: boolean; notify(method: string, params: unknown): void; drain?(): Promise<void> | undefined } | undefined
   queue: { combineQueued: boolean; followUpSteer: boolean }
   permissions: Pick<ReturnType<typeof createNativeInteractions<SessionRecord>>, 'validateMeta' | 'apply' | 'assertReady'>
@@ -359,17 +359,23 @@ export function createSessionLifecycle(host: LifecycleHost) {
     if (sessionId === undefined || record === undefined) {
       throw invalidParams('unknown session: ' + String(p.sessionId))
     }
-    const points = record.agent.session.snapshotEvents()
-      .filter(event => event.type === 'user/message'
-        && (event.data as { source?: { kind?: unknown } }).source?.kind === 'user')
-      .map((event, promptIndex) => ({
-        promptIndex,
-        createdAt: new Date(event.time).toISOString(),
-        numFileSnapshots: 0,
-        promptPreview: textBlocks((event.data as { content: unknown }).content).map(block => block.text).join(''),
-        hasFileChanges: false,
-      }))
-    return { rewindPoints: points }
+    return record.work.read(async scope => {
+      const end = record.agent.session.seq
+      await host.flush(record.agent.session)
+      scope.assertActive()
+      let promptIndex = 0
+      const points = await host.discovery.select(sessionId, { end, signal: scope.signal }, event => {
+        if (event.type !== 'user/message' || (event.data as { source?: { kind?: unknown } }).source?.kind !== 'user') return
+        return {
+          promptIndex: promptIndex++,
+          createdAt: new Date(event.time).toISOString(),
+          numFileSnapshots: 0,
+          promptPreview: textBlocks((event.data as { content: unknown }).content).map(block => block.text).join(''),
+          hasFileChanges: false,
+        }
+      })
+      return { rewindPoints: points }
+    })
   }
 
   const executeRewind = async (clientId: number, params: unknown): Promise<Record<string, unknown>> => {

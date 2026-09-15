@@ -6,7 +6,7 @@ import { FrameDecoder, encodeJsonFrame } from '../bridge/grok-leader/src/codec.t
 
 /** A second real bridge client owns isolated sessions; it never borrows or
  * changes the TUI client's session. Only the model gateway is scripted. */
-export async function sessionLifecycleAcceptance({ socketPath, cwd, artifact }) {
+export async function sessionLifecycleAcceptance({ socketPath, cwd, artifact, state, waitFor }) {
   const socket = createConnection(socketPath), decoder = new FrameDecoder(), pending = new Map(), messages = []
   let counter = 0
   const rejectPending = error => {
@@ -74,8 +74,28 @@ export async function sessionLifecycleAcceptance({ socketPath, cwd, artifact }) 
     await load(forkId) // Closed source now uses storage, not any live source snapshot.
     assert.deepEqual(previews(await points(forkId)), [first, second], 'Closed fork must remain durably resumable')
     await request('session/close', { sessionId: forkId })
+    // Grow real history past two page boundaries through ordinary model turns,
+    // never by injecting events or substituting a synthetic persistence backend.
+    const pagedId = randomUUID(), prompts = []
+    await request('session/new', { cwd, mcpServers: [], _meta: { sessionId: pagedId } })
+    let eventCount = 0
+    for (let index = 0; eventCount <= 512 && index < 64; index++) {
+      const text = `DSCODE_REWIND_PAGE_${index}_${pagedId}`
+      const result = await request('session/prompt', { sessionId: pagedId, prompt: [{ type: 'text', text }] })
+      assert.equal(result.stopReason, 'end_turn'); prompts.push(text)
+      const observed = await waitFor(() => state(pagedId), value => value?.status === 'idle' && value.eventCount > eventCount, 'paged-rewind-native-history')
+      eventCount = observed.eventCount
+    }
+    assert.ok(eventCount > 512, `Expected at least three history pages, observed ${eventCount} events`)
+    const pagedPoints = await points(pagedId)
+    assert.deepEqual(previews(pagedPoints), prompts)
+    assert.deepEqual(pagedPoints.rewindPoints.map(point => point.promptIndex), prompts.map((_, index) => index))
+    await request('session/close', { sessionId: pagedId }); await load(pagedId)
+    assert.deepEqual(previews(await points(pagedId)), prompts, 'Paged points must survive cold resume')
+    await request('session/close', { sessionId: pagedId })
     const result = { sourceId, forkId, rewindId: rewind.newSessionId, liveReloadReplay: replay,
-      cases: ['live-reload', 'live-fork', 'seeded-live-reload', 'wire-rewind', 'source-preserved', 'closed-fork-resume'] }
+      pagedRewind: { sessionId: pagedId, eventCount, prompts: prompts.length },
+      cases: ['live-reload', 'live-fork', 'seeded-live-reload', 'wire-rewind', 'source-preserved', 'closed-fork-resume', 'paged-rewind-points', 'paged-rewind-resume'] }
     await artifact('session-lifecycle', { ...result, messages })
     return result
   } finally {

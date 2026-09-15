@@ -492,6 +492,55 @@ async function slashRecencyAcceptance() {
     await key('C-u')
   }
 }
+async function rewindUiAcceptance() {
+  console.log('[lifecycle] interactive rewind picker, confirmation, draft and resume')
+  await stop(); activeId = randomUUID(); await boot(false, 'standard')
+  const sourceId = activeId, first = 'DSCODE_REWIND_UI_FIRST', second = 'DSCODE_REWIND_UI_SECOND'
+  const log = () => readFile(join(artifacts, `tui-${generation}.log`), 'utf8')
+  for (const [index, text] of [first, second].entries()) {
+    await send(text)
+    await waitFor(log, value => value.split('received "session/prompt" response:').length - 1 === index + 1, 'rewind-ui-prompt-completed')
+    await waitState(value => value.status === 'idle', 'rewind-ui-native-idle')
+  }
+  const requestCount = (await readRequests()).length
+  await send('/rewind')
+  const picker = await wait(/Rewind to which turn\?/)
+  assert.ok(picker.includes(first) && picker.includes(second))
+  await key('Enter'); await wait(/Rewind conversation to/); await key('y')
+  // ACP's extension gateway logs all extension names as "ext_method". Match
+  // the actual rewind response shape in this fresh TUI generation's log.
+  const rewindResponse = value => value.split('\n').flatMap(line => {
+    const marker = 'received "ext_method" response: ', start = line.indexOf(marker)
+    if (start < 0) return []
+    const result = JSON.parse(line.slice(start + marker.length))
+    return result?.mode === 'conversation_only' && result.targetPromptIndex === 1 && result.newSessionId ? [result] : []
+  }).at(-1)
+  const responseLog = await waitFor(log, value => rewindResponse(value) !== undefined, 'rewind-ui-execute-response')
+  const response = rewindResponse(responseLog)
+  assert.equal(response.success, true); assert.equal(response.targetPromptIndex, 1)
+  assert.equal(response.promptText, second); assert.equal(response.mode, 'conversation_only')
+  assert.ok(response.newSessionId && response.newSessionId !== sourceId)
+  activeId = response.newSessionId
+  await wait(/Reverted conversation/)
+  const draft = await waitFor(capture, value => value.includes(second) && !value.includes('Rewind to which turn?'), 'rewind-ui-restored-draft')
+  assert.equal((await readRequests()).length, requestCount, 'Rewind must restore the draft without resubmitting it')
+  // set_text preserves the cursor (zero after submit). Ctrl-U only deletes
+  // before it; Ctrl-C clears the nonempty prompt regardless of cursor position.
+  await key('C-c')
+  await waitFor(capture, value => !value.includes(second), 'rewind-ui-draft-cleared')
+  const transcripts = []
+  for (const resumed of [false, true]) {
+    if (resumed) { await stop(); await boot(true) }
+    const path = join(artifacts, `rewind-ui-${resumed ? 'resumed' : 'live'}.md`)
+    await send(`/export ${path}`)
+    const text = await waitFor(() => readFile(path, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error }), Boolean, 'rewind-ui-export')
+    assert.ok(text.includes(first) && !text.includes(second), 'Rewound transcript must omit the selected turn, including after resume')
+    transcripts.push(path)
+  }
+  const result = { sourceId, newSessionId: activeId, targetPromptIndex: 1, draftRestoredWithoutResend: true, transcripts }
+  await artifact('rewind-ui', { ...result, picker, draft, response })
+  return result
+}
 let cleaning
 function cleanup() {
   return cleaning ??= (async () => {
@@ -511,7 +560,7 @@ try {
   await packaging()
   await boot()
   const lifecycle = env.DSCODE_E2E_NEXT_SIX_ONLY !== '1' && !extraOnly
-    ? await sessionLifecycleAcceptance({ socketPath: socket, cwd, artifact }) : undefined
+    ? await sessionLifecycleAcceptance({ socketPath: socket, cwd, artifact, state, waitFor }) : undefined
   let childId
   if (env.DSCODE_E2E_NEXT_SIX_ONLY !== '1' && !extraOnly) {
     await contextAcceptance()
@@ -574,12 +623,13 @@ try {
     fresh: async preset => { await stop(); activeId = randomUUID(); await boot(false, preset) },
     type: text => tmux('send-keys', '-l', '-t', `${session}:main.0`, text),
   })
+  const rewindUi = env.DSCODE_E2E_NEXT_SIX_ONLY !== '1' && !extraOnly ? await rewindUiAcceptance() : undefined
   await stop()
   const kittyImages = env.DSCODE_E2E_KITTY_BIN ? await kittyImageAcceptance({
     kittyBin: env.DSCODE_E2E_KITTY_BIN, tuiBin: env.DSCODE_TUI_BIN, baseEnv, cwd, artifacts, waitFor, artifact, sockets, children,
   }) : { skipped: 'DSCODE_E2E_KITTY_BIN is not configured' }
   if (env.DSCODE_E2E_NEXT_SIX_ONLY !== '1' && !extraOnly) history = await historyAcceptance({ runHeadless, readRequests, scratch, artifactDir: artifacts })
-  await artifact('PASS', { sessionId: id, lifecycle, history, nativeTui, nativeControls, nextSix, archiveTerminal, kittyImages })
+  await artifact('PASS', { sessionId: id, lifecycle, rewindUi, history, nativeTui, nativeControls, nextSix, archiveTerminal, kittyImages })
   console.log(`PASS runtime acceptance: ${artifacts}`)
 } catch (error) {
   await artifact('FAIL', { error: error.stack ?? String(error), state: await state().catch(() => null), screen: await capture().catch(() => '') })

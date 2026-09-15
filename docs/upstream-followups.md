@@ -294,6 +294,63 @@ the host for interference-sensitive evaluations and requires prior approval.
 No build, workload or cancellation tests were started there; confirmation is
 pending before using that host. This does not block the local reader migration.
 
+## Execution: bounded rewind points
+
+Rewind-point enumeration no longer calls `Session.snapshotEvents`. It borrows
+the source through `SessionWork`, captures its cursor before a durability flush,
+and selects only user-prompt preview fields from pages of at most 256 events.
+The existing discovery module owns the single read handle, per-request/global
+cancellation, actual read/close settlement and preservation of primary plus
+cleanup errors. Its full `inspect` operation and bounded `select` share that
+private ownership implementation; no handle escapes to callers. The
+codebase-design skill guided this reuse rather than adding another reader owner.
+
+The public response still contains every eligible point, unchanged preview text
+and consecutive prompt indices. This bounds event pages, not the total response
+size or the bytes in a single event. It is not a measured latency/RSS win or a
+claim that DSH no longer keeps complete history in memory. Short, oversized or
+noncontiguous pages fail closed rather than returning a partial list.
+
+Validation on macOS arm64:
+
+- Pinned-SDK build passed. Node 22.19.0 and 24.19.0 each passed 47 files / 898
+  tests, including the compiled CLI. A 1,030-event fixture crosses five pages;
+  tests check exact page bounds, unchanged multiline preview/index semantics,
+  omission of non-user history, live/fork/resume parity, fixed-cursor reads,
+  malformed pages and close/cancellation through uncooperative read/cleanup.
+- Plugin SHA-256
+  `b3121850b62a491f08d6ab33ec63c1d24c9fb609c1c6015a6c0bf32a90be55d4`;
+  135 source/compiled/bin/preset files matched. The archive is 1,444,577 bytes,
+  900 bytes above the prior lifecycle slice, with host dependencies unbundled.
+- Installed lifecycle acceptance passed with an additional real session grown
+  by 63 ordinary model turns to 514 native events. Its point list crossed at
+  least three pages and exactly matched after cold resume; no events or storage
+  backends were injected. Evidence:
+  `/tmp/dsc-follow-work.nYBS9C/rewind/final/contracts-36057/session-lifecycle.json`.
+- Complete installed macOS regression passed (run `36057`), including the new
+  interactive rewind picker, confirmation, restored draft without automatic
+  resend, and live/fresh-leader exports that exclude the selected turn. Evidence:
+  `/tmp/dsc-follow-work.nYBS9C/rewind/final/contracts-36057/rewind-ui.json`,
+  `rewind-ui-live.md`, `rewind-ui-resumed.md`, and `PASS.json` in that directory;
+  outer log: `/tmp/dsc-follow-work.nYBS9C/rewind/final.log`.
+  Earlier runs `2769` and `20482` failed new harness assumptions: extension RPCs
+  log as `ext_method`, and Ctrl-U only deletes before the preserved cursor.
+  The harness now matches the rewind response shape and uses Ctrl-C to clear
+  the nonempty restored draft, waiting for it to disappear before export.
+  The same product archive was used for all three runs; no product change was
+  needed for those failures. Graphical Kitty, physical Cmd-click, nonempty
+  compaction and Linux remain outside this run's verification boundary.
+- Script tests: 37 passed, one Linux-only skip. `scripts/check.sh` and
+  `git diff --check` passed. No package version, DSH pin, daily profile or
+  release changed.
+
+Four production readers remain: child history/interruption (2), incremental
+workflow indexing (1), and optional Schedule fallback (1). Lifecycle now has
+none. The bounded child-history path must preserve its metadata cache and
+requested-page behavior when migrated; it must not use a full-log query wrapper.
+The Linux/systemd, native image estimator and disposable-image cache follow-ups
+remain separate runtime work, not completed by this local migration.
+
 ## DSH
 
 Local runtime/SDK pin: `0.1.5-rc.2` at
