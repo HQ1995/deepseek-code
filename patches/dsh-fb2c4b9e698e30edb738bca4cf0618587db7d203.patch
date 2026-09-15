@@ -1,6 +1,44 @@
+diff --git a/.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.i18n.yaml b/.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.i18n.yaml
+index b1b7365597..0fe88aff56 100644
+--- a/.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.i18n.yaml
++++ b/.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.i18n.yaml
+@@ -2,5 +2,5 @@
+ # side as of the last confirmed-consistent state. Both languages carry equal authority;
+ # after editing either side, bring the other along and re-record with:
+ #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.md
+-2026-07-16-persistent-pty-sessions.md: d62587ced78be75de121fe907ca258d07a2830a1
+-2026-07-16-persistent-pty-sessions.zh.md: a26c3ed852b3a18842585e19ecb2a6994f8d9117
++2026-07-16-persistent-pty-sessions.md: 8829f692fed26f4d3bbd1d420a5fa6cb8ac4b949
++2026-07-16-persistent-pty-sessions.zh.md: 6a240bcc329bda0ba3fb8eca902b0ebee005012b
+diff --git a/.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.md b/.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.md
+index d62587ced7..8829f692fe 100644
+--- a/.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.md
++++ b/.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.md
+@@ -45,7 +45,7 @@ A registered `shell` backend constrains how a terminal starts; it does not const
+ 
+ Sandboxing confines local process effects but does not make arbitrary shell input safe: network calls and other external side effects remain governed by deployment policy. Tool descriptions state that PTY sessions are less auditable than one-shot tools and should be used only when persistence or interactive stdin is necessary.
+ 
+-The local subprocess terminal primitive uses only public `node-pty` capabilities: child PID, `data` and `exit` notifications, `write`, and `kill`. It does not assume access to the native master fd or call `waitpid` from TypeScript. On supported Linux hosts the [native-containment owner](../architecture/2026-08-28-subprocess-native-containment.md) starts that same PTY command inside a user-systemd scope without changing its PID, session, controlling terminal, foreground-group, or readiness semantics. Platform process inspectors below the primitive still derive foreground process groups and fallback parent/child identity from `/proc` on Linux and `ps` on macOS. The [portable execution-world decision](../architecture/2026-07-28-portable-execution-world-consumers.md) owns this process/consumer split.
++The local subprocess terminal primitive uses only public `node-pty` capabilities: child PID, `data` and `exit` notifications, `write`, and `kill`. It does not assume access to the native master fd or call `waitpid` from TypeScript. On supported Linux hosts the [native-containment owner](../architecture/2026-08-28-subprocess-native-containment.md) starts that same PTY command inside a user-systemd scope without changing its PID, session, controlling terminal, foreground-group, or readiness semantics. Platform process inspectors below the primitive derive foreground process groups and fallback parent/child identity from `/proc` on Linux and [kernel sysctl observations](../simplification/2026-09-15-macos-kernel-process-observations.md) on macOS. The [portable execution-world decision](../architecture/2026-07-28-portable-execution-world-consumers.md) owns this process/consumer split.
+ 
+ ### Six model-facing tools
+ 
+diff --git a/.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.zh.md b/.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.zh.md
+index a26c3ed852..6a240bcc32 100644
+--- a/.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.zh.md
++++ b/.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.zh.md
+@@ -45,7 +45,7 @@ agent scope dispose（资源释放）时先撤销注册，再等待全部所属
+ 
+ 沙箱限制本地进程副作用，但不会让任意 shell 输入自动安全：网络调用和其他外部副作用仍由部署策略治理。工具描述会说明 PTY 会话比一次性工具更难审计，只应在确实需要持久状态或交互式 stdin 时使用。
+ 
+-本地子进程终端原语只使用 `node-pty` 的公开能力：子进程 PID、`data` 与 `exit` 通知、`write` 和 `kill`。它不假设能访问原生 master fd，也不从 TypeScript 调用 `waitpid`。在受支持的 Linux 宿主上，[原生收容 owner](../architecture/2026-08-28-subprocess-native-containment.zh.md)会在 user-systemd scope 内启动同一条 PTY 命令，同时保持 PID、session、控制终端、前台进程组与就绪语义。该原语下的平台进程检查器仍在 Linux 上通过 `/proc`、在 macOS 上通过 `ps` 推导前台进程组和 fallback 父子进程身份。[可移植执行环境决策](../architecture/2026-07-28-portable-execution-world-consumers.zh.md)负责定义这种进程／消费方拆分。
++本地子进程终端原语只使用 `node-pty` 的公开能力：子进程 PID、`data` 与 `exit` 通知、`write` 和 `kill`。它不假设能访问原生 master fd，也不从 TypeScript 调用 `waitpid`。在受支持的 Linux 宿主上，[原生收容 owner](../architecture/2026-08-28-subprocess-native-containment.zh.md)会在 user-systemd scope 内启动同一条 PTY 命令，同时保持 PID、session、控制终端、前台进程组与就绪语义。该原语下的平台进程检查器在 Linux 上通过 `/proc`、在 macOS 上通过[内核 sysctl 观察](../simplification/2026-09-15-macos-kernel-process-observations.zh.md)推导前台进程组和 fallback 父子进程身份。[可移植执行环境决策](../architecture/2026-07-28-portable-execution-world-consumers.zh.md)负责定义这种进程／消费方拆分。
+ 
+ ### 6 个面向模型的工具
+ 
 diff --git a/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.i18n.yaml b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.i18n.yaml
 new file mode 100644
-index 0000000000..df272dd87f
+index 0000000000..12dae98ded
 --- /dev/null
 +++ b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.i18n.yaml
 @@ -0,0 +1,6 @@
@@ -8,11 +46,11 @@ index 0000000000..df272dd87f
 +# side as of the last confirmed-consistent state. Both languages carry equal authority;
 +# after editing either side, bring the other along and re-record with:
 +#   pnpm run verify-translation-pairing --write .agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.md
-+2026-09-15-macos-identity-point-query.md: de5931a2515f266b4e05006389d5cfdbe09c456e
-+2026-09-15-macos-identity-point-query.zh.md: 40f21503fb98bb5fffb8a92479b1e2b5142ab919
++2026-09-15-macos-identity-point-query.md: 6c405f3afdbc42148e80bbf37b34ed16aa2d708f
++2026-09-15-macos-identity-point-query.zh.md: 5d048d7fda0ff9f133144a8d80ff364e007174a6
 diff --git a/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.md b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.md
 new file mode 100644
-index 0000000000..de5931a251
+index 0000000000..6c405f3afd
 --- /dev/null
 +++ b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.md
 @@ -0,0 +1,25 @@
@@ -28,7 +66,7 @@ index 0000000000..de5931a251
 +
 +## Decision
 +
-+Current identity checks select one PID with `ps -p` and retain the existing start-timestamp comparison. Tree snapshots still enumerate the full table. A headerless selected-PID query returning status `1` with empty stdout and stderr means absence; all other query errors propagate.
++Current identity checks select one PID and retain the existing start-timestamp comparison. Tree snapshots still enumerate the full table. An empty successful selected-PID query means absence; query errors propagate. The [kernel observation decision](2026-09-15-macos-kernel-process-observations.md) owns the macOS query implementation.
 +
 +The [persistent PTY](../feature/2026-07-16-persistent-pty-sessions.md) and [native containment](../architecture/2026-08-28-subprocess-native-containment.md) decisions remain active: this query change does not alter readiness, managed-range ownership, or fallback cleanup guarantees.
 +
@@ -40,10 +78,10 @@ index 0000000000..de5931a251
 +
 +## Consequences
 +
-+Each fresh macOS identity check avoids full-table enumeration without adding a cache, configuration, or lifecycle owner. Tree discovery costs and the existing timestamp precision remain unchanged. Focused tests cover current identities, changed start timestamps, absent PIDs, query failures, and full-table snapshots.
++Each fresh macOS identity check avoids full-table enumeration without adding a cache, configuration, or lifecycle owner. Tree discovery remains fresh and timestamp precision remains unchanged. Focused tests cover current identities, changed start timestamps, absent PIDs, query failures, and full-table snapshots.
 diff --git a/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.zh.md b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.zh.md
 new file mode 100644
-index 0000000000..40f21503fb
+index 0000000000..5d048d7fda
 --- /dev/null
 +++ b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.zh.md
 @@ -0,0 +1,25 @@
@@ -59,7 +97,7 @@ index 0000000000..40f21503fb
 +
 +## Decision
 +
-+当前身份检查通过 `ps -p` 选择单个 PID，并保留既有启动时间戳比较。进程树快照仍枚举全表。无表头的单 PID 查询若返回状态码 `1` 且 stdout、stderr 均为空，则表示进程不存在；所有其他查询错误均向上传播。
++当前身份检查选择单个 PID，并保留既有启动时间戳比较。进程树快照仍枚举全表。成功的单 PID 查询若结果为空，则表示进程不存在；查询错误向上传播。[内核观察决策](2026-09-15-macos-kernel-process-observations.zh.md) 记录 macOS 查询实现。
 +
 +[持久 PTY](../feature/2026-07-16-persistent-pty-sessions.zh.md) 与[原生 containment](../architecture/2026-08-28-subprocess-native-containment.zh.md) 决策仍有效：此查询变更不改变就绪判断、受管范围所有权或 fallback 清理保证。
 +
@@ -71,9 +109,91 @@ index 0000000000..40f21503fb
 +
 +## Consequences
 +
-+每次新的 macOS 身份检查均避免全表枚举，且不引入缓存、配置或生命周期 owner。进程树发现成本与既有时间戳精度保持不变。定向测试覆盖当前身份、启动时间戳变化、PID 不存在、查询失败和全表快照。
++每次新的 macOS 身份检查均避免全表枚举，且不引入缓存、配置或生命周期 owner。进程树发现仍使用新观察，时间戳精度保持不变。定向测试覆盖当前身份、启动时间戳变化、PID 不存在、查询失败和全表快照。
+diff --git a/.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.i18n.yaml b/.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.i18n.yaml
+new file mode 100644
+index 0000000000..f774236d83
+--- /dev/null
++++ b/.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.i18n.yaml
+@@ -0,0 +1,6 @@
++# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
++# side as of the last confirmed-consistent state. Both languages carry equal authority;
++# after editing either side, bring the other along and re-record with:
++#   pnpm run verify-translation-pairing --write .agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.md
++2026-09-15-macos-kernel-process-observations.md: 2ff6dbb05c5121c36e71a66791d8f49e4584af83
++2026-09-15-macos-kernel-process-observations.zh.md: 291a5f2d19a66d4fe417ed627a5ee1060700310e
+diff --git a/.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.md b/.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.md
+new file mode 100644
+index 0000000000..2ff6dbb05c
+--- /dev/null
++++ b/.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.md
+@@ -0,0 +1,29 @@
++# Agent Note: macOS kernel process observations
++
++Status: implemented
++
++English | [中文](2026-09-15-macos-kernel-process-observations.zh.md)
++
++## Problem
++
++Terminal readiness needs fresh descendant observations. Spawning `ps` for every observation blocks the host while the utility gathers information beyond the parentage and start identity required by the inspector.
++
++## Decision
++
++The macOS inspector uses the existing Koffi dependency to call `sysctl` with `KERN_PROC_ALL` or `KERN_PROC_PID`, the kernel source used by [Apple's ps](https://github.com/apple-oss-distributions/adv_cmds/blob/main/ps/ps.c). Each call owns its buffer; no table or identity cache crosses calls. The [point-query decision](2026-09-15-macos-identity-point-query.md) continues to require a new selected-PID observation immediately before signalling.
++
++The reader decodes the LP64 `kinfo_proc` fields shared by arm64 and x64. A C SDK oracle asserts sizes, offsets, and selectors for both architectures. The buffer has twice the estimated capacity to accommodate process creation between sizing and reading. Further growth, syscall failures, and malformed results throw; an incomplete table never proves quiescence.
++
++## Alternatives considered
++
++**Cache or reduce discovery polls.** Rejected because a descendant may reparent before a later observation can retain its identity.
++
++**Read every PID through libproc BSD info.** Rejected because that query restricts cross-user access; treating inaccessible rows as absent weakens discovery.
++
++**Add a native helper artifact.** Rejected because Koffi already ships in this provider and a helper adds build, packaging, and launch responsibilities for this synchronous query.
++
++## Consequences
++
++Process inspection creates no child process and adds no dependency, asynchronous work, or lifecycle owner. Whole-table reads remain fresh. Identities encode epoch seconds rather than locale-formatted dates, remain private, and retain second precision; session omission, presence-only liveness, and observational containment remain unchanged.
++
++Focused tests reject invalid/truncated results and failed queries, compare real rows with `ps` across user identities, and exercise identity-fenced signals. The SDK oracle validates x64 layout but is not an x64 runtime test. Native runtime evidence is macOS arm64; other OS paths retain their implementations.
+diff --git a/.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.zh.md b/.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.zh.md
+new file mode 100644
+index 0000000000..291a5f2d19
+--- /dev/null
++++ b/.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.zh.md
+@@ -0,0 +1,29 @@
++# Agent Note: macOS 内核进程观察
++
++Status: implemented
++
++[English](2026-09-15-macos-kernel-process-observations.md) | 中文
++
++## Problem
++
++终端就绪判断需要新的后代进程观察。每次观察都启动 `ps` 会阻塞宿主，因为该工具收集的信息超出了检查器所需的父子关系和启动身份。
++
++## Decision
++
++macOS 检查器使用已有的 Koffi 依赖，以 `KERN_PROC_ALL` 或 `KERN_PROC_PID` 调用 `sysctl`；[Apple 的 ps](https://github.com/apple-oss-distributions/adv_cmds/blob/main/ps/ps.c) 也使用此内核数据源。每次调用独立持有缓冲区，不跨调用缓存进程表或身份。[单点查询决策](2026-09-15-macos-identity-point-query.zh.md) 仍要求在发送信号前立即重新观察目标 PID。
++
++读取器解码 arm64 与 x64 共用的 LP64 `kinfo_proc` 字段。C SDK 校验程序对两种架构断言大小、偏移和选择器。缓冲区容量为估计值的两倍，以容纳估算大小与实际读取之间新建的进程。超出容量的增长、系统调用失败和格式错误的结果均抛出异常；不完整的进程表绝不作为已完全停稳的证据。
++
++## Alternatives considered
++
++**缓存或减少发现轮询。** 未采用，因为后代进程可能在后续观察保留其身份之前改变父进程。
++
++**通过 libproc BSD info 逐个读取 PID。** 未采用，因为该查询限制跨用户访问；将不可访问的行视为不存在会削弱发现能力。
++
++**增加原生辅助程序产物。** 未采用，因为此提供方已包含 Koffi，而辅助程序会为这项同步查询增加构建、打包和启动职责。
++
++## Consequences
++
++进程检查不创建子进程，不新增依赖、异步工作或生命周期所有者。全表读取仍使用新观察。身份编码从区域格式的日期改为 epoch 秒数，仅在内部使用，并保持秒级精度；省略会话信息、仅判断存在性的存活检查和观察式 containment 均保持不变。
++
++定向测试拒绝无效或截断的结果及失败的查询，跨用户身份将真实进程行与 `ps` 比较，并验证带身份检查的信号发送。SDK 校验程序验证 x64 布局，但不是 x64 运行时测试。原生运行时证据来自 macOS arm64；其他操作系统路径保留原有实现。
 diff --git a/packages/subprocess/subprocess-local/README.i18n.yaml b/packages/subprocess/subprocess-local/README.i18n.yaml
-index 7979b68d4d..fc60efb3f7 100644
+index 7979b68d4d..65303d28f8 100644
 --- a/packages/subprocess/subprocess-local/README.i18n.yaml
 +++ b/packages/subprocess/subprocess-local/README.i18n.yaml
 @@ -2,5 +2,5 @@
@@ -82,134 +202,456 @@ index 7979b68d4d..fc60efb3f7 100644
  #   pnpm run verify-translation-pairing --write packages/subprocess/subprocess-local/README.md
 -README.md: 63d4d5d403d3559778dcad76a8c96cf677f1a977
 -README.zh.md: f0a8b629b2ed17b6a6e9385a6eb565443c21ab26
-+README.md: f10db2c0c682d5799838b707f001ab6b49964150
-+README.zh.md: ae99f3760d6291a530737347f159c5a78e8a96c8
++README.md: 130280319e4a64119e727dbb480338bf5bcad242
++README.zh.md: 64b44f236267575627effe75351680910086cccc
 diff --git a/packages/subprocess/subprocess-local/README.md b/packages/subprocess/subprocess-local/README.md
-index 63d4d5d403..f10db2c0c6 100644
+index 63d4d5d403..130280319e 100644
 --- a/packages/subprocess/subprocess-local/README.md
 +++ b/packages/subprocess/subprocess-local/README.md
 @@ -96,6 +96,8 @@ A spawn synchronously validates the final argv, cwd, and environment, selects co
  
  Spill files are opened `0600` with `O_EXCL` and random names under a `0700` per-process directory, defeating symlink planting in shared temp dirs; a failed final close withholds the spill path. Fallback process identities carry start times, so cleanup never follows PID reuse. A selected native failure is reported instead of replaying argv through fallback, and a range is removed from the live set only after cleanup completes or the failure remains observable. Host-exit finalization creates no promises or timers, preserves the host exit code and diagnostic, contains each target's failure, and does not claim quiescence.
  
-+On macOS, a current identity check selects one PID through `ps` and compares its start timestamp; tree snapshots still read the full table. Only a selected-PID query exiting with status `1` and empty stdout and stderr means absence. Other query failures propagate. Signals retain a fresh identity check, not a cached snapshot.
++On 64-bit macOS, process inspection reads kernel `sysctl` observations without spawning `ps`. Tree snapshots enumerate the full table; current identity and foreground checks select one PID. Failed, truncated, or malformed reads throw instead of proving absence. Signals retain a fresh identity check, not a cached snapshot. Start identities remain second-precision and private to the handle; this optimization does not strengthen observational containment. The [kernel observation decision](../../../.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.md) owns the ABI and failure constraints.
 +
  </details>
  
  -----
 diff --git a/packages/subprocess/subprocess-local/README.zh.md b/packages/subprocess/subprocess-local/README.zh.md
-index f0a8b629b2..ae99f3760d 100644
+index f0a8b629b2..64b44f2362 100644
 --- a/packages/subprocess/subprocess-local/README.zh.md
 +++ b/packages/subprocess/subprocess-local/README.zh.md
 @@ -96,6 +96,8 @@ kind: "package-reference"
  
  spill 文件以 `0600` 权限、`O_EXCL` 与随机名称在 `0700` 每进程目录下创建，可抵御共享临时目录中的符号链接植入；最终关闭失败时不公布 spill 路径。fallback 进程身份携带启动时间，因此清理绝不会跟随 PID 复用。选定的 native 路径失败时会报告错误，而不会通过 fallback 重放 argv；受管范围只有在清理完成后才从存活集合移除，否则失败仍保持可观察。宿主退出最终清理不创建 Promise 或定时器，保留宿主退出码与诊断，分别包含每个目标的失败，也不会声称已经完全停稳。
  
-+在 macOS 上，当前身份检查通过 `ps` 选择单个 PID 并比较其启动时间戳；进程树快照仍读取全表。只有单 PID 查询以状态码 `1` 退出且 stdout、stderr 均为空时，才表示进程不存在。其他查询失败会向上传播。发送信号仍需重新检查身份，而不使用缓存快照。
++在 64 位 macOS 上，进程检查读取内核 `sysctl` 观察结果，不启动 `ps`。进程树快照枚举全表；当前身份和前台检查选择单个 PID。读取失败、截断或格式错误时抛出异常，而不将其视为进程不存在的证据。发送信号仍需重新检查身份，而不使用缓存快照。启动身份保持秒级精度，且仅由句柄内部使用；此优化不增强观察式 containment。[内核观察决策](../../../.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.zh.md) 记录 ABI 与失败约束。
 +
  </details>
  
  -----
+diff --git a/packages/subprocess/subprocess-local/src/mac-process-table.ts b/packages/subprocess/subprocess-local/src/mac-process-table.ts
+new file mode 100644
+index 0000000000..9e00b98c5f
+--- /dev/null
++++ b/packages/subprocess/subprocess-local/src/mac-process-table.ts
+@@ -0,0 +1,91 @@
++/** Darwin 64-bit kernel process observations through the same sysctl used by ps. */
++
++import koffi from 'koffi'
++
++/** Fields needed by the local terminal inspector; identities retain second precision. */
++export interface MacProcessRow {
++  pid: number
++  parentPid: number
++  started: string
++  tpgid: number
++}
++
++/** Injectable sysctl call and its immediately captured errno. */
++export interface MacProcessTableInternals {
++  sysctl(mib: Int32Array, buffer: Buffer | null, size: Buffer): number
++  errno(): number
++}
++
++// Darwin's LP64 kinfo_proc layout (sys/sysctl.h and sys/proc.h), shared by
++// arm64 and x64. The native SDK oracle pins every consumed offset and size.
++const RECORD_BYTES = 648
++let nativeSysctl: ((mib: Int32Array, length: number, buffer: Buffer | null,
++  size: Buffer, replacement: null, replacementBytes: number) => number) | undefined
++
++/* v8 ignore start -- thin ABI binding, exercised by the macOS SDK/real-process test. */
++const DEFAULT_INTERNALS: MacProcessTableInternals = {
++  sysctl(mib, buffer, size) {
++    if (nativeSysctl === undefined) {
++      if (process.platform !== 'darwin' || !['arm64', 'x64'].includes(process.arch)) {
++        throw new Error('subprocess-local: kernel process inspection requires 64-bit macOS')
++      }
++      const libc = koffi.load('/usr/lib/libSystem.B.dylib')
++      nativeSysctl = libc.func('int sysctl(const int *name, unsigned int namelen, void *oldp, void *oldlenp, void *newp, size_t newlen)')
++    }
++    return nativeSysctl(mib, mib.length, buffer, size, null, 0)
++  },
++  errno: () => koffi.errno(),
++}
++/* v8 ignore stop */
++
++/**
++ * Read one complete kernel process observation, or throw on a failed/partial read.
++ * No observations or native buffers survive this call. Buffer capacity doubles
++ * the size observation to allow process creation between the two sysctl calls;
++ * growth beyond that capacity fails instead of accepting a truncated table.
++ *
++ * @param pid - select one PID, or omit for the entire process table.
++ * @param internals - injectable synchronous kernel operations.
++ * @returns Observed process rows, empty only for an absent selected PID.
++ */
++export function readMacProcessTable(
++  pid?: number,
++  internals: MacProcessTableInternals = DEFAULT_INTERNALS,
++): MacProcessRow[] {
++  // CTL_KERN / KERN_PROC / KERN_PROC_ALL or KERN_PROC_PID.
++  const mib = new Int32Array([1, 14, pid === undefined ? 0 : 1, pid ?? 0])
++  const size = Buffer.alloc(8)
++  const query = (buffer: Buffer | null): number => {
++    size.writeBigUInt64LE(BigInt(buffer?.length ?? 0))
++    if (internals.sysctl(mib, buffer, size) !== 0) {
++      throw new Error(`subprocess-local: macOS process query failed (errno ${internals.errno()})`)
++    }
++    const bytes = Number(size.readBigUInt64LE())
++    if (!Number.isSafeInteger(bytes) || bytes % RECORD_BYTES !== 0
++      || (buffer !== null && bytes > buffer.length)
++      || (pid === undefined && bytes === 0)) {
++      throw new Error('subprocess-local: invalid macOS process table byte count')
++    }
++    return bytes
++  }
++  const capacity = query(null)
++  if (capacity === 0) return []
++  const buffer = Buffer.alloc(capacity * 2)
++  const bytes = query(buffer)
++  const rows: MacProcessRow[] = []
++  for (let offset = 0; offset < bytes; offset += RECORD_BYTES) {
++    const processId = buffer.readInt32LE(offset + 40)
++    // kernel_task is not a signal target in ps either.
++    if (processId === 0 && (pid === undefined || pid === 0)) continue
++    const parentPid = buffer.readInt32LE(offset + 560)
++    const started = buffer.readBigInt64LE(offset)
++    if (processId < 0 || parentPid < 0 || started < 0n || (pid !== undefined && processId !== pid)) {
++      throw new Error('subprocess-local: invalid macOS process table record')
++    }
++    rows.push({ pid: processId, parentPid, started: String(started), tpgid: buffer.readInt32LE(offset + 576) })
++  }
++  if (pid === undefined && rows.length === 0) {
++    throw new Error('subprocess-local: empty macOS process table')
++  }
++  return rows
++}
 diff --git a/packages/subprocess/subprocess-local/src/process-inspector.ts b/packages/subprocess/subprocess-local/src/process-inspector.ts
-index 08cec3b4ab..a492ce158b 100644
+index 08cec3b4ab..5ffe9d683c 100644
 --- a/packages/subprocess/subprocess-local/src/process-inspector.ts
 +++ b/packages/subprocess/subprocess-local/src/process-inspector.ts
-@@ -479,8 +479,22 @@ class LinuxProcessInspector extends PosixProcessInspector {
+@@ -1,9 +1,10 @@
+ /** Platform process-table inspection for terminal readiness, signals, and teardown. */
  
- // `ps` exposes neither the session id nor a state column in this format, so a
- // macOS row can answer presence and parentage but never session membership.
+ import { closeSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, statSync } from 'node:fs'
+-import { execFileSync } from 'node:child_process'
+ import type { SubprocessTerminalSignal } from '@deepseek-ai/dsh-subprocess'
+ import { createWindowsProcessInspector } from './windows-inspector.ts'
++import { readMacProcessTable } from './mac-process-table.ts'
++import type { MacProcessRow } from './mac-process-table.ts'
+ 
+ /** PID plus start identity, preventing teardown escalation after PID reuse. */
+ export interface ProcessIdentity {
+@@ -21,7 +22,7 @@ interface FileStatus {
+  * single readiness poll or teardown pass asks.
+  *
+  * The table is read at most once, on the first question that needs it — a
+- * `/bin/ps` fork on macOS, a `/proc` walk on Linux, a Toolhelp32 enumeration on
++ * kernel sysctl on macOS, a `/proc` walk on Linux, a Toolhelp32 enumeration on
+  * Windows. Later questions never re-read it, which is what keeps a poll's cost
+  * independent of how many descendants the running command spawned. Windows
+  * liveness needs no table at all: wait state is a per-handle question there, so
+@@ -104,7 +105,7 @@ export interface ProcessInspectorInternals {
+   open(path: string): number
+   read(fd: number, buffer: Buffer, length: number, position: number): number
+   close(fd: number): void
+-  exec(file: string, args: string[]): string
++  macProcessTable(pid?: number): MacProcessRow[]
+   kill(pid: number, signal: NodeJS.Signals): void
+ }
+ 
+@@ -117,7 +118,7 @@ const DEFAULT_INTERNALS: ProcessInspectorInternals = {
+   open: path => openSync(path, 'r'),
+   read: (fd, buffer, length, position) => readSync(fd, buffer, 0, length, position),
+   close: closeSync,
+-  exec: (file, args) => execFileSync(file, args, { encoding: 'utf8' }),
++  macProcessTable: readMacProcessTable,
+   kill: (pid, signal) => process.kill(pid, signal),
+ }
+ /* v8 ignore stop */
+@@ -477,27 +478,11 @@ class LinuxProcessInspector extends PosixProcessInspector {
+ 
+ }
+ 
+-// `ps` exposes neither the session id nor a state column in this format, so a
+-// macOS row can answer presence and parentage but never session membership.
 -function macProcessTable(internals: ProcessInspectorInternals): ProcessRow[] {
 -  return internals.exec('/bin/ps', ['-axo', 'pid=,ppid=,lstart=']).split('\n').flatMap((line) => {
-+function macProcessTable(internals: ProcessInspectorInternals, pid?: number): ProcessRow[] {
-+  let output: string
-+  try {
-+    output = internals.exec('/bin/ps', pid === undefined
-+      ? ['-axo', 'pid=,ppid=,lstart=']
-+      : ['-p', String(pid), '-o', 'pid=,ppid=,lstart='])
-+  } catch (error) {
-+    // Headerless ps exits 1 with no output when the selected PID is absent.
-+    // Other failures must not be mistaken for an empty managed process range.
-+    if (pid !== undefined && typeof error === 'object' && error !== null
-+      && 'status' in error && error.status === 1
-+      && 'stdout' in error && error.stdout === ''
-+      && 'stderr' in error && error.stderr === '') return []
-+    throw error
-+  }
-+  return output.split('\n').flatMap((line) => {
-     const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line)
-     if (match?.[1] === undefined || match[2] === undefined || match[3] === undefined) return []
-     return [{
-@@ -508,7 +522,7 @@ class MacProcessInspector extends PosixProcessInspector {
+-    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line)
+-    if (match?.[1] === undefined || match[2] === undefined || match[3] === undefined) return []
+-    return [{
+-      pid: Number(match[1]),
+-      parentPid: Number(match[2]),
+-      started: match[3],
+-      session: undefined,
+-      state: undefined,
+-    }]
+-  })
+-}
+-
+ class MacProcessInspector extends PosixProcessInspector {
+   foregroundPgid(shellPid: number): number | undefined {
+     try {
+-      const value = Number(this.internals.exec('/bin/ps', ['-o', 'tpgid=', '-p', String(shellPid)]).trim())
+-      return Number.isSafeInteger(value) && value > 0 ? value : undefined
++      const value = this.internals.macProcessTable(shellPid)[0]?.tpgid
++      return value !== undefined && value > 0 ? value : undefined
+     } catch (_missingProcess) {
+       return undefined
+     }
+@@ -508,12 +493,15 @@ class MacProcessInspector extends PosixProcessInspector {
    }
  
    isAlive(identity: ProcessIdentity): boolean {
 -    return macProcessTable(this.internals)
-+    return macProcessTable(this.internals, identity.pid)
++    return this.internals.macProcessTable(identity.pid)
        .some(entry => entry.pid === identity.pid && entry.started === identity.started)
    }
  
+   snapshot(): ProcessSnapshot {
+-    return new PosixProcessSnapshot(macProcessTable(this.internals))
++    // Retain the existing macOS presence-only/session-omitting observation.
++    return new PosixProcessSnapshot(this.internals.macProcessTable().map(row => ({
++      ...row, session: undefined, state: undefined,
++    })))
+   }
+ 
+ }
+diff --git a/packages/subprocess/subprocess-local/src/terminal.ts b/packages/subprocess/subprocess-local/src/terminal.ts
+index 8d165dbd20..ab5b56f30b 100644
+--- a/packages/subprocess/subprocess-local/src/terminal.ts
++++ b/packages/subprocess/subprocess-local/src/terminal.ts
+@@ -50,7 +50,7 @@ function signalName(number: number | undefined): NodeJS.Signals | null {
+  * ownership stays below the PTY backend.
+  * The seam's terminate() promise — no write, inspection, or signal in flight
+  * after settlement — holds here without operation tracking only because every
+- * handle call completes synchronously under the hood (node-pty write, ps-based
++ * handle call completes synchronously under the hood (node-pty write, kernel
+  * inspection). A first genuinely asynchronous step in any handle call must add
+  * the tracking a remote provider needs.
+  */
+diff --git a/packages/subprocess/subprocess-local/tests/mac-process-layout.c b/packages/subprocess/subprocess-local/tests/mac-process-layout.c
+new file mode 100644
+index 0000000000..0495ca524d
+--- /dev/null
++++ b/packages/subprocess/subprocess-local/tests/mac-process-layout.c
+@@ -0,0 +1,14 @@
++/* SDK oracle for the LP64 fields consumed by mac-process-table.ts. */
++#include <stddef.h>
++#include <sys/types.h>
++#include <sys/sysctl.h>
++#include <sys/proc.h>
++_Static_assert(sizeof(size_t) == 8, "size_t");
++_Static_assert(sizeof(struct kinfo_proc) == 648, "kinfo_proc stride");
++_Static_assert(offsetof(struct kinfo_proc, kp_proc.p_starttime.tv_sec) == 0, "start seconds");
++_Static_assert(sizeof(((struct kinfo_proc *)0)->kp_proc.p_starttime.tv_sec) == 8, "start width");
++_Static_assert(offsetof(struct kinfo_proc, kp_proc.p_pid) == 40, "pid offset");
++_Static_assert(sizeof(pid_t) == 4, "pid width");
++_Static_assert(offsetof(struct kinfo_proc, kp_eproc.e_ppid) == 560, "parent offset");
++_Static_assert(offsetof(struct kinfo_proc, kp_eproc.e_tpgid) == 576, "foreground offset");
++_Static_assert(CTL_KERN == 1 && KERN_PROC == 14 && KERN_PROC_ALL == 0 && KERN_PROC_PID == 1, "sysctl selectors");
+diff --git a/packages/subprocess/subprocess-local/tests/mac-process-table.spec.ts b/packages/subprocess/subprocess-local/tests/mac-process-table.spec.ts
+new file mode 100644
+index 0000000000..4985a31686
+--- /dev/null
++++ b/packages/subprocess/subprocess-local/tests/mac-process-table.spec.ts
+@@ -0,0 +1,121 @@
++import { execFileSync, spawn } from 'node:child_process'
++import { once } from 'node:events'
++import { fileURLToPath } from 'node:url'
++import { describe, expect, it } from 'vitest'
++import { readMacProcessTable } from '@deepseek-ai/dsh-subprocess-local/src/mac-process-table.ts'
++import type { MacProcessTableInternals } from '@deepseek-ai/dsh-subprocess-local/src/mac-process-table.ts'
++import { createProcessInspector } from '@deepseek-ai/dsh-subprocess-local/src/process-inspector.ts'
++
++function record(pid: number, parentPid = 1, started = 500n, tpgid = -1): Buffer {
++  const bytes = Buffer.alloc(648)
++  bytes.writeBigInt64LE(started, 0)
++  bytes.writeInt32LE(pid, 40)
++  bytes.writeInt32LE(parentPid, 560)
++  bytes.writeInt32LE(tpgid, 576)
++  return bytes
++}
++
++function fakeTable(records = [record(10)], estimatedBytes = records.length * 648) {
++  const calls: Array<{ mib: number[]; capacity: number }> = []
++  const internals: MacProcessTableInternals = {
++    sysctl(mib, buffer, size) {
++      calls.push({ mib: Array.from(mib), capacity: Number(size.readBigUInt64LE()) })
++      if (buffer === null) size.writeBigUInt64LE(BigInt(estimatedBytes))
++      else {
++        const bytes = Buffer.concat(records)
++        bytes.copy(buffer)
++        size.writeBigUInt64LE(BigInt(bytes.length))
++      }
++      return 0
++    },
++    errno: () => 12,
++  }
++  return { internals, calls }
++}
++
++describe('macOS kernel process table', () => {
++  it('reads full tables and selected identities without sharing observations', () => {
++    const fake = fakeTable([record(0, 0), record(10, 1, 500n, 55), record(11, 10, 501n)])
++    expect(readMacProcessTable(undefined, fake.internals)).toEqual([
++      { pid: 10, parentPid: 1, started: '500', tpgid: 55 },
++      { pid: 11, parentPid: 10, started: '501', tpgid: -1 },
++    ])
++    expect(fake.calls).toEqual([{ mib: [1, 14, 0, 0], capacity: 0 }, { mib: [1, 14, 0, 0], capacity: 3888 }])
++    const selected = fakeTable([record(11, 10, 501n)])
++    expect(readMacProcessTable(11, selected.internals)[0]?.started).toBe('501')
++    expect(selected.calls).toEqual([{ mib: [1, 14, 1, 11], capacity: 0 }, { mib: [1, 14, 1, 11], capacity: 1296 }])
++    const changed = fakeTable([record(11, 10, 502n)])
++    selected.internals.sysctl = changed.internals.sysctl.bind(changed.internals)
++    expect(readMacProcessTable(11, selected.internals)[0]?.started).toBe('502')
++  })
++
++  it('accepts bounded table growth and returns only bytes actually written', () => {
++    const growth = fakeTable([record(10), record(11)], 648)
++    expect(readMacProcessTable(undefined, growth.internals)).toHaveLength(2)
++    const shrink = fakeTable([record(10)], 648 * 3)
++    expect(readMacProcessTable(undefined, shrink.internals)).toHaveLength(1)
++  })
++
++  it('distinguishes a selected PID disappearing from an empty full observation', () => {
++    const absent = fakeTable([])
++    expect(readMacProcessTable(11, absent.internals)).toEqual([])
++    expect(absent.calls).toHaveLength(1)
++    expect(readMacProcessTable(11, fakeTable([], 648).internals)).toEqual([])
++    expect(() => readMacProcessTable(undefined, absent.internals)).toThrow('byte count')
++    expect(() => readMacProcessTable(undefined, fakeTable([], 648).internals)).toThrow('byte count')
++    expect(() => readMacProcessTable(undefined, fakeTable([record(0, 0)]).internals)).toThrow('empty macOS process table')
++    expect(readMacProcessTable(0, fakeTable([record(0, 0)]).internals)).toEqual([])
++  })
++
++  it('propagates sizing/read errors, including growth beyond allocated capacity', () => {
++    for (const failSizing of [true, false]) {
++      const fake = fakeTable()
++      const query = fake.internals.sysctl.bind(fake.internals)
++      fake.internals.sysctl = (mib, buffer, size) => (buffer === null) === failSizing ? -1 : query(mib, buffer, size)
++      expect(() => readMacProcessTable(10, fake.internals)).toThrow('errno 12')
++    }
++    expect(() => readMacProcessTable(undefined, fakeTable([record(10), record(11), record(12)], 648).internals)).toThrow('byte count')
++  })
++
++  it('rejects malformed byte counts and invalid/mismatched records', () => {
++    for (const count of [1n, 647n, 649n, 18446744073709551615n]) {
++      const fake = fakeTable()
++      fake.internals.sysctl = (_mib, _buffer, size) => { size.writeBigUInt64LE(count); return 0 }
++      expect(() => readMacProcessTable(10, fake.internals)).toThrow('byte count')
++    }
++    for (const bytes of [record(-1), record(10, -1), record(10, 1, -1n), record(11), record(0)]) {
++      expect(() => readMacProcessTable(10, fakeTable([bytes]).internals)).toThrow('record')
++    }
++  })
++
++  it.skipIf(process.platform !== 'darwin')('matches both SDK architectures and ps for live/absent processes across user identities', async () => {
++    const oracle = fileURLToPath(new URL('./mac-process-layout.c', import.meta.url))
++    for (const arch of ['arm64', 'x86_64']) execFileSync('/usr/bin/cc', ['-arch', arch, '-fsyntax-only', oracle])
++    const child = spawn('/bin/sleep', ['30'], { stdio: 'ignore' })
++    const exited = once(child, 'exit')
++    const inspector = createProcessInspector()
++    try {
++      expect(child.pid).toBeDefined()
++      const full = readMacProcessTable()
++      for (const pid of [1, process.pid, child.pid!]) {
++        const row = readMacProcessTable(pid)[0]
++        expect(row).toBeDefined()
++        expect(full.find(entry => entry.pid === pid)).toEqual(row)
++        const ps = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'ppid=,lstart='], {
++          encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC' },
++        }).trim().match(/^(\d+)\s+(.+)$/)
++        expect(row?.parentPid).toBe(Number(ps?.[1]))
++        expect(row?.started).toBe(String(Date.parse(`${ps?.[2]} UTC`) / 1000))
++      }
++      const identity = inspector.snapshot().tree(child.pid!).find(row => row.pid === child.pid)
++      expect(identity).toBeDefined()
++      expect(inspector.isAlive(identity!)).toBe(true)
++      inspector.signalProcess({ ...identity!, started: 'not this process' }, 'SIGKILL')
++      expect(inspector.isAlive(identity!)).toBe(true)
++    } finally {
++      child.kill('SIGTERM')
++      await exited
++    }
++    expect(readMacProcessTable(child.pid)).toEqual([])
++  }, 30000)
++})
 diff --git a/packages/subprocess/subprocess-local/tests/process-inspector.spec.ts b/packages/subprocess/subprocess-local/tests/process-inspector.spec.ts
-index 797076ebfc..757a737f49 100644
+index 797076ebfc..d13ccbe09b 100644
 --- a/packages/subprocess/subprocess-local/tests/process-inspector.spec.ts
 +++ b/packages/subprocess/subprocess-local/tests/process-inspector.spec.ts
-@@ -37,6 +37,7 @@ function fakeInternals() {
+@@ -5,6 +5,7 @@ import {
+   parseProcStat,
+ } from '@deepseek-ai/dsh-subprocess-local/src/process-inspector.ts'
+ import type { ProcessInspectorInternals } from '@deepseek-ai/dsh-subprocess-local/src/process-inspector.ts'
++import type { MacProcessRow } from '@deepseek-ai/dsh-subprocess-local/src/mac-process-table.ts'
+ import { WindowsProcessInspector } from '@deepseek-ai/dsh-subprocess-local/src/windows-inspector.ts'
+ 
+ function stat(
+@@ -37,9 +38,9 @@ function fakeInternals() {
    const memories = new Map<string, Buffer>()
    const fds = new Map<number, string>()
    const kills: Array<[number, NodeJS.Signals]> = []
-+  const executions: Array<[string, string[]]> = []
++  const queries: Array<number | undefined> = []
    let nextFd = 10
-   let ps = ''
-   let tpgid = '0'
-@@ -75,14 +76,15 @@ function fakeInternals() {
+-  let ps = ''
+-  let tpgid = '0'
++  let rows: MacProcessRow[] = []
+   const internals: ProcessInspectorInternals = {
+     readFile(path) {
+       const value = files.get(path)
+@@ -75,16 +76,15 @@ function fakeInternals() {
        return source.copy(buffer, 0, position, Math.min(source.length, position + length))
      },
      close(fd) { fds.delete(fd) },
 -    exec(_file, args) {
-+    exec(file, args) {
-+      executions.push([file, args])
-       if (args.includes('tpgid=')) return tpgid
-       return ps
+-      if (args.includes('tpgid=')) return tpgid
+-      return ps
++    macProcessTable(pid) {
++      queries.push(pid)
++      return pid === undefined ? rows : rows.filter(row => row.pid === pid)
      },
      kill(pid, signal) { kills.push([pid, signal]) },
    }
    return {
 -    internals, files, dirs, links, devices, memories, kills,
-+    internals, files, dirs, links, devices, memories, kills, executions,
-     setPs(value: string) { ps = value },
-     setTpgid(value: string) { tpgid = value },
+-    setPs(value: string) { ps = value },
+-    setTpgid(value: string) { tpgid = value },
++    internals, files, dirs, links, devices, memories, kills, queries,
++    setRows(value: MacProcessRow[]) { rows = value },
    }
-@@ -282,6 +284,40 @@ describe('Linux process inspector', () => {
+ }
+ 
+@@ -282,53 +282,84 @@ describe('Linux process inspector', () => {
  })
  
  describe('macOS process inspector', () => {
++  const row = (pid: number, parentPid: number, started: string, tpgid = -1): MacProcessRow => ({ pid, parentPid, started, tpgid })
 +  it('queries only the selected identity while retaining fresh signal fences and full snapshots', () => {
-+    const fake = fakeInternals(), identity = { pid: 11, started: 'Mon Jul 21 10:00:01 2026' }
-+    fake.setPs(' 11 10 Mon Jul 21 10:00:01 2026\n')
++    const fake = fakeInternals(), identity = { pid: 11, started: '501' }
++    fake.setRows([row(11, 10, '501')])
 +    const inspector = createProcessInspector('darwin', 'arm64', fake.internals)
 +    expect(inspector.isAlive(identity)).toBe(true)
 +    inspector.signalProcess(identity, 'SIGTERM')
-+    fake.setPs(' 11 10 Mon Jul 21 10:00:02 2026\n')
++    fake.setRows([row(11, 10, '502')])
 +    inspector.signalProcess(identity, 'SIGKILL')
 +    expect(fake.kills).toEqual([[11, 'SIGTERM']])
-+    expect(fake.executions).toEqual(Array.from({ length: 3 }, () => ['/bin/ps', ['-p', '11', '-o', 'pid=,ppid=,lstart=']]))
++    expect(fake.queries).toEqual([11, 11, 11])
 +    inspector.snapshot()
-+    expect(fake.executions.at(-1)).toEqual(['/bin/ps', ['-axo', 'pid=,ppid=,lstart=']])
++    expect(fake.queries).toEqual([11, 11, 11, undefined])
 +  })
 +
 +  it('distinguishes an absent selected PID from a failed process query', () => {
-+    const fake = fakeInternals(), identity = { pid: 11, started: 'Mon Jul 21 10:00:01 2026' }
++    const fake = fakeInternals(), identity = { pid: 11, started: '501' }
 +    const inspector = createProcessInspector('darwin', 'arm64', fake.internals)
-+    const absent = Object.assign(new Error('no selected process'), { status: 1, stdout: '', stderr: '' })
-+    fake.internals.exec = () => { throw absent }
 +    expect(inspector.isAlive(identity)).toBe(false)
 +    inspector.signalProcess(identity, 'SIGKILL')
 +    expect(fake.kills).toEqual([])
-+    expect(() => inspector.snapshot()).toThrow(absent)
-+    for (const error of [new Error('spawn failed'),
-+      Object.assign(new Error('query failed'), { status: 2, stdout: '', stderr: '' }),
-+      Object.assign(new Error('query denied'), { status: 1, stdout: '', stderr: 'denied' }),
-+      Object.assign(new Error('partial query'), { status: 1, stdout: 'partial', stderr: '' })]) {
-+      fake.internals.exec = () => { throw error }
++    for (const error of [new Error('query failed'), new Error('query denied'), new Error('partial query')]) {
++      fake.internals.macProcessTable = () => { throw error }
++      expect(() => inspector.snapshot()).toThrow(error)
 +      expect(() => inspector.isAlive(identity)).toThrow(error)
 +      expect(() => { inspector.signalProcess(identity, 'SIGKILL') }).toThrow(error)
 +    }
@@ -218,4 +660,103 @@ index 797076ebfc..757a737f49 100644
 +
    it('reads tpgid and process trees, contains cycles, and identity-fences signals', () => {
      const fake = fakeInternals()
-     fake.setTpgid('55\n')
+-    fake.setTpgid('55\n')
+-    fake.setPs(' 10 1 Mon Jul 21 10:00:00 2026\n 11 10 Mon Jul 21 10:00:01 2026\n 12 11 Mon Jul 21 10:00:02 2026\n 13 99 Mon Jul 21 10:00:03 2026\nmalformed\n')
++    fake.setRows([row(10, 1, '500', 55), row(11, 10, '501'), row(12, 11, '502'), row(13, 99, '503')])
+     const inspector = createProcessInspector('darwin', 'arm64', fake.internals)
+     expect(inspector.foregroundPgid(10)).toBe(55)
+     expect(inspector.isStdinWaiting(55, 10)).toBe(false)
+     const observed = inspector.snapshot()
+     expect(observed.tree(10)).toEqual([
+-      { pid: 12, started: 'Mon Jul 21 10:00:02 2026' },
+-      { pid: 11, started: 'Mon Jul 21 10:00:01 2026' },
+-      { pid: 10, started: 'Mon Jul 21 10:00:00 2026' },
++      { pid: 12, started: '502' },
++      { pid: 11, started: '501' },
++      { pid: 10, started: '500' },
+     ])
+     expect(observed.tree(99)).toEqual([])
+     expect(observed.session(10)).toEqual([])
+-    expect(observed.alive({ pid: 11, started: 'Mon Jul 21 10:00:01 2026' })).toBe(true)
++    expect(observed.alive({ pid: 11, started: '501' })).toBe(true)
+     inspector.signalGroup(55, 'SIGTSTP')
+-    inspector.signalProcess({ pid: 11, started: 'Mon Jul 21 10:00:01 2026' }, 'SIGKILL')
++    inspector.signalProcess({ pid: 11, started: '501' }, 'SIGKILL')
+     inspector.signalProcess({ pid: 12, started: 'missing' }, 'SIGTERM')
+     expect(fake.kills).toEqual([[-55, 'SIGTSTP'], [11, 'SIGKILL']])
+ 
+-    fake.setPs(' 10 11 Mon Jul 21 10:00:00 2026\n 11 10 Mon Jul 21 10:00:01 2026\n')
++    fake.setRows([row(10, 11, '500'), row(11, 10, '501')])
+     expect(inspector.snapshot().tree(10)).toEqual([
+-      { pid: 11, started: 'Mon Jul 21 10:00:01 2026' },
+-      { pid: 10, started: 'Mon Jul 21 10:00:00 2026' },
++      { pid: 11, started: '501' },
++      { pid: 10, started: '500' },
+     ])
+   })
+ 
+   it('re-reads the process table before signalling instead of trusting an earlier observation', () => {
+     const fake = fakeInternals()
+-    fake.setPs(' 11 10 Mon Jul 21 10:00:01 2026\n')
++    fake.setRows([row(11, 10, '501')])
+     const inspector = createProcessInspector('darwin', 'arm64', fake.internals)
+     inspector.snapshot()
+     // The member exits after that observation; a recycled pid would otherwise
+     // inherit the observed identity and take the signal meant for the original.
+-    fake.setPs('')
++    fake.setRows([])
+ 
+-    inspector.signalProcess({ pid: 11, started: 'Mon Jul 21 10:00:01 2026' }, 'SIGKILL')
++    inspector.signalProcess({ pid: 11, started: '501' }, 'SIGKILL')
+ 
+     expect(fake.kills).toEqual([])
+   })
+ 
+   it('returns undefined for missing or invalid foreground groups and dispatches platform inspectors', () => {
+     const fake = fakeInternals()
+-    fake.setTpgid('-1')
++    fake.setRows([row(1, 0, '1')])
++    expect(createProcessInspector('darwin', 'arm64', fake.internals).foregroundPgid(1)).toBeUndefined()
++    fake.setRows([])
+     expect(createProcessInspector('darwin', 'arm64', fake.internals).foregroundPgid(1)).toBeUndefined()
+-    fake.internals.exec = () => { throw new Error('gone') }
++    fake.internals.macProcessTable = () => { throw new Error('gone') }
+     expect(createProcessInspector('darwin', 'arm64', fake.internals).foregroundPgid(1)).toBeUndefined()
+     expect(createProcessInspector('win32', 'x64', fake.internals)).toBeInstanceOf(WindowsProcessInspector)
+     expect(() => createProcessInspector('freebsd', 'x64', fake.internals)).toThrow('unsupported on platform freebsd')
+diff --git a/packages/subprocess/subprocess-local/tests/terminal.spec.ts b/packages/subprocess/subprocess-local/tests/terminal.spec.ts
+index 7b02470f7c..8103e4736f 100644
+--- a/packages/subprocess/subprocess-local/tests/terminal.spec.ts
++++ b/packages/subprocess/subprocess-local/tests/terminal.spec.ts
+@@ -782,12 +782,10 @@ describe('signalling freshness and containment', () => {
+ })
+ 
+ describe('process-table read amplification', () => {
+-  // The macOS inspector answers every question by forking `/bin/ps`, so a
+-  // readiness poll that asks per descendant scales its blocking cost with the
+-  // command's process tree. These pin the read count, not the wall time.
++  // One complete observation per readiness poll, independent of tree size.
+   function darwinInternals(table: string): { internals: ProcessInspectorInternals; tableReads: string[] } {
+     const tableReads: string[] = []
+-    const unreachable = (): never => { throw new Error('darwin inspection uses exec and kill only') }
++    const unreachable = (): never => { throw new Error('darwin inspection uses its kernel table and kill only') }
+     return {
+       tableReads,
+       internals: {
+@@ -798,10 +796,12 @@ describe('process-table read amplification', () => {
+         open: unreachable,
+         read: unreachable,
+         close: unreachable,
+-        exec(_file, args) {
+-          if (args.includes('tpgid=')) return '456\n'
+-          tableReads.push(args.join(' '))
+-          return table
++        macProcessTable(pid) {
++          if (pid === undefined) tableReads.push('snapshot')
++          return table.trim().split('\n').map((line) => {
++            const [processId, parentPid, ...started] = line.trim().split(/\s+/)
++            return { pid: Number(processId), parentPid: Number(parentPid), started: started.join(' '), tpgid: 456 }
++          }).filter(row => pid === undefined || row.pid === pid)
+         },
+         kill() {},
+       },

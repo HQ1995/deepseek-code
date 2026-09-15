@@ -114,7 +114,7 @@
     "testedVersion": "0.1.5-rc.2",
     "supportedRange": "0.1.5-rc.2",
     "sourceCommit": "fb2c4b9e698e30edb738bca4cf0618587db7d203",
-    "sourcePatchSha256": "a07718367bbf400f6cf3166c58c29277e27b8179a9869882eeb7c8d4ac83e6e0"
+    "sourcePatchSha256": "5d5ffa359d9e44e2280846a65e99638b39a4484672d7f4bbc0b4d34a7684f505"
   },
   "dependencies": {
     "@deepseek-ai/dsh-tool-session-query": "0.1.5-rc.2",

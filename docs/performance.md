@@ -6,9 +6,93 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
-## 2026-09-15: macOS current-identity checks
+## 2026-09-15: macOS kernel process observations
 
-The source runtime backport selects one PID for `isAlive` instead of reading
+The runtime backport reads `KERN_PROC_ALL` / `KERN_PROC_PID` through the existing
+Koffi dependency instead of spawning `ps`. Every readiness poll still observes
+the complete process table. Every signal still rechecks its target immediately.
+Failed, truncated, malformed, or empty full-table reads throw; they cannot prove
+that the owned range is empty. No cache, polling reduction, new native artifact,
+or lifecycle owner is introduced. Private identities encode epoch seconds with
+the same precision; session omission and presence-only liveness remain unchanged.
+
+Six alternating fresh-process pairs per Node version compare `76300cfe`'s
+selected-PID `ps` implementation with this kernel reader. Each process uses a
+real `node-pty` shell with eight sleep children, performs 20 foreground polls,
+terminates it, and verifies all nine observed identities absent. Runs on this
+Darwin arm64 host (~1100 processes) did not overlap our build/test jobs.
+
+| Node | Foreground poll median, before → after | Teardown median, before → after | Benchmark CPU seconds, before → after |
+| --- | ---: | ---: | ---: |
+| 22.19.0 | 36.69 → 0.49ms | 259.18 → 29.09ms | 1.095 → 0.250s |
+| 24.19.0 | 33.74 → 0.49ms | 238.73 → 29.00ms | 0.995 → 0.220s |
+
+Poll figures are medians of six per-process medians, recomputed from the raw
+20-value `polls` arrays by averaging the middle pair (the original JSONL's
+`pollMedianMs` selected the upper middle value). `/usr/bin/time -lp` CPU
+figures sum user and system time for the benchmark command and waited children,
+including Node startup and teardown; these are not daily application CPU or
+overall speedup claims. Reported maximum RSS increased 118.41 → 124.88MiB
+(Node 22) and 113.81 → 119.15MiB (Node 24). This run trades about 5–6.5MiB of
+measured peak RSS for fewer child processes; it does not attribute allocations
+or measure retained heap or steady-state RSS.
+
+Reproduce each side with the same installed source and Node version:
+
+```sh
+/usr/bin/time -lp node --experimental-transform-types scripts/bench-macos-process.mjs /path/to/dsh-source 1
+```
+
+The source suites passed 61 tests on each Node version, including real host-exit
+cleanup. The SDK oracle compiled for arm64 and x64 and asserts every consumed
+`kinfo_proc` offset, width and selector. Actual rows match `ps` for the owned
+child, caller and another user's PID 1. x64 SDK compilation is not x64 runtime
+validation. Documentation checks passed 16 quick and 34 full gates; source
+build and lint passed. Fresh plugin/runtime payloads contain the verified patch;
+installed-tree provenance validation passed, and the previous consumer at the
+same upstream revision was rejected under the new patch identity.
+
+The first full macOS run (**67179**) exposed an independent selection bug:
+double-click copying blocks synchronously, so a slow clipboard helper exhausted
+the 300ms multi-click window before a queued third click was handled. In the
+retained session, the same three clicks with a private 400ms clipboard delay
+copied only 77 bytes of a 233-byte URL. Starting the next-click window after
+selection handling restores all 233 bytes under the same delay, without changing
+the timeout, synchronous copy ordering, or source-preservation assertions. The
+generic macOS product E2E now always injects that delay into its private `pbcopy`.
+
+Final acceptance of the rebuilt TUI and new runtime:
+
+- Node 22.19.0 and 24.19.0 each passed SDK TypeScript compilation and all 931
+  bridge tests, including four compiled-CLI cases. Each passed 43 script tests
+  with one Linux-only skip. Rust mouse/selection suites passed 59 tests;
+  formatting, `scripts/check.sh` and whitespace checks passed.
+- Full macOS TUI → DSH → bridge → private gateway passed, exit 0, run **92262**,
+  with the 400ms clipboard fixture. It covers wrapped table source preservation,
+  child history/quoting, native goals/workflows, real TypeScript LSP, persistent
+  bash/Python REPL, cancellation/reuse, owner isolation, reaping and durable
+  rewind/resume.
+- Managed-update E2E passed install, same-version no-op, missing/corrupt native
+  repair, legacy-overlay repair, corrupt-asset rejection, composed profiles,
+  installed launcher and preservation of user files.
+
+Raw measurements are `/tmp/dscode-mac-snapshot.fKs7LY/bench-final-{22,24}.jsonl`
+and `cpu-final-{22,24}.log`; source, payloads and validation logs are in the same
+directory. Product evidence is `mac2/contracts-92262/PASS.json`, `mac2-e2e.log`,
+`bridge{22,24}-copy-fix.log` and `update-copy-fix.log`. The failed first run and
+isolated delayed-copy reproduction remain there for inspection.
+The pinned upstream revision remains DSH 0.1.5-rc.2
+`fb2c4b9e698e30edb738bca4cf0618587db7d203`; patch SHA-256 is
+`5d5ffa359d9e44e2280846a65e99638b39a4484672d7f4bbc0b4d34a7684f505`.
+
+Linux/systemd and Linux packaging were not rerun. Optional Kitty-image
+acceptance, physical Cmd-click, IME and the host clipboard remain untested in
+this pass. Fixtures stayed private. No push, release publication or daily-profile
+installation was performed.
+
+## 2026-09-15: macOS current-identity checks (76300cfe)
+
+At `76300cfe`, the source runtime backport selects one PID for `isAlive` instead of reading
 the full process table. It compares the same start timestamp immediately before
 signalling, without a cache or polling change. Tree snapshots still enumerate
 all processes. Only status 1 with empty stdout/stderr from a selected-PID query
@@ -19,7 +103,7 @@ Six alternating fresh-process pairs per Node version exercised the actual
 `LocalTerminalHandle` with a real `node-pty` bash and eight sleep children.
 All nine observed identities were checked absent after teardown in every run.
 Baseline is official DSH `fb2c4b9e698e30edb738bca4cf0618587db7d203`; candidate
-is that commit plus the [source backport](../patches/README.md).
+is that commit plus the source backport stored at `76300cfe`.
 
 | Node | Teardown median, before → after | Full-table / point queries, before → after |
 | --- | ---: | ---: |

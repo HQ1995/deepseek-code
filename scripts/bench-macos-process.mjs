@@ -16,6 +16,9 @@ const source = resolve(sourceArg)
 const pkg = join(source, 'packages/subprocess/subprocess-local')
 const { createProcessInspector } = await import(pathToFileURL(join(pkg, 'src/process-inspector.ts')))
 const { LocalTerminalHandle } = await import(pathToFileURL(join(pkg, 'src/terminal.ts')))
+const nativeTablePath = join(pkg, 'src/mac-process-table.ts')
+const readMacProcessTable = fs.existsSync(nativeTablePath)
+  ? (await import(pathToFileURL(nativeTablePath))).readMacProcessTable : undefined
 const pty = createRequire(join(pkg, 'package.json'))('node-pty')
 let queries = []
 const inspector = createProcessInspector('darwin', process.arch, {
@@ -23,6 +26,12 @@ const inspector = createProcessInspector('darwin', process.arch, {
   readLink: file => fs.readlinkSync(file, 'utf8'), stat: fs.statSync,
   open: file => fs.openSync(file, 'r'), read: (fd, buffer, length, offset) => fs.readSync(fd, buffer, 0, length, offset),
   close: fs.closeSync, kill: (pid, signal) => process.kill(pid, signal),
+  macProcessTable(pid) {
+    assert.ok(readMacProcessTable)
+    const start = performance.now()
+    try { return readMacProcessTable(pid) }
+    finally { queries.push({ kind: pid === undefined ? 'table' : 'point', ms: performance.now() - start }) }
+  },
   exec(file, args) {
     const start = performance.now()
     try { return execFileSync(file, args, { encoding: 'utf8' }) }
@@ -61,7 +70,12 @@ for (let run = 0; run < repeats; run++) {
     await ready.promise
     const owned = inspector.snapshot().tree(terminal.pid)
     assert.ok(owned.length >= 9, `expected shell and eight children; got ${owned.length}`)
-    handle.inspectForeground()
+    const polls = []
+    for (let poll = 0; poll < 20; poll++) {
+      const start = performance.now()
+      assert.ok(await handle.inspectForeground())
+      polls.push(performance.now() - start)
+    }
     queries = []
     const start = performance.now()
     await handle.terminate()
@@ -69,7 +83,10 @@ for (let run = 0; run < repeats; run++) {
     const teardownMs = performance.now() - start
     const inspection = summarize()
     for (const member of owned) assert.equal(inspector.isAlive(member), false, `survivor ${member.pid}`)
-    console.log(JSON.stringify({ source, node: process.version, run, owned: owned.length, teardownMs, inspection }))
+    const orderedPolls = [...polls].sort((a, b) => a - b)
+    const midpoint = orderedPolls.length / 2
+    console.log(JSON.stringify({ source, node: process.version, run, owned: owned.length,
+      pollMedianMs: (orderedPolls[midpoint - 1] + orderedPolls[midpoint]) / 2, polls, teardownMs, inspection }))
   } finally {
     clearTimeout(timeout)
     await handle.terminate()
