@@ -134,19 +134,19 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
   const turnWatches = new Map<Agent['session'], Set<{ latest?: SessionEvent<'turn/start'> }>>()
   const childTerminalStatus = (kind: string): string => kind === 'completed' || kind === 'max-tokens' ? 'completed'
     : kind === 'aborted' || kind === 'interrupted' ? 'cancelled' : 'failed'
-  const childOverview = (id: string, events: readonly SessionEvent[], agent?: Agent): Pick<ChildState, 'attemptId' | 'status'> => {
+  const childOverview = (id: string, events: readonly SessionEvent[], status?: Agent['status']): Pick<ChildState, 'attemptId' | 'status'> => {
     const start = events.findLast(event => event.type === 'turn/start')
     const end = events.findLast(event => event.type === 'turn/end')
     return {
       attemptId: id + ':' + String(start?.type === 'turn/start' ? start.data.turn : 'pending'),
-      status: agent?.status === 'running' ? 'running'
+      status: status === 'running' ? 'running'
         : end?.type === 'turn/end' && (start?.type !== 'turn/start' || end.data.turn === start.data.turn)
           ? childTerminalStatus(end.data.reason.kind) : 'cancelled',
     }
   }
   const childLogs = new WeakMap<S, Map<string, { source?: object; index: ChildHistoryIndex; tail: Promise<unknown> }>>()
   const withChildLog = async <T>(record: S, id: string, scope: SessionOperation,
-    action: (index: ChildHistoryIndex, meta: SessionInspection['meta'], read: ChildEventReader) => Promise<T> | T,
+    action: (index: ChildHistoryIndex, meta: SessionInspection['meta'], read: ChildEventReader, status?: Agent['status']) => Promise<T> | T,
   ): Promise<T> => {
     const signal = AbortSignal.any([scope.signal, shutdown.signal])
     const assertActive = () => {
@@ -175,6 +175,10 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       // Fix the live prefix before flushing; later appends belong to the next
       // refresh. Cold storage uses its revision/count and the same read owner.
       let count: number | undefined, revision: string | undefined
+      // Pair activity with the same cut, before any I/O. A child can settle
+      // during flush: combining its new idle status with this older prefix
+      // would invent a cancelled finish before its real turn/end is indexed.
+      const status = live?.status
       if (live !== undefined) {
         count = live.session.seq
         revision = String(count)
@@ -204,7 +208,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
         await index.sync(read, revision, count)
         // Unknown cold lengths become fixed after the index reaches EOF.
         count = index.nextSeq
-        result = await action(index, handle.header, read)
+        result = await action(index, handle.header, read, status)
         assertActive()
       } catch (error) { failures.push(error) }
       // Close is deliberately uncancellable and always awaited, even after a
@@ -245,7 +249,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     let discoveredWorkflowChild = false
     for (const row of rows) {
       if (row.kind !== 'child') continue
-      const overview = await withChildLog(record, row.id, scope, index => childOverview(row.id, index.overviewEvents, host.agent(SessionId(row.id))))
+      const overview = await withChildLog(record, row.id, scope, (index, _meta, _read, status) => childOverview(row.id, index.overviewEvents, status))
       if (!isLive(record)) return
       const discovery = workflowChildDiscovery.get(record)
       if (discovery?.ids.delete(row.id)) {
@@ -391,7 +395,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       turnWatches.set(child.session, watches); watches.add(watch)
       let overview: Pick<ChildState, 'attemptId' | 'status'>
       try {
-        overview = await withChildLog(record, subagentId, scope, index => childOverview(subagentId, index.overviewEvents, child))
+        overview = await withChildLog(record, subagentId, scope, (index, _meta, _read, status) => childOverview(subagentId, index.overviewEvents, status))
       } finally {
         watches.delete(watch)
         if (watches.size === 0) turnWatches.delete(child.session)

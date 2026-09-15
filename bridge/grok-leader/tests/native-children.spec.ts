@@ -93,6 +93,29 @@ function fixture() {
 afterEach(() => vi.useRealTimers())
 
 describe('native child/workflow ownership', () => {
+  it('does not combine a pre-settlement history cut with post-settlement idle status', async () => {
+    const f = fixture(), child = f.add('child'), gate = deferred<void>()
+    f.logs.get('child')!.push(
+      { seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent,
+      { seq: 1, time: 1001, type: 'turn/end', data: { turn: 0, reason: { kind: 'aborted' } } } as SessionEvent,
+    )
+    Object.assign(child, { status: 'idle' })
+    await f.children.snapshot(f.root)
+    f.root.output.notify.mockClear()
+    f.flush.mockImplementationOnce(() => gate.promise)
+    Object.assign(child, { status: 'running' })
+    f.append(child, 'turn/start', { turn: 1 })
+    await vi.waitFor(() => expect(f.flush).toHaveBeenCalledTimes(2))
+    f.append(child, 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+    Object.assign(child, { status: 'idle' })
+    f.emit('agent/status', { agent: child, status: 'idle' })
+    gate.resolve()
+    await f.children.snapshot(f.root)
+    expect(f.notes().filter(note => note.sessionUpdate === 'subagent_finished').map(note => note.status)).toEqual(['completed'])
+    expect(f.notes().filter(note => note.sessionUpdate === 'subagent_spawned')).toHaveLength(1)
+    await f.children.dispose()
+  })
+
   it('session cancellation prevents a delayed descendant lookup from mutating the same live owner', async () => {
     const f = fixture(), child = f.add('child'), lookup = deferred<Row[]>()
     f.service.listDescendants.mockReturnValueOnce(lookup.promise)
