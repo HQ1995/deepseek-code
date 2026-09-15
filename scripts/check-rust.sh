@@ -18,7 +18,8 @@ cargo test -p xai-grok-shell-base util::tests:: --lib
 cargo test -p xai-grok-shell --lib -- leader:: image_normalize util::config
 cargo test -p xai-grok-tools --lib ask_user_question
 cargo test -p xai-grok-update --lib
-cargo test -p xai-grok-pager --lib -- \
+cargo test -p xai-grok-pager -p xai-grok-pager-render --lib -- \
   to_meta_ native_controls native_question dsh_patch dsh_mcp_patch dsh_leader model_switch switch_model slash:: slash_ default_model question_view doctor tasks shortcuts_help subagent mode_switch prompt_stash overlay_post_flush mcps_modal startup_failure \
-  presenter_ send_now_awaiting_current background_tasks queue_and_adoption turn_completion
+  presenter_ send_now_awaiting_current background_tasks queue_and_adoption turn_completion \
+  settings_modal theme open_settings_focus open_settings_enter_picker
 echo 'PASS Rust product contracts'

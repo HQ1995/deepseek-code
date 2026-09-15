@@ -100,21 +100,27 @@ impl ThemeKind {
         }
     }
 
+    /// Alternate spellings, excluding the canonical display name.
+    pub fn aliases(self) -> &'static [&'static str] {
+        match self {
+            Self::GrokNight => &["grok-night", "dark"],
+            Self::TokyoNight => &["tokyo-night", "tokyo"],
+            Self::GrokDay => &["grok-day", "light", "day"],
+            Self::RosePineMoon => &["rosepine", "rose-pine", "rose-pine-moon"],
+            Self::OscuraMidnight => &["oscura"],
+            Self::Auto => &["system"],
+        }
+    }
+
     /// Parse a theme name (case-insensitive). All string→ThemeKind
     /// conversions must go through this function.
     pub fn from_name(name: &str) -> Option<Self> {
         let lower = name.to_lowercase();
-        match lower.as_str() {
-            "auto" | "system" => Some(Self::Auto),
-            "groknight" | "grok-night" | "dark" => Some(Self::GrokNight),
-            "tokyonight" | "tokyo-night" | "tokyo" => Some(Self::TokyoNight),
-            "grokday" | "grok-day" | "light" | "day" => Some(Self::GrokDay),
-            "rosepine" | "rose-pine" | "rosepine-moon" | "rose-pine-moon" => {
-                Some(Self::RosePineMoon)
-            }
-            "oscura" | "oscura-midnight" => Some(Self::OscuraMidnight),
-            _ => None,
-        }
+        Self::ALL
+            .iter()
+            .chain(std::iter::once(&Self::Auto))
+            .copied()
+            .find(|kind| kind.display_name() == lower || kind.aliases().contains(&lower.as_str()))
     }
 
     /// Whether this is the meta "auto" variant (resolved at runtime).
@@ -675,6 +681,16 @@ mod tests {
     #[test]
     fn from_name_auto() {
         assert_eq!(ThemeKind::from_name("auto"), Some(ThemeKind::Auto));
+    }
+
+    #[test]
+    fn from_name_accepts_every_name_and_alias() {
+        for kind in ThemeKind::ALL.iter().chain([&ThemeKind::Auto]).copied() {
+            for name in std::iter::once(kind.display_name()).chain(kind.aliases().iter().copied()) {
+                assert_eq!(ThemeKind::from_name(name), Some(kind), "name {name}");
+                assert_eq!(ThemeKind::from_name(&name.to_uppercase()), Some(kind));
+            }
+        }
     }
 
     #[test]

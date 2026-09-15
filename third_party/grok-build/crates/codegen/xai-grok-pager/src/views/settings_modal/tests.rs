@@ -10,6 +10,7 @@ use super::input::*;
 use super::render::*;
 use super::state::*;
 use crate::app::actions::Action;
+use crate::appearance::FollowUpBehavior;
 use crate::input::line_editor::LineEditor;
 use crate::settings::{
     EnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey, SettingKind, SettingMeta,
@@ -564,7 +565,7 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
 /// The default registry contains Appearance settings
 /// (3 bools + 3 enums + 1 int = 7 entries), the Editor entry
 /// `multiline_mode`, the Agent entries `permission_mode` and
-/// `plan_mode`, the Privacy entry `coding_data_sharing`, the
+/// `plan_mode`, the
 /// Models entry `default_model`, and the Advanced entries
 /// `show_tips` and `auto_update`. `default_reasoning_effort` and
 /// `auto_compact_threshold_percent` are not exposed in the modal.
@@ -591,7 +592,6 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             &SettingCategory::Mouse,
             &SettingCategory::Editor,
             &SettingCategory::Agent,
-            &SettingCategory::Privacy,
             &SettingCategory::Models,
             // The Session category has no registered settings, so its
             // header is not emitted.
@@ -680,8 +680,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             // PAGER-owned plan_mode (Agent category).
             "plan_mode",
-            // SHELL-owned coding_data_sharing (Privacy category).
-            "coding_data_sharing",
+            // The xAI coding-data-sharing setting is not part of dscode.
             // SHELL-owned default_model (Models category).
             "default_model",
             // Models category. `default_reasoning_effort`,
@@ -2563,12 +2562,12 @@ fn picker_esc_returns_to_browse_after_preview_nav() {
     );
 }
 
-/// `/privacy` deep-link: focus + enter picker with `close_on_picker_exit`,
+/// Focus + enter a non-preview picker with `close_on_picker_exit`,
 /// then Esc closes the modal entirely (not Browse).
 #[test]
 fn deep_link_picker_esc_closes_modal() {
     let mut s = make_state();
-    assert!(s.focus_key("coding_data_sharing"));
+    assert!(s.focus_key("follow_up_behavior"));
     assert!(s.try_enter_picking_enum());
     s.close_on_picker_exit = true;
     assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
@@ -2584,11 +2583,11 @@ fn deep_link_picker_esc_closes_modal() {
     );
 }
 
-/// Settings → Privacy row → Enter into chooser: Esc returns to Browse.
+/// Settings → Follow-up behavior → Enter into chooser: Esc returns to Browse.
 #[test]
 fn browse_enter_picker_esc_returns_to_browse() {
     let mut s = make_state();
-    assert!(s.focus_key("coding_data_sharing"));
+    assert!(s.focus_key("follow_up_behavior"));
     assert!(s.try_enter_picking_enum());
     assert!(!s.close_on_picker_exit);
     assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
@@ -2609,16 +2608,16 @@ fn browse_enter_picker_esc_returns_to_browse() {
 #[test]
 fn deep_link_commit_closes_modal() {
     let mut s = make_state();
-    assert!(s.focus_key("coding_data_sharing"));
+    assert!(s.focus_key("follow_up_behavior"));
     assert!(s.try_enter_picking_enum());
     s.close_on_picker_exit = true;
 
     let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     match outcome {
-        SettingsKeyOutcome::ActionThenClose(Action::SetCodingDataSharing { opted_in }) => {
-            assert!(!opted_in, "default snapshot is opt-out");
+        SettingsKeyOutcome::ActionThenClose(Action::SetFollowUpBehavior(value)) => {
+            assert_eq!(value, FollowUpBehavior::Queue);
         }
-        other => panic!("expected ActionThenClose(SetCodingDataSharing), got {other:?}"),
+        other => panic!("expected ActionThenClose(SetFollowUpBehavior), got {other:?}"),
     }
     assert!(!s.close_on_picker_exit);
 }
@@ -2627,16 +2626,16 @@ fn deep_link_commit_closes_modal() {
 #[test]
 fn browse_path_enter_commit_returns_to_browse() {
     let mut s = make_state();
-    assert!(s.focus_key("coding_data_sharing"));
+    assert!(s.focus_key("follow_up_behavior"));
     assert!(s.try_enter_picking_enum());
     assert!(!s.close_on_picker_exit);
 
     let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     match outcome {
-        SettingsKeyOutcome::Action(Action::SetCodingDataSharing { opted_in }) => {
-            assert!(!opted_in, "default snapshot is opt-out");
+        SettingsKeyOutcome::Action(Action::SetFollowUpBehavior(value)) => {
+            assert_eq!(value, FollowUpBehavior::Queue);
         }
-        other => panic!("expected Action(SetCodingDataSharing), got {other:?}"),
+        other => panic!("expected Action(SetFollowUpBehavior), got {other:?}"),
     }
     assert!(
         matches!(s.mode(), SettingsModalMode::Browse),
@@ -4195,8 +4194,7 @@ fn picker_mode_scroll_wheel_is_noop_and_preserves_browse_selection() {
     assert_eq!(s.selected, selected_before);
 }
 
-/// Mouse click in PickingEnum mode is a no-op (click-to-pick is
-/// handled elsewhere).
+/// A click with no choice hit-rects is a no-op.
 #[test]
 fn picker_mode_mouse_click_is_noop() {
     let mut s = picker_test_state();
@@ -4209,6 +4207,246 @@ fn picker_mode_mouse_click_is_noop() {
     );
     assert!(matches!(outcome, SettingsKeyOutcome::Unchanged));
     assert_eq!(s.selected, selected_before);
+}
+
+fn picker_choice_idx(s: &SettingsModalState) -> usize {
+    match s.mode() {
+        SettingsModalMode::PickingEnum { choices_idx, .. } => choices_idx,
+        other => panic!("expected PickingEnum, got {other:?}"),
+    }
+}
+
+fn install_picker_choice_rects(s: &mut SettingsModalState) {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 30,
+    };
+    let mut buf = Buffer::empty(area);
+    render_picking_enum(&mut buf, area, s, &Theme::current());
+    s.picker_choice_rects = take_picker_choice_rects();
+}
+
+fn click_picker_choice(s: &mut SettingsModalState, idx: usize) -> SettingsKeyOutcome {
+    let rect = s.picker_choice_rects[idx];
+    assert!(
+        rect.width > 0 && rect.height > 0,
+        "choice {idx} must be visible, got {rect:?}"
+    );
+    handle_settings_mouse(
+        s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        rect.x.saturating_add(2),
+        rect.y,
+    )
+}
+
+fn unfocused_visible_choice(s: &SettingsModalState) -> usize {
+    let focused = picker_choice_idx(s);
+    s.picker_choice_rects
+        .iter()
+        .enumerate()
+        .find(|(i, r)| *i != focused && r.height > 0)
+        .map(|(i, _)| i)
+        .expect("need a visible unfocused radio")
+}
+
+/// A click on the focused radio does not select. A click on another radio only focuses it.
+/// The second click on that radio selects and leaves the chooser.
+#[test]
+fn picker_double_click_selects_radio() {
+    let mut s = enter_picker_for("follow_up_behavior");
+    install_picker_choice_rects(&mut s);
+    let focused = picker_choice_idx(&s);
+    let target = unfocused_visible_choice(&s);
+
+    let on_focused = click_picker_choice(&mut s, focused);
+    assert!(
+        matches!(on_focused, SettingsKeyOutcome::Unchanged),
+        "click on the focused radio must not select, got {on_focused:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), focused);
+
+    let first = click_picker_choice(&mut s, target);
+    assert!(
+        matches!(first, SettingsKeyOutcome::Changed),
+        "first click on another radio must only focus, got {first:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), target);
+
+    let second = click_picker_choice(&mut s, target);
+    match second {
+        SettingsKeyOutcome::Action(Action::SetFollowUpBehavior(value)) => {
+            assert_eq!(value, FollowUpBehavior::Steer);
+        }
+        other => panic!("double-click must select like Enter, got {other:?}"),
+    }
+    assert!(
+        matches!(s.mode(), SettingsModalMode::Browse),
+        "select must leave the chooser"
+    );
+}
+
+/// Two quick clicks on different radios move focus only; they are not a double-click.
+#[test]
+fn picker_clicks_on_different_radios_do_not_select() {
+    let mut s = enter_picker_for("follow_up_behavior");
+    install_picker_choice_rects(&mut s);
+    let first_idx = unfocused_visible_choice(&s);
+    let second_idx = picker_choice_idx(&s);
+    assert_ne!(first_idx, second_idx);
+
+    let _ = click_picker_choice(&mut s, first_idx);
+    let outcome = click_picker_choice(&mut s, second_idx);
+    assert!(
+        !matches!(
+            outcome,
+            SettingsKeyOutcome::Action(_) | SettingsKeyOutcome::ActionThenClose(_)
+        ),
+        "clicking a different radio must not select, got {outcome:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), second_idx);
+}
+
+/// Click A, move focus with the keyboard, then click A again is a new single click.
+#[test]
+fn picker_keyboard_move_cancels_double_click() {
+    let mut s = enter_picker_for("follow_up_behavior");
+    install_picker_choice_rects(&mut s);
+    let first = unfocused_visible_choice(&s);
+    let _ = click_picker_choice(&mut s, first);
+    assert_eq!(picker_choice_idx(&s), first);
+
+    let nav = if picker_choice_idx(&s) + 1 < s.picker_choice_rects.len() {
+        KeyCode::Down
+    } else {
+        KeyCode::Up
+    };
+    let _ = handle_settings_key(&mut s, &KeyEvent::new(nav, KeyModifiers::NONE));
+    assert_ne!(picker_choice_idx(&s), first);
+    assert!(
+        s.picker_last_click.is_none(),
+        "keyboard focus move must clear the pending double-click"
+    );
+
+    let outcome = click_picker_choice(&mut s, first);
+    assert!(
+        !matches!(
+            outcome,
+            SettingsKeyOutcome::Action(_) | SettingsKeyOutcome::ActionThenClose(_)
+        ),
+        "click after keyboard nav must not select, got {outcome:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), first);
+}
+
+/// A click outside the double-click window focuses only, even on the same radio.
+#[test]
+fn picker_stale_click_does_not_select() {
+    let mut s = enter_picker_for("follow_up_behavior");
+    install_picker_choice_rects(&mut s);
+    let target = picker_choice_idx(&s);
+    s.picker_last_click = Some((
+        target,
+        std::time::Instant::now()
+            - std::time::Duration::from_millis(
+                crate::app::agent_view::MULTI_CLICK_TIMEOUT_MS as u64 + 1,
+            ),
+    ));
+
+    let outcome = click_picker_choice(&mut s, target);
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Unchanged),
+        "stale click must not select the focused radio, got {outcome:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), target);
+}
+
+#[test]
+fn picker_outside_click_cancels_double_click() {
+    let mut s = enter_picker_for("follow_up_behavior");
+    install_picker_choice_rects(&mut s);
+    let target = picker_choice_idx(&s);
+    let _ = click_picker_choice(&mut s, target);
+    let _ = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        u16::MAX,
+        u16::MAX,
+    );
+    assert!(s.picker_last_click.is_none());
+    assert!(matches!(
+        click_picker_choice(&mut s, target),
+        SettingsKeyOutcome::Unchanged
+    ));
+}
+
+#[test]
+fn picker_reopen_cancels_double_click() {
+    let mut s = enter_picker_for("follow_up_behavior");
+    install_picker_choice_rects(&mut s);
+    let target = picker_choice_idx(&s);
+    let _ = click_picker_choice(&mut s, target);
+    let _ = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(s.picker_last_click.is_none());
+    assert!(s.try_enter_picking_enum());
+    install_picker_choice_rects(&mut s);
+    assert!(matches!(
+        click_picker_choice(&mut s, target),
+        SettingsKeyOutcome::Unchanged
+    ));
+}
+
+#[test]
+fn picker_shortcuts_explain_double_click() {
+    let s = enter_picker_for("theme");
+    let labels: Vec<_> = build_shortcuts(&s)
+        .iter()
+        .map(|shortcut| shortcut.label)
+        .collect();
+    assert!(labels.contains(&"Enter select"));
+    assert!(labels.contains(&"double-click select"));
+}
+
+/// Deep-link choosers close the modal on double-click, same as Enter.
+#[test]
+fn picker_double_click_deep_link_closes() {
+    let mut s = enter_picker_for("follow_up_behavior");
+    s.close_on_picker_exit = true;
+    install_picker_choice_rects(&mut s);
+    let focused = picker_choice_idx(&s);
+
+    let _ = click_picker_choice(&mut s, focused);
+    let outcome = click_picker_choice(&mut s, focused);
+    match outcome {
+        SettingsKeyOutcome::ActionThenClose(Action::SetFollowUpBehavior(value)) => {
+            assert_eq!(value, FollowUpBehavior::Queue);
+        }
+        other => panic!("deep-link double-click must close, got {other:?}"),
+    }
+}
+
+/// Preview enums still preview on the first click; the second click commits.
+#[test]
+fn picker_double_click_commits_preview_enum() {
+    let mut s = enter_picker_for("theme");
+    install_picker_choice_rects(&mut s);
+    let target = unfocused_visible_choice(&s);
+
+    let first = click_picker_choice(&mut s, target);
+    match first {
+        SettingsKeyOutcome::Action(Action::PreviewTheme(_)) => {}
+        other => panic!("first click must preview, not select, got {other:?}"),
+    }
+    assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+
+    let second = click_picker_choice(&mut s, target);
+    match second {
+        SettingsKeyOutcome::Action(Action::SetTheme(_)) => {}
+        other => panic!("double-click must commit the previewed theme, got {other:?}"),
+    }
+    assert!(matches!(s.mode(), SettingsModalMode::Browse));
 }
 
 /// Random keypresses in PickingEnum mode are Unchanged and don't
@@ -4955,7 +5193,7 @@ fn pathologically_narrow_truncates_label_with_ellipsis() {
 /// Two-line rows expand `state.row_rects` to span BOTH lines so
 /// mouse clicks on either line trigger the same default action.
 ///
-/// `coding_data_sharing`'s label plus the value "Opt out", the chevron,
+/// `follow_up_behavior`'s label plus the value "Queue", the chevron,
 /// and the row chrome are far wider than the width=28 we render at, so
 /// the row drops to two lines.
 #[test]
@@ -4964,9 +5202,9 @@ fn two_line_row_hit_rect_spans_both_lines() {
     let row_idx = s
         .rows
         .iter()
-        .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "coding_data_sharing"))
-        .expect("coding_data_sharing must be registered");
-    // Render at a narrow width so coding_data_sharing forces a
+        .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "follow_up_behavior"))
+        .expect("follow_up_behavior must be registered");
+    // Render at a narrow width so follow_up_behavior forces a
     // two-line layout.
     let area = Rect {
         x: 0,
@@ -4988,7 +5226,7 @@ fn two_line_row_hit_rect_spans_both_lines() {
 
     // Synthesize a click on line 2 of the row. The mouse handler
     // should fire the default action (open the enum picker for
-    // coding_data_sharing).
+    // follow_up_behavior).
     s.list_area = area;
     let click_y = rect.y + 1;
     // Click somewhere in the middle of line 2.
@@ -5024,15 +5262,15 @@ fn two_line_row_hit_rect_spans_both_lines() {
 #[test]
 fn two_line_row_with_expansion_renders_three_segments() {
     let mut s = make_state();
-    // The coding-data row's label + value (with chevron) won't
+    // The follow-up row's label + value (with chevron) won't
     // fit on a 28-col line, forcing two-line layout.
     let row_idx = s
         .rows
         .iter()
-        .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "coding_data_sharing"))
-        .expect("coding_data_sharing must be registered");
+        .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "follow_up_behavior"))
+        .expect("follow_up_behavior must be registered");
     s.selected = row_idx;
-    s.expanded_keys.insert("coding_data_sharing");
+    s.expanded_keys.insert("follow_up_behavior");
 
     let area = Rect {
         x: 0,
@@ -5055,7 +5293,7 @@ fn two_line_row_with_expansion_renders_three_segments() {
     let label_line = buf_row_text(&buf, rect.y, area.x, area.width);
     let label = s
         .registry
-        .find("coding_data_sharing")
+        .find("follow_up_behavior")
         .expect("registered")
         .label;
     let head: String = label
@@ -5067,15 +5305,10 @@ fn two_line_row_with_expansion_renders_three_segments() {
         label_line.contains(&head),
         "line 1 must contain the row label (head {head:?}): {label_line:?}"
     );
-    // The value (display: "Opt out" or similar) is on line 2.
+    // The value is on line 2.
     let value_line = buf_row_text(&buf, rect.y + 1, area.x, area.width);
-    // Value comes from displaying the canonical → display mapping,
-    // which uses the synthetic enum's "Third Option" canonical of
-    // "opt-out". The display fallback returns the canonical when
-    // the lookup misses — registry has the real `CodingDataSharing`
-    // choices, so display should be "Opt out".
     assert!(
-        value_line.contains("Opt") || value_line.contains("opt") || value_line.contains("out"),
+        value_line.contains("Queue"),
         "line 2 must contain the value text: {value_line:?}"
     );
     // The expanded description renders on line 3 and below.
@@ -6109,7 +6342,7 @@ fn tip_line_has_blank_row_above() {
     let mut tip_y: Option<u16> = None;
     for y in 0..area.height {
         let txt = buf_row_text(&buf, y, area.x, area.width);
-        if txt.contains("Tip") && txt.contains("Ask Grok") {
+        if txt.contains("Tip") && txt.contains("Ask Dscode") {
             tip_y = Some(y);
             break;
         }

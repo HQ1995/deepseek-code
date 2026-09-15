@@ -41,6 +41,14 @@ after entering the namespace to handle older util-linux launchers.
 
 ## Feature
 
+- Theme alias search and settings radio double-click (selectively ported from
+  upstream `37949780c1`): the picker searches the same aliases the theme parser
+  accepts and inserts canonical values. Only local theme variants are included;
+  this does not introduce the upstream terminal theme. A timely second click
+  confirms through the existing Enter path, retaining preview/revert and
+  deep-link close behavior. Picker transitions, keyboard focus changes and
+  clicks outside choices clear the gesture. Rust contracts and the real TUI
+  acceptance cover these paths without changing the DSH runtime pin.
 - Native DSH ZIP export: `/export file.zip` uses the existing session-command
   effect with `x.ai/session/export` for the root session. The bridge streams
   native logs, descendants and attachments to a private, non-overwriting file;

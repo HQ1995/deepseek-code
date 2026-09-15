@@ -684,7 +684,7 @@ fn dispatch_open_settings_focus_reopens_when_already_open() {
     ));
     let _ = dispatch(
         Action::OpenSettingsFocus {
-            key: "coding_data_sharing",
+            key: "follow_up_behavior",
         },
         &mut app,
     );
@@ -694,7 +694,7 @@ fn dispatch_open_settings_focus_reopens_when_already_open() {
     };
     assert_eq!(
         state.focused_setting().map(|(k, _)| k),
-        Some("coding_data_sharing"),
+        Some("follow_up_behavior"),
         "focused re-entry must land on the requested row"
     );
     assert!(
@@ -707,65 +707,38 @@ fn dispatch_open_settings_focus_reopens_when_already_open() {
         "focused re-entry must arm close_on_picker_exit"
     );
 }
-/// Chooser when editable, browse row when locked. The team-admin arm is the
-/// one a `team_name.is_some()` shortcut would break.
+/// xAI privacy settings remain absent regardless of inherited account metadata.
 #[test]
-fn dispatch_open_settings_focus_skips_the_chooser_only_when_locked() {
+fn dispatch_open_settings_focus_does_not_expose_removed_privacy_setting() {
     use crate::views::modal::ActiveModal;
     use crate::views::settings_modal::SettingsModalMode;
-    let open_focused = |app: &mut AppView| -> SettingsModalMode {
+    for (is_zdr, role) in [
+        (false, None),
+        (true, None),
+        (false, Some("member")),
+        (false, Some("admin")),
+    ] {
+        let mut app = test_app_with_agent();
+        app.is_zdr = is_zdr;
+        app.team_name = role.map(|_| "acme".to_string());
+        app.team_role = role.map(str::to_string);
         let _ = dispatch(
             Action::OpenSettingsFocus {
                 key: "coding_data_sharing",
             },
-            app,
+            &mut app,
         );
         let agent = app.agents.get(&AgentId(0)).unwrap();
         let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
             panic!("settings modal must be open")
         };
-        assert_eq!(
-            state.focused_setting().map(|(k, _)| k),
-            Some("coding_data_sharing"),
-            "every landing focuses the row"
-        );
-        state.mode()
-    };
-    let mut app = test_app_with_agent();
-    assert!(
-        matches!(
-            open_focused(&mut app),
-            SettingsModalMode::PickingEnum { .. }
-        ),
-        "an editable setting opens its chooser"
-    );
-    let mut app = test_app_with_agent();
-    app.is_zdr = true;
-    assert!(
-        matches!(open_focused(&mut app), SettingsModalMode::Browse),
-        "ZDR must stop at the row that says so"
-    );
-    let mut app = test_app_with_agent();
-    app.team_name = Some("acme".to_string());
-    app.team_role = Some("member".to_string());
-    assert!(
-        matches!(open_focused(&mut app), SettingsModalMode::Browse),
-        "a team-managed lock must stop at the row that says so"
-    );
-    let mut app = test_app_with_agent();
-    app.team_name = Some("acme".to_string());
-    app.team_role = Some("admin".to_string());
-    assert!(
-        matches!(
-            open_focused(&mut app),
-            SettingsModalMode::PickingEnum { .. }
-        ),
-        "a team admin is not locked"
-    );
+        assert!(state.registry.find("coding_data_sharing").is_none());
+        assert!(matches!(state.mode(), SettingsModalMode::Browse));
+        assert!(!state.close_on_picker_exit);
+    }
 }
 /// Focused open that enters the chooser sets `close_on_picker_exit` so Esc
-/// dismisses the modal (GB-4470). Locked landings stay in Browse with the
-/// flag clear — chrome Esc already closes.
+/// dismisses the modal. Missing settings stay in Browse with the flag clear.
 #[test]
 fn dispatch_open_settings_focus_sets_close_on_picker_exit_when_chooser_opens() {
     use crate::views::modal::ActiveModal;
@@ -773,7 +746,7 @@ fn dispatch_open_settings_focus_sets_close_on_picker_exit_when_chooser_opens() {
     let mut app = test_app_with_agent();
     let _ = dispatch(
         Action::OpenSettingsFocus {
-            key: "coding_data_sharing",
+            key: "follow_up_behavior",
         },
         &mut app,
     );
@@ -804,7 +777,7 @@ fn dispatch_open_settings_focus_sets_close_on_picker_exit_when_chooser_opens() {
     assert!(matches!(state.mode(), SettingsModalMode::Browse));
     assert!(
         !state.close_on_picker_exit,
-        "locked focus must not set close_on_picker_exit"
+        "missing setting must not set close_on_picker_exit"
     );
 }
 /// Plain OpenSettings does not arm close-on-picker-Esc.
@@ -819,7 +792,7 @@ fn dispatch_open_settings_does_not_set_close_on_picker_exit() {
     };
     assert!(!state.close_on_picker_exit);
 }
-/// Full path: `/privacy`-style focus open → Esc dismisses the settings modal.
+/// Full path: focused open → Esc dismisses the settings modal.
 #[test]
 fn open_settings_focus_esc_closes_settings_modal() {
     use crate::views::modal::ActiveModal;
@@ -829,7 +802,7 @@ fn open_settings_focus_esc_closes_settings_modal() {
     let id = AgentId(0);
     let _ = dispatch(
         Action::OpenSettingsFocus {
-            key: "coding_data_sharing",
+            key: "follow_up_behavior",
         },
         &mut app,
     );
@@ -851,7 +824,7 @@ fn open_settings_focus_esc_closes_settings_modal() {
         "deep-link Esc must dismiss the settings modal"
     );
 }
-/// Full path: `/privacy`-style focus open → Enter commits and dismisses.
+/// Full path: focused open → Enter commits and dismisses.
 #[test]
 fn open_settings_focus_enter_closes_settings_modal() {
     use crate::app::app_view::InputOutcome;
@@ -862,7 +835,7 @@ fn open_settings_focus_enter_closes_settings_modal() {
     let id = AgentId(0);
     let _ = dispatch(
         Action::OpenSettingsFocus {
-            key: "coding_data_sharing",
+            key: "follow_up_behavior",
         },
         &mut app,
     );
@@ -886,9 +859,9 @@ fn open_settings_focus_enter_closes_settings_modal() {
     assert!(
         matches!(
             outcome,
-            InputOutcome::Action(Action::SetCodingDataSharing { .. })
+            InputOutcome::Action(Action::SetFollowUpBehavior(_))
         ),
-        "deep-link Enter must commit SetCodingDataSharing, got {outcome:?}"
+        "deep-link Enter must commit SetFollowUpBehavior, got {outcome:?}"
     );
 }
 /// Browse path: OpenSettings → enter picker → Esc keeps modal open in Browse.
@@ -905,7 +878,7 @@ fn open_settings_enter_picker_esc_stays_open_in_browse() {
         let Some(ActiveModal::Settings { state }) = &mut agent.active_modal else {
             panic!("settings modal must be open")
         };
-        assert!(state.focus_key("coding_data_sharing"));
+        assert!(state.focus_key("follow_up_behavior"));
         assert!(state.try_enter_picking_enum());
         assert!(!state.close_on_picker_exit);
     }
@@ -3403,8 +3376,8 @@ fn set_theme_toast_format_uses_display_name() {
             "toast must contain label, got: {toast:?}",
         );
         assert!(
-            toast.contains("Grok Day"),
-            "toast must use display name `Grok Day`, not canonical `grokday`, got: {toast:?}",
+            toast.contains("Dscode Day"),
+            "toast must use display name `Dscode Day`, not canonical `grokday`, got: {toast:?}",
         );
         assert!(toast.contains('\u{2713}'), "toast must contain the ✓ glyph");
     });
@@ -3416,7 +3389,7 @@ fn set_auto_dark_theme_toast_format_uses_display_name() {
         let _ = dispatch(Action::SetAutoDarkTheme("grokday".into()), &mut app);
         let toast = read_toast(&app);
         assert!(toast.contains("Auto dark theme"));
-        assert!(toast.contains("Grok Day"));
+        assert!(toast.contains("Dscode Day"));
         assert!(toast.contains('\u{2713}'));
     });
 }
@@ -3427,7 +3400,7 @@ fn set_auto_light_theme_toast_format_uses_display_name() {
         let _ = dispatch(Action::SetAutoLightTheme("groknight".into()), &mut app);
         let toast = read_toast(&app);
         assert!(toast.contains("Auto light theme"));
-        assert!(toast.contains("Grok Night"));
+        assert!(toast.contains("Dscode Night"));
     });
 }
 /// `apply_setting_rollback` for theme keys: a failed persist

@@ -17,6 +17,13 @@ use crate::theme::{Theme, ThemeKind, cache as theme_cache};
 /// Switch the pager color theme.
 pub struct ThemeCommand;
 
+fn picker_match_text(kind: ThemeKind) -> String {
+    std::iter::once(kind.display_name())
+        .chain(kind.aliases().iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl SlashCommand for ThemeCommand {
     fn name(&self) -> &str {
         "theme"
@@ -87,7 +94,7 @@ impl SlashCommand for ThemeCommand {
         let auto_active = if is_auto { " (active)" } else { "" };
         let mut items = vec![ArgItem {
             display: "auto".to_string(),
-            match_text: "auto".to_string(),
+            match_text: picker_match_text(ThemeKind::Auto),
             insert_text: "auto".to_string(),
             description: format!("auto (follow system){auto_active}"),
         }];
@@ -101,7 +108,7 @@ impl SlashCommand for ThemeCommand {
             };
             ArgItem {
                 display: kind.display_name().to_string(),
-                match_text: kind.display_name().to_string(),
+                match_text: picker_match_text(*kind),
                 insert_text: kind.display_name().to_string(),
                 description: format!("{}{active}", kind.display_name()),
             }
@@ -166,6 +173,40 @@ mod tests {
     }
 
     // -- suggest_args ---------------------------------------------------------
+
+    #[test]
+    fn suggest_args_alias_ranks_canonical_row() {
+        with_test_env(|| {
+            let models = crate::acp::model_state::ModelState::default();
+            let ctx = AppCtx {
+                models: &models,
+                cwd: std::path::Path::new("."),
+                has_session_announcements: false,
+                billing_surface_visible: true,
+                usage_command_visible: true,
+                workflows_available: true,
+                capabilities: None,
+                screen_mode: crate::app::ScreenMode::Fullscreen,
+                current_title: None,
+            };
+            let items = ThemeCommand.suggest_args(&ctx, "").unwrap();
+            let mut matcher = crate::slash::matcher::FuzzyMatcher::new();
+            for kind in ThemeKind::available()
+                .iter()
+                .chain([&ThemeKind::Auto])
+                .copied()
+            {
+                for alias in kind.aliases() {
+                    let ranked = matcher.rank(&items, alias, items.len(), |item| &item.match_text);
+                    assert_eq!(
+                        items[ranked[0].0].insert_text,
+                        kind.display_name(),
+                        "alias {alias}"
+                    );
+                }
+            }
+        });
+    }
 
     #[test]
     fn suggest_args_prepends_auto_option() {

@@ -557,9 +557,9 @@ try {
   }
   const nextSix = extraOnly ? undefined : await nextSixAcceptance({ ...goalUi, waitFor, readRequests, runHeadless, cwd, scratch,
     mediaOpenerLog,
-    click: (x, y, modifiers = 0) => {
+    click: (x, y, modifiers = 0, count = 1) => {
       const mouse = `\x1b[<${modifiers};${x + 1};${y + 1}M\x1b[<${modifiers};${x + 1};${y + 1}m`
-      return tmux('send-keys', '-t', `${session}:main.0`, '-H', ...Buffer.from(mouse).toString('hex').match(/../g))
+      return tmux('send-keys', '-t', `${session}:main.0`, '-H', ...Buffer.from(mouse.repeat(count)).toString('hex').match(/../g))
     },
     type: text => tmux('send-keys', '-l', '-t', `${session}:main.0`, text),
     resize: async (width, height) => {

@@ -865,8 +865,8 @@ fn apply_filter_edit(
 ///    steps the value.
 ///  - Scroll wheel scrolls the row list by ~3 rows per tick.
 ///
-/// **Picker short-circuit:** when the modal is in `PickingEnum`
-/// mode, every mouse event is a no-op. `EditingValue` mode handles `[-]` / `[+]`
+/// **Picker short-circuit:** `PickingEnum` handles choice focus and
+/// double-click selection. `EditingValue` mode handles `[-]` / `[+]`
 /// clicks AND treats everything else as a no-op.
 pub fn handle_settings_mouse(
     state: &mut SettingsModalState,
@@ -1083,8 +1083,9 @@ pub fn handle_settings_mouse(
 ///
 /// Left-click on any line of a choice's multi-line hit-rect moves
 /// the picker focus to that choice (and fires the matching preview
-/// dispatch, mirroring keyboard Up/Down). Clicks outside any choice
-/// rect are no-ops, as are scroll wheel events (the picker viewport
+/// dispatch, mirroring keyboard Up/Down). A second click on the same
+/// choice within the multi-click window confirms via Enter. Clicks outside a
+/// choice clear the gesture; scroll wheel events are no-ops (the picker viewport
 /// is bounded; in-picker scrolling could surprise).
 ///
 /// Continuation lines of a word-wrapped description share the same
@@ -1134,24 +1135,32 @@ fn handle_picker_mouse(
         .iter()
         .position(|r| r.height > 0 && rect_contains(*r, column, row));
     let Some(target_idx) = clicked_idx else {
+        state.picker_last_click = None;
         return SettingsKeyOutcome::Unchanged;
     };
-    if target_idx == current_idx {
-        // Already focused — re-clicking the same choice is a no-op
-        // (kept for parity with the row-list's "already-focused
-        // click commits" semantics; commit fires on Enter, not on
-        // a re-click).
-        return SettingsKeyOutcome::Unchanged;
+    let double_click = state.picker_last_click.is_some_and(|(idx, when)| {
+        idx == target_idx
+            && when.elapsed().as_millis() < crate::app::agent_view::MULTI_CLICK_TIMEOUT_MS
+    });
+    if double_click && target_idx == current_idx {
+        state.picker_last_click = None;
+        return handle_picking_enum(state, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     }
     // Reuse the keyboard nav helper to update `choices_idx` AND
     // fire the matching preview Action (when the kind supports it).
-    set_picker_idx(
-        state,
-        setting_key,
-        target_idx,
-        original_value,
-        supports_preview,
-    )
+    let outcome = if target_idx == current_idx {
+        SettingsKeyOutcome::Unchanged
+    } else {
+        set_picker_idx(
+            state,
+            setting_key,
+            target_idx,
+            original_value,
+            supports_preview,
+        )
+    };
+    state.picker_last_click = Some((target_idx, std::time::Instant::now()));
+    outcome
 }
 
 /// Handle a mouse event while the modal is in `PickingGroup` mode.

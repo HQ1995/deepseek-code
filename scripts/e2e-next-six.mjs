@@ -42,6 +42,44 @@ export async function prepareNextSix(cwd) {
 export async function nextSixAcceptance(ui) {
   const { send, key, type, wait, waitFor, capture, waitState, readRequests, artifact, restart, runHeadless, cwd, scratch, resize, click, mediaOpenerLog } = ui
   const requestsBefore = (await readRequests()).length
+  console.log('[next-six] theme aliases and settings double-click')
+  const themeConfig = () => readFile(join(scratch, 'dsc-contract/config.toml'), 'utf8')
+    .catch(error => { if (error.code === 'ENOENT') return ''; throw error })
+  for (const [alias, canonical] of [['light', 'grokday'], ['dark', 'groknight']]) {
+    await type(`/theme ${alias}`)
+    await wait(new RegExp(canonical))
+    await artifact(`theme-alias-${alias}`, { screen: await capture() })
+    await key('Enter')
+    await waitFor(themeConfig, value => value.includes(`theme = "${canonical}"`), `theme-alias-${alias}-committed`)
+  }
+  await send('/settings')
+  await wait(/Settings/)
+  await key('/'); await type('Color theme'); await key('Enter'); await key('Enter')
+  await wait(/double-click select/)
+  let themeRows = (await capture()).split('\n')
+  let dayRow = themeRows.findIndex(row => row.includes('Dscode Day'))
+  assert.ok(dayRow >= 0, 'Day theme must be visible in the settings picker')
+  await click(themeRows[dayRow].indexOf('Dscode Day') + 2, dayRow)
+  await ui.settle(350)
+  assert.ok((await capture()).includes('double-click select'), 'Single click must keep the picker open')
+  assert.ok((await themeConfig()).includes('theme = "groknight"'), 'Single-click preview must not persist')
+  await key('Escape')
+  await waitFor(capture, screen => !screen.includes('double-click select'), 'theme-preview-reverted')
+  await key('Enter')
+  await wait(/double-click select/)
+  await wait(/[●•]\s+Dscode Night/)
+  themeRows = (await capture()).split('\n')
+  dayRow = themeRows.findIndex(row => row.includes('Dscode Day'))
+  assert.ok(dayRow >= 0)
+  await click(themeRows[dayRow].indexOf('Dscode Day') + 2, dayRow, 0, 2)
+  await waitFor(themeConfig, value => value.includes('theme = "grokday"'), 'theme-double-click-persisted')
+  await waitFor(capture, screen => screen.includes('Settings') && !screen.includes('double-click select'), 'theme-double-click-left-picker')
+  await artifact('theme-settings-double-click', { screen: await capture(), config: await themeConfig() })
+  await key('Escape')
+  await waitFor(capture, screen => !screen.includes('Settings'), 'theme-settings-closed')
+  await send('/theme dark')
+  await waitFor(themeConfig, value => value.includes('theme = "groknight"'), 'theme-restored')
+  assert.equal((await readRequests()).length, requestsBefore, 'Theme and settings must not send model requests')
   console.log('[next-six] native skills')
   await type('/six-')
   await wait(/six-manual[\s\S]*User only/)
@@ -209,5 +247,5 @@ export async function nextSixAcceptance(ui) {
   assert.ok(results.slice(0, 3).every(result => String(result.content).includes('main.ts')))
   assert.match(String(results[3].content), /Greeter/)
   await artifact('six-lsp-real-server', { results, tools: lsp.tools?.map(tool => tool.function?.name) })
-  return { skills: 'native scoped injection', viewer: 'draft/undo/resume/resize', table: process.platform === 'darwin' ? 'URL and email keyboard opens after resize (physical Cmd-click not covered)' : 'URL and email fragment clicks after resize', navigation: 'real turn boundaries', presets: 'native copy/read/external edit/restart', lsp: 'four real TypeScript queries' }
+  return { themeSettings: 'alias picker canonical commit; single-click preview/revert; double-click persistence', skills: 'native scoped injection', viewer: 'draft/undo/resume/resize', table: process.platform === 'darwin' ? 'URL and email keyboard opens after resize (physical Cmd-click not covered)' : 'URL and email fragment clicks after resize', navigation: 'real turn boundaries', presets: 'native copy/read/external edit/restart', lsp: 'four real TypeScript queries' }
 }
