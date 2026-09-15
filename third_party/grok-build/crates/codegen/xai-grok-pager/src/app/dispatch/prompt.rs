@@ -1177,6 +1177,7 @@ pub(super) fn handle_prompt_response(
                 .or_else(|| prompt_id.clone()),
             Err(_) => prompt_id.clone(),
         };
+        agent.ack_prompt_if_named(response_pid.as_deref());
         // The turn-end RPC for this prompt arrived — disarm the
         // lost-response reconcile that `handle_prompt_complete` armed
         // for it (the broadcast is emitted before the RPC response, so

@@ -5795,9 +5795,10 @@ impl AppView {
         }
         if self.agents.values().any(|a| {
             a.pending_cancel_resend.is_some()
+                || a.prompt_ack.is_some()
                 || a.subagent_views
                     .values()
-                    .any(|c| c.pending_cancel_resend.is_some())
+                    .any(|c| c.pending_cancel_resend.is_some() || c.prompt_ack.is_some())
         }) {
             return TickDemand::Fast;
         }

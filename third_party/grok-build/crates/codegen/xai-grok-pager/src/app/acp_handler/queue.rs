@@ -143,6 +143,22 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
 
     // Resolve the owning agent before the queue is replaced.
     let sid = acp::SessionId::new(session_id.clone());
+    let view = match find_session_match(app, &sid) {
+        Some(SessionMatch::Root(id)) => app.agents.get_mut(&id),
+        Some(SessionMatch::Child(id)) => app
+            .agents
+            .get_mut(&id)
+            .and_then(|parent| parent.subagent_views.get_mut(&session_id))
+            .map(|child| &mut **child),
+        _ => None,
+    };
+    if let Some(view) = view
+        && view.prompt_ack.as_ref().is_some_and(|watch| {
+            crate::app::prompt_ack::queue_changed_acks(&changed, watch.prompt_id())
+        })
+    {
+        view.prompt_ack = None;
+    }
     let agent_id = match find_session_match(app, &sid) {
         Some(SessionMatch::Root(id)) => Some(id),
         _ => None,
@@ -477,6 +493,16 @@ pub(super) fn handle_prompt_complete(notif: &acp::ExtNotification, app: &mut App
     let session_id = payload.session_id.as_str();
 
     let sid = acp::SessionId::new(session_id.to_string());
+    if let Some(SessionMatch::Child(parent_id)) = find_session_match(app, &sid) {
+        if let Some(child) = app
+            .agents
+            .get_mut(&parent_id)
+            .and_then(|parent| parent.subagent_views.get_mut(session_id))
+        {
+            child.ack_prompt_if_named(payload.prompt_id.as_deref());
+        }
+        return false;
+    }
     let Some(SessionMatch::Root(id)) = find_session_match(app, &sid) else {
         return false;
     };

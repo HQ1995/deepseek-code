@@ -102,9 +102,63 @@ Validation on macOS arm64:
 - `scripts/check.sh` and `git diff --check` passed. No SDK pin, package version,
   daily profile, remote branch or release changed.
 
-Next separate slice: TUI/headless prompt-ack deadlines, safe draft recovery and
-the new request's client integration, with delayed/lost-ack acceptance.
-History-read migration and the Linux/systemd runtime candidate remain pending.
+## Execution: TUI/headless first-ack recovery
+
+The clients now use the prompt-specific cancellation foundation above. A small
+shared module owns receipt matching, bounded deadlines and the cancellation
+request; TUI dispatch owns composer recovery. This keeps the codebase-design
+single-owner boundary without changing the pinned SDK or the legacy cancel path.
+
+The default TUI notice/hard deadline is 10/120s, tunable with the bounded
+`DSCODE_PROMPT_ACK_TIMEOUT_SECS` setting. Matching queue receipt, live named
+updates, terminal notifications and RPC completion disarm the watch. Replay or
+another session/prompt does not; acknowledged model work is not time-limited.
+Headless now supplies its own prompt ID and reports `prompt_ack_timeout` with a
+nonzero exit. Cancellation and timeout-path log flush have bounded waits.
+
+TUI restores recoverable text/chips/images without overwriting newer images,
+queue edits or interaction-owned input. A newer plain-text draft stays below
+the recovered prompt. Committed scrollback remains intact, hidden child views
+are included, and reconnect retains its own recovery. Late prompt IDs cannot
+replace recovered input or finish a newer turn. Recovery neither drains queued
+input nor resends the uncertain request. Warnings explicitly preserve the
+possibility of earlier execution, including old/unresponsive bridges.
+
+Validation on macOS arm64:
+
+- Final-source expanded release Rust selection: 1,775 pager + 161 renderer
+  tests passed (1,936 total), including 13 first-ack tests and headless,
+  turn/rewind and queue/adoption coverage. The same 2 pre-existing ignores
+  documented above remain. This is not the entire `check-rust.sh` script.
+- Built release TUI `0.0.14-alpha.12 (1e6531d)`, SHA-256
+  `38b0eae22994cf53636c91f069e57f2a823eac6379897bcd7908d136b704042c`.
+  The embedded revision names its parent checkout; this hash identifies the
+  tested watchdog build.
+- The preserved pre-watch binary reproduced the missing-ack hang past the
+  fixture's 15s limit, with one prompt and no targeted cancellation:
+  `/tmp/dsc-follow-work.nYBS9C/ack/baseline-watch2/`.
+- `scripts/e2e-prompt-ack.mjs` passed all 10 compiled-client cases on each of
+  Node 22.19.0 and 24.19.0. Artifacts:
+  `/tmp/dsc-follow-work.nYBS9C/ack/watch-final-node22/PASS.json` and
+  `/tmp/dsc-follow-work.nYBS9C/ack/watch-final-node24/PASS.json`.
+  These cover lost receipts with unrelated/replay noise, old leaders, silent
+  cancellation, queue/live-update/terminal receipt followed by a longer turn,
+  TUI draft recovery, old-leader warnings and late responses. Exact requests
+  prove no automatic resend and no legacy whole-session cancellation. The
+  fixture tests transport/client behavior, not native model cancellation.
+- Real installed TUI/DSH product regression passed using the unchanged verified
+  bridge archive with `DSCODE_E2E_NEXT_SIX_ONLY=1`:
+  `/tmp/dsc-follow-work.nYBS9C/ack/watch-real/contracts-1262/PASS.json`.
+  This covers theme/settings, skills, viewer/navigation, presets, real LSP,
+  archives, terminal/Python, doctor and owner-isolated interruption. It does not
+  simulate a lost receipt through the real native agent. Full goals/history/
+  provider acceptance and graphical Kitty were not run for this slice.
+- `scripts/check.sh`, new-module/headless Rust formatting and
+  `git diff --check` passed. Existing unrelated formatting differences were
+  preserved. No daily profile, package version, DSH pin, remote or release changed.
+
+History-read migration and the independently validated Linux/systemd runtime
+candidate remain pending; this completes only the first-ack client slice.
 
 ## DSH
 

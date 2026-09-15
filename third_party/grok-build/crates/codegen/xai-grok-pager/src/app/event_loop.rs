@@ -2011,6 +2011,7 @@ pub(crate) async fn run(
 
     // Animation tick: only scheduled when there are running entries.
     let mut tick_interval = tick_interval;
+    let prompt_ack_deadlines = crate::app::prompt_ack::PromptAckDeadlines::from_process_env();
     let mut animation_tick_at: Option<Instant> = None;
 
     // Whether the extra Kitty keyboard layer (WASD release events) is
@@ -2930,6 +2931,10 @@ pub(crate) async fn run(
 
             _ = animation_tick => {
                 animation_tick_at = None;
+                if let Some(effects) = dispatch::reconcile_overdue_prompt_acks(&mut app, &prompt_ack_deadlines) {
+                    if process_effects(effects, &mut tasks, &mut app, &progress_tx) { break; }
+                    presenter.request(false);
+                }
                 // Lost-cancel recovery: re-send cancels for panes still
                 // cancelling past the grace (`dispatch::reconcile_overdue_cancels`).
                 // `needs_animation()` keeps ticks alive while either recovery

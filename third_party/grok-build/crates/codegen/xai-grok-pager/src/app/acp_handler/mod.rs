@@ -172,6 +172,10 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         .get_mut(&id)
                         .expect("find_session_match returned an existing AgentId");
 
+                    if !meta.is_replay {
+                        agent.ack_prompt_if_named(meta.prompt_id.as_deref());
+                    }
+
                     // Live-only dedup: a per-session `eventId` highwater drops
                     // re-delivered live duplicates (leader fan-out, reconnect
                     // re-emit). Replay is EXEMPT — the per-process counter resets
@@ -574,6 +578,9 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             .subagent_views
                             .get_mut(child_key)
                             .expect("find_session_match returned an existing subagent_views key");
+                        if !meta.is_replay {
+                            child_view.ack_prompt_if_named(meta.prompt_id.as_deref());
+                        }
                         let context_is_fresh = meta.is_replay
                             || !meta.event_seq.is_some_and(|seq| {
                                 child_view

@@ -358,6 +358,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         QueueEntryKind::Prompt => {
             agent.start_turn_boundary(Some(&prompt_id));
             agent.session.current_prompt_id = Some(prompt_id.clone());
+            agent.arm_prompt_ack(&prompt_id);
             // Scrollback shows display text (never raw skill XML). Combined
             // drains paint one bubble per original follow-up.
             let is_skill = queued.display_as_skill;
@@ -501,6 +502,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
             // The execute block from the shell IS the visual entry.
             agent.start_turn_boundary(Some(&prompt_id));
             agent.session.current_prompt_id = Some(prompt_id.clone());
+            agent.arm_prompt_ack(&prompt_id);
             agent.turn_started_at = Some(Instant::now());
 
             agent.scrollback.follow_new_turn(None, page_flip_on_send());

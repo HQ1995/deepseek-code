@@ -295,6 +295,7 @@ pub(super) fn finalize_turn_from_terminal(
     session_id: &str,
     signal: TerminalSignal<'_>,
 ) -> TerminalApply {
+    agent.ack_prompt_if_named(signal.prompt_id);
     let TerminalSignal {
         prompt_id,
         stop_reason,

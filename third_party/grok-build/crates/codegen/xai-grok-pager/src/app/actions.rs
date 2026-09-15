@@ -1635,6 +1635,11 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
+    /// Cancel only the timed-out prompt; never use the legacy session-wide path.
+    CancelUnacknowledgedPrompt {
+        session_id: acp::SessionId,
+        prompt_id: String,
+    },
     /// Kill a background task.
     KillBgTask {
         session_id: acp::SessionId,
@@ -2657,6 +2662,11 @@ pub enum TaskResult {
     /// Cancel notification was sent (fire-and-forget).
     /// The real turn end comes via PromptResponse.
     CancelComplete,
+    PromptAckCancelComplete {
+        session_id: acp::SessionId,
+        prompt_id: String,
+        result: Result<(), String>,
+    },
     /// The marker can stop advertising itself as unsent.
     ConsentRecorded {
         notice_id: String,

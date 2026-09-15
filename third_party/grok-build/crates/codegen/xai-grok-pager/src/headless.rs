@@ -26,6 +26,9 @@ use xai_grok_telemetry::startup::PendingStartup;
 
 use crate::acp::model_state::{EffortTokenError, ModelState};
 use crate::acp::spawn::{AgentShutdownGuard, spawn_grok_shell};
+use crate::app::prompt_ack::{
+    CANCEL_TIMEOUT, PromptAckDeadlines, PromptAckWatch, cancel_unacknowledged, message_acks,
+};
 use crate::client_identity::{HEADLESS_CLIENT_TYPE, PAGER_CLIENT_VERSION};
 use crate::headless::reducer::{
     Lifecycle, McpServer, Reducer, SessionContext, StreamEvent, TurnEnd, map_session_update,
@@ -1288,8 +1291,10 @@ pub async fn run_single_turn(
 
     let prompt_blocks = prompt.into_content_blocks();
 
+    let prompt_id = uuid::Uuid::new_v4().to_string();
     let prompt_meta = {
         let mut meta = serde_json::Map::new();
+        meta.insert("promptId".to_string(), prompt_id.clone().into());
         if verbatim {
             meta.insert("verbatim".to_string(), serde_json::Value::Bool(true));
         }
@@ -1308,6 +1313,9 @@ pub async fn run_single_turn(
     emitter.mark_prompt_started();
     let mut ttf_logged = false;
     let mut prompt_fut = Box::pin(acp_send(request, &acp_tx));
+    let ack_deadlines = PromptAckDeadlines::from_process_env();
+    let mut prompt_ack = Some(PromptAckWatch::new(&prompt_id, t_prompt));
+    let mut prompt_unacknowledged = false;
     let mut prompt_result = None;
     // Tracked regardless of wait_for_background so the exit reaper always sees running work.
     let mut pending_bg: HashSet<BackgroundWork> = HashSet::new();
@@ -1368,25 +1376,15 @@ pub async fn run_single_turn(
             Duration::from_secs(3600)
         };
 
+        let ack_deadline = prompt_ack
+            .as_ref()
+            .map(|watch| tokio::time::Instant::from_std(watch.hard_deadline(&ack_deadlines)))
+            .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600));
         tokio::select! {
             biased;
-            msg = acp_rx.recv() => {
-                let Some(msg) = msg else {
-                    emitter.on_error("Connection closed unexpectedly", None);
-                    connection_closed = true;
-                    break;
-                };
-                handle_headless_acp_message(
-                    msg.boxed(),
-                    &mut emitter,
-                    t_prompt,
-                    &mut ttf_logged,
-                    options.yolo,
-                    &mut pending_bg,
-                    &mut completed_bg,
-                );
-            }
+            // A terminal RPC is itself acknowledgment, even when a timeout is ready.
             res = &mut prompt_fut, if prompt_result.is_none() => {
+                prompt_ack = None;
                 prompt_result = Some(res);
                 prompt_done_at = Some(Instant::now());
                 if !options.wait_for_background {
@@ -1403,9 +1401,37 @@ pub async fn run_single_turn(
                     .await;
                     break;
                 }
-                // Drain now so a task_backgrounded around completion is recorded before the empty-check.
+                // Drain now so task_backgrounded around completion is not missed.
                 drain_pending_acp_messages(
                     &mut acp_rx,
+                    &mut emitter,
+                    t_prompt,
+                    &mut ttf_logged,
+                    options.yolo,
+                    &mut pending_bg,
+                    &mut completed_bg,
+                );
+            }
+            // A ready timeout must not be starved by unrelated ambient notifications.
+            _ = tokio::time::sleep_until(ack_deadline), if prompt_ack.is_some() => {
+                let cancellation = cancel_unacknowledged(&acp_tx, &session_id, &prompt_id).await;
+                let detail = cancellation.err().unwrap_or_else(|| "Cancellation requested for this prompt only.".into());
+                prompt_result = Some(Err(xai_acp_lib::acp_internal_error(format!(
+                    "prompt_ack_timeout: no acknowledgment received within {}s. {detail} The prompt may already have run; check running work before retrying. Nothing was resent.", ack_deadlines.hard.as_secs()
+                ))));
+                prompt_unacknowledged = true;
+                break;
+            }
+            msg = acp_rx.recv() => {
+                let Some(msg) = msg else {
+                    emitter.on_error("Connection closed unexpectedly", None);
+                    connection_closed = true;
+                    break;
+                };
+                let msg = msg.boxed();
+                if prompt_ack.is_some() && message_acks(&msg, &session_id, &prompt_id) { prompt_ack = None; }
+                handle_headless_acp_message(
+                    msg,
                     &mut emitter,
                     t_prompt,
                     &mut ttf_logged,
@@ -1442,7 +1468,11 @@ pub async fn run_single_turn(
         reap_pending_background_tasks(&pending_bg, &session_id, &acp_tx).await;
     }
 
-    crate::unified_log::flush_blocking().await;
+    if prompt_unacknowledged {
+        let _ = tokio::time::timeout(CANCEL_TIMEOUT, crate::unified_log::flush_blocking()).await;
+    } else {
+        crate::unified_log::flush_blocking().await;
+    }
 
     if track_active {
         // Non-blocking flock so a slow/network ~/.grok can't hang exit.

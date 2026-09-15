@@ -41,6 +41,16 @@ after entering the namespace to handle older util-linux launchers.
 
 ## Feature
 
+- Prompt acknowledgment recovery (adapted from upstream `37949780c1`): shared
+  first-receipt rules for TUI/headless, with a 120s default hard deadline and
+  a 10s TUI notice. `DSCODE_PROMPT_ACK_TIMEOUT_SECS` is bounded to 5–3600s;
+  missing/zero/invalid values keep the default. Queue receipt, live named
+  updates and terminal responses disarm the watch; model duration is unbounded.
+  Recovery preserves newer drafts/attachments/queue edits, never auto-resends,
+  keeps committed minimal scrollback and rejects late prompt IDs. Reconnect
+  retains its own lifecycle. Unlike upstream's legacy cancel metadata, dscode
+  uses the bridge's bounded `x.ai/session/cancel_prompt` request and warns on
+  old/unresponsive leaders without a session-wide fallback. No telemetry added.
 - Theme alias search and settings radio double-click (selectively ported from
   upstream `37949780c1`): the picker searches the same aliases the theme parser
   accepts and inserts canonical values. Only local theme variants are included;

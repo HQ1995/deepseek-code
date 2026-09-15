@@ -225,8 +225,29 @@ retries, never automatic resends after an uncertain timeout.
 Old leaders reject this method with method-not-found, safely leaving their queue
 intact. Clients must not retry it as legacy `session/cancel` with extra metadata:
 old bridges ignore that metadata and cancel the whole session queue. Legacy
-`session/cancel` retains its existing whole-session semantics. The TUI/headless
-acknowledgment watchdog is a separate follow-up, not enabled by this endpoint.
+`session/cancel` retains its existing whole-session semantics.
+
+The TUI/headless first-ack watchdog uses a 120s hard deadline. TUI displays a
+notice after 10s; `DSCODE_PROMPT_ACK_TIMEOUT_SECS` can tune the hard deadline to
+5–3600s (zero/invalid/missing values retain 120s; the notice is at most half the
+hard deadline). A matching queue row/running ID, live named update, terminal
+notification or prompt RPC response disarms it. Replay and unrelated activity
+do not count. Acknowledged model work has no deadline from this watchdog.
+
+On expiry, TUI retires only its local prompt view and restores the original
+composer content when safe; a newer image-free text draft is retained below it.
+New images, queue edits and interaction-owned input are not overwritten with
+the expired prompt. Committed native scrollback is not removed. The original
+prompt remains in the transcript when it cannot be restored. Late updates are
+discarded by the existing rewound-ID gates. Reconnect owns its own recovery.
+Cancellation confirmation is bounded to 2s; failure/old leaders display a warning.
+Headless emits `prompt_ack_timeout` and exits nonzero, with bounded cancellation
+and log flush. Neither surface automatically retries or claims non-execution.
+
+`node scripts/e2e-prompt-ack.mjs` exercises compiled headless and tmux clients
+against a local socket fixture (no model credentials). Set `DSCODE_TUI_BIN` to
+the built client and optionally `DSCODE_E2E_ACK_OUT` for its isolated artifacts.
+This complements, not replaces, real DSH acceptance.
 
 Session-picker cold reads share at most four open logs. Each response owns its
 projection snapshots so cache eviction cannot erase rows in a concurrent request.

@@ -1308,6 +1308,13 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::CancelUnacknowledgedPrompt { session_id, prompt_id } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let result = crate::app::prompt_ack::cancel_unacknowledged(&tx, &session_id, &prompt_id).await;
+                TaskResult::PromptAckCancelComplete { session_id, prompt_id, result }
+            });
+        }
         Effect::CancelTurn {
             session_id,
             cancel_subagents,

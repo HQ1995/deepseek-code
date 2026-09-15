@@ -8,6 +8,7 @@ mod modes;
 mod notes;
 mod permissions;
 mod prompt;
+mod prompt_ack;
 mod rewind;
 mod router;
 mod session;

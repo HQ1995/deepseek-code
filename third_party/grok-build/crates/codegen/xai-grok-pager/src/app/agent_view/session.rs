@@ -377,6 +377,7 @@ impl AgentView {
             deferred_send: None,
             pending_turn_end_reconcile: None,
             pending_cancel_resend: None,
+            prompt_ack: None,
             expect_send_now_cancel: None,
             front_message_committed: true,
             optimistic_queue_ids: std::collections::HashSet::new(),
@@ -425,12 +426,30 @@ impl AgentView {
     /// wall-max against a previous attempt's anchor in
     /// [`honest_turn_elapsed`].
     pub fn mark_turn_finished(&mut self) {
+        self.prompt_ack = None;
         self.turn_started_at = None;
         self.turn_paused_duration = std::time::Duration::ZERO;
         self.turn_paused_wall = std::time::Duration::ZERO;
         self.turn_start_ms = None;
         self.turn_start_ms_prompt = None;
         self.last_active_at = Some(Instant::now());
+    }
+    pub(crate) fn ack_prompt_if_named(&mut self, id: Option<&str>) {
+        if self
+            .prompt_ack
+            .as_ref()
+            .is_some_and(|watch| Some(watch.prompt_id()) == id)
+        {
+            self.prompt_ack = None;
+        }
+    }
+    pub(crate) fn arm_prompt_ack(&mut self, id: &str) {
+        if !self.chat_kind {
+            self.prompt_ack = Some(crate::app::prompt_ack::PromptAckWatch::new(
+                id,
+                Instant::now(),
+            ));
+        }
     }
     /// Absorb a closing/replaced question view's open span into the turn's
     /// pause totals, on both clocks — a close site that updated only the
@@ -601,6 +620,7 @@ impl AgentView {
     /// it. Deliberately NOT used by server-initiated synthetic turns
     /// (auto-wake / actor runs): they never call `start_turn`.
     pub(crate) fn start_turn_boundary(&mut self, starting_prompt_id: Option<&str>) {
+        self.prompt_ack = None;
         if self
             .expect_send_now_cancel
             .as_deref()

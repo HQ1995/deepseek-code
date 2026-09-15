@@ -27,6 +27,8 @@ mod native_controls;
 mod notes;
 mod permissions;
 mod prompt;
+mod prompt_ack;
+pub(crate) use prompt_ack::reconcile_overdue_prompt_acks;
 mod providers;
 mod queue;
 mod rewind;

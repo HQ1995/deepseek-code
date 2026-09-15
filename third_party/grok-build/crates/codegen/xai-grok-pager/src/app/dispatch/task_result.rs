@@ -554,6 +554,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             tracing::trace!("Cancel notification sent successfully");
             vec![]
         }
+        TaskResult::PromptAckCancelComplete {
+            session_id,
+            prompt_id,
+            result,
+        } => {
+            super::prompt_ack::cancel_complete(app, &session_id, &prompt_id, result);
+            vec![]
+        }
         TaskResult::ConsentPersistFailed { error } => {
             tracing::warn!(%error, "consent answer not persisted; the notice re-arms next launch");
             app.show_toast(
