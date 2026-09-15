@@ -3,8 +3,9 @@
 Candidate `5922e6a2134dd2ad14fbc5a054e56b7938340c98` adds the Linux subprocess
 settlement fixes to [image candidate `079a0d76`](runtime-image-candidate.md).
 It is an isolated local backport over pinned DSH `fb2c4b9e` (`0.1.5-rc.2`), not
-an adopted SDK pin or published runtime. Main product code and daily profiles
-are unchanged. Real Linux/user-systemd acceptance remains pending.
+an adopted SDK pin or published runtime. Its initial validation did not change
+main product code or daily profiles; the subsequent updater correction is
+recorded below. Real Linux/user-systemd acceptance remains pending.
 
 ## Refreshed scope
 
@@ -141,6 +142,16 @@ measurement. Graphical Kitty, physical Cmd-click, nonempty compaction and Linux
 native containment are outside its coverage. Main-checkout `scripts/check.sh`
 and `git diff --check` passed. Re-review found no additional failure within the
 executed coverage; it does not waive the Linux or source-distribution gates.
+
+## Subsequent updater acceptance
+
+The managed-update gate exposed an existing macOS staged-tree flush cost,
+including a Node 24 startup-repair timeout. The focused product correction and
+its independent source/package checks are recorded in
+[macOS updater durability cost](macos-update-durability.md). The rebuilt plugin
+differs only in `bin/update.mjs`; it uses the identical candidate runtime archive
+above. This does not change the native cancellation candidate, main SDK pin or
+the distinction between local validation and adoption.
 
 ## Remaining adoption gates
 

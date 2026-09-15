@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { accessSync, chmodSync, closeSync, constants, cpSync, createWriteStream, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { accessSync, chmodSync, closeSync, constants, cpSync, createWriteStream, existsSync, fsync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { promisify } from 'node:util'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -237,11 +238,34 @@ export const installationFilesMatch = (profile, packageName, version, expectedDs
 export const installationMatches = (profile, packageName, version, expectedDsh, tuiVersion) =>
   matchesInstallation(profile, packageName, version, expectedDsh, true, tuiVersion)
 const canonicalProfile = profile => existsSync(profile) ? realpathSync(profile) : join(realpathSync(dirname(profile)), basename(profile))
-const syncTree = path => {
-  const stat = lstatSync(path, { throwIfNoEntry: false })
-  if (!stat || stat.isSymbolicLink()) return
-  if (stat.isDirectory()) for (const name of readdirSync(path)) syncTree(join(path, name))
-  syncDirectory(path)
+const syncFd = promisify(fsync)
+const syncTrees = async paths => {
+  const levels = []
+  const visit = (path, depth) => {
+    const stat = lstatSync(path, { throwIfNoEntry: false })
+    if (!stat || stat.isSymbolicLink()) return
+    ;(levels[depth] ??= []).push(path)
+    if (stat.isDirectory()) for (const name of readdirSync(path)) visit(join(path, name), depth + 1)
+  }
+  for (const path of paths) visit(path, 0)
+  // macOS fsync includes a drive-cache flush. Bound concurrent descriptors to
+  // the default libuv pool size, while keeping children durable before parents.
+  for (const level of levels.reverse()) {
+    let next = 0, failure
+    const worker = async () => {
+      while (next < level.length && !failure) {
+        const path = level[next++]
+        try {
+          const fd = openSync(path, constants.O_RDONLY)
+          try { await syncFd(fd) } finally { closeSync(fd) }
+        } catch (error) { failure ??= error }
+      }
+    }
+    // Drain every admitted flush before rejecting: the caller may remove the
+    // staging tree and release its profile lock as soon as this settles.
+    await Promise.all(Array.from({ length: Math.min(4, level.length) }, worker))
+    if (failure) throw failure
+  }
 }
 const writeJournal = (stage, transaction) => atomicWrite(join(stage, 'transaction.json'), JSON.stringify(transaction) + '\n', 0o600)
 const validEntry = entry => typeof entry === 'string' && entry !== '' && !isAbsolute(entry)
@@ -372,14 +396,14 @@ export const saveUpdateChannel = (profile, channel) => withProfileLock(profile, 
 })
 
 /** Config commits last; ordinary failures restore every moved entry. Missing staged entries are deletions. */
-const commit = (profile, stage, entries) => {
+const commit = async (profile, stage, entries) => {
   if (entries.some(entry => !validEntry(entry)) || new Set(entries).size !== entries.length
     || entries.some(entry => entries.some(other => other.startsWith(entry + '/')))) throw new Error('invalid installation entries')
   const backup = join(stage, 'backup')
   mkdirSync(backup)
   const transaction = { schema: 1, profile: canonicalProfile(profile), pid: process.pid, state: 'pending',
     entries: entries.map(path => ({ path, existed: !!lstatSync(join(profile, path), { throwIfNoEntry: false }) })) }
-  for (const entry of entries) syncTree(join(stage, 'profile', entry))
+  await syncTrees(entries.map(entry => join(stage, 'profile', entry)))
   writeJournal(stage, transaction)
   try {
     for (const entry of transaction.entries) {
@@ -476,7 +500,7 @@ export const installRelease = async ({ profile, packageName, version, channel, a
     // Retarget the managed link before moving its plugin directory, so the
     // next invocation can still load recovery code from this transaction.
     healLauncherLink({ profile, packageName, sourceBin: dirname(fileURLToPath(import.meta.url)) })
-    commit(profile, stage, entries)
+    await commit(profile, stage, entries)
     }, runtime)
   } finally {
     // A failed rollback can leave the only good copy here. The next lock owner

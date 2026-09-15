@@ -10,6 +10,17 @@ import { fixtureEnvironment } from './fixtures/environment.ts'
 import { installationReport } from '../bin/doctor.mjs'
 import { commitInstallation, saveUpdateChannel, validateRuntime, withProfileLock } from '../bin/update.mjs'
 
+it.each(['success', 'failure'])('bounds staged flushes and preserves commit ordering on %s', mode => {
+  const root = mkdtempSync(join(tmpdir(), 'dscode-staged-sync-'))
+  try {
+    const child = spawnSync(process.execPath, [fileURLToPath(new URL('./fixtures/update-sync-worker.mjs', import.meta.url)), root, mode, new URL('../bin/update.mjs', import.meta.url).href], {
+      env: fixtureEnvironment(root), encoding: 'utf8', timeout: 15000,
+    })
+    expect(child.status, child.stderr).toBe(0)
+    expect(JSON.parse(child.stdout)).toMatchObject({ mode, maximum: 4, drained: true })
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 it.each(['unloadable addon', 'lazy addon failure', 'invalid native scope'])('uses an available runtime lock binding despite %s in the profile', async damage => {
   const root = mkdtempSync(join(tmpdir(), 'dscode-broken-binding-'))
   try {

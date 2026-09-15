@@ -518,6 +518,11 @@ acceptance passed, run 88327, including terminal interruption and interactive
 rewind. Four restored obsolete decisions made the corresponding regression
 tests fail; restoring the candidate passed again.
 
+Subsequent managed-update acceptance exposed the existing updater's serial
+macOS staged-tree flush cost. A [minimal product-side correction](macos-update-durability.md)
+retains every durability call and the transaction interface while bounding
+concurrent flushes and draining failures. The runtime archive itself is unchanged.
+
 These tests include mocked systemd observations and real macOS fallback
 processes, not real Linux scope validation. `swoop` workload approval and an
 exact-source distribution/adoption decision remain outstanding. The verified
