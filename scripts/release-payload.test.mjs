@@ -24,8 +24,22 @@ test('Mac product E2E uses private clipboard helpers, not the machine clipboard'
     assert.throws(() => run('osascript', ['-e', 'unexpected automation']));
     const script = readFileSync(fileURLToPath(new URL('./e2e-tui-bridge.sh', import.meta.url)), 'utf8');
     assert.match(script, /export DSCODE_CLIPBOARD_NO_NATIVE_READ=1 DSCODE_CLIPBOARD_NO_OSC52=1/);
-    assert.match(script, /e2e-macos-clipboard\.mjs.*SCRATCH\/e2e-bin/);
+    assert.match(script, /e2e-macos-clipboard\.mjs" "\$SCRATCH\/e2e-bin" 400/);
     assert.match(script, /Unexpected clipboard image in text-only draft/);
+  } finally { rmSync(bin, { recursive: true, force: true }); }
+});
+
+test('private clipboard can reproduce a write slower than the multi-click window', () => {
+  const bin = mkdtempSync(join(tmpdir(), 'dscode-slow-clipboard-fixture-'));
+  try {
+    for (const invalid of [-1, 1001, 0.5, NaN, '400']) {
+      assert.throws(() => prepareMacClipboard(bin, invalid), /copyDelayMs/);
+    }
+    prepareMacClipboard(bin, 400);
+    const started = performance.now();
+    execFileSync(process.execPath, [join(bin, 'pbcopy')], { input: 'slow private copy' });
+    assert.ok(performance.now() - started >= 400);
+    assert.equal(execFileSync(process.execPath, [join(bin, 'pbpaste')], { encoding: 'utf8' }), 'slow private copy');
   } finally { rmSync(bin, { recursive: true, force: true }); }
 });
 

@@ -129,7 +129,8 @@ if [[ "$(uname -s)" == Darwin ]]; then
   # A HOME/tmux sandbox does not isolate NSPasteboard. Disable native content
   # reads and route CLI fallbacks/copies to a private fixture; retain OSC8 tests.
   export DSCODE_CLIPBOARD_NO_NATIVE_READ=1 DSCODE_CLIPBOARD_NO_OSC52=1
-  "$NODE_BIN" "$ROOT/scripts/e2e-macos-clipboard.mjs" "$SCRATCH/e2e-bin"
+  # Exceed the 300ms multi-click window to catch clipboard-blocked triple clicks.
+  "$NODE_BIN" "$ROOT/scripts/e2e-macos-clipboard.mjs" "$SCRATCH/e2e-bin" 400
 fi
 mkdir -p "$SCRATCH/dsc-tui"
 cat >"$SCRATCH/dsc-tui/config.toml" <<'EOF'

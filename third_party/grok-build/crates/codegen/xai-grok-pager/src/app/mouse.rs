@@ -791,7 +791,9 @@ impl AgentView {
                                 };
                                 if handled {
                                     self.last_text_click = Some(TextClickState {
-                                        time: now,
+                                        // Selection can synchronously wait for the clipboard.
+                                        // Do not expire queued clicks during our own work.
+                                        time: Instant::now(),
                                         entry_idx: hit.entry_idx,
                                         range_id: hit.range_id,
                                         block_line_idx: hit.block_line_idx,

@@ -323,6 +323,11 @@ commands before capability discovery; they do not become model prompts.
   whitespace survives cell, grid and drag copy. Raw grids without source
   metadata keep the upstream wrap-join fallback. The streaming path retains
   frozen metadata and rebases the live tail after appends and width changes.
+- Text multi-click timing starts the next-click window after selection handling.
+  A synchronous clipboard write must not expire an already queued third click
+  and turn a full table-cell copy into a single rendered line. The macOS product
+  E2E injects a private 400ms clipboard write, longer than the 300ms click window;
+  copy ordering and the gesture timeout remain unchanged.
 - Selected upstream TUI fixes (2026-09-08; baseline remains `19d42e35c0`):
   - `9684fa3cdb`: coalesce Enter + Ctrl+J as one pasted CRLF, including a
     trailing newline, while preserving genuine Enter and standalone Ctrl+J.
