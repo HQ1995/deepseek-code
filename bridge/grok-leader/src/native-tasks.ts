@@ -25,6 +25,9 @@ interface TaskHost<T extends TaskSession> {
   output(registry: object, owner: Agent, id: string): string | undefined
   logger: { warn(message: string): void }
 }
+interface ScheduleProjections {
+  stateOf(session: Agent['session'], key: 'schedule'): ReturnType<typeof foldScheduleEvents> | undefined
+}
 const nonEmptyString = (value: unknown): value is string => typeof value === 'string' && value.length > 0
 
 /** Native task controls, reminder projection and passive job-output snapshots
@@ -51,10 +54,15 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
   const emitReminders = (record: T): void => {
     if (!isLive(record)) return
     const cached = reminderSnapshots.get(record)
-    const schedule = record.agent.ctx.get('sessionProjections')?.snapshot(record.agent.session, ['schedule']).values.schedule
-    const folded = cached === undefined || schedule === undefined ? foldScheduleEvents(record.agent.session.ownEvents()) : undefined
-    const active = schedule ?? folded!.active
-    const previous = cached ?? new Map<string, string>(folded!.seenIds.map(id => [id, '']))
+    // The native host state includes seen IDs as well as active reminders. The
+    // wire view alone forced a whole-history scan on every first snapshot.
+    const projections = record.agent.ctx.get('sessionProjections') as ScheduleProjections | undefined
+    const folded = projections?.stateOf(record.agent.session, 'schedule')
+      // Deferred compatibility path when the optional native Schedule unit is
+      // absent. Keep its exact behavior until bounded async seeding is adopted.
+      ?? foldScheduleEvents(record.agent.session.ownEvents())
+    const active = folded.active
+    const previous = cached ?? new Map<string, string>(folded.seenIds.map(id => [id, '']))
     const next = new Map<string, string>()
     for (const reminder of active) {
       const serialized = JSON.stringify(reminder)

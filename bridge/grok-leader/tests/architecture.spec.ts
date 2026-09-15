@@ -56,6 +56,17 @@ allEdges.get('src/package-location.ts')!.add('bin/update.mjs')
 runtimeEdges.get('src/package-location.ts')!.add('bin/update.mjs')
 
 describe('architecture ownership and dependency gate', () => {
+  it('reuses the host projection/schema packages instead of bundling duplicate runtime copies', () => {
+    const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>; peerDependencies: Record<string, string>; devDependencies: Record<string, string>; dsh: { testedVersion: string }
+    }
+    for (const [name, version] of [['@deepseek-ai/dsh-session-projection', manifest.dsh.testedVersion], ['zod', '^4.4.3']]) {
+      expect(manifest.dependencies[name!]).toBeUndefined()
+      expect(manifest.peerDependencies[name!]).toBe(version)
+      expect(manifest.devDependencies[name!]).toBe(version)
+    }
+  })
+
   it('preserves durable event vocabulary for consumers of the built public type entry', () => {
     // Deliberately consume emitted declarations, not src/index.ts: source
     // compilation includes every augmentation and can hide a missing type edge.
@@ -65,11 +76,13 @@ describe('architecture ownership and dependency gate', () => {
       import type {} from '../lib/types/index.js'
       import type { ToolResultContentBlock } from '../lib/types/index.js'
       import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
+      import type { SessionProjectionStateMap } from '@deepseek-ai/dsh-session-projection/types'
       const native: SessionEventMap['model/selection'] = { provider: 'native', model: 'model' }
       const legacy: SessionEventMap['dscode/model-selected'] = { provider: 'legacy', model: 'model' }
       const older: SessionEventMap['model/selected'] = { provider: 'older', model: 'model', reasoningEffort: 'high' }
       const content: ToolResultContentBlock = { type: 'content', content: { type: 'text', text: 'preserved' } }
-      void [native, legacy, older, content]
+      const preset: SessionProjectionStateMap['dscodePresetHistory'] = { selected: 'standard', locked: false }
+      void [native, legacy, older, content, preset]
     `
     const options: ts.CompilerOptions = { noEmit: true, skipLibCheck: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext, types: [] }
     const host = ts.createCompilerHost(options), read = host.getSourceFile.bind(host)
@@ -119,7 +132,8 @@ describe('architecture ownership and dependency gate', () => {
     ['session-registry', ['acp', 'session-work']],
     ['session-lifecycle', ['acp', 'mcp', 'prompt-queue', 'session-output', 'session-models', 'session-presets', 'session-registry', 'native-interactions', 'session-work', 'session-discovery', 'projection']],
     ['session-models', ['acp', 'model-catalog', 'session-migration']],
-    ['session-presets', ['acp', 'model-catalog']],
+    ['session-presets', ['acp', 'model-catalog', 'preset-history']],
+    ['preset-history', []],
     ['session-output', ['projection', 'image-output']],
     ['native-tasks', ['acp', 'reminders', 'session-output', 'session-work', 'job-output']],
     ['native-children', ['acp', 'child-history', 'workflows', 'prompt-content', 'projection', 'session-output', 'session-work', 'image-output']],
@@ -136,6 +150,31 @@ describe('architecture ownership and dependency gate', () => {
     // not use a Cordis runtime or receive the host context as a dependency bag.
     if (name === 'session-models' || name === 'session-presets') expect([...runtimeExternals.get('src/' + name + '.ts')!]).not.toContain('@deepseek-ai/cordis')
     else if (!['profile-plugins', 'native-tasks'].includes(name)) expect([...externals.get('src/' + name + '.ts')!]).not.toContain('@deepseek-ai/cordis')
+  })
+
+  it('allows only the explicitly deferred synchronous Session readers, never new dependencies', () => {
+    const deprecated = new Set(['snapshotEvents', 'eventAt', 'ownEvents'])
+    const reads: Record<string, number> = {}
+    for (const [path, source] of sources) {
+      const visit = (node: ts.Node) => {
+        const name = ts.isPropertyAccessExpression(node) ? node.name.text
+          : ts.isElementAccessExpression(node) && ts.isStringLiteral(node.argumentExpression) ? node.argumentExpression.text : undefined
+        if (name !== undefined && deprecated.has(name)) {
+          const key = path + ':' + name
+          reads[key] = (reads[key] ?? 0) + 1
+        }
+        ts.forEachChild(node, visit)
+      }
+      visit(source)
+    }
+    // Remove entries as their owners migrate. Do not copy these exceptions to
+    // new callers or conceal a complete log read behind a synchronous alias.
+    expect(reads).toEqual({
+      'src/native-children.ts:snapshotEvents': 2, // live child pages and interruption overview
+      'src/session-lifecycle.ts:snapshotEvents': 3, // reload, fork and rewind
+      'src/workflows.ts:snapshotEvents': 1, // bounded incremental seed/tail
+      'src/native-tasks.ts:ownEvents': 1, // optional Schedule projection absence
+    })
   })
 
   it('does not move socket/provider/queue engines or mutable registries back into composition', () => {

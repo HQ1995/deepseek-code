@@ -269,6 +269,13 @@ external editor; shipped entries can be read or copied. Replies use the existing
 session and modal nonce checks, so a dismissed or rebound session cannot open an
 editor from a stale reply. Copies and file edits leave live compositions intact.
 
+Live preset selection reads the host-only `dscodePresetHistory` projection,
+registered through the native `sessionProjections` service before the bridge
+accepts clients. It preserves the existing model-visible-history lock and latest
+valid selection across resume/fork, without retaining transcript bodies. Missing
+policy state fails closed; it does not fall back to a synchronous log scan. The
+native projection registry owns restore, incremental updates and cache lifetime.
+
 ## Persistent terminal controls and runtime diagnostics
 
 `deliverables/presented` events project to Markdown file links through the

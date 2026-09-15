@@ -4,6 +4,7 @@ import type {} from '@deepseek-ai/dsh-agent-presets'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams, paramRecord } from './acp.ts'
 import type { SettingsLike } from './model-catalog.ts'
+import { presetHistory, type PresetHistory } from './preset-history.ts'
 
 /**
  * English display copy for the four shipped (system) agent presets, mirrored
@@ -97,6 +98,8 @@ interface PresetHost<S extends PresetSession> {
   owned(clientId: number, id: SessionId | undefined): S | undefined
   isLive(record: S): boolean
   flush(session: Agent['session']): Promise<unknown>
+  /** Already-maintained state at the native Session cursor. */
+  history(record: S): PresetHistory
 }
 interface State { closed: boolean; changing: boolean; inconsistent: boolean; pending: Set<Promise<unknown>>; disposal?: Promise<void> }
 interface PreparedPreset<S> {
@@ -107,17 +110,6 @@ interface PreparedPreset<S> {
   commit(record: S): Promise<void>
 }
 const lockedMessage = 'agent-preset-locked: a preset can only be changed before the session has produced history'
-function historyPreset({ header, events }: History): string | undefined {
-  for (let index = events.length - 1; index >= 0; index--) {
-    const event = events[index]
-    if (event?.type !== 'agent-preset/selected') continue
-    const selected = (event.data as { agentPreset?: unknown }).agentPreset
-    if (typeof selected === 'string' && selected.length > 0) return selected
-  }
-  return header.agentPreset
-}
-const locked = (events: readonly SessionEvent[]) => events.some(event =>
-  event.type === 'user/message' || event.type === 'assistant/message' || event.type === 'tool/result')
 const busy = (record: PresetSession) => record.queue.busy || record.agent.status === 'running'
 
 /** Owns preset selection, composition rollback, durable/default writes and
@@ -185,14 +177,14 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
     return { agentPreset: resolved.id, mount: (ctx: Context) => run(async () => { await roster.mount(ctx, resolved.id); assertOpen() }) }
   }
   const current = (roster: AgentPresetsLike | undefined, record: S) => roster?.composedPreset?.(record.agent.ctx)
-    ?? historyPreset({ header: record.agent.session.header, events: record.agent.session.snapshotEvents() })
+    ?? host.history(record).selected ?? undefined
   const swap = async (roster: AgentPresetsLike, record: S, target: string, previous: string | undefined) => {
     assertLive(record)
-    if (busy(record) || locked(record.agent.session.snapshotEvents())) throw invalidParams(lockedMessage)
+    if (busy(record) || host.history(record).locked) throw invalidParams(lockedMessage)
     await roster.recompose(record.agent.ctx, target)
     try {
       assertLive(record)
-      if (busy(record) || locked(record.agent.session.snapshotEvents())) throw invalidParams(lockedMessage)
+      if (busy(record) || host.history(record).locked) throw invalidParams(lockedMessage)
       record.agent.session.append('agent-preset/selected', { agentPreset: target })
     } catch (error) {
       if (previous !== undefined) {
@@ -223,9 +215,10 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
         // Reselecting a live preset still reloads/disposes its agent.
         if (explicitPreset !== undefined && busy(live)) throw invalidParams('agent-preset-locked: cannot change preset while a turn is running')
       }
-      const previous = live === undefined ? historyPreset(request.source) : current(roster, live)
+      const history = live === undefined ? presetHistory(request.source.header, request.source.events) : host.history(live)
+      const previous = live === undefined ? history.selected ?? undefined : current(roster, live)
       const switching = explicitPreset !== undefined && explicitPreset !== previous
-      if (switching && locked(live?.agent.session.snapshotEvents() ?? request.source.events)) throw invalidParams(lockedMessage)
+      if (switching && history.locked) throw invalidParams(lockedMessage)
       selected = explicitPreset ?? previous
       appendOnCommit = switching && live === undefined
     }
@@ -282,7 +275,7 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
     if (resolved === undefined) throw invalidParams('Unknown preset "' + requested + '".')
     const previous = current(roster, record)
     if (previous !== resolved) {
-      if (busy(record) || locked(record.agent.session.snapshotEvents())) throw invalidParams(lockedMessage)
+      if (busy(record) || host.history(record).locked) throw invalidParams(lockedMessage)
       await swap(roster, record, resolved, previous)
     }
     assertLive(record)

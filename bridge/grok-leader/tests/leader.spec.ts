@@ -15,6 +15,7 @@ import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { createAssistantMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-attachment'
 import { SessionId, SessionLogOffset, SessionSeq, type SessionEvent, type UserMessage } from '@deepseek-ai/dsh-session'
+import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import { SessionFormatUnsupportedError, SessionPersistenceRevision, sessionFormatVersionRefusal, type SessionAccess, type SessionHandle, type SessionPersistenceSnapshot } from '@deepseek-ai/dsh-session-persistence'
@@ -132,6 +133,7 @@ function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry {
         id: sessionId,
         header: { id: sessionId, version: 0, isSeeded: false, createdAt: 0, ...cwd === undefined ? {} : { cwd }, ...agentPreset === undefined ? {} : { agentPreset } },
         get seq() { return events.length },
+        eventAt(seq: number) { return events[seq] },
         snapshotEvents(from = 0, to = events.length) { return events.slice(from, to) },
         ownEvents() { return [...events] },
         append(type: string, data: unknown) {
@@ -531,11 +533,11 @@ async function makeHarness(
   if (options.subagents !== undefined) ctx.provide('subagents', options.subagents as never)
   if (options.goals !== undefined) ctx.provide('goals', options.goals as never)
   if (options.jobs !== undefined) Object.assign(new (class extends Service {})(ctx, 'jobs'), options.jobs)
-  if (options.sessionProjections !== undefined) ctx.provide('sessionProjections', options.sessionProjections as never)
   if (options.sessionTitle !== undefined) ctx.provide('sessionTitle', options.sessionTitle as never)
   if (options.sessionQuery !== undefined) ctx.provide('sessionQuery', options.sessionQuery as never)
   ctx.provide('sessionPersistence', persistence as unknown as Context['sessionPersistence'])
   ctx.provide('sessions', (options.sessionsStore ?? mockSessionsStore) as unknown as Context['sessions'])
+  Object.assign(new SessionProjectionRegistry(ctx), options.sessionProjections)
   if (presets !== undefined) Object.assign(new (class extends Service {})(ctx, 'agentPresets'), presets)
   ctx.provide('agentDefaultModel', mockDefaultModel as unknown as Context['agentDefaultModel'])
   ctx.provide('appExit', mockAppExit.exit)

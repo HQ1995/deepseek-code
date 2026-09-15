@@ -268,6 +268,37 @@ describe('native task ownership', () => {
     await f.tasks.dispose()
   })
 
+  it('uses native host projection state including deleted IDs without a first-snapshot history scan', async () => {
+    const f = fixture(), every = createEveryScheduleRecord(ScheduleId('repeat'), 'again', 300, 1000)
+    let projected = { active: [every], seenIds: [ScheduleId('once'), every.id] }
+    const stateOf = vi.fn(() => projected)
+    vi.spyOn(f.owner.agent.ctx, 'get').mockReturnValue({ stateOf } as never)
+    const history = vi.spyOn(f.owner.agent.session, 'ownEvents').mockImplementation(() => { throw new Error('must use maintained schedule state') })
+    f.tasks.snapshot(f.owner); f.tasks.snapshot(f.owner)
+    expect(history).not.toHaveBeenCalled()
+    expect(stateOf).toHaveBeenCalledWith(f.owner.agent.session, 'schedule')
+    expect(f.owner.output.notify).toHaveBeenCalledTimes(2)
+    expect(f.owner.output.notify.mock.calls.map(call => (call[1] as { update: { task_id: string } }).update.task_id)).toEqual(['repeat', 'once'])
+    projected = { ...projected, active: [] }
+    f.tasks.observe(f.owner, { type: 'schedule/change' } as SessionEvent)
+    f.tasks.snapshot(f.owner)
+    expect(f.owner.output.notify).toHaveBeenCalledTimes(3)
+    expect(f.owner.output.notify).toHaveBeenLastCalledWith('x.ai/session_notification', { update: {
+      sessionUpdate: 'scheduled_task_deleted', task_id: 'repeat', reason: 'deleted',
+    } }, { nativeSchedule: true })
+    await f.tasks.dispose()
+  })
+
+  it('does not resurrect inherited reminders excluded by the native projection', async () => {
+    const f = fixture()
+    const inherited = createAfterScheduleRecord(ScheduleId('parent'), 'parent only', 600, 1000)
+    f.append({ version: 1, operation: 'create', schedule: inherited })
+    vi.spyOn(f.owner.agent.ctx, 'get').mockReturnValue({ stateOf: () => ({ active: [], seenIds: [] }) } as never)
+    f.tasks.snapshot(f.owner)
+    expect(f.owner.output.notify).not.toHaveBeenCalled()
+    await f.tasks.dispose()
+  })
+
   it('parses reminder controls through the native tools without changing the prompt', async () => {
     const f = fixture()
     const cases = [

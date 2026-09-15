@@ -10,9 +10,11 @@ import { createSessionDiscovery, type SessionQueryLike } from './session-discove
 import { createNativeInteractions } from './native-interactions.ts'
 import { createSessionLifecycle, type SessionRecord } from './session-lifecycle.ts'
 import { createSessionPresets, type AgentPresetsLike } from './session-presets.ts'
+import { presetHistoryProjection } from './preset-history.ts'
 import { createSessionModels } from './session-models.ts'
 // Keep durable event augmentations reachable through the published type entry.
 export type {} from './session-models.ts'
+export type {} from './preset-history.ts'
 import { createNativeSessionStatus, type NativeStatusProjections, type NativeGoalAuthority } from './native-session-status.ts'
 import { createNativeChildren } from './native-children.ts'
 import { createNativeTasks } from './native-tasks.ts'
@@ -66,8 +68,8 @@ export type { DecodeSpeed, GrokSessionUpdate, ProjectedUpdate, StopReasonWire, T
 export type { ToolResultContentBlock } from './projection.ts'
 
 export const name = 'grok-leader'
-/** The bridge cannot accept clients until agents and durable session discovery are ready. */
-export const inject = ['agents', 'sessionPersistence', 'attachments']
+/** Agents, maintained policy state and durable discovery must exist before accepting clients. */
+export const inject = ['agents', 'sessionPersistence', 'sessionProjections', 'attachments']
 
 /** Plugin config: socket path and the provider/model selection used for created agents. */
 export interface GrokLeaderConfig {
@@ -136,6 +138,7 @@ interface SessionsLike {
  */
 export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const agents = ctx.agents
+  ctx.sessionProjections.register(presetHistoryProjection)
   protectTerminalSignals(ctx)
   const jobOutput = observeJobOutputs(ctx)
   const projectImages = createImageOutputProjector(ctx)
@@ -173,6 +176,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     roster: agentPresets, settings, owned: registry.owned,
     isLive: record => !registry.closed && registry.ownedAgent(record.agent) === record,
     flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),
+    history: record => {
+      const state = ctx.sessionProjections.stateOf(record.agent.session, 'dscodePresetHistory')
+      if (state === undefined) throw internalError('preset history projection is unavailable')
+      return state
+    },
   })
   const transport = createLeaderTransport({
     socketPath: config.socketPath ?? '/tmp/dsh-grok-leader.sock',

@@ -3,6 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { createSessionPresets, type AgentPresetsLike } from '../src/session-presets.ts'
+import { presetHistory } from '../src/preset-history.ts'
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void
@@ -13,6 +14,7 @@ const event = (type: string, data: unknown = {}) => ({ type, data, seq: 0, time:
 function fixture() {
   const order: string[] = [], sessions = new Map<string, { clientId: number; agent: Agent; queue: { busy: boolean } }>()
   const choices = new Map<Context, string>()
+  const histories = new WeakMap<Agent, { header: { agentPreset: string }; events: SessionEvent[] }>()
   const entries = [
     { id: 'standard', name: '标准', trust: 'system' as const },
     { id: 'minimal', name: '极简', trust: 'system' as const },
@@ -40,6 +42,7 @@ function fixture() {
   let availableSettings: typeof settings | undefined = settings
   const host = {
     roster: () => availableRoster, settings: () => availableSettings, flush,
+    history: (record: { agent: Agent }) => { const source = histories.get(record.agent)!; return presetHistory(source.header, source.events) },
     isLive: (record: { agent: Agent }) => sessions.get(record.agent.session.id) === record,
     owned: (clientId: number, id: SessionId | undefined) => { const record = sessions.get(String(id)); return record?.clientId === clientId ? record : undefined },
   }
@@ -50,7 +53,8 @@ function fixture() {
       order.push('append:' + (data as { agentPreset: string }).agentPreset)
       const next = event(type, data); events.push(next); return next
     })
-    const agent = { id, ctx, status: 'idle', session: { id: SessionId(id), header, snapshotEvents: () => events, append } } as unknown as Agent
+    const agent = { id, ctx, status: 'idle', session: { id: SessionId(id), header, snapshotEvents: () => { throw new Error('preset controls must not read history') }, append } } as unknown as Agent
+    histories.set(agent, { header, events })
     const record = { clientId: 1, agent, queue: { busy: false } }
     sessions.set(id, record); choices.set(ctx, preset)
     return { record, events, append, ctx, source: { header, events } }
@@ -118,6 +122,13 @@ describe('session preset ownership', () => {
     const { record, source } = f.add()
     record.queue.busy = true
     await expect(f.presets.prepare({ kind: 'load', live: record, source, meta: { agentPreset: 'standard' } })).rejects.toThrow('while a turn is running')
+    expect(f.roster.recompose).not.toHaveBeenCalled()
+  })
+
+  it('rejects a missing projection before recomposition instead of falling back to a log scan', async () => {
+    const f = fixture(), { record } = f.add()
+    f.host.history = () => { throw new Error('preset history projection is unavailable') }
+    await expect(f.presets.command(record, '/preset minimal')).rejects.toThrow('projection is unavailable')
     expect(f.roster.recompose).not.toHaveBeenCalled()
   })
 

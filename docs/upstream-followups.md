@@ -157,8 +157,85 @@ Validation on macOS arm64:
   `git diff --check` passed. Existing unrelated formatting differences were
   preserved. No daily profile, package version, DSH pin, remote or release changed.
 
-History-read migration and the independently validated Linux/systemd runtime
-candidate remain pending; this completes only the first-ack client slice.
+This completes only the first-ack client slice. History migration follows below;
+the independently validated Linux/systemd runtime candidate remains pending.
+
+## Execution: history state migration
+
+Live preset selection/locking no longer reads arbitrary Session history. Its
+host-only `dscodePresetHistory` definition folds only the current valid preset
+and the existing model-visible-history lock. Native `sessionProjections` owns
+restoration, incremental updates and cache lifetime; the bridge now declares
+that service dependency before opening its socket. Cold load/fork folds the
+source it already owns through the same policy. Missing policy state fails
+closed, and the pre/post-recomposition checks and rollback/drain behavior remain.
+The different native preset selector's turn-boundary policy was not substituted
+for dscode's existing user/assistant/tool-result history gate.
+
+Reminder snapshots now read the native Schedule host state, which includes both
+active reminders and previously used IDs. This avoids a first-snapshot full-log
+scan when that projection exists, without resurrecting inherited reminders or
+losing deleted-ID notifications. The existing `ownEvents` fallback remains only
+for absence of the optional Schedule projection; it is not claimed migrated.
+
+The codebase-design skill kept policy behind a small interface, with its pure
+definition separate from bridge composition. The native registry is reused;
+no parallel event cache or new history-reader wrapper was introduced. The
+projection package is an exact-version host peer/dev dependency, not bundled.
+Zod is also declared as a host peer/dev dependency for the persisted-state
+schema: review caught that bundling a duplicate would increase this archive
+from 1.44 MB to 2.61 MB, despite the pinned runtime already supplying it.
+DSH remains pinned.
+
+Validation on macOS arm64:
+
+- Pinned-SDK TypeScript build and frozen/offline lockfile validation passed.
+  Full suites on Node 22.19.0 and 24.19.0 each passed 47 files / 876 tests,
+  including the compiled CLI. The dependency gate explicitly accounts for the
+  new pure module and checks the built type entry's projection augmentation.
+- Native Session/SessionProjectionRegistry tests verify live, resumed and
+  inherited-fork parity, a rewind prefix before conversation history, remount
+  invalidation, persisted state and the unchanged wire shape. A warmed
+  projection processed 1,000 unrelated live events with
+  zero `snapshotEvents` or `eventAt` calls; this is an operation-count check,
+  not an end-to-end latency or memory benchmark. Preset control tests forbid
+  raw history reads and retain retirement/recomposition race coverage.
+- Isolated plugin SHA-256
+  `be48eb7bccc0ffb676ea77d91daf65dac8c5519543dfed19f16b06ff27e759fa`;
+  all 135 source/compiled/bin/preset files matched the checkout/build. The prior
+  five runtime peers, the new projection peer and Zod remain unbundled. The
+  final archive is 1,442,880 bytes, only 1,600 bytes above the baseline.
+- Full real installed TUI/DSH E2E passed without scenario-only flags, run 53103:
+  `/tmp/dsc-follow-work.nYBS9C/history/peer/full.log`, with contracts at
+  `/tmp/dsc-follow-work.nYBS9C/history/final/contracts-53103/PASS.json`.
+  The outer scenarios cover isolated installation, persistent headless fork,
+  resume, streaming, editor/paste/copy and live UI-mode switching; the runtime
+  contracts include goals, native children/workflows, live/restarted reminders,
+  permission controls, native history queries, theme/settings,
+  presets/LSP, archives, terminal/Python and owner-isolated interruption.
+  The `/compact` route is checked on empty history, not a nonempty compaction.
+  Interactive root rewind remains unit/protocol-tested, not exercised by this
+  installed run. Graphical Kitty, physical Cmd-click and Linux were not
+  exercised. TUI is unchanged from the
+  verified watchdog hash above; the runtime run uses Node 24.19.0.
+- Script tests passed 37 cases with one Linux-only skip; `scripts/check.sh` and
+  `git diff --check` passed. No daily profile, version,
+  runtime pin, remote branch or release changed.
+
+Seven production reader calls still require migration: lifecycle reload/fork/
+rewind (3), child history/interruption (2), incremental workflow indexing (1),
+and missing-Schedule fallback (1). The architecture gate permits exactly these
+references and rejects growth. The assessment's original count included a
+`snapshotEvents` interface declaration: the starting implementation actually
+had 11 snapshot calls plus one `ownEvents` call; five preset calls are now gone.
+
+Next: explicit storage snapshots for full-history lifecycle operations, with
+the reload borrow held across awaited capture; bounded reads for requested
+history; then workflow/optional-Schedule state seeding. The pinned query engine
+was inspected: `readEvent` calls its full-log corpus loader before selecting a
+window, so replacing live bounded pages with that method would not preserve
+their cost bound. Neither this SDK observation nor a green state migration
+completes the remaining reader work or the Linux/systemd validation gate.
 
 ## DSH
 
@@ -195,7 +272,7 @@ runtime: retain exact source provenance and release-shaped validation.
    Upstream now deprecates `eventAt`, `snapshotEvents`, and `ownEvents`; its
    [policy and current implementation](https://github.com/deepseek-ai/deepseek-harness/blob/c291e7961a515f6d7af9304e7fd1d257929aef26/.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md)
    explicitly retain old callers and the complete in-memory log for now.
-   Local production source has 12 `snapshotEvents(...)` call sites, principally
+   The initial source inventory found synchronous readers, principally
    [preset guards](../bridge/grok-leader/src/session-presets.ts),
    [load/fork/rewind](../bridge/grok-leader/src/session-lifecycle.ts),
    [children](../bridge/grok-leader/src/native-children.ts), and
