@@ -416,10 +416,60 @@ Validation on macOS arm64:
 - Script tests passed 37 cases with one Linux-only skip. `scripts/check.sh` and
   `git diff --check` passed.
 
-Two production readers remain: the bounded incremental workflow seed/tail and
-optional Schedule fallback. Linux/systemd, native image estimator and disposable
-image-cache follow-ups also remain; no SDK pin, version or daily profile changes
-are included in this slice.
+At this checkpoint, two production readers remained: the bounded incremental
+workflow seed/tail and optional Schedule fallback. They are handled below.
+
+## Execution: workflow state and optional Schedule history
+
+The final two direct synchronous readers have been removed. Workflow history is
+now a host-only `dscodeWorkflows` definition driven by the pinned native projection
+registry. Its JSON state preserves run/member ordering, duplicate-name identity,
+fork inheritance, restart/replay and checkpoint reconstruction, while unrelated
+events reuse the existing state. Live descriptions, phases and elapsed times stay
+outside durable state. No parallel bridge-owned event cursor or full transcript
+cache remains, and child views still precede visible workflow membership.
+
+Schedule continues to prefer the official host projection synchronously. Only
+optional-capability absence uses async durable storage: the source/cursor is fixed
+before awaiting a flush, reads are serialized per owner, pages contain at most 256
+events, inherited changes are excluded, and only selected Schedule changes are
+retained for the official `foldScheduleEvents`. Empty own history needs no read.
+Native state is rechecked before reading and before publication so an older
+fallback cannot resurrect deleted reminders after the native unit becomes
+available. Initialization waits for the actual read/close; cancellation drains
+accepted work and suppresses late notifications. Decode/read errors remain errors.
+
+Verification on macOS arm64:
+
+- TypeScript build passed. Node 22.19.0 and 24.19.0 each passed 47 files / 923 tests.
+  New coverage includes native-registry replay/checkpoint parity, 10,000 unrelated
+  appends with no warm synchronous reads, same-version invalid checkpoint rejection,
+  ordered fallback cuts, inherited same-ID reminders, native-state takeover,
+  retry after read failure, and cancellation/drain during initialization.
+- The optional-Schedule test runs the real discovery reader over 1,002 fixture
+  events: read sizes are 256/256/256/234, exactly one own Schedule change survives,
+  and the read handle closes. This is bounded-read/semantic evidence, not a
+  filesystem throughput benchmark.
+- The architecture gate now permits zero production property/element references
+  to `snapshotEvents`, `eventAt` or `ownEvents`. The pinned SDK may still use them
+  internally and retain the full log. No RSS or latency improvement is claimed.
+- Fresh release-shaped plugin: 1,447,608 bytes, SHA-256
+  `dc2b95b55686e14d2178b1ae7685d712f3653c549bde57d420b8c8d59f07e8ff`;
+  all 135 source/compiled/preset files matched the current build. Host peers and
+  Zod stayed unbundled, and installed source/lib directories matched exactly.
+  Package: `/tmp/dsc-follow-work.nYBS9C/projections/final/hqzhao95-dscode-0.0.14-alpha.12.tgz`.
+- Full installed macOS regression passed (run `5001`), including two same-name
+  workflows and restored children, live/deleted/recurring/restarted reminders,
+  native goal/task controls, live/fork/rewind history, archives, real LSP, shell
+  and Python REPL. Receipt:
+  `/tmp/dsc-follow-work.nYBS9C/projections/final/e2e/contracts-5001/PASS.json`.
+  Graphical Kitty, physical Cmd-click, nonempty compaction and Linux remain
+  outside this run's validation.
+- Script contracts passed 37 cases with one Linux-only skip; `scripts/check.sh`
+  and `git diff --check` passed.
+
+Linux/systemd, the native image estimator and disposable image-cache follow-ups
+remain. There is no SDK pin, version, daily-profile update or upstream push here.
 
 ## DSH
 
@@ -460,12 +510,12 @@ runtime: retain exact source provenance and release-shaped validation.
    [preset guards](../bridge/grok-leader/src/session-presets.ts),
    [load/fork/rewind](../bridge/grok-leader/src/session-lifecycle.ts),
    [children](../bridge/grok-leader/src/native-children.ts), and
-   [the incremental workflow index](../bridge/grok-leader/src/workflows.ts).
+   [workflow history](../bridge/grok-leader/src/workflows.ts).
    Avoid adding new synchronous-history dependencies. Migrate ordinary state
    checks to maintained projections first; use bounded asynchronous history
    reads for requested content, with explicit full-history reads only where
-   fork/replay really requires them. Existing bounded workflow reads and cold
-   persistence handles are useful foundations, not a completed migration.
+   fork/replay really requires them. The execution slices above complete the
+   direct-reader migration in production bridge code on the existing SDK pin.
    Verify live/resumed parity, cancellation/drain ownership, fork inheritance,
    and large-history behavior. No present API removal or measured memory gain is
    claimed; a wholesale rewrite now would exceed this upstream change.

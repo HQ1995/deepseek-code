@@ -8,7 +8,7 @@ import type { SessionInspection, SessionPersistence } from '@deepseek-ai/dsh-ses
 import type { SubagentRuntime, SubagentPromptRequestId } from '@deepseek-ai/dsh-subagent'
 import { invalidParams, internalError, paramRecord } from './acp.ts'
 import { ChildHistoryIndex, CHILD_HISTORY_PAGE_SIZE, type ChildEventReader } from './child-history.ts'
-import { WorkflowIndex, type LiveWorkflow } from './workflows.ts'
+import { workflowUpdates, type WorkflowHistory, type LiveWorkflow } from './workflows.ts'
 import { parsePrompt } from './prompt-content.ts'
 import { sessionEventToUpdates, textBlocks, type GrokSessionUpdate, type ProjectedUpdate } from './projection.ts'
 import type { SessionOutput } from './session-output.ts'
@@ -34,6 +34,7 @@ interface ChildHost<S extends ChildSession> {
   owned(clientId: number, sessionId: SessionId | undefined): S | undefined
   agent(sessionId: SessionId): Agent | undefined
   subagents(record: S): unknown
+  workflow(record: S): WorkflowHistory
   persistence(): Pick<SessionPersistence, 'open' | 'stat'> | undefined
   flush(session: Agent['session']): Promise<unknown>
   projectImages(event: SessionEvent, updates: ProjectedUpdate[]): Promise<ProjectedUpdate[]>
@@ -86,12 +87,9 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
   }
   type ChildRow = { kind: 'child' | 'diagnostic'; id: string; mode?: 'continuable' | 'one-shot'; label?: string; parentId?: string }
   const liveWorkflows = new Map<string, LiveWorkflow>()
-  const workflowIndexes = new WeakMap<S, WorkflowIndex>()
   const emitWorkflows = (record: S, replay = false, runId?: string): void => {
     if (!isLive(record)) return
-    let index = workflowIndexes.get(record)
-    if (index === undefined) { index = new WorkflowIndex(); workflowIndexes.set(record, index) }
-    for (const update of index.updates(record.agent.session, liveWorkflows, Date.now(), runId)) {
+    for (const update of workflowUpdates(host.workflow(record), liveWorkflows, Date.now(), runId)) {
       // A visible member must already have a native child view: otherwise an
       // immediate Enter is lost before subagent_spawned reaches the pager.
       if (update.agents.some(agent => workflowChildDiscovery.get(record)?.ids.has(agent.agent_id))) continue
@@ -103,14 +101,14 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     const run = liveWorkflows.get(info.id)
     if (run === undefined) return
     run.phase = phase
-    for (const record of host.sessions.values()) if (workflowIndexes.get(record)?.has(info.id)) emitWorkflows(record, false, info.id)
+    for (const record of host.sessions.values()) emitWorkflows(record, false, info.id)
   })
   on('workflow/end', info => {
     liveWorkflows.delete(info.id)
     // The tool appends run-end as its awaited native result settles.
     const timer = setTimeout(() => {
       deferredWorkflowEnds.delete(timer)
-      if (!closed) for (const record of host.sessions.values()) if (workflowIndexes.get(record)?.has(info.id)) emitWorkflows(record, false, info.id)
+      if (!closed) for (const record of host.sessions.values()) emitWorkflows(record, false, info.id)
     }, 0)
     deferredWorkflowEnds.add(timer)
   })

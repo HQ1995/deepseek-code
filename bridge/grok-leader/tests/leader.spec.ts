@@ -133,6 +133,7 @@ function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry {
         id: sessionId,
         header: { id: sessionId, version: 0, isSeeded: false, createdAt: 0, ...cwd === undefined ? {} : { cwd }, ...agentPreset === undefined ? {} : { agentPreset } },
         get seq() { return events.length },
+        inheritedEventCount: SessionLogOffset(0),
         eventAt(seq: number) { return events[seq] },
         snapshotEvents(from = 0, to = events.length) { return events.slice(from, to) },
         ownEvents() { return [...events] },
@@ -1773,23 +1774,23 @@ describe('grok leader over a unix socket', () => {
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
     const agent = registry.byId.get(sessionId)!
-    const settle = (seq: number, step: number, startTime: number, firstToken: number, messageTime: number, outputTokens: number) => {
-      pluginCtx.emit('session/event', agent.session, {
-        type: 'step/start', seq, time: startTime, data: { turn: 1, step },
-      } as never)
-      pluginCtx.emit('session/event', agent.session, {
-        type: 'assistant/message', seq: seq + 1, time: messageTime, data: {
+    const settle = (step: number, startTime: number, firstToken: number, messageTime: number, outputTokens: number) => {
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(startTime)
+      try {
+        pluginCtx.emit('session/event', agent.session, agent.session.append('step/start', { turn: 1, step } as never))
+        clock.mockReturnValue(messageTime)
+        pluginCtx.emit('session/event', agent.session, agent.session.append('assistant/message', {
           turn: 1, step,
           stream: [{ type: 'chunk', time: firstToken, chunk: { type: 'text-delta', index: 0, text: 'ok' } }],
           message: createAssistantMessage({ content: [{ type: 'text', text: 'ok' }], source: { provider: 'deepseek', model: 'chat' } }),
           usage: { inputTokens: 1, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0 },
-        },
-      } as never)
+        } as never))
+      } finally { clock.mockRestore() }
     }
     // 40 tokens over the 800ms after the first token, then 10 over the next 1000ms.
-    settle(1, 0, 1000, 1200, 2000, 40)
+    settle(0, 1000, 1200, 2000, 40)
     expect(await c.next()).toMatchObject({ params: { _meta: { tokensPerSecond: '50' } } })
-    settle(3, 1, 2100, 3000, 4000, 10)
+    settle(1, 2100, 3000, 4000, 10)
     expect(await c.next()).toMatchObject({ params: { _meta: { tokensPerSecond: '28' } } })
   })
 

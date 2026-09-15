@@ -60,7 +60,7 @@ interface LifecycleHost {
   views: {
     status(record: SessionRecord, replay?: boolean): void
     children(record: SessionRecord, replay: boolean): Promise<void>
-    tasks(record: SessionRecord): void
+    tasks(record: SessionRecord): void | Promise<void>
     commands(record: SessionRecord): void
   }
 }
@@ -144,14 +144,16 @@ export function createSessionLifecycle(host: LifecycleHost) {
       pending.push(work)
       return work
     }
-    // Keep the load replay window open until BOTH transcript and child history
+    // Keep the load replay window open until transcript and all async views
     // finish, even if a sibling projection fails. Partial publication is retired
     // by activate(), not left as a stranded live session after an error response.
     const failures: unknown[] = []
     try {
       if (creation.kind === 'new') await startChildren()
       if (creation.kind === 'load') startChildren()
-      views.tasks(record); views.commands(record)
+      const tasks = views.tasks(record)
+      if (tasks !== undefined) { void tasks.catch(() => {}); pending.push(tasks) }
+      views.commands(record)
       if (creation.kind === 'fork') startChildren()
       if (creation.kind === 'load') {
         for (const event of events) {

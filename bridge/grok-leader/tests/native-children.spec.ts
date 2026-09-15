@@ -5,6 +5,7 @@ import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { ProjectedUpdate } from '../src/projection.ts'
 import { createNativeChildren } from '../src/native-children.ts'
 import { createSessionWork } from '../src/session-work.ts'
+import { workflowProjection } from '../src/workflows.ts'
 
 type Row = { kind: 'child' | 'diagnostic'; id: string; mode: 'continuable' | 'one-shot'; label?: string; parentId?: string }
 function deferred<T>() {
@@ -76,6 +77,7 @@ function fixture() {
     const record = id === undefined ? undefined : sessions.get(id)
     return record?.clientId === clientId ? record : undefined
   }, agent: (id: SessionId) => agents.get(id), subagents: () => service,
+  workflow: (record: typeof root) => logs.get(record.agent.session.id)!.reduce(workflowProjection.apply, { runs: [] }),
   persistence: () => store as unknown as Pick<SessionPersistence, 'open' | 'stat'>, flush, projectImages, notify,
   logger: { warn } }
   const children = createNativeChildren({ ...host, on: (name, listener) => {

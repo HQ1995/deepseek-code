@@ -11,10 +11,12 @@ import { createNativeInteractions } from './native-interactions.ts'
 import { createSessionLifecycle, type SessionRecord } from './session-lifecycle.ts'
 import { createSessionPresets, type AgentPresetsLike } from './session-presets.ts'
 import { presetHistoryProjection } from './preset-history.ts'
+import { workflowProjection } from './workflows.ts'
 import { createSessionModels } from './session-models.ts'
 // Keep durable event augmentations reachable through the published type entry.
 export type {} from './session-models.ts'
 export type {} from './preset-history.ts'
+export type {} from './workflows.ts'
 import { createNativeSessionStatus, type NativeStatusProjections, type NativeGoalAuthority } from './native-session-status.ts'
 import { createNativeChildren } from './native-children.ts'
 import { createNativeTasks } from './native-tasks.ts'
@@ -139,6 +141,7 @@ interface SessionsLike {
 export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const agents = ctx.agents
   ctx.sessionProjections.register(presetHistoryProjection)
+  ctx.sessionProjections.register(workflowProjection)
   protectTerminalSignals(ctx)
   const jobOutput = observeJobOutputs(ctx)
   const projectImages = createImageOutputProjector(ctx)
@@ -512,6 +515,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   const tasks = createNativeTasks({
     sessions, owned: ownedRecord,
+    discovery, flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),
     jobs: record => presetServiceFor(record, 'jobs'),
     tools: record => {
       const runtime = record.agent.ctx.get('tools') as ToolRuntime | undefined
@@ -522,6 +526,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const children = createNativeChildren({
     sessions, owned: ownedRecord, agent: id => agents.get(id),
     subagents: record => presetServiceFor(record, 'subagents'),
+    workflow: record => {
+      const state = ctx.sessionProjections.stateOf(record.agent.session, 'dscodeWorkflows')
+      if (state === undefined) throw internalError('workflow history projection is unavailable')
+      return state
+    },
     persistence, flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),
     projectImages,
     notify: (record, method, params) => connections.get(record.clientId)?.notify(method, params),

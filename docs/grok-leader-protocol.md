@@ -89,6 +89,13 @@ The bridge also implements the `x.ai/*` surfaces required by this TUI:
   session, including when invoked from a child view. Export bypasses model calls.
 - `x.ai/scheduler/list`, `create`, and `delete` use the official Schedule tools.
   Native changes feed Tasks reminders; delivery resumes with the owning session.
+  Snapshots prefer native `schedule` state, including deleted IDs. If this
+  optional projection is absent, the bridge flushes the live source and selects
+  only its own Schedule changes from storage pages of at most 256 events, then
+  uses the official fold. Observed cursors are serialized; inherited changes
+  are excluded. A native projection appearing during the read takes precedence.
+  Initialization waits for fallback reads and handle cleanup; close cancels and
+  drains accepted reads without publishing late reminders.
 
 Extension notifications use the `_x.ai/*` wire spelling expected by the ACP
 decoder. `session/update` remains the normal unprefixed ACP notification.
@@ -292,6 +299,21 @@ accepts clients. It preserves the existing model-visible-history lock and latest
 valid selection across resume/fork, without retaining transcript bodies. Missing
 policy state fails closed; it does not fall back to a synchronous log scan. The
 native projection registry owns restore, incremental updates and cache lifetime.
+
+## Workflow history state
+
+Workflow rendering reads the host-only `dscodeWorkflows` projection, registered
+before clients are accepted. The bridge defines the workflow-domain JSON fold;
+the native registry drives seed, append and checkpoint lifetime. State keeps run
+and member metadata, not unrelated transcript bodies. Inherited workflow history
+is preserved, members render in native sequence order, and repeated names remain
+distinct by run ID. Liveness, active phase and elapsed time are rendered from
+current native runtime state, never persisted as active-state claims. The child
+view is still published before a workflow exposes that member.
+
+Production bridge code has no direct `snapshotEvents`, `eventAt` or `ownEvents`
+dependencies. This does not remove the pinned SDK's internal synchronous reads
+or full in-memory log, and does not claim a measured memory or latency gain.
 
 ## Persistent terminal controls and runtime diagnostics
 

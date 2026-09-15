@@ -1,4 +1,5 @@
 import type { SessionWork } from './session-work.ts'
+import type { SessionDiscovery } from './session-discovery.ts'
 import { randomUUID } from 'node:crypto'
 import { symbols } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -12,7 +13,7 @@ import type { SessionOutput } from './session-output.ts'
 import { jobOutputPatch } from './job-output.ts'
 
 interface TaskSession {
-  work: Pick<SessionWork, 'run'>
+  work: Pick<SessionWork, 'run' | 'read'>
   agent: Agent
   output: Pick<SessionOutput, 'notify' | 'update'>
 }
@@ -21,6 +22,8 @@ interface TaskHost<T extends TaskSession> {
   owned(clientId: number, sessionId: SessionId | undefined): T | undefined
   jobs(record: T): unknown
   tools(record: T): { runtime: Pick<ToolRuntime, 'execute'>; names: ReadonlySet<string> } | undefined
+  discovery: Pick<SessionDiscovery, 'select'>
+  flush(session: Agent['session']): Promise<unknown>
   /** Passive collected output; never advances the model's native job cursor. */
   output(registry: object, owner: Agent, id: string): string | undefined
   logger: { warn(message: string): void }
@@ -36,6 +39,7 @@ const nonEmptyString = (value: unknown): value is string => typeof value === 'st
 export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
   let closed = false
   let disposal: Promise<void> | undefined
+  const shutdown = new AbortController()
   const pending = new Set<Promise<unknown>>()
   const invocations = new Map<AbortController, T>()
   const request = <R>(operation: () => Promise<R>): Promise<R> => {
@@ -51,16 +55,14 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
   const owned = (clientId: number, sessionId: SessionId | undefined): T | undefined =>
     closed ? undefined : host.owned(clientId, sessionId)
   const reminderSnapshots = new WeakMap<T, Map<string, string>>()
-  const emitReminders = (record: T): void => {
+  const reminderCursors = new WeakMap<T, number>()
+  const reminderReads = new WeakMap<T, Promise<void>>()
+  const scheduleState = (record: T) => (record.agent.ctx.get('sessionProjections') as ScheduleProjections | undefined)?.stateOf(record.agent.session, 'schedule')
+  const publishReminders = (record: T, folded: ReturnType<typeof foldScheduleEvents>, end: number): void => {
     if (!isLive(record)) return
+    if (end < (reminderCursors.get(record) ?? -1)) return
+    reminderCursors.set(record, end)
     const cached = reminderSnapshots.get(record)
-    // The native host state includes seen IDs as well as active reminders. The
-    // wire view alone forced a whole-history scan on every first snapshot.
-    const projections = record.agent.ctx.get('sessionProjections') as ScheduleProjections | undefined
-    const folded = projections?.stateOf(record.agent.session, 'schedule')
-      // Deferred compatibility path when the optional native Schedule unit is
-      // absent. Keep its exact behavior until bounded async seeding is adopted.
-      ?? foldScheduleEvents(record.agent.session.ownEvents())
     const active = folded.active
     const previous = cached ?? new Map<string, string>(folded.seenIds.map(id => [id, '']))
     const next = new Map<string, string>()
@@ -79,6 +81,41 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
       record.output.notify('x.ai/session_notification', { update: { sessionUpdate: 'scheduled_task_deleted', task_id: id, reason: 'deleted' } }, { nativeSchedule: true })
     }
     reminderSnapshots.set(record, next)
+  }
+  const emitReminders = (record: T): void | Promise<void> => {
+    if (!isLive(record)) return
+    const previous = reminderReads.get(record), native = scheduleState(record)
+    if (previous === undefined) {
+      if (native !== undefined) return publishReminders(record, native, record.agent.session.seq)
+      if (record.agent.session.seq === record.agent.session.inheritedEventCount) return publishReminders(record, foldScheduleEvents([]), record.agent.session.seq)
+    }
+    // Only optional-capability absence needs storage. Serialize observed cuts,
+    // keeping native Schedule's decoder/fold as the single transition authority.
+    const work = request(() => record.work.read(async scope => {
+      const session = record.agent.session, end = session.seq, inherited = session.inheritedEventCount
+      const signal = AbortSignal.any([scope.signal, shutdown.signal])
+      const assertActive = () => {
+        scope.assertActive()
+        if (!isLive(record) || signal.aborted) throw invalidParams('session closed')
+      }
+      await previous?.catch(() => {})
+      assertActive()
+      const current = scheduleState(record)
+      if (current !== undefined) return publishReminders(record, current, session.seq)
+      await host.flush(session)
+      assertActive()
+      const events = await host.discovery.select(session.id, { end, signal }, event =>
+        event.seq >= inherited && event.type === 'schedule/change' ? event : undefined)
+      assertActive()
+      // A native unit can appear while the read is pending. Never publish an
+      // older fallback over its newer state; no alternate Schedule logic here.
+      const latest = scheduleState(record)
+      publishReminders(record, latest ?? foldScheduleEvents(events), latest === undefined ? end : session.seq)
+    }))
+    reminderReads.set(record, work)
+    const settled = () => { if (reminderReads.get(record) === work) reminderReads.delete(record) }
+    void work.then(settled, settled)
+    return work
   }
 
   const reminders = async (clientId: number, method: string, params: unknown): Promise<unknown> => {
@@ -117,7 +154,7 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
       }
       const rows = await invoke('schedule_list', {})
       if (!Array.isArray(rows)) throw internalError('Invalid reminder list')
-      emitReminders(record)
+      await emitReminders(record)
       return { title: 'Session reminders', items: rows.map(value => {
         const row = value as Record<string, unknown>
         return { id: row.id, text: row.prompt, detail: `${row.state} · ${row.scheduledAt} · ${row.kind === 'every' ? 'every ' + String(row.everySeconds) + 's' : 'once'}`, editable: false }
@@ -258,9 +295,11 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
     return { taskId: job.id, status: job.status, available: output !== undefined, output: output ?? '' }
   }
   return {
-    snapshot(record: T): void { emitJobsForRecord(record); emitReminders(record) },
+    snapshot(record: T): void | Promise<void> { emitJobsForRecord(record); return emitReminders(record) },
     observe(record: T, event: SessionEvent): void {
-      if (String(event.type) === 'schedule/change') emitReminders(record)
+      if (String(event.type) === 'schedule/change') void emitReminders(record)?.catch(error => {
+        if (isLive(record)) host.logger.warn('TUI reminder history: ' + errorChain(error))
+      })
     },
     poll(): void {
       if (closed) return
@@ -280,6 +319,7 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
         while (pending.size > 0) await Promise.allSettled([...pending])
         if (failures.length > 0) throw new AggregateError(failures, 'native task subscription disposal failed')
       })
+      shutdown.abort()
       for (const controller of invocations.keys()) controller.abort()
       for (const unsubscribe of jobSubscriptions.values()) {
         try { unsubscribe() } catch (error) { failures.push(error) }

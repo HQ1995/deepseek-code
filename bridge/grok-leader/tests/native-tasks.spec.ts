@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { symbols } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent, type SessionLogOffset } from '@deepseek-ai/dsh-session'
 import { createAfterScheduleRecord, createEveryScheduleRecord, ScheduleId } from '@deepseek-ai/dsh-schedule'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
+import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
+import { createSessionDiscovery } from '../src/session-discovery.ts'
 import { createNativeTasks } from '../src/native-tasks.ts'
 import { createSessionWork } from '../src/session-work.ts'
 
@@ -17,7 +19,8 @@ function fixture() {
   const sessions = new Map<SessionId, ReturnType<typeof session>>()
   function session(id: string, clientId = 1) {
     const events: SessionEvent[] = []
-    const record = { clientId, agent: { ctx: { get: () => undefined }, session: { id: SessionId(id), header: { cwd: '/workspace' }, ownEvents: () => events } } as unknown as Agent,
+    const record = { clientId, agent: { ctx: { get: () => undefined }, session: { id: SessionId(id), header: { cwd: '/workspace' },
+      get seq() { return events.length }, inheritedEventCount: 0, ownEvents: () => events } } as unknown as Agent,
       output: { notify: vi.fn(), update: vi.fn() }, events,
       work: createSessionWork({ isLive: () => sessions.get(SessionId(id)) === record, assertReady: () => {} }) }
     return record
@@ -51,11 +54,15 @@ function fixture() {
   const execute = vi.fn(async (_request: unknown): Promise<unknown> => ({ isError: false, value: [] }))
   const output = vi.fn((_registry: object, agent: Agent, id: string) => outputs.get(agent.session.id + ':' + id))
   const warn = vi.fn()
+  const flush = vi.fn(async (_session: Agent['session']) => {})
+  const select = vi.fn(async <T>(id: SessionId, { end }: { end: SessionLogOffset; signal?: AbortSignal }, project: (event: SessionEvent) => T | undefined): Promise<T[]> =>
+    sessions.get(id)!.events.slice(0, end).flatMap(event => { const value = project(event); return value === undefined ? [] : [value] }))
   const host = { sessions, owned: (clientId: number, id: SessionId | undefined) => {
     const record = id === undefined ? undefined : sessions.get(id)
     return record?.clientId === clientId ? record : undefined
   }, jobs: vi.fn((_record: typeof owner): unknown => ({ [symbols.original]: { [symbols.original]: jobs } })),
-  tools: (_record: typeof owner) => ({ runtime: { execute } as Pick<ToolRuntime, 'execute'>, names }), output, logger: { warn } }
+  tools: (_record: typeof owner) => ({ runtime: { execute } as Pick<ToolRuntime, 'execute'>, names }),
+  discovery: { select }, flush, output, logger: { warn } }
   const tasks = createNativeTasks(host)
   const job = (id: string, record = owner, status: Job['status'] = 'running') => {
     const row: Job = { id, kind: 'bash', label: 'build ' + id, ownerSession: record.agent.session.id, status, startedAt: 1234 }
@@ -67,7 +74,7 @@ function fixture() {
     const event = { seq: record.events.length, time: 1000, type: 'schedule/change', data } as SessionEvent
     record.events.push(event); return event
   }
-  return { tasks, owner, other, sessions, add, rows, outputs, jobs, host, output, listeners, unsubscribe, change, job, request, names, execute, append, warn }
+  return { tasks, owner, other, sessions, add, rows, outputs, jobs, host, output, listeners, unsubscribe, change, job, request, names, execute, append, warn, flush, select }
 }
 
 describe('native task ownership', () => {
@@ -255,7 +262,7 @@ describe('native task ownership', () => {
     f.append({ version: 1, operation: 'create', schedule: after })
     f.append({ version: 1, operation: 'delete', id: after.id })
     f.append({ version: 1, operation: 'create', schedule: every })
-    f.tasks.snapshot(f.owner); f.tasks.snapshot(f.owner)
+    await f.tasks.snapshot(f.owner); await f.tasks.snapshot(f.owner)
     expect(f.owner.output.notify).toHaveBeenCalledTimes(2)
     expect(f.owner.output.notify).toHaveBeenCalledWith('x.ai/session_notification', { update: {
       sessionUpdate: 'scheduled_task_created', task_id: 'repeat', prompt: 'again', human_schedule: 'every 300s', next_fire_at: every.scheduledAt,
@@ -264,6 +271,7 @@ describe('native task ownership', () => {
       sessionUpdate: 'scheduled_task_deleted', task_id: 'once', reason: 'deleted',
     } }, { nativeSchedule: true })
     f.tasks.observe(f.owner, f.append({ version: 1, operation: 'delete', id: 'repeat' }))
+    await f.owner.work.settle()
     expect(f.owner.output.notify).toHaveBeenCalledTimes(3)
     await f.tasks.dispose()
   })
@@ -295,6 +303,96 @@ describe('native task ownership', () => {
     f.append({ version: 1, operation: 'create', schedule: inherited })
     vi.spyOn(f.owner.agent.ctx, 'get').mockReturnValue({ stateOf: () => ({ active: [], seenIds: [] }) } as never)
     f.tasks.snapshot(f.owner)
+    expect(f.owner.output.notify).not.toHaveBeenCalled()
+    await f.tasks.dispose()
+  })
+
+  it('selects only owned Schedule changes and preserves native decoding without synchronous reads', async () => {
+    const f = fixture(), id = ScheduleId('same-id')
+    f.append({ version: 1, operation: 'create', schedule: createAfterScheduleRecord(id, 'parent', 600, 1000) })
+    Object.assign(f.owner.agent.session, { inheritedEventCount: 1 })
+    for (let index = 0; index < 1000; index++) f.owner.events.push({ seq: f.owner.events.length, time: 1000, type: 'session/title', data: { title: 'unrelated' } } as SessionEvent)
+    f.append({ version: 1, operation: 'create', schedule: createAfterScheduleRecord(id, 'child', 600, 1000) })
+    const sync = vi.spyOn(f.owner.agent.session, 'ownEvents').mockImplementation(() => { throw new Error('must select durable Schedule history') })
+    const read = vi.fn(async (offset = 0, length = 0) => ({ events: f.owner.events.slice(offset, offset + length), eventState: 'detached' as const }))
+    const close = vi.fn(async () => {})
+    const discovery = createSessionDiscovery({
+      persistence: () => ({ list: async () => [], open: async (): Promise<SessionHandle> => ({
+        id: f.owner.agent.session.id, header: f.owner.agent.session.header, inheritedEventCount: 1 as SessionLogOffset,
+        access: 'read', read, close, [Symbol.asyncDispose]: close,
+        append: async () => { throw new Error('read handle cannot append') }, flush: async () => { throw new Error('read handle cannot flush') },
+      }) }),
+      query: () => undefined, owns: () => false, onEvent: () => () => {},
+    })
+    f.select.mockImplementation(discovery.select)
+    await f.tasks.snapshot(f.owner)
+    expect(f.select).toHaveBeenCalledWith('owner', { end: 1002, signal: expect.any(AbortSignal) }, expect.any(Function))
+    expect(await f.select.mock.results[0]!.value).toHaveLength(1)
+    expect(read.mock.calls).toEqual([[0, 256, expect.any(Object)], [256, 256, expect.any(Object)], [512, 256, expect.any(Object)], [768, 234, expect.any(Object)]])
+    expect(close).toHaveBeenCalledOnce()
+    expect(f.owner.output.notify).toHaveBeenCalledOnce()
+    expect(f.owner.output.notify).toHaveBeenCalledWith('x.ai/session_notification', { update: expect.objectContaining({ task_id: id, prompt: 'child' }) }, { nativeSchedule: true })
+    expect(sync).not.toHaveBeenCalled()
+    await f.tasks.dispose()
+    await discovery.dispose()
+  })
+
+  it('serializes observed cuts in order and recovers the queue after a failed read', async () => {
+    const f = fixture(), gate = deferred<void>(), record = createAfterScheduleRecord(ScheduleId('once'), 'check', 600, 1000)
+    f.append({ version: 1, operation: 'create', schedule: record })
+    f.flush.mockImplementationOnce(() => gate.promise)
+    const first = f.tasks.snapshot(f.owner)
+    await vi.waitFor(() => expect(f.flush).toHaveBeenCalledOnce())
+    f.append({ version: 1, operation: 'delete', id: record.id })
+    const second = f.tasks.snapshot(f.owner)
+    expect(f.select).not.toHaveBeenCalled()
+    gate.resolve(); await first; await second
+    expect(f.select.mock.calls.map(([, options]) => options.end)).toEqual([1, 2])
+    expect(f.owner.output.notify.mock.calls.map(call => (call[1] as { update: { sessionUpdate: string } }).update.sessionUpdate))
+      .toEqual(['scheduled_task_created', 'scheduled_task_deleted'])
+    f.select.mockRejectedValueOnce(new Error('read offline'))
+    await expect(f.tasks.snapshot(f.owner)).rejects.toThrow('read offline')
+    await f.tasks.snapshot(f.owner)
+    expect(f.owner.output.notify).toHaveBeenCalledTimes(2)
+    await f.tasks.dispose()
+  })
+
+  it.each(['owner', 'module'])('cancels and drains an uncooperative fallback read when the %s closes', async kind => {
+    const f = fixture(), gate = deferred<SessionEvent[]>()
+    f.append({ version: 1, operation: 'create', schedule: createAfterScheduleRecord(ScheduleId('once'), 'check', 600, 1000) })
+    f.select.mockImplementationOnce(() => gate.promise as never)
+    const work = f.tasks.snapshot(f.owner), rejected = expect(work).rejects.toThrow('session closed')
+    await vi.waitFor(() => expect(f.select).toHaveBeenCalledOnce())
+    let done = false
+    if (kind === 'owner') f.owner.work.cancel()
+    const disposal = (kind === 'owner' ? f.owner.work.settle() : f.tasks.dispose()).then(() => { done = true })
+    expect(f.select.mock.calls[0]![1].signal!.aborted).toBe(true)
+    await Promise.resolve(); expect(done).toBe(false)
+    gate.resolve(f.owner.events); await rejected; await disposal
+    expect(f.owner.output.notify).not.toHaveBeenCalled()
+    await f.tasks.dispose()
+  })
+
+  it('uses a newly available native state instead of publishing an older fallback', async () => {
+    const f = fixture(), gate = deferred<SessionEvent[]>(), id = ScheduleId('once')
+    f.append({ version: 1, operation: 'create', schedule: createAfterScheduleRecord(id, 'stale', 600, 1000) })
+    f.select.mockImplementationOnce(() => gate.promise as never)
+    const work = f.tasks.snapshot(f.owner)
+    await vi.waitFor(() => expect(f.select).toHaveBeenCalledOnce())
+    f.append({ version: 1, operation: 'delete', id })
+    vi.spyOn(f.owner.agent.ctx, 'get').mockReturnValue({ stateOf: () => ({ active: [], seenIds: [id] }) } as never)
+    gate.resolve(f.owner.events.slice(0, 1)); await work
+    expect(f.owner.output.notify).toHaveBeenCalledOnce()
+    expect(f.owner.output.notify).toHaveBeenCalledWith('x.ai/session_notification', { update: expect.objectContaining({ sessionUpdate: 'scheduled_task_deleted', task_id: id }) }, { nativeSchedule: true })
+    await f.tasks.snapshot(f.owner)
+    expect(f.select).toHaveBeenCalledOnce()
+    await f.tasks.dispose()
+  })
+
+  it('does not hide native Schedule validation errors in fallback history', async () => {
+    const f = fixture()
+    f.append({ version: 1, operation: 'delete', id: ScheduleId('never-created') })
+    await expect(f.tasks.snapshot(f.owner)).rejects.toThrow('inactive id')
     expect(f.owner.output.notify).not.toHaveBeenCalled()
     await f.tasks.dispose()
   })

@@ -82,7 +82,8 @@ describe('architecture ownership and dependency gate', () => {
       const older: SessionEventMap['model/selected'] = { provider: 'older', model: 'model', reasoningEffort: 'high' }
       const content: ToolResultContentBlock = { type: 'content', content: { type: 'text', text: 'preserved' } }
       const preset: SessionProjectionStateMap['dscodePresetHistory'] = { selected: 'standard', locked: false }
-      void [native, legacy, older, content, preset]
+      const workflows: SessionProjectionStateMap['dscodeWorkflows'] = { runs: [] }
+      void [native, legacy, older, content, preset, workflows]
     `
     const options: ts.CompilerOptions = { noEmit: true, skipLibCheck: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext, types: [] }
     const host = ts.createCompilerHost(options), read = host.getSourceFile.bind(host)
@@ -135,7 +136,7 @@ describe('architecture ownership and dependency gate', () => {
     ['session-presets', ['acp', 'model-catalog', 'preset-history']],
     ['preset-history', []],
     ['session-output', ['projection', 'image-output']],
-    ['native-tasks', ['acp', 'reminders', 'session-output', 'session-work', 'job-output']],
+    ['native-tasks', ['acp', 'reminders', 'session-output', 'session-work', 'session-discovery', 'job-output']],
     ['native-children', ['acp', 'child-history', 'workflows', 'prompt-content', 'projection', 'session-output', 'session-work', 'image-output']],
     ['native-session-status', ['acp', 'prompt-content', 'projection', 'session-output', 'session-work']],
     ['native-interactions', ['acp', 'leader-transport']],
@@ -152,7 +153,7 @@ describe('architecture ownership and dependency gate', () => {
     else if (!['profile-plugins', 'native-tasks'].includes(name)) expect([...externals.get('src/' + name + '.ts')!]).not.toContain('@deepseek-ai/cordis')
   })
 
-  it('allows only the explicitly deferred synchronous Session readers, never new dependencies', () => {
+  it('keeps deprecated synchronous Session readers out of production', () => {
     const deprecated = new Set(['snapshotEvents', 'eventAt', 'ownEvents'])
     const reads: Record<string, number> = {}
     for (const [path, source] of sources) {
@@ -167,12 +168,9 @@ describe('architecture ownership and dependency gate', () => {
       }
       visit(source)
     }
-    // Remove entries as their owners migrate. Do not copy these exceptions to
-    // new callers or conceal a complete log read behind a synchronous alias.
-    expect(reads).toEqual({
-      'src/workflows.ts:snapshotEvents': 1, // bounded incremental seed/tail
-      'src/native-tasks.ts:ownEvents': 1, // optional Schedule projection absence
-    })
+    // State belongs to native projections; requested content uses async storage.
+    // Do not conceal a complete log read behind a synchronous alias.
+    expect(reads).toEqual({})
   })
 
   it('does not move socket/provider/queue engines or mutable registries back into composition', () => {

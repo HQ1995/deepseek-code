@@ -170,12 +170,12 @@ describe('session lifecycle ownership', () => {
     expect(f.nativeDisposals.get('root')).toHaveBeenCalledOnce()
   })
 
-  it('keeps reads owned but input blocked until child replay completes, then publishes readiness', async () => {
+  it.each(['children', 'tasks'] as const)('keeps reads owned but input blocked until %s replay completes, then publishes readiness', async view => {
     const f = fixture(), gate = deferred()
-    f.views.children.mockImplementationOnce(() => gate.promise)
+    f.views[view].mockImplementationOnce(() => gate.promise)
     let completed = false
     const creation = f.add().then(record => { completed = true; return record })
-    await vi.waitFor(() => expect(f.views.children).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(f.views[view]).toHaveBeenCalledOnce())
     const record = f.sessions.records.get(SessionId('root'))!
     expect(f.sessions.owned(1, record.agent.session.id)).toBe(record)
     expect(() => f.lifecycle.writable(1, SessionId('root'))).toThrow('initializing')
@@ -200,24 +200,36 @@ describe('session lifecycle ownership', () => {
     await expect(record.work.run(execute)).resolves.toBe('native')
   })
 
-  it('retires a partially published session if initial projections fail', async () => {
+  it.each(['children', 'tasks'] as const)('retires a partially published session if initial %s projections fail', async view => {
     const f = fixture(), failure = new Error('child history failed')
-    f.views.children.mockRejectedValueOnce(failure)
+    f.views[view].mockImplementationOnce(() => Promise.reject(failure))
     await expect(f.add()).rejects.toBe(failure)
     expect(f.sessions.records.size).toBe(0)
     expect(f.nativeDisposals.get('root')).toHaveBeenCalledOnce()
     expect(f.order).toContain('flush:root')
   })
 
-  it('does not acknowledge or arm a timer when the client closes during initialization', async () => {
+  it.each(['children', 'tasks'] as const)('does not acknowledge or arm a timer when the client closes during %s initialization', async view => {
     const f = fixture(), gate = deferred()
-    f.views.children.mockImplementationOnce(() => gate.promise)
+    f.views[view].mockImplementationOnce(() => gate.promise)
     const creation = f.add(), failure = expect(creation).rejects.toThrow('session closed during initialization')
-    await vi.waitFor(() => expect(f.views.children).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(f.views[view]).toHaveBeenCalledOnce())
     const record = f.sessions.records.get(SessionId('root'))!
     await f.lifecycle.close(1, { sessionId: 'root' })
     gate.resolve(); await failure
     expect(record.mcpInitTimer).toBeUndefined(); expect(f.nativeDisposals.get('root')).toHaveBeenCalledOnce()
+  })
+
+  it('drains pending task history and retains both errors when a sibling startup view fails', async () => {
+    const f = fixture(), gate = deferred(), sibling = new Error('commands failed'), reader = new Error('task history failed')
+    f.views.tasks.mockImplementationOnce(record => record.work.read(async () => { await gate.promise; throw reader }))
+    f.views.commands.mockImplementationOnce(() => { throw sibling })
+    const creation = f.add(), rejected = expect(creation).rejects.toMatchObject({ errors: [sibling, reader] })
+    await vi.waitFor(() => expect(f.views.commands).toHaveBeenCalledOnce())
+    expect(f.nativeDisposals.get('root')).not.toHaveBeenCalled()
+    gate.resolve(); await rejected
+    expect(f.nativeDisposals.get('root')).toHaveBeenCalledOnce()
+    expect(f.sessions.records.size).toBe(0)
   })
 
   it('drains late native creators when their callback synchronously starts global shutdown', async () => {

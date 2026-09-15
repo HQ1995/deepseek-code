@@ -1,81 +1,70 @@
 /** Read-only TUI projection of the official tool-workflow durable records. */
-import type { SessionEvent, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { z } from 'zod'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 
 export interface LiveWorkflow {
   meta: { name: string; description: string; phases?: Array<{ title: string }> }
   phase?: string
 }
 
-type Member = { agent_id: string; label: string; phase?: string; state: string; started: number; duration_ms: number }
-type Run = { name: string; started: number; time: number; status?: string; members: Map<number, Member> }
-type WorkflowSource = {
-  readonly seq: number
-  snapshotEvents(from: SessionLogOffset, to: SessionLogOffset): readonly SessionEvent[]
+const memberSchema = z.object({
+  seq: z.number(), agent_id: z.string(), label: z.string(), phase: z.string().optional(),
+  state: z.string(), started: z.number(), duration_ms: z.number(),
+})
+const runSchema = z.object({
+  id: z.string(), name: z.string(), started: z.number(), time: z.number(),
+  status: z.string().optional(), members: z.array(memberSchema),
+})
+type Run = z.infer<typeof runSchema>
+export interface WorkflowHistory { runs: Run[] }
+declare module '@deepseek-ai/dsh-session-projection/types' {
+  interface SessionProjectionStateMap { dscodeWorkflows: WorkflowHistory }
 }
 
-/** Incremental projection for one append-only native session. Retains only
- * workflow state, never unrelated transcript bodies. Replacement/truncation
- * rebuilds, while elapsed times and live phases are recomputed on each read. */
-export class WorkflowIndex {
-  #source: WorkflowSource | undefined
-  #offset = 0
-  #runs = new Map<string, Run>()
-  has(id: string): boolean { return this.#runs.has(id) }
-
-  updates(source: WorkflowSource, live: ReadonlyMap<string, LiveWorkflow>, now: number, runId?: string) {
-    const end = source.seq
-    if (source !== this.#source || end < this.#offset) {
-      this.#source = source
-      this.#offset = 0
-      this.#runs.clear()
-    }
-    while (this.#offset < end) {
-      const next = Math.min(end, this.#offset + 512)
-      for (const event of source.snapshotEvents(this.#offset as SessionLogOffset, next as SessionLogOffset)) foldEvent(this.#runs, event)
-      this.#offset = next
-    }
-    if (runId !== undefined) {
-      const run = this.#runs.get(runId)
-      return run === undefined ? [] : [renderRun(runId, run, live, now)]
-    }
-    return [...this.#runs].map(([id, run]) => renderRun(id, run, live, now))
-  }
+/** Native drive owns seed/tail/checkpoint lifetime. State is plain JSON and
+ * contains only workflow metadata; liveness and wall-clock time stay outside. */
+export const workflowProjection: ProjectionDefinition<'dscodeWorkflows'> = {
+  key: 'dscodeWorkflows', stateVersion: 1,
+  stateSchema: z.object({ runs: z.array(runSchema) }),
+  init: () => ({ runs: [] }),
+  apply: foldEvent,
 }
 
-/** Stateless projection retained for whole-log callers and compatibility. */
-export function workflowUpdates(events: readonly SessionEvent[], live: ReadonlyMap<string, LiveWorkflow>, now: number) {
-  const runs = new Map<string, Run>()
-  for (const event of events) foldEvent(runs, event)
-  return [...runs].map(([id, run]) => renderRun(id, run, live, now))
+export function workflowUpdates(state: WorkflowHistory, live: ReadonlyMap<string, LiveWorkflow>, now: number, runId?: string) {
+  return state.runs.filter(run => runId === undefined || run.id === runId).map(run => renderRun(run.id, run, live, now))
 }
 
-function foldEvent(runs: Map<string, Run>, event: SessionEvent): void {
-  if (!String(event.type).startsWith('tool-workflow/')) return
+function foldEvent(state: WorkflowHistory, event: SessionEvent): WorkflowHistory {
+  if (!String(event.type).startsWith('tool-workflow/')) return state
   const data = event.data as { runId: string; name: string; seq: number; label: string; phase?: string; childId: string; outcome: string; stopReason: string }
+  const position = state.runs.findIndex(run => run.id === data.runId)
   if (String(event.type) === 'tool-workflow/run-start') {
-    runs.set(data.runId, { name: data.name, started: event.time, time: event.time, members: new Map() })
-    return
+    const next = { id: data.runId, name: data.name, started: event.time, time: event.time, members: [] }
+    // Like Map.set, restarting an existing ID preserves its insertion order.
+    return { runs: position < 0 ? [...state.runs, next] : state.runs.map((run, index) => index === position ? next : run) }
   }
-  const run = runs.get(data.runId)
-  if (run === undefined) return
-  run.time = event.time
+  const before = state.runs[position]
+  if (before === undefined) return state
+  const run = { ...before, time: event.time }
   if (String(event.type) === 'tool-workflow/agent-start') {
-    run.members.set(data.seq, { agent_id: data.childId, label: data.label, phase: data.phase, state: 'running', started: event.time, duration_ms: 0 })
+    const next = { seq: data.seq, agent_id: data.childId, label: data.label, ...data.phase === undefined ? {} : { phase: data.phase }, state: 'running', started: event.time, duration_ms: 0 }
+    const member = run.members.findIndex(member => member.seq === data.seq)
+    run.members = member < 0 ? [...run.members, next] : run.members.map((value, index) => index === member ? next : value)
   } else if (String(event.type) === 'tool-workflow/agent-end') {
-    const member = run.members.get(data.seq)
-    if (member !== undefined) {
-      member.state = data.outcome === 'completed' ? 'done' : data.outcome
-      member.duration_ms = Math.max(0, event.time - member.started)
-    }
+    run.members = run.members.map(member => member.seq === data.seq ? {
+      ...member, state: data.outcome === 'completed' ? 'done' : data.outcome, duration_ms: Math.max(0, event.time - member.started),
+    } : member)
   } else if (String(event.type) === 'tool-workflow/run-end') {
     run.status = data.stopReason === 'completed' ? 'complete' : data.stopReason === 'cancelled' ? 'cancelled' : 'failed'
   }
+  return { runs: state.runs.map((value, index) => index === position ? run : value) }
 }
 
 function renderRun(id: string, run: Run, live: ReadonlyMap<string, LiveWorkflow>, now: number) {
   const active = live.get(id)
   const status = run.status ?? (active === undefined ? 'interrupted' : 'active')
-  const agents = [...run.members].sort(([a], [b]) => a - b).map(([, { started, ...member }]) => ({
+  const agents = [...run.members].sort((a, b) => a.seq - b.seq).map(({ seq: _seq, started, ...member }) => ({
     ...member,
     state: member.state === 'running' && status !== 'active' ? 'interrupted' : member.state,
     duration_ms: member.state === 'running' && status === 'active' ? Math.max(0, now - started) : member.duration_ms,
