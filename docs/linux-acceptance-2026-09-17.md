@@ -18,7 +18,8 @@ runs, release/runtime/gateway scripts, bridge regression, sandbox-root
 project-isolation scenarios, SDK snapshots, snapshot corpus, managed-update E2E
 and the full installed-product E2E all pass on the patched revision. This is a
 local backport revision, not a published pin; distribution remains a separate
-gate.
+gate. The same merged revision also passes the macOS focused
+subprocess/shell/terminal selection described below.
 
 ## What changed
 
@@ -87,6 +88,36 @@ release is involved.
 - `scripts/check.sh` passed on Linux and the product clone stayed clean at
   `f5052559` with only its main worktree.
 
+## Paired macOS check of the same merged revision
+
+The merge was also built and exercised on Apple Silicon (macOS 26.5.2, Node
+24.19.0) from a clean clone of the pinned DSH revision with the combined patch
+applied; that worktree's tree hash is `dafcada7`, which is also what the swoop
+product clone carries at `f5052559` and what its patched `source-tests`
+checkout writes from the same patch. Both hosts therefore exercised one
+identical source tree. The focused subprocess/shell/terminal selection passed
+**448 tests with 17 platform skips in 22 files (3 skipped)**, exit 0:
+`packages/subprocess/subprocess-local`,
+`packages/subprocess/subprocess`, `packages/shell/bash-local` and
+`packages/terminal/terminal-bash`. The 17 skips are the Linux-only
+`linux-execve` (3), `native-containment` (4), `native-windows` (4) and
+`windows-inspector` (2) cases plus the environment-conditional
+`terminal-bash/local` cases (four: an `/dev/tty` read and three `pwsh`
+cases whose interpreter is absent on this host).
+
+The owner-core selection used on swoop (linux-scope, local,
+native-containment, process-inspector, terminal, mac-process-table) passed
+**162 tests with 4 Linux-only skips in 6 files (1 skipped)**, exit 0.
+
+One earlier run of the focused selection executed from the `/tmp` symlink
+path recorded a single failure,
+`packages/shell/bash-local/tests/executor.spec.ts > defaults cwd to
+process.cwd()`, because `bash`'s `pwd` printed the resolved
+`/private/tmp` path while the child inherited the unresolved `/tmp`
+spelling. It is an artifact of running the checkout through the symlink, not a
+product defect; the same file passes from the physical path, and the original
+failure is retained alongside the passing logs.
+
 ## Snapshot-gate environment notes
 
 The recorded-session corpus is environment-sensitive in two ways that this run
@@ -110,11 +141,27 @@ had to satisfy before it could measure the product:
 
 ## Evidence and audit
 
-The independent post-run audit at `2026-09-17T12:03:48Z` found no new user
-scopes and no surviving processes owned by the test root; all four recorded
-process identities were absent. Per-case scope collection and the final audit
-agree. No unrelated process or scope was stopped, and inactive build and test
-artifacts remain in the private root for reproduction.
+The post-run audit for this fixture ran as `audit-fix.mjs` against
+`/home/hanqing/dscode-fix-linux.K9Q2WD` at `2026-09-17T18:43:00Z` (its own
+`checkedAt`; `logs/post-run-audit.json`). It found no new user scopes and no
+surviving processes owned by the test root, and all **six** process identities
+recorded by this run's `built-*/PASS.json` are absent or replaced: ordinary
+and PTY native cancel after readiness plus the direct-exit case on each Node.
+Per-case scope collection and the final audit agree. No unrelated process or
+scope was stopped, and inactive build and test artifacts remain in the private
+root for reproduction.
+
+The first collection archived the wrong audit: `collect-evidence-fix.sh`
+still invoked `audit.mjs`, which hardcodes the previous run's root
+`/home/hanqing/dscode-main-linux-acceptance.5LA3OP` and reads its
+`matrix-*/results.json`. That report therefore covered the earlier run's four
+identities (PIDs 408460, 408837, 408055, 408379), not this one's six. The
+scoped `audit-fix.mjs` under the same invocation is clean, the retained copy
+is `logs/post-run-audit-unscoped-5LA3OP.json`, and the script now calls
+`audit-fix.mjs`. The re-collected archive below contains both reports; the
+superseded `linux-fix-f5052559-evidence-preaudit.tar.gz`, SHA-256
+`170abaf7…`, is the previously recorded artifact and also sits in
+`/tmp/dscode-linux-fix.Ht7Km/`.
 
 | Asset | SHA-256 |
 | --- | --- |
@@ -122,18 +169,34 @@ artifacts remain in the private root for reproduction.
 | `dscode-plugin.tgz` | `ae7dc9eb8359221cc28b5a3b70a88f257ac3047ea3e5509d081847545bee1a58` |
 | `dscode-runtime-linux-x86_64.tar.gz` | `811ad2e7f79c544ddcb8159246847ce34209e73eb5cbcbdc10828e14847272d0` |
 | `dscode` | `4c083ffbbb138144eecec49640561f28a1e8e72d2926288d8f000bc3a34ecd31` |
-| evidence archive | `170abaf72ed87631080e491edf5a075ec8f61a34ea3f30525f730374d287d67c` |
+| evidence archive | `777df810673c574915627bb071d60fe223b09fbcb54eddbea745d4c383fca5fd` |
 
 Remote evidence includes `logs/built-{22,24}.19.0.log` and
 `built-*/PASS.json`, `logs/fix-source-reaper-*`, `logs/fix-scripts-*`,
 `logs/fix-bridge-*`, `logs/fix-docs.log`, `logs/fix-lib-build.*`,
 `logs/fix-snapshot4.*` (with the superseded `fix-snapshot{,2,3}.*` retained as
 initial failures), `logs/fix-update.log`, `fix-e2e/contracts-3684347/PASS.json`,
-`logs/fix-check.log`, `logs/product-final-*` and `logs/post-run-audit.json`.
-Scripts, logs, matrix results and product evidence are archived as
+`logs/fix-check.log`, `logs/product-final-*` and `logs/post-run-audit.json`
+(with the unscoped report retained as
+`logs/post-run-audit-unscoped-5LA3OP.json`, and the superseded first archive
+as `linux-fix-f5052559-evidence-preaudit.tar.gz`). Scripts, logs, matrix
+results and product evidence are archived as
 `linux-fix-f5052559-evidence.tar.gz`; the local copy is
 `/tmp/dscode-linux-fix.Ht7Km/` and its hash matches the remote archive.
 Bulky test homes, dependencies and build outputs are excluded.
+
+Recovery copies are in the main repository's
+`.git/integration-backups/linux-fix-f5052559.bundle` (verified with
+`git bundle verify`; the bundle records a complete history for
+`refs/heads/wip/linux-cancellation-fix-20260917` at `f5052559`) and
+`.git/integration-backups/linux-fix-f5052559-evidence.tar.gz`. Local macOS
+logs for the paired check are `mac-focused24-rerun.log` (448/17 pass, exit 0)
+and `mac-owners6-24.log` (162/4 pass, exit 0) under
+`/tmp/dscode-fix-merge.23286/`, next to the failing `mac-focused24.log` and
+the initial `mac-owners24.log`; those logs, both combined patches and the
+recovery bundle are archived together as
+`.git/integration-backups/linux-fix-f5052559-mac-evidence.tar.gz`, SHA-256
+`68733af9487579c3c765d973b2c3e1497e8d7173e8052e5ea47e69dd96b60309`.
 
 ## Coverage limits
 
@@ -143,3 +206,6 @@ physical Cmd-click, IME, host clipboard, live paid-model sessions and the
 unmerged Browser/Inspector candidates are outside this pass. Distribution
 still requires an official remotely fetchable source revision for the pin, as
 recorded in [the Linux candidate](runtime-linux-candidate.md#remaining-adoption-gates).
+The paired macOS numbers above cover only the focused source selection; the
+full macOS source suite, the installed-product E2E and the packaged release
+assets for this revision were not re-run on that host.
