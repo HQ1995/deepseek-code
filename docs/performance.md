@@ -6,6 +6,72 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-17: terminal readiness polls under the kernel reader
+
+The Darwin inspection cost that the "Profiling and deferred work" section below
+left as a follow-up priority is discharged by the kernel reader at `20b6c546`;
+that change and its source-level numbers are recorded under the 2026-09-15
+kernel observation section below. Its contract is intact: every readiness poll
+still reads the complete process table, every signal still rechecks its target
+identity immediately, and no cache, polling interval, or adaptive schedule was
+added.
+
+The production path was re-measured on both sides with
+`scripts/bench-macos-process.mjs`: a real `node-pty` bash with eight sleep
+children, 20 foreground polls per run, Node 24.19.0 on Darwin arm64. The runs
+alternate between the two implementations; four cover each quiet condition and
+two each loaded condition. The load lane grew this host's table with detached
+`sleep 600` children and reaped them afterwards (1,022 → 4,028 → 1,025, in
+`meta.txt`; the `ps` lane loaded to 3,933).
+
+| Live processes | Inspector | Poll median | Teardown median | Teardown full-table reads | Teardown point reads |
+| --- | --- | ---: | ---: | ---: | ---: |
+| ~1,020 | pinned `ps` | 21.0–21.6ms | 148–157ms | 18.5–19.7ms × 7 | 1.8–2.1ms × 8 |
+| ~1,020 | kernel reader | 0.38–0.48ms | 28.7–29.6ms | 0.21–0.34ms × 8 | 0.03–0.05ms × 8 |
+| ~4,000 | pinned `ps` | 51.5–51.7ms | 362–369ms | 48–49ms × 7 | 2.1–2.3ms × 8 |
+| ~4,000 | kernel reader | 1.81–1.92ms | 13.9–14.4ms | 1.1–1.3ms × 7 | 0.24–0.29ms × 8 |
+
+Poll figures are per-run medians of the 20 measured polls (middle pair
+average), reported as the range across runs; read figures are per-call averages
+over the reads a teardown performed. A poll is one full-table read plus one
+selected-PID read, so the poll column tracks the full-table column: at the same
+table the kernel reader's poll is roughly fifty times cheaper, and the gap
+widens with the table — about 10ms per 1,000 further live processes for `ps`
+(21 to 52ms) against about 0.3ms for the kernel reader (0.4 to 1.9ms). The
+selected-PID read that identity rechecks use barely moves with the table on
+either side, which is why the point-query backport already covered
+signal-and-teardown rechecks. Teardown includes real process exits and is the
+noisier column; it is reported for completeness, not as an independent query
+cost. Absolute `ps` cost tracks host state, which is why this pass quotes a
+fresh baseline instead of reusing the 33.7–36.7ms poll medians the 2026-09-15
+pass recorded.
+
+For the deferred note that named this priority, the consequence is direct: the
+30 inspections a Python REPL operation paid at 200ms polling, measured then at
+372–377ms of synchronous process-query time, now cost single-digit milliseconds
+of query time at a quiet table. Readiness latency is still the poll interval,
+which is unchanged, and every read remains a fresh kernel observation, so the
+note's "keep fresh process identity checks" constraint holds without a cache.
+
+The reader itself was cross-checked against the platform oracle after these
+runs: over 11 passes on a live ~1,022 process table, `readMacProcessTable()`
+and `/bin/ps -axo pid=,ppid=,tpgid=,etime=` agreed row for row, with zero
+parent-PID or tpgid differences, `started` always within the same second as
+the `ps`-derived start (worst drift 0.98s) and no row the reader reported that
+`ps` did not; the single row `ps` saw that the kernel read did not was a
+process created between the two reads.
+
+Per-run JSONL, both source trees, both load lanes and `meta.txt` are in
+`/tmp/dsc-termcheck.AOEarS`; the earlier session's quieter pair (20.1–20.6ms
+before, 0.29–0.36ms after on the same harness) is retained in
+`/tmp/dsc-termpoll.7HXYED`. Reproduce one side per run with:
+
+```sh
+node --experimental-transform-types scripts/bench-macos-process.mjs /path/to/dsh-source 4
+```
+
+No production code, polling setting, or cache policy changed in this pass.
+
 ## 2026-09-17: pinned session ids answer with a point query
 
 `session/new` and `session/fork` refuse a client-supplied id that a stored
@@ -618,6 +684,9 @@ The 50ms baseline costs 82–84 calls / 1005–1026ms. Short shell commands take
 about 250ms at 200ms polling versus 100ms at 50ms. Reducing native inspection
 cost without this latency tradeoff is a follow-up priority. Keep fresh process
 identity checks for signals/teardown; a stale cache is not an acceptable fix.
+The kernel-reader backport recorded at the top of this document discharges that
+priority: the same polls cost single-digit milliseconds of query time with
+fresh identities and the unchanged interval.
 
 The upstream source inspected at `c291e7961a515f6d7af9304e7fd1d257929aef26`
 still uses the same synchronous Darwin `ps` inspection. Its current head is
