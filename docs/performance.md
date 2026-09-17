@@ -83,12 +83,22 @@ directory. Product evidence is `mac2/contracts-92262/PASS.json`, `mac2-e2e.log`,
 isolated delayed-copy reproduction remain there for inspection.
 The pinned upstream revision remains DSH 0.1.5-rc.2
 `fb2c4b9e698e30edb738bca4cf0618587db7d203`; patch SHA-256 is
-`5d5ffa359d9e44e2280846a65e99638b39a4484672d7f4bbc0b4d34a7684f505`.
+`5c893b2efa320965d19efa64d33fc24c8d72621fe7a259004533bb29d642a748`.
+The digest recorded here by the macOS pass, `5d5ffa35…`, was regenerated when
+the Linux settlement correction was merged into the same patch.
 
 Linux/systemd and Linux packaging were not rerun. Optional Kitty-image
 acceptance, physical Cmd-click, IME and the host clipboard remain untested in
 this pass. Fixtures stayed private. No push, release publication or daily-profile
 installation was performed.
+
+The subsequent [current-main Linux acceptance](linux-acceptance-2026-09-16.md)
+found an early-cancellation failure in the unchanged pinned Linux scope owner;
+the macOS pass does not clear that separate release gate. The
+[combined Linux settlement acceptance](linux-acceptance-2026-09-17.md) merged
+that correction into this backport at `f5052559`; the built-provider matrix
+that failed on main then passed all 15 cases on both Node versions, together
+with the source, script, bridge, snapshot, updater, E2E and audit gates.
 
 ## 2026-09-15: macOS current-identity checks (76300cfe)
 

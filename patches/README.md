@@ -19,6 +19,19 @@ The patch includes regression tests, a two-architecture SDK layout oracle,
 paired README contracts and decision notes. No native helper artifact is added.
 See [performance evidence](../docs/performance.md).
 
+The same patch carries the Linux scope-settlement correction in
+`subprocess-local/src/linux-scope.ts` and its PTY binding in `src/index.ts`.
+A requested termination observed before the launch request is consumed resolves
+as cancellation; genuine startup failures and signal-delivery failures still
+reject. An empty but active scope owned by the terminated client settles and is
+released best-effort, a state observation invalidated by a termination signal is
+discarded and re-queried, and the final scope signal waits once for acknowledged
+direct settlement. A new early-bootstrap test fixture and the authored
+`bash-startup-timeout` recorded session accompany the change. This half is not
+an upstream-adopted pin either: it is a local backport whose real user-systemd
+acceptance is recorded in
+[the combined Linux settlement acceptance](../docs/linux-acceptance-2026-09-17.md).
+
 When upgrading the upstream source, review whether the change is already
 included. Remove the patch digest if it is; otherwise rebase the source change,
 regenerate and review the patch, update its digest, rebuild both platform

@@ -576,6 +576,12 @@ runtime: retain exact source provenance and release-shaped validation.
    evidence of a macOS bug or speedup. Before adoption: ordinary and PTY early
    cancellation, genuine startup failure, process reaping, and shutdown tests on
    a real user-systemd Linux host; retain macOS regression coverage separately.
+   **Status 2026-09-17: implemented in the pinned backport and accepted.**
+   The product now carries this correction inside its `fb2c4b9e` patch; the
+   rebuilt Linux revision passed the built-provider matrix, source, script,
+   bridge, snapshot, updater, product E2E and post-run audit gates. See
+   [the Linux settlement acceptance](linux-acceptance-2026-09-17.md). The
+   remaining upstream-side work is exact-source distribution, not the fix.
 
 2. **Session-history API direction — prepare a small local migration, not an urgent SDK bump.**
    Upstream now deprecates `eventAt`, `snapshotEvents`, and `ownEvents`; its

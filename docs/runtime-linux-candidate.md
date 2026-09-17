@@ -8,6 +8,14 @@ main product code or daily profiles; the subsequent updater correction is
 recorded below. Real Linux/user-systemd source and built-library acceptance on
 `swoop` passed after explicit workload approval; distribution remains separate.
 
+This candidate is superseded as an integration vehicle: its owner and PTY
+settlement changes were merged into the product's pinned
+`fb2c4b9e` backport and re-validated at `f5052559`. The section below keeps
+the candidate's own scope, source backup and first-round Linux evidence; the
+combined revision and its acceptance are recorded in
+[the Linux settlement acceptance](linux-acceptance-2026-09-17.md). Nothing here
+adopts `5922e6a2` as a pin.
+
 ## Refreshed scope
 
 The initial assessment named `b79a227c` and `aaa02a39`. Refreshing official
