@@ -6,6 +6,64 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-17: session-picker retention past the first-prompt cap
+
+`x.ai/session/list` folds every session it can see before sorting and slicing,
+but the first-prompt LRU behind it was capped at 100 entries
+(`DEFAULT_FIRST_PROMPT_CACHE_LIMIT`). A single pass over a working directory
+taller than that cap evicted its own earliest entries, and because eviction also
+drops the cached revision, every later pass re-opened and refolded them. The
+retained set never converged, so the picker's warm cost grew with the store
+instead of with the size of the answer.
+
+`SessionListIndex.retainFirstPrompts(candidates)` now reserves room for one
+pass before `list()` inspects its candidates. The cap grows monotonically to
+the resident set plus that pass (`size + candidates`), which is exactly the
+number of entries a pass can insert, so no entry a pass or a later pass may
+reuse is evicted. Raising the cap preserves the existing revision semantics:
+only eviction still clears a cached revision. `firstPromptCacheLimit` is no
+longer `readonly`.
+
+Before is `c7589a68`, after is this change. Both columns are the same harness
+against the same pinned SDK: one JSONL root per run, 120 events per session,
+three lists, `--strict`, Node 24.19.0 on Darwin ARM64.
+
+| Stored sessions in cwd | Phase | Before | After |
+| ---: | --- | ---: | ---: |
+| 30 | warm passes | 0 opens | 0 opens |
+| 100 | warm passes | 0 opens | 0 opens |
+| 101 | warm passes | 1 open per pass | 0 opens |
+| 300 | warm passes | 200 opens, 174.4–184.1ms | 0 opens, 43.6–47.1ms |
+| 300 | after one changed session | 200 opens, 198.6ms | 1 open, 47.5ms |
+| 300 across 8 cwds | second directory sweep | 300 opens | 0 opens |
+
+The 101-session row is the cliff: one entry over the cap made every warm list
+re-read a log. At 300 sessions each warm pass refolded 24,000 events and
+re-validated them through `adoptSessionEvent`; the after column refolds none,
+and a single changed session costs one open instead of the whole store. The
+cold pass is unchanged (300 opens, 270.2ms after vs 273.5ms before), as are
+stores at or below the old cap. Retention paid for this: at 300 sessions the
+index holds 1167.9KiB above the pre-list heap (`indexRetainedKiB`, two GCs
+before sampling) against 1228.4KiB before, and peak RSS was 222.1MiB against
+211.2MiB — a range repeated across runs, so it is not a measured regression.
+Growth is bounded by the union of the directories the picker has listed, not
+by the whole store per pass, and each entry is a first-prompt string the row
+would carry anyway.
+
+`scripts/bench-session-list.mjs` gained the directory sweep (`--sweep=true`),
+which lists every cwd twice and asserts a second pass re-opens nothing; it also
+had a use-before-initialization crash on `counters` that made every run die at
+module evaluation, now fixed. Regression coverage sits in two specs:
+`tests/session-list.spec.ts` raises a cap below the pass and ignores a
+non-positive reserve, and `tests/session-discovery.spec.ts` drives 150 stored
+sessions through the real picker and requires warm passes to open nothing
+(it fails on the previous revision with 250 opens instead of 150).
+
+Full bridge suite: 934 tests in 47 files on Node 22.19.0 and 24.19.0; the 44
+release/runtime/gateway script cases, `scripts/check.sh` and `git diff --check`
+pass. Measurements are local macOS numbers for one module path, not a
+whole-application speedup, and no product E2E was rerun for this change.
+
 ## 2026-09-17: workflow queries and macOS process reads under load
 
 Two stress lanes checked the readers that long sessions and large process

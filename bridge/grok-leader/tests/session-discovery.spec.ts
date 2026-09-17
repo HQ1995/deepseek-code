@@ -100,6 +100,23 @@ describe('owned session discovery', () => {
     expect((await f.picker({ query: 'prompt 0', limit: 1 }))[0]).toMatchObject({ sessionId: '0', firstPrompt: 'prompt 0' })
   })
 
+  it('keeps a picker pass wider than the default cap resident instead of evicting itself', async () => {
+    const f = fixture()
+    for (let i = 0; i < 150; i++) f.add(String(i), '/work', [prompt('prompt ' + i, i)])
+    expect(await f.picker()).toHaveLength(50)
+    expect(f.open).toHaveBeenCalledTimes(150)
+    // A pass over the whole store must not evict its own earliest rows: both a
+    // repeated pass and a cwd-scoped one reuse every unchanged session.
+    await f.picker()
+    await f.picker({ cwd: '/work', query: 'prompt 9' })
+    expect(f.open).toHaveBeenCalledTimes(150)
+    expect(f.active).toBe(0)
+    // Only a changed revision re-reads, and only that session.
+    f.revisions.set('0', 'r2')
+    expect((await f.picker({ query: 'prompt 0', limit: 1 }))[0]).toMatchObject({ sessionId: '0', firstPrompt: 'prompt 0' })
+    expect(f.open).toHaveBeenCalledTimes(151)
+  })
+
   it('caches empty logs with unchanged revisions and refreshes changed revisions', async () => {
     const f = fixture(); f.add('a', '/work', [])
     expect((await f.picker())[0]!.firstPrompt).toBe('')

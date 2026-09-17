@@ -154,6 +154,9 @@ export function createSessionDiscovery(host: DiscoveryHost) {
     // Filter before opening logs; retain exact-id cross-cwd resume.
     const candidates = cwd === undefined ? snapshots : snapshots.filter(({ header }) => header.cwd === cwd
       || (query !== undefined && header.id.toLowerCase() === query))
+    // One pass over the candidates must stay resident: a cap below the pass
+    // size evicts its own earliest entries and every later list re-reads them.
+    projectionIndex.retainFirstPrompts(candidates.length)
     const projections = await Promise.all(candidates.map(({ header, revision }) => accepted(() =>
       projectionIndex.inspect(header.id, header.createdAt,
         async () => (await read(store, SessionId(header.id), {}, inspection(), true))?.events, revision))))

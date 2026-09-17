@@ -208,6 +208,38 @@ describe('SessionListIndex first-prompt LRU', () => {
     expect(index.projection('b', 0).firstPrompt).toBe('') // evicted
     expect(index.projection('c', 0).firstPrompt).toBe('c prompt')
   })
+
+  it('keeps one picker pass resident so a store larger than the cap reuses', async () => {
+    const index = new SessionListIndex(2)
+    let loads = 0
+    const read = (id: string) => index.inspect(id, 0, async () => {
+      loads += 1
+      return [userMessage(1, id)]
+    }, 'v1')
+    index.retainFirstPrompts(3)
+    await Promise.all(['a', 'b', 'c'].map(read))
+    expect(loads).toBe(3)
+    const again = await Promise.all(['a', 'b', 'c'].map(read))
+    expect(again.map(row => row.firstPrompt)).toEqual(['a', 'b', 'c'])
+    expect(loads).toBe(3)
+    // A pass over another directory retains alongside the resident rows.
+    index.retainFirstPrompts(2)
+    await Promise.all(['d', 'e'].map(read))
+    expect(loads).toBe(5)
+    await Promise.all(['a', 'b', 'c', 'd', 'e'].map(read))
+    expect(loads).toBe(5)
+  })
+
+  it('ignores a non-positive or non-integer reserve', () => {
+    const index = new SessionListIndex(1)
+    index.recordInspection('a', 0, [userMessage(1, 'a prompt')])
+    index.retainFirstPrompts(0)
+    index.retainFirstPrompts(-3)
+    index.retainFirstPrompts(Number.NaN)
+    index.recordInspection('b', 0, [userMessage(1, 'b prompt')])
+    expect(index.projection('a', 0).firstPrompt).toBe('')
+    expect(index.projection('b', 0).firstPrompt).toBe('b prompt')
+  })
 })
 
 it('caches empty durable logs only while their revision is unchanged', async () => {

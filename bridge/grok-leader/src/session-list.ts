@@ -68,7 +68,8 @@ export class SessionListIndex {
   private readonly inspectionTails = Array.from({ length: 4 }, () => Promise.resolve())
   private nextInspection = 0
   private readonly firstPromptSeen = new Set<string>()
-  private readonly firstPromptCacheLimit: number
+  /** Monotone cap; raising it never invalidates a resident entry. */
+  private firstPromptCacheLimit: number
 
   constructor(firstPromptCacheLimit: number = DEFAULT_FIRST_PROMPT_CACHE_LIMIT) {
     this.firstPromptCacheLimit = firstPromptCacheLimit
@@ -94,6 +95,22 @@ export class SessionListIndex {
     this.firstPromptCache.delete(sessionId)
     this.firstPromptCache.set(sessionId, title)
     return title
+  }
+
+  /**
+   * Raise the first-prompt cap so one picker pass over `candidates` sessions
+   * cannot evict entries that pass, or a later pass over the same store, must
+   * reuse: the pass inserts at most one entry per candidate, and everything
+   * already resident may be revisited by the next list — including after a
+   * switch to another working directory. A cap smaller than the pass makes the
+   * pass evict its own earliest entries, and every following list then reopens
+   * and refolds those logs, so the retained set tracks the picking working set
+   * instead of a fixed count.
+   */
+  retainFirstPrompts(candidates: number): void {
+    if (!Number.isSafeInteger(candidates) || candidates <= 0) return
+    const needed = this.firstPromptCache.size + candidates
+    if (needed > this.firstPromptCacheLimit) this.firstPromptCacheLimit = needed
   }
 
   /** Share cold reads across requests and cap open logs at four. The returned
