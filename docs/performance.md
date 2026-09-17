@@ -6,6 +6,54 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-17: sustained product-loop soak
+
+`scripts/soak-product-loop.sh` runs the real product loop for hundreds of
+consecutive turns from a single session: the real TUI binary, a real pinned
+`dsh` profile, the real bridge and leader, and a local streaming gateway that
+answers one deterministic turn per prompt (a bash tool step every fifth turn by
+default, so the loop under test includes the tool round trip). It records
+per-turn latency next to TUI and leader RSS and descriptor counts, and it
+checks that the leader exits after its last client disconnects, so drift or a
+leak shows up as a failing row instead of an anecdote.
+
+| Turns | Errors | p50 | p90 | max | first 5 | last 5 |
+| ---: | ---: | ---: | ---: | ---: | --- | --- |
+| 100 | 0 | 234ms | 292ms | 468ms | 468, 234, 237, 235, 294 | 234, 232, 230, 232, 233 |
+| 200 | 0 | 233ms | 237ms | 358ms | 358, 236, 232, 233, 235 | 232, 237, 235, 237, 239 |
+
+Latency does not drift: the 200-turn run ends where it started once the first
+turn is past, and provider wait (keypress to the gateway receiving the request)
+holds at 185ms p50 / 195ms p90 across the whole run. Boot was 1.5-1.9s to the
+leader socket.
+
+| Scope | Run | First | Last | Max | 25-turn segment averages |
+| --- | ---: | ---: | ---: | ---: | --- |
+| leader | 100 | 237.2MiB | 291.4MiB | 301.9MiB | 236.3 248.3 289.6 290.2 |
+| leader | 200 | 238.0MiB | 300.6MiB | 304.6MiB | 236.0 255.1 290.7 294.5 296.5 289.0 292.1 292.8 |
+| TUI | 200 | 76.0MiB | 83.1MiB | 83.1MiB | 74.3 75.1 75.9 77.3 79.0 79.9 80.8 81.1 |
+
+Leader RSS is a plateau, not a leak. Growth is confined to the first ~75 turns
+and then oscillates around 292MiB for 125 further turns; the 100-turn run
+settled at 290.2MiB in its final segment. Every request replays the accumulated
+conversation (the turn-100 request carries all 100 earlier prompts), so the rise
+tracks session transcript size and stalls once the heap has room. Descriptors
+stay flat (leader 39-40, TUI 38-43) and no orphan process or tmux session
+remained after either run. The leader exited on its own inside the harness
+check in every run, including the 8- and 12-turn harness checks; the row reads
+`absent`, `forced-after-*` or `killed` when that contract fails.
+
+Run it with `SOAK_TURNS=200 bash scripts/soak-product-loop.sh` (knobs
+`SOAK_TURNS`, `SOAK_TOOL_EVERY`, `SOAK_PAUSE_MS`, `SOAK_SESSION_ID`,
+`SOAK_PORT`, `DSCODE_E2E_OUT_DIR`; it reuses an existing payload through
+`DSCODE_RELEASE_DIR` and otherwise builds the pinned runtime). Evidence:
+`/tmp/dscode-soak-long` (100 turns) and `/tmp/dscode-soak-200` (200 turns) hold
+`turns-*.jsonl`, `samples-*.jsonl` and the summary JSON. These are loopback
+results against a synthetic gateway on Darwin arm64 with the pinned runtime:
+they do not measure real provider latency, daily CPU, Linux systemd behaviour,
+or retained heap (the pinned launcher offers no `--expose-gc`), and RSS is
+whole-process, including V8 heap growth and fragmentation.
+
 ## 2026-09-17: terminal readiness polls under the kernel reader
 
 The Darwin inspection cost that the "Profiling and deferred work" section below
