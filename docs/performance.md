@@ -80,10 +80,64 @@ node scripts/bench-workflows.mjs 1000000 200
 node scripts/bench-workflows.mjs 100000 200 /path/to/installed/bridge/grok-leader/
 ```
 
+### Session retained memory
+
+A leader that keeps one session open holds three layers: the pinned DSH session
+log itself, the two bridge projections the leader registers (`dscodeWorkflows`,
+`dscodePresetHistory`), and the session-list index that observes every event
+plus the readers that walk history. `scripts/bench-session-memory.mjs`
+appends one coding turn (four tool round trips, a 3KB result per step, 12 events
+including the periodic title update) and reports the heap the session still
+retains after two forced collections, once per layer.
+
+| Mode | Retained at 2,000 turns / 24,100 events | Per event | Per turn |
+| --- | ---: | ---: | ---: |
+| log | 37.874 MiB | 1647.9 B | 19,857 B |
+| projections | 37.922 MiB | 1650.0 B | 19,882 B |
+| leader | 38.158 MiB | 1660.2 B | 20,007 B |
+
+Medians of two runs on Node 24.19.0 / Darwin ARM64, agreeing to 0.03 MiB; Node
+22.15.0 (with `--experimental-strip-types`, which the harness needs for the
+bridge's TypeScript sources) reproduced 1652.5 / 1655.6 / 1663.8 B/event. The
+mid-run and final checkpoints keep the second-half slope within 1% of the first
+half in every mode (log 1.568 to 1.578, projections 1.573 to 1.577, leader 1.573
+to 1.580 MiB per 1,000 events), and the harness asserts that: retention is
+linear in appended events, so none of these layers accumulates per-event state
+beyond the log. The two projections add 2.1 B/event and the index with its
+readers 10.2 B/event.
+
+The first version of this harness reported the last two rows as 1802.6 and
+1811.0 B/event. That gap is measurement, not retention. The SDK wraps every
+listener dispatch in a containment `Promise.resolve(...).catch(...)`, so an
+append loop that never yields leaves roughly 24,000 settled-but-undispatched
+jobs parked in the microtask queue when the sample is taken; each parked job
+keeps its closure alive and inflates the reading by about 155 B/event. Draining
+the queue before the read removes it completely: the same three modes measured
+1648.5 / 1650.6 / 1660.3 B/event with no explicit drain but awaits at the
+checkpoints, and 1647.9 / 1650.0 / 1660.2 with the current `setImmediate` drain.
+A controlled listener probe agreed. Before the drain, adding listeners moved the
+reading from 1623.5 B/event (none) to 1777.4 (one), 1872.5 (two) and 1777.3 (the
+full projection registry); after it, none, one, two and the registry all landed
+between 1623.5 and 1624.7 B/event. The registry costs exactly one `session/event`
+listener, and neither the containment promise nor the registration path retains
+memory, so no SDK backport was made for it.
+
+Both controls are recorded in
+`/tmp/dsc-verify-mac.9f3q/bench-session-memory-controls-24.log`. The harness
+needs the bridge's dependencies installed and `--expose-gc`:
+
+```sh
+node --expose-gc scripts/bench-session-memory.mjs 2000 /path/to/installed/bridge/grok-leader/ leader
+# Node 22 additionally needs --experimental-strip-types for the bridge's TypeScript sources.
+```
+
 Verification for this pass: `scripts/check.sh`, 43 script tests with the one
 Linux-only skip, and 7/7 `tests/workflows.spec.ts` cases against this
-checkout's bridge source. No production code changed, so the bridge, Rust and
-product-E2E gates were not rerun.
+checkout's bridge source. The session-memory harness runs above were taken
+after its drain fix. No production code changed in this pass, so the bridge,
+Rust and product-E2E gates were not rerun for it; the packaged release and the
+installed-product E2E of the same revision are recorded in
+[the Linux acceptance document](linux-acceptance-2026-09-17.md).
 
 ## 2026-09-15: macOS kernel process observations
 

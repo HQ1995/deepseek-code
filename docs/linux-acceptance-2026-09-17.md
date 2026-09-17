@@ -19,7 +19,8 @@ project-isolation scenarios, SDK snapshots, snapshot corpus, managed-update E2E
 and the full installed-product E2E all pass on the patched revision. This is a
 local backport revision, not a published pin; distribution remains a separate
 gate. The same merged revision also passes the macOS focused
-subprocess/shell/terminal selection described below.
+subprocess/shell/terminal selection described below, and its full macOS source
+suite failed only the four host artifacts the paired check itemizes.
 
 ## What changed
 
@@ -108,6 +109,26 @@ cases whose interpreter is absent on this host).
 The owner-core selection used on swoop (linux-scope, local,
 native-containment, process-inspector, terminal, mac-process-table) passed
 **162 tests with 4 Linux-only skips in 6 files (1 skipped)**, exit 0.
+
+The **full macOS source suite** then ran on that same patched tree (`dafcada7`,
+Node 24.19.0): **1,244 files — 1,228 passed, 12 skipped, 4 failed** and
+**22,325 tests — 22,191 passed, 130 skipped, 4 failed**, exit 1. All four file
+failures are host artifacts, separated by re-running exactly those four specs
+against the pristine pin with the same `node_modules` (A/B, both trees after
+`pnpm` resolves on `PATH`: 3 failed / 40 passed, the same three):
+
+- `scripts/browser-bundled-externals.spec.ts`: the `vite build-html` step fails
+  on this host's `/private/var/folders` temp path, identically on the pristine
+  pin.
+- `packages/shell/bash-local/tests/executor.spec.ts > defaults cwd to
+  process.cwd()`: the `/tmp` versus `/private/tmp` spelling described below,
+  identically on the pristine pin, passing from the physical path.
+- `packages/experimental/webworker-runtime/tests/compile/transform-corpus.spec.ts`:
+  two `UNEXPECTED BASELINE FAILURE`s read from the prebuilt `lib/`, identically
+  on the pristine pin.
+- `packages/client/ui-sidebar-documentpreview/tests/pdf-license-bundle.client.spec.ts`:
+  `spawnSync pnpm ENOENT`; passes on both trees once `pnpm` resolves, which is
+  how the other suite legs already run.
 
 One earlier run of the focused selection executed from the `/tmp` symlink
 path recorded a single failure,
@@ -206,6 +227,14 @@ physical Cmd-click, IME, host clipboard, live paid-model sessions and the
 unmerged Browser/Inspector candidates are outside this pass. Distribution
 still requires an official remotely fetchable source revision for the pin, as
 recorded in [the Linux candidate](runtime-linux-candidate.md#remaining-adoption-gates).
-The paired macOS numbers above cover only the focused source selection; the
-full macOS source suite, the installed-product E2E and the packaged release
-assets for this revision were not re-run on that host.
+
+The paired macOS host has since closed those three gaps. Its full source suite
+ran with only the four host artifacts listed above failing; the packaged
+release assets were rebuilt from this revision and record the pinned
+`sourceCommit` and patch digest in `dscode-runtime.json`; and the installed
+product E2E consumed those assets end to end — `PASS real TUI + dsh + bridge
+E2E run 90442` and `PASS provider-manage e2e run 26084`, exit 0. Assets:
+`dscode-runtime-macos-aarch64.tar.gz` (288,548,791 bytes) `58391a0d…` and
+`dscode-plugin.tgz` (1,449,255 bytes) `5762ae6d…`; the evidence set is
+archived as `.git/integration-backups/macos-full-e549786c-evidence.tar.gz`,
+SHA-256 `071079eec1b21433f3c5c5636b9eb98cf680dc46af5c257d5b858f0a471df2f9`.
