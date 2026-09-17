@@ -6,6 +6,85 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-17: workflow queries and macOS process reads under load
+
+Two stress lanes checked the readers that long sessions and large process
+trees actually scale against. Neither found a bottleneck, so no production
+code changed. The pass also repaired the benchmark behind the historical
+workflow numbers.
+
+### Workflow projection queries
+
+`scripts/bench-workflows.mjs` still drove the removed `WorkflowIndex` API, so
+its documented reproduction threw `TypeError: Cannot read properties of
+undefined (reading 'filter')` at `workflows.ts:35` (`d119625e` had moved
+workflow history to the host-only `dscodeWorkflows` projection owned by the
+pinned native registry). It now drives the production path: a real
+`SessionStore` and `SessionProjectionRegistry` with `workflowProjection`
+registered, one `workflowUpdates` query per transition, and every
+`snapshotEvents`, `eventAt` and `ownEvents` call counted. The workload stays at
+200 members and 402 workflow transitions behind the unrelated prefix, spread
+over four phase titles instead of one.
+
+| Prior unrelated events | Fold per transition | Query per transition | Warm history reads | Seeded rebuild, once |
+| --- | ---: | ---: | ---: | ---: |
+| 100,000 | 0.006ms | 0.029ms | 0 | 176.46ms |
+| 1,000,000 | 0.006ms | 0.029ms | 0 | 1791.43ms |
+
+Medians of three runs on Node 24.19.0 / Darwin ARM64, where the per-transition
+columns are medians over the 402 transitions inside each run. Fold and render
+cost do not grow with prior history, and the 402 warm queries read no history
+at all, which is the property `tests/workflows.spec.ts` still asserts. The
+seeded rebuild is the one-time resume fold a checkpoint-less session pays.
+Appending the unrelated prefix cost 244.04ms and 2309.24ms (2.3–2.4µs per
+event); those two figures are the registry's per-append fold, and this
+benchmark does not separate this module's type guard from it. Node 22.15.0
+with `--experimental-strip-types` (below the pinned 22.19.0 floor) reproduced
+the same shape: 0.033ms per query, 187.96ms and 1997.05ms for the seeded
+rebuilds. These are synthetic projection workloads, not whole-application
+speedups.
+
+### macOS process-table reads under load
+
+The kernel `KERN_PROC_ALL` / `KERN_PROC_PID` reader was measured against a
+process table grown by 1000 detached sleeps per level, then reaped.
+
+| Live processes | Full-table median | Point-query median |
+| ---: | ---: | ---: |
+| 985 (baseline) | 0.223ms | 0.025ms |
+| 1,983 | 0.847ms | 0.121ms |
+| 2,983 | 1.234ms | 0.235ms |
+| 3,982 | 1.971ms | 0.438ms |
+| 4,981 | 2.864ms | 0.907ms |
+| 5,981 | 2.780ms | 0.652ms |
+| 6,981 | 3.268ms | 0.733ms |
+| 981 (all 6000 children reaped) | 0.158ms | 0.024ms |
+
+Medians of 11 reads per level on this 16-core host. Full-table reads cost
+about 0.5ms per 1000 live processes and stayed under 3.3ms at roughly 7000
+processes; point queries stayed under 1ms. Both fit the readiness-poll and
+signal-recheck budgets this reader serves, so the macOS inspector keeps its
+whole-table reads with no added cache or polling change. The harness left no
+processes behind: `pgrep -f 'sleep 601'` matched nothing afterwards and the
+table returned to its baseline size.
+
+Raw JSONL and harness (`read-bench.mjs`, `load-stress.mjs`,
+`sysctl-stress-24.jsonl`, `bench-workflows-{22,24}-runs.jsonl`) are in
+`/tmp/dscstress.xsbh7c/`. The workflow benchmark runs where the bridge's
+dependencies are installed; from a checkout without them, point it at an
+installed bridge tree:
+
+```sh
+node scripts/bench-workflows.mjs 100000 200
+node scripts/bench-workflows.mjs 1000000 200
+node scripts/bench-workflows.mjs 100000 200 /path/to/installed/bridge/grok-leader/
+```
+
+Verification for this pass: `scripts/check.sh`, 43 script tests with the one
+Linux-only skip, and 7/7 `tests/workflows.spec.ts` cases against this
+checkout's bridge source. No production code changed, so the bridge, Rust and
+product-E2E gates were not rerun.
+
 ## 2026-09-15: macOS kernel process observations
 
 The runtime backport reads `KERN_PROC_ALL` / `KERN_PROC_PID` through the existing
@@ -296,6 +375,11 @@ Reproduce with Node >=22.19:
 node scripts/bench-workflows.mjs 100000 200
 node scripts/bench-workflows.mjs 1000000 200
 ```
+
+These numbers describe a bridge-owned `WorkflowIndex` that `d119625e` removed
+when workflow history moved to the host-only `dscodeWorkflows` projection, so
+the command above now runs the 2026-09-17 benchmark and no longer reproduces
+this table.
 
 Verification: pinned-SDK TypeScript compilation passed; Node 22.19.0 and
 24.19.0 each passed **18 files / 368 tests**. Full Mac product E2E passed
