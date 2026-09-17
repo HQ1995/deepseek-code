@@ -93,7 +93,10 @@ export function createSessionLifecycle(host: LifecycleHost) {
   const persistedSessionIdInUse = async (id: SessionId) => {
     const store = persistence()
     if (store === undefined) throw internalError('session persistence is not configured')
-    return (await store.list()).some(({ header }) => header.id === id)
+    // One stored id is a point query: listing would walk every project and
+    // session directory and header-read each log just to test membership, and
+    // an unrelated unreadable log would fail the check for every pinned id.
+    return (await store.stat(id)) !== undefined
   }
   const cleanup = async (steps: Array<() => Promise<unknown>>): Promise<void> => {
     const failures: unknown[] = []

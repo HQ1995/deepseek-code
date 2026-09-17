@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import { SessionId, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
-import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
+import { SessionPersistenceRevision, type SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import { createSessionLifecycle, type PersistenceLike, type SessionRecord } from '../src/session-lifecycle.ts'
 import { createSessionRegistry } from '../src/session-registry.ts'
 import { createSessionDiscovery } from '../src/session-discovery.ts'
@@ -36,7 +36,10 @@ function fixture() {
   const persistence = {
     list: vi.fn(async () => [...durable.values()].map(inspection => ({ header: inspection.meta }))),
     open: vi.fn(async (id: string) => ({ header: durable.get(id)!.meta, inheritedEventCount: durable.get(id)!.inheritedEventCount, read: (offset?: number, length?: number, options?: { signal?: AbortSignal }) => read(id, offset, length, options), close: closeRead })),
-    stat: vi.fn(),
+    stat: vi.fn(async (id: string) => {
+      const inspection = durable.get(id)
+      return inspection === undefined ? undefined : { header: inspection.meta, revision: SessionPersistenceRevision('mock') }
+    }),
   }
   const install = vi.fn((ctx: Context) => { order.push('model install'); void ctx })
   const modelHandles: SessionModel[] = []
@@ -125,6 +128,24 @@ describe('session lifecycle ownership', () => {
     await expect(f.add()).rejects.toThrow('already in use')
     expect(f.agents.create).toHaveBeenCalledTimes(1)
     expect(record.model.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('answers one pinned durable id with a point query instead of listing the store', async () => {
+    const f = fixture()
+    await f.add()
+    await f.lifecycle.close(1, { sessionId: 'root' })
+    f.persistence.stat.mockClear(); f.persistence.list.mockClear()
+    // The durable id is still visible to the point query after the live record retired.
+    await expect(f.add()).rejects.toThrow('already in use: root')
+    expect(f.persistence.stat).toHaveBeenCalledExactlyOnceWith('root')
+    expect(f.persistence.list).not.toHaveBeenCalled()
+    // A live duplicate never reaches persistence, and a free id still composes.
+    await f.add('live')
+    f.persistence.stat.mockClear()
+    await expect(f.add('live')).rejects.toThrow('already in use: live')
+    expect(f.persistence.stat).not.toHaveBeenCalled()
+    expect((await f.add('fresh')).agent.session.id).toBe('fresh')
+    expect(f.persistence.list).not.toHaveBeenCalled()
   })
 
   it('reserves pinned ids across asynchronous native construction without blocking unrelated sessions', async () => {

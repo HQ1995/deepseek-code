@@ -192,8 +192,22 @@ const snapshotMs = async () => {
   const snapshots = await persistence.list({})
   return { ms: +(Number(process.hrtime.bigint() - started) / 1e6).toFixed(1), snapshots: snapshots.length }
 }
+// The lifecycle asks "is this stored id still in use" when a client pins one.
+// It answers with the backend point query; time that against the store listing
+// above so the difference is measured, not assumed. Median of five.
+const pointQueryMs = async id => {
+  const samples = []
+  for (let index = 0; index < 5; index += 1) {
+    const started = process.hrtime.bigint()
+    await persistence.stat(id, {})
+    samples.push(Number(process.hrtime.bigint() - started) / 1e6)
+  }
+  samples.sort((left, right) => left - right)
+  return +samples[2].toFixed(1)
+}
 const heapBefore = await heapNow()
 const snapshots = await snapshotMs()
+const pointQueries = { stored: await pointQueryMs(sessionIds[0].id), absent: await pointQueryMs(SessionId('bench-absent')) }
 const first = await listOnce('cold')
 for (let index = 2; index <= listCount; index += 1) await listOnce(`warm ${index - 1}`)
 const heapWarm = await heapNow()
@@ -243,6 +257,7 @@ console.log(JSON.stringify({
   sessions: sessionCount, eventsPerSession, projects, candidates, limit: 30,
   seedMs: +seedMs.toFixed(1), rootBytes: Number(execFileSync('du', ['-sk', root]).toString().split('\t')[0]) * 1024,
   snapshotMs: snapshots.ms, snapshotCount: snapshots.snapshots,
+  pointQueryMs: pointQueries,
   peakRssMiB: +(counters.peakRss / 1024 / 1024).toFixed(1),
   indexRetainedKiB: global.gc === undefined ? undefined : +((heapWarm - heapBefore) / 1024).toFixed(1),
   phases, ...sweepPhases.length === 0 ? {} : { sweepPhases }, violations,

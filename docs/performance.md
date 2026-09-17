@@ -6,6 +6,49 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-17: pinned session ids answer with a point query
+
+`session/new` and `session/fork` refuse a client-supplied id that a stored
+session already owns, and that membership test ran the full store listing:
+`(await store.list()).some(({ header }) => header.id === id)`. A pinned request
+paid for every other session in the store — every project directory, every
+session directory, and a header read per log — to compare one id, and it paid
+again on each pinned create or fork. Over 300 stored sessions that snapshot
+costs 49.7-56.2ms (`snapshotMs`, 52.0ms on Node 22.19.0) against the same
+harness.
+
+`persistedSessionIdInUse` now resolves the id's own directory and header
+(`store.stat(id) !== undefined`): 0.2ms for a stored id and 0.1ms for a free
+one in the same run, both reported by the `pointQueryMs` median-of-five that
+`scripts/bench-session-list.mjs` now measures beside `snapshotMs`. The
+substitution is exact against the pinned backend rather than merely narrower:
+`stat` returns `undefined` only when the session does not exist, it sees
+created-but-unmaterialized sessions through the same tracker as `list`, and it
+verifies the stored header against the requested id before answering, so a match
+still means the same thing. The narrower query also drops a failure mode the
+listing carried: `list()` reads a header for every stored session, so one
+unrelated session whose header cannot be read (a permission error, a retired
+header field, a filename/version mismatch) failed the check for every pinned id,
+where `stat` only touches the id in question.
+
+| Question | Cost | Work |
+| --- | ---: | --- |
+| `list()` snapshot, 300 stored sessions | 49.7-56.2ms | every project and session dir, one header per log |
+| `stat(id)`, stored id | 0.2ms | one id, one header |
+| `stat(id)`, free id | 0.1ms | one id, one directory probe per project |
+
+This is a per-request cost, not a per-keystroke one: the picker's listing path
+is unchanged and still folds the store. Before is `9bd0d4a0`, after is this
+change; every number above comes from one JSONL root per run, 120 events per
+session, three lists, `--strict`, Node 24.19.0 on Darwin ARM64.
+
+Regression coverage sits in `tests/session-lifecycle.spec.ts` ("answers one
+pinned durable id with a point query instead of listing the store"): it closes a
+session, pins its id through `session/new`, and requires `stat` called once
+with that id while `list` is never called; it then checks that a live duplicate
+is refused before persistence is consulted and that a free id still composes. On
+the previous revision it fails with `Number of calls: 0`.
+
 ## 2026-09-17: session-picker retention past the first-prompt cap
 
 `x.ai/session/list` folds every session it can see before sorting and slicing,
