@@ -79,6 +79,76 @@ provider latency, daily CPU, Linux systemd behaviour, or retained heap (the
 pinned launcher offers no `--expose-gc`), and RSS is whole-process, including
 V8 heap growth and fragmentation.
 
+## 2026-09-17: cancellation lane and descriptor attribution
+
+`SOAK_CANCEL_EVERY` (default 0, off, so the sustained runs above are
+unchanged) turns every Nth turn of window 1 into a cancel probe instead of a
+measured turn. The window is asked for a step that never returns on its own:
+the fixture's bash command writes this run's own marker path and then sleeps
+600s, and the harness sends Ctrl+C only once that file exists, so the keystroke
+cannot land on a turn that has not started yet. Immediately before the Ctrl+C
+the probe proves the held `sleep` is alive inside this run's own process tree;
+a cancel that could never have seen a survivor is recorded as `step-unseen`
+and fails instead of passing as a clean one. A passing probe requires the
+product's `Turn cancelled by user` marker, the held step reaped inside
+`SOAK_CANCEL_TIMEOUT_S`, and the neighbouring windows still rendering their
+own turns next to it. The failing statuses are `no-start`, `no-cancel`,
+`ghost-ok` (the turn completed anyway), `failure-text` (a startup failure
+such as `before its bootstrap consumed`), `step-alive`, `still-busy` and
+`step-unseen`; each writes its row to `cancels-*.jsonl`, saves the pane
+scrollback to `cancel-*-turn-<turn>-w<window>.txt`, and fails the run at the
+end.
+
+| Turns | Windows | Cancel every | Probes | Statuses | Step sighted | Hold p50/max | Cancel p50/max | Cross-talk | Leader exit |
+| ---: | ---: | ---: | ---: | --- | ---: | --- | --- | ---: | --- |
+| 10 | 2 | 2 | 5 | 5 ok | 5 | 69ms / 71ms | 47ms / 52ms | 0 | exited-after-2000ms |
+| 200 | 2 | 10 | 20 | 20 ok | 20 | 64ms / 163ms | 51ms / 99ms | 0 | exited-after-2000ms |
+
+`holdMs` is keypress-to-marker, `cancelMs` is Ctrl+C-to-`Turn cancelled by
+user`, and `SOAK_CANCEL_DELAY_MS` (default 250) is the pause between the live
+step and the keystroke. `SOAK_CANCEL_TIMEOUT_S` (default 30) bounds both the
+wait for the marker and the wait for the step to be reaped. A probe that fails
+mid-turn cancels its own window so the rest of the run still measures turns, and
+any step it found alive is terminated from the run's cleanup.
+
+The lane first reported a fixture bug, not a product one: the runtime appends a
+context snapshot after the prompt it belongs to, and the fixture matched its
+hold prompt against the last user message only, so the first probe of a run
+reported `no-start` for a turn that had started (`/tmp/dscode-fd-dense`). The
+fixture now scans user messages backwards for both prompt families, and answers
+a hold prompt whose step already returned with a plain reply so a post-cancel
+re-request cannot start a second `sleep`. The regression case is the
+every-turn lane: 6 probes, 6 ok, first probe included (`/tmp/dscode-fd-attr`).
+
+Descriptors in the loop are attributed to the HMR user-patch watcher, not to
+the skill provider. A 120-turn tool-step run grew the leader from 42 to 160
+descriptors with one descriptor per created file while the TUI stayed flat at
+38 (`/tmp/dscode-touch-long`). An `fs` hook on the leader
+(`/tmp/soak-hook-variant.sh`, log `/tmp/dsh-fd-hook.log`) put every new
+handle in chokidar's `_handleDir`/`_handleFile` path on the turn's marker
+file inside `$DSH_HOME`. The registering code is `dsh`'s profile boot: it
+watches the home patch layer `$DSH_HOME/cordis.patch.yml` and the profile's
+own `cordis.patch.yml` through `hmr.registerConfig`, which resolves an
+existing directory with `findWatchRoot` (here `$DSH_HOME`, depth 0) and then
+calls `chokidar.watch`, so the directory and every regular file directly
+inside it each hold one descriptor
+(`@deepseek-ai/dsh/lib/profile-boot-*.js`, `cordis-plugin-hmr/lib/index.js`
+and `chokidar/esm/handler.js` in the pinned `0.1.5-rc.2` runtime). A
+standalone reproduction of that watch shape holds one descriptor per direct
+file and releases it on unlink (21 with the directory watch ready, 26 after five
+files, 23 after three were removed, 21 after the rest,
+`/tmp/dscode-chokidar-check`), so the growth is bounded by the files left in
+that one directory rather than by turn count. The skill provider
+is narrower: it watches `<project>/.dsh/skills`, `<project>/.agents/skills`,
+custom directories, `$DSH_HOME/skills`, `$AGENTS_HOME/skills` and the
+bundled directory at depth 1, and only while the root exists — a missing root
+degrades to `fs.watchFile` stat polling, which holds no descriptor
+(`dsh-skill-filesystem/lib/index.js`, same runtime). No watcher covers the
+workspace root, so files an agent writes inside a repository consume no
+descriptor; what this run measured is the soak writing one marker per turn
+directly into `$DSH_HOME`, a directory a real host keeps to a handful of files
+(`settings.yaml`, `settings.yaml.lock`, `runtime-paths`).
+
 ## 2026-09-17: terminal readiness polls under the kernel reader
 
 The Darwin inspection cost that the "Profiling and deferred work" section below
