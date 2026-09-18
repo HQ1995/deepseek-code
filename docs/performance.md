@@ -9,50 +9,75 @@ does not establish overall application performance.
 ## 2026-09-17: sustained product-loop soak
 
 `scripts/soak-product-loop.sh` runs the real product loop for hundreds of
-consecutive turns from a single session: the real TUI binary, a real pinned
-`dsh` profile, the real bridge and leader, and a local streaming gateway that
-answers one deterministic turn per prompt (a bash tool step every fifth turn by
-default, so the loop under test includes the tool round trip). It records
-per-turn latency next to TUI and leader RSS and descriptor counts, and it
-checks that the leader exits after its last client disconnects, so drift or a
-leak shows up as a failing row instead of an anecdote.
+consecutive turns: the real TUI binary, a real pinned `dsh` profile, the real
+bridge and leader, and a local streaming gateway that answers one
+deterministic turn per prompt (a bash tool step every fifth turn by default,
+so the loop under test includes the tool round trip). It records per-turn
+latency next to TUI and leader RSS and descriptor counts, tags every reply per
+window so a reply delivered to the wrong client fails the run, and checks that
+the leader outlives its clients and then exits inside its 2000ms idle window.
+A drift, leak, misroute or premature leader exit is a failing row rather than
+an anecdote.
 
-| Turns | Errors | p50 | p90 | max | first 5 | last 5 |
-| ---: | ---: | ---: | ---: | ---: | --- | --- |
-| 100 | 0 | 234ms | 292ms | 468ms | 468, 234, 237, 235, 294 | 234, 232, 230, 232, 233 |
-| 200 | 0 | 233ms | 237ms | 358ms | 358, 236, 232, 233, 235 | 232, 237, 235, 237, 239 |
+| Turns | Windows | Rows | Errors | p50 | p90 | max | first 5 | last 5 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| 200 | 1 | 200 | 0 | 52ms | 84ms | 251ms | 251, 52, 51, 52, 85 | 50, 51, 48, 49, 79 |
+| 200 | 1, 150ms pause | 200 | 0 | 50ms | 82ms | 205ms | 205, 52, 48, 48, 83 | 49, 50, 50, 48, 80 |
+| 400 | 1 | 400 | 0 | 50ms | 83ms | 149ms | 149, 51, 49, 50, 80 | 50, 49, 53, 52, 82 |
+| 60 | 2 | 120 | 0 | 69ms | 107ms | 371ms | 371, 370, 66, 75, 63 | 69, 65, 66, 108, 109 |
 
-Latency does not drift: the 200-turn run ends where it started once the first
-turn is past, and provider wait (keypress to the gateway receiving the request)
-holds at 185ms p50 / 195ms p90 across the whole run. Boot was 1.5-1.9s to the
-leader socket.
+Latency does not drift. The last five turns of every run sit at its median,
+including the 400-turn run whose final turn is 82ms; the first turn is the
+outlier in all of them because it pays for the session's first request.
+Provider wait (keypress to the gateway receiving the request) holds at 26ms
+p50 / 29-31ms p90 for one client (27ms p50 in the loaded 200-turn run) and
+32ms p50 / 39ms p90 for two. Per-step, a
+tool turn costs about 33ms over a plain turn (83ms vs 50ms p50 at 400 turns),
+which is the bash round trip plus its extra model request, and the two-client
+run costs about 17ms per row because two clients poll one leader. Boot to the
+leader socket and the model row was 1.5-2.3s for one client and 5.1s for two.
 
-| Scope | Run | First | Last | Max | 25-turn segment averages |
+| Scope | Run | First | Last | Max | 25-turn segment averages (MiB) |
 | --- | ---: | ---: | ---: | ---: | --- |
-| leader | 100 | 237.2MiB | 291.4MiB | 301.9MiB | 236.3 248.3 289.6 290.2 |
-| leader | 200 | 238.0MiB | 300.6MiB | 304.6MiB | 236.0 255.1 290.7 294.5 296.5 289.0 292.1 292.8 |
-| TUI | 200 | 76.0MiB | 83.1MiB | 83.1MiB | 74.3 75.1 75.9 77.3 79.0 79.9 80.8 81.1 |
+| leader | 400 turns | 234 | 303 | 310 | 240 268 296 298 299 302 304 306 308 300 299 299 300 300 302 302 |
+| leader | 200 turns | 235 | 295 | 301 | 239 271 296 259 264 272 281 290 |
+| leader | 200 turns, 150ms pause | 235 | 297 | 302 | 240 255 296 300 300 301 299 296 |
+| leader | 60 turns x 2 clients | 231 | 306 | 308 | 249 296 306 |
+| TUI | 400 turns | 73 | 83 | 83 | 74 74 75 76 76 76 77 79 80 80 80 82 83 83 83 83 |
 
-Leader RSS is a plateau, not a leak. Growth is confined to the first ~75 turns
-and then oscillates around 292MiB for 125 further turns; the 100-turn run
-settled at 290.2MiB in its final segment. Every request replays the accumulated
-conversation (the turn-100 request carries all 100 earlier prompts), so the rise
-tracks session transcript size and stalls once the heap has room. Descriptors
-stay flat (leader 39-40, TUI 38-43) and no orphan process or tmux session
-remained after either run. The leader exited on its own inside the harness
-check in every run, including the 8- and 12-turn harness checks; the row reads
-`absent`, `forced-after-*` or `killed` when that contract fails.
+Leader RSS is a plateau, not a leak. Growth is confined to the first ~75
+turns, after which the 400-turn run stays inside 299-308MiB for the next 325
+and the slower-paced 200-turn run oscillates around 296-301MiB. The third run
+dips to 259MiB around turn 100 and climbs back to 290MiB, which is V8
+collecting, not a second regime. Every request replays the accumulated
+conversation, so the rise tracks transcript size: the request body grows from
+36KB on turn 1 to 87.5KB on turn 400 and 98KB on the last request of the run.
+TUI RSS climbs about 10MiB across 400 turns (74 -> 83MiB) and descriptor
+counts stay flat throughout (leader 40-41, TUI 38-39, and 37 per client plus
+43-46 for the leader in the two-client run).
 
-Run it with `SOAK_TURNS=200 bash scripts/soak-product-loop.sh` (knobs
-`SOAK_TURNS`, `SOAK_TOOL_EVERY`, `SOAK_PAUSE_MS`, `SOAK_SESSION_ID`,
-`SOAK_PORT`, `DSCODE_E2E_OUT_DIR`; it reuses an existing payload through
-`DSCODE_RELEASE_DIR` and otherwise builds the pinned runtime). Evidence:
-`/tmp/dscode-soak-long` (100 turns) and `/tmp/dscode-soak-200` (200 turns) hold
-`turns-*.jsonl`, `samples-*.jsonl` and the summary JSON. These are loopback
-results against a synthetic gateway on Darwin arm64 with the pinned runtime:
-they do not measure real provider latency, daily CPU, Linux systemd behaviour,
-or retained heap (the pinned launcher offers no `--expose-gc`), and RSS is
-whole-process, including V8 heap growth and fragmentation.
+The exit contract held in all four runs: `leaderExit` read
+`exited-after-2000ms` and `lastClient` read `alive-with-N-of-N-client(s)`, so
+the leader stayed up while any client was attached and exited on its own once
+the last one was gone. Cross-talk was 0 rows everywhere, and no orphan
+process or tmux server remained after any run; the harness fails the run when
+a window renders another window's tagged reply.
+
+Run it with `SOAK_TURNS=200 bash scripts/soak-product-loop.sh`, or
+`SOAK_WINDOWS=2` for the concurrent-client lane. Knobs: `SOAK_TURNS`,
+`SOAK_TOOL_EVERY`, `SOAK_WINDOWS`, `SOAK_PAUSE_MS`,
+`SOAK_TURN_TIMEOUT_S`, `SOAK_SESSION_ID`, `SOAK_PORT`,
+`DSCODE_E2E_OUT_DIR`; it reuses an existing payload through
+`DSCODE_RELEASE_DIR` and otherwise builds the pinned runtime. Each window
+gets its own session UUID, because `--session-id` rejects anything that is
+not a bare UUID. Evidence: `/tmp/dscode-soak-f200`, `/tmp/dscode-soak-f200p`,
+`/tmp/dscode-soak-f400` and `/tmp/dscode-soak-win4` hold `turns-*.jsonl`,
+`samples-*.jsonl`, `crosstalk-*.jsonl` and the summary JSON. These are
+loopback results against a synthetic gateway on Darwin arm64 with the pinned
+runtime, taken while the host ran at load average ~6; they do not measure real
+provider latency, daily CPU, Linux systemd behaviour, or retained heap (the
+pinned launcher offers no `--expose-gc`), and RSS is whole-process, including
+V8 heap growth and fragmentation.
 
 ## 2026-09-17: terminal readiness polls under the kernel reader
 
