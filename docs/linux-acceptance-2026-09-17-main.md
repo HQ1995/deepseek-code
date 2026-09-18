@@ -192,3 +192,21 @@ bench script, and the plugin payload hash is byte-identical to the accepted
 run. As before, this validates a local revision, not a published artifact:
 main is 44 commits ahead of `origin/main` `f6524d40` and nothing is pushed,
 so distribution remains its own gate.
+
+## Threshold reopened (2026-09-18)
+
+The first product commit after the `dfe46647` run — `aefb700b`
+`perf(telemetry)`, which resolves the traces exporter's blocking OTLP HTTP
+client on first export instead of inside startup — reopens the threshold
+again. The delta is `xai-grok-telemetry` only (`src/otlp_http.rs`,
+`src/otel_layer/mod.rs`, plus the new `tests/otel_traces_export.rs`), no
+DSH, bridge or script code, and the change is measured in
+[the performance notes](performance.md): the `connect finished` → `app_init`
+window drops from 193-242ms to 107-116ms over interleaved before/after
+launches, with the export path covered end to end by the new wire test.
+
+It still links into the shipped binary, so `dfe46647` remains the last
+accepted Linux revision and a fresh swoop run of the same threshold — the
+15-case built-provider matrix, `scripts/check.sh` and the script/bridge
+suites on Node 22.19.0 and 24.19.0 — is required at the revision that
+contains it before this document can call Linux accepted again.
