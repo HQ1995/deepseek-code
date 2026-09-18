@@ -141,10 +141,12 @@ instead of retrying, and logging, on every flush.
   `1ded98a9b621c6b3edb1347b2a31592018758ce5c804c6c911ee100be70733ac`.
 
 This section changes product code under `third_party/grok-build`, so it
-reopens the Linux acceptance threshold: the revision that contains it needs a
-fresh swoop run (15-case built-provider matrix, `check.sh`, script and
-bridge tests) before `main` counts as accepted on Linux again. The last
-accepted Linux revision is `dfe46647` (`docs/linux-acceptance-2026-09-17-main.md`).
+reopened the Linux acceptance threshold. The re-run at `243e2616`, the head
+that contains it, executed the approved threshold green (15-case
+built-provider matrix, `check.sh`, script and bridge suites on Node 22.19.0
+and 24.19.0) with a supplementary Linux compile and test of the changed
+crate, so `243e2616` is the last accepted Linux revision
+(`docs/linux-acceptance-2026-09-17-main.md`).
 
 ## 2026-09-17: sustained product-loop soak
 

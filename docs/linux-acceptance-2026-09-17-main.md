@@ -210,3 +210,71 @@ accepted Linux revision and a fresh swoop run of the same threshold — the
 15-case built-provider matrix, `scripts/check.sh` and the script/bridge
 suites on Node 22.19.0 and 24.19.0 — is required at the revision that
 contains it before this document can call Linux accepted again.
+
+## Re-run on `243e2616` (2026-09-18)
+
+The owner re-approved the threshold and the run was re-executed at
+`243e26164c849c31d06c4c7356355be661859e46`, the head main carries after the
+telemetry delta. Pin and patch digest are unchanged
+(`fb2c4b9e698e30edb738bca4cf0618587db7d203` and
+`5c893b2efa320965d19efa64d33fc24c8d72621fe7a259004533bb29d642a748`), and the
+shipped-code delta since accepted `dfe46647` is exactly one commit — the
+telemetry crate: the traces exporter's HTTP client is now built on first
+export instead of inside startup. The rest of the range is the two
+`bench-*-compile-cache.mjs` harnesses and documentation.
+
+**Accepted for the executed gates on Linux.** The run re-executed the
+approved threshold — the 15-case built-provider matrix, `scripts/check.sh`
+and the script/bridge suites, each on Node 22.19.0 and 24.19.0 — in 134
+seconds of gate time (setup 8s, build 50s, matrix 4s, tests 70s, check 2s),
+plus a supplementary Linux compile and test of the changed crate that the
+JS-level gates never reach. Private root
+`/home/hanqing/dscode-main-243e2616.3tYNh9`; toolchains, caches and the
+upstream `third_party/grok-build/target` build are reused from the earlier
+approved roots. No sudo, paid model, push or release is involved.
+
+- Setup cloned the product from a local bundle
+  (`b1ffc8d8eac3cd0b9622b03101c42faa6eb1e380e467c29e44c57faa3c9165ff`) and
+  asserted the revision, the `package.json` identities (source commit,
+  source patch digest and version) and the patch digest against
+  `sourcePatchSha256` before any build (`logs/setup-env.txt`).
+- **The built-provider 15-case matrix passed on both Nodes**
+  (`logs/built-*`, `built-*/PASS.json`): ordinary and PTY native cancel after
+  readiness, five immediate disposals of each kind, immediate ordinary abort
+  before target output, genuine pre-exec ENOENT/EACCES, and direct exit kept
+  separate from escaped-descendant cleanup.
+- Both Nodes passed all 44 release/runtime/gateway script cases, the 935
+  bridge cases in 47 files (931 passed, 4 macOS-conditional skips) and
+  `scripts/check.sh` with the version sources agreeing on
+  `0.0.14-alpha.12`.
+- The changed crate was compiled and tested on Linux in that host's warm
+  release target (`logs/tui-crate-test.log`, cargo/rustc 1.94.0, 23m09s at
+  nice 15): 227 unit tests, all 11 integration binaries — including the new
+  `otel_traces_export`, which asserts the deferred client still posts the
+  span to a loopback collector — and the doctests all pass, exit 0. This is
+  supplementary to the threshold: the JS-level gates never compile the
+  vendored tree, so without it the compiled form of the delta would be
+  untested on Linux.
+- Artifacts: `dscode-plugin.tgz` `aad2471a…` — byte-identical to the
+  accepted `dfe46647` run, so the shipped plugin payload is unchanged —
+  `dscode-runtime-linux-x86_64.tar.gz` `6678514b…` and
+  `dscode-consumer.json` `3ac92597…` (`logs/artifact-sha256.txt`).
+- The post-run audit (`logs/post-run-audit.json`) found `newScopes: []`,
+  `residualProcesses: []` and all 6 recorded matrix PIDs stopped, each with
+  its `/proc` start time preserved for the check. The product worktree is
+  clean at `243e2616` with no extra worktree.
+- Evidence: `linux-main-243e2616-evidence.tar.gz`, SHA-256
+  `364889b70640a96a7e6a954afa6e54a9167ca7fb9c970a6d14a5c427c507dd66`; the
+  local copy is `.git/integration-backups/linux-main-243e2616-evidence.tar.gz`
+  and its hash matches the remote archive.
+
+**Coverage limits.** This pass re-ran the approved threshold plus the crate
+check above. The focused source owner/consumer selection, the
+`unshare --user --pid` reaper/namespace sweep, `build:lib` with the 16
+`test:docs` gates, the recorded-session corpus, the managed-update E2E and
+the full installed-product E2E were not re-executed: the delta since the
+accepted revision is one crate inside the vendored tree plus documentation
+and bench harnesses, and the plugin payload hash is byte-identical to the
+accepted run. As before, this validates a local revision, not a published
+artifact: main is 52 commits ahead of `origin/main` `f6524d40` and nothing
+is pushed, so distribution remains its own gate.
