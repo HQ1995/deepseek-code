@@ -138,3 +138,57 @@ for this revision are `scripts/check.sh` and the 44 script cases (43 passed,
 [the performance notes](performance.md) to the Cordis HMR user-patch watcher
 over `$DSH_HOME`, not to the skill provider, and is therefore not a product
 defect this acceptance needs to carry.
+
+## Re-run on `dfe46647` after the threshold was reopened
+
+Two production commits landed after the cancellation-fix acceptance —
+`9bd0d4a0` (picker) and `c556e079` (bridge) — so the threshold was explicitly
+re-approved and re-executed, first at `edb47f57` (the pass above) and again at
+`dfe46647ce2f2d809442c63ec61af393af5b0e86`, where main stands today. Nothing
+between those two revisions is product code: the delta is documentation plus
+`scripts/bench-session-list.mjs` (the per-pass `storeListMs` column).
+
+**Accepted for the executed gates on Linux.** The run re-executed exactly the
+approved threshold — the 15-case built-provider matrix, `scripts/check.sh`
+and the script/bridge suites, each on Node 22.19.0 and 24.19.0 — in 131
+seconds of gate time (setup 7s, build 51s, matrix 4s, tests 67s, check 2s).
+Private root `/home/hanqing/dscode-main-dfe46647.Q7WM3D`; the toolchains,
+caches and the upstream `third_party/grok-build/target` build are reused from
+the earlier approved roots. No sudo, paid model, push or release is involved.
+
+- Setup cloned the product from a local bundle
+  (`9dcbc97fe1518ba94e6be2c8793d60d5ebb9582bedc33cf6ce38ef8929ca61e7`) and
+  asserted revision, all three `package.json` identities and the patch digest
+  `5c893b2e…` against `sourcePatchSha256` before any build, so this run
+  consumed the same patch bytes as the accepted one.
+- The build passed with the same CLI version `0.1.5-rc.2`, and its plugin
+  tarball is byte-identical to the accepted run's artifact (`aad2471a…`,
+  1450479 bytes); the runtime tarball is `0eaa6021…`.
+- **The built-provider 15-case matrix passed on both Nodes**
+  (`built-*/PASS.json`), each case recording its owned PID, `/proc` start
+  time, `dsh-subprocess-*` / `dsh-terminal-*` scope, `systemctl show` state
+  and milliseconds.
+- Node 22.19.0 and 24.19.0 each passed all 44 release/runtime/gateway script
+  cases (the same three files under `node --test`) and all 935 bridge cases in
+  47 files — 931 passed with 4 macOS-conditional skips per Node. The same suite
+  passes 935 of 935 locally on Darwin ARM64, which covers the four skipped
+  cases. `scripts/check.sh` reported `PASS` on both Nodes with the version
+  sources agreeing on `0.0.14-alpha.12`.
+- The post-run audit found only `init.scope`, no new user scope, no residual
+  process, and every one of the 6 recorded PIDs stopped with its original
+  cgroup and unit recorded first. The product worktree is clean at
+  `dfe46647`.
+- Evidence: `linux-main-dfe46647-evidence.tar.gz`, SHA-256
+  `2d2ffde23f228ad3dd5ba553b55c5516b7bc751fa168d9014cbb9161ac61ff5f`; the
+  local copy is `/tmp/linux-main-dfe46647-evidence.tar.gz` and its hash
+  matches the remote archive.
+
+**Coverage limits.** This pass re-ran the approved threshold only. The focused
+source owner/consumer selection, the `unshare --user --pid` reaper/namespace
+sweep, `build:lib` with the 16 `test:docs` gates, the recorded-session
+corpus, the managed-update E2E and the full installed-product E2E were not
+re-executed: the delta since the accepted revision is documentation plus one
+bench script, and the plugin payload hash is byte-identical to the accepted
+run. As before, this validates a local revision, not a published artifact:
+main is 44 commits ahead of `origin/main` `f6524d40` and nothing is pushed,
+so distribution remains its own gate.
