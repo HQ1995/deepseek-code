@@ -921,10 +921,61 @@ The startup benchmark tests Node's actual cache-enabled state and alternates
 six fresh processes per condition. Warm compile-cache medians for importing
 the bridge graph saved approximately 14ms of process lifetime on both Node
 22 and 24 (about 110ms → 96ms). Initial cache population took about 156–157ms;
-RSS was slightly higher. This is not time to an interactive TUI. No default
-cache setting has been changed. Full launch measurements are needed before
-adopting this tradeoff. See the [Node compile-cache documentation](https://nodejs.org/download/release/v22.18.0/docs/api/module.html#module-compile-cache)
+RSS was slightly higher.
+
+Two later benchmarks closed the launch-level question that import times could
+not answer. Both alternate fresh processes and **assert** the switch instead of
+assuming it: a disabled boot must leave the cache directory untouched, a cold
+boot must populate it, and every warm boot must reuse it without rewriting it.
+
+- **Leader boot** (spawn → socket → `registered` reply), Node 24.19.0, 12 pairs,
+  `scripts/bench-leader-compile-cache.mjs`: 369.6ms off → 348.3ms warm, so
+  **21.3ms (5.8%)**. The first enabled boot starts from an empty directory and
+  paid 25.8ms more than the disabled median, the slowest disabled boot being
+  387.7ms; the run's later repeat population, taken after deleting the warm
+  directory, ran 431.3ms while the warm boot right after it returned to
+  352.7ms, so that late sample carries machine drift too. The population left
+  **1483 files / 4.38MB**
+  under a per-Node-version subdirectory (`v24.19.0-arm64-cf738c9d-501`) that
+  Node creates inside whatever directory it is given.
+- **Whole launch** (real TUI, real leader, loopback gateway, `dscode` printing
+  one deterministic reply), Node 24.19.0, 8 pairs,
+  `scripts/bench-launch-compile-cache.mjs`: the leader's listening moment moves
+  459.4ms → 425.6ms (7.4%), but the user-visible milestones barely do — first
+  painted frame 801.2ms → 794.2ms (0.9%) and first model reply 955.9ms →
+  950.3ms (0.6%), both inside the per-launch spread. The cold first launch cost
+  about 20ms more than the disabled one and cached **1756 files / 5.34MB**.
+
+The launch path is what decides the tradeoff, and there the win is about one
+percent against a 5.3MB per-Node-version directory plus a first-launch penalty.
+The leader's own readiness is 7.4% faster, but the user waits on the session
+startup between listening and the first frame, which the cache does not move.
+**Not enabled by default**; the leader is an ordinary Node process that inherits
+the launcher's environment, so `NODE_COMPILE_CACHE` remains available to anyone
+who wants those milliseconds. The TUI itself is a Rust binary, so no default
+could cover it anyway. The launch fixture answers from loopback, so its times
+exclude provider latency, which dilutes the cache share further rather than
+helping it. See the [Node compile-cache documentation](https://nodejs.org/download/release/v22.18.0/docs/api/module.html#module-compile-cache)
 for invalidation, per-Node-version caches and coverage caveats.
+
+```sh
+node scripts/bench-leader-compile-cache.mjs /path/to/runtime/bin/dsh /path/to/dsh-home 12
+node scripts/bench-launch-compile-cache.mjs /path/to/tui /path/to/runtime/bin/dsh /path/to/dsh-home 8
+```
+
+The launch benchmark writes the workspace, `dsc-tui` config and provider
+settings it needs into its own scratch directory, uses a loopback gateway that
+answers `GET /v1/models` and `POST /v1/chat/completions`, and removes the
+session directories it created. It refuses to run against a home that already
+has a `settings.yaml`.
+
+Raw JSON from this host: `/tmp/dscode-cc/bench-12pairs.json` (leader) and
+`/tmp/dscode-cc/fixture/evidence-final/launch-ab.json` (launch), both Node
+24.19.0 on macOS arm64 against an isolated copy of a real installed profile;
+the two files are archived as
+`.git/integration-backups/perf-compile-cache-2026-09-17-evidence.tar.gz`,
+SHA-256
+`c4c3a307bb22b013ce2cf7f929baee65ae8f3193fc839db33f58bc0a53d00482`.
 
 The terminal baseline was remeasured using the real pinned Bash backend:
 200ms polling still costs approximately 30 `ps` calls / 372–377ms of synchronous
@@ -1122,11 +1173,12 @@ used different baselines (the first "after" home is this run's "before").
 
 ### Not adopted or deferred
 
-- **Node compile cache for the leader.** A warm `NODE_COMPILE_CACHE` saved
-  roughly the same ≈30ms (~8%) on leader boot in the earlier profile-home
-  benchmark, at the cost of a per-Node-version cache directory (1486 entries
-  for this graph) and initial population time. Not enabled by default; a
-  launch-level decision, see the compile-cache notes above.
+- **Node compile cache for the leader.** Measured at both levels now: 21.3ms
+  (5.8%) off the leader boot and 0.6% off time to the first reply, at the cost
+  of a 5.3MB per-Node-version directory, a ≈20–26ms first-launch population and
+  a cache to place, invalidate and clean up. Not enabled by default; the
+  environment variable remains the escape hatch, see the compile-cache notes
+  above.
 - **Remaining duplicate packages across roots.** After the peer change,
   `js-yaml` (runtime 4.3.2 ×3, plugin 5.4.2 — different majors, so not a
   duplicate to remove), `schemastery` and `cosmokit` (≈34K, dependencies of
