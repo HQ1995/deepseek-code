@@ -6,6 +6,76 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-18: the launch gap between `connect finished` and `app_init`
+
+The TUI's own startup phases leave a fixed window between the connect result
+and `app_init`: 197, 201, 204, 206, 207, 243 and 254ms in seven fresh-process
+launches against an isolated profile and a loopback gateway, while total
+startup ranged 876-1943ms with machine load. A 5-second `sample` at 3ms run
+time between samples, taken from the process that reported the 254ms gap,
+shows the window is synchronous main-thread work that all lands before the
+first frame: 68 of its 358 main-thread samples sit inside `init_tracing`
+(204ms), 17 in the startup-warning tmux probes (51ms) and 7 in
+`display_refresh_startup` (21ms).
+
+| Work inside the window | Main-thread samples (3ms each) | Paid by |
+| --- | ---: | --- |
+| `AuthManager::force_reload_from_disk` re-read budget (two 50ms sleeps) | 31 (93ms) | a profile with no readable `auth.json` at init |
+| `otlp_http::build_blocking_client_with_identity` (thread + `join`) | 35 (105ms) | every launch while trace export is enabled, which is the default |
+| startup-warning tmux probes (three queries, one 15ms poll tick each) | 17 (51ms) | a tmux-backed pane (`is_tmux_backed()`) |
+| `display_refresh_startup::start` (SkyLight `SLSMainDisplayID`, TCC preflight) | 7 (21ms) | macOS |
+
+The two OTLP items arrive through `init_tracing` → `build_otel_layer` →
+`build_tracer_provider` → `build_server_provider`, which snapshots the
+credential provider and builds the exporter's HTTP client before the first
+frame is drawn. Three earlier samples of the same launcher show the same shape
+(173ms in `init_tracing`, 80ms of it the client build, 93ms the auth budget,
+51ms the tmux probes).
+
+The same pass settled an instrumentation question that made the first runs
+hard to read: `GROK_INSTRUMENTATION` and `GROK_INSTRUMENTATION_LOG` cannot
+reach a dscode launch at all. `isolate_dscode_environment()` removes every
+inherited `GROK_*` variable before configuration or threads start and
+re-maps only five `DSCODE_*` aliases (`DSCODE_CONFIG`,
+`DSCODE_CONFIG_PATH`, `DSCODE_CONNECT_UI_TIMEOUT_SECS`,
+`DSCODE_CLIPBOARD_NO_NATIVE_READ`, `DSCODE_CLIPBOARD_NO_OSC52`), so the TUI
+always runs in the default `Server` mode. The four launches that set `off`
+or `log` plus a log path are therefore four samples of that one path: no log
+file appeared, the window did not move, and the spread between them is host
+noise. `ps eww` does print the variables for a pane — that is the exec-time
+copy in the kernel's argument area, not the environment the process runs with.
+
+Not adopted in this pass. Each candidate is product code under
+`third_party/grok-build`, so it reopens the Linux acceptance threshold, and
+the three belong in one cycle or none. What that cycle would buy is bounded by
+the conditions in the table: the auth budget is only paid where `auth.json`
+is missing or unreadable, and the tmux probes only in tmux-backed panes. The
+always-paid item is the OTLP client build, and it is deliberately built at
+init, outside the batch-processor thread, to avoid a "no reactor" panic when
+an export runs there; deferring it to the first export is a behaviour change
+with its own verification, not a mechanical move.
+
+### Verification for this section
+
+- Seven launches of the real launcher over a loopback gateway with an isolated
+  `DSCODE_HOME`, phases read from the profile's `unified.jsonl`; the
+  `ab-*.out.json` files are in the archive below.
+- Stack attribution: `/usr/bin/sample` by process name, 5 seconds at 3ms run
+  time between samples, main thread filtered, from the launch that reported
+  the 254ms gap (`absample3-s3a/`); `absample-off2/`, `absample-offsample/`
+  and `run5/` are the earlier trees.
+- The bench-side read of the same window was exercised end to end with the
+  accompanying bench patch: `node scripts/bench-launch-compile-cache.mjs`
+  with one pair completed on Node 24.19.0 with its cache assertions intact and
+  reports the per-request timeline now (`bench-cc-validate/launch-ab.json`).
+- `scripts/check.sh`, `node --test scripts/*.test.mjs` and `git diff --check`
+  passed. macOS arm64 under sustained foreign load (load average 9.4-13.5
+  throughout), so these milliseconds are upper bounds and only same-session
+  comparisons hold.
+- Raw evidence: `.git/integration-backups/perf-launch-gap-2026-09-18-evidence.tar.gz`,
+  SHA-256
+  `a97c8c7d5b001492123f7d3b8ae0b16d07e8f66fb1dd3f26b1d7c01356c90a3e`.
+
 ## 2026-09-17: sustained product-loop soak
 
 `scripts/soak-product-loop.sh` runs the real product loop for hundreds of
