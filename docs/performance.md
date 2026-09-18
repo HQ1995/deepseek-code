@@ -45,15 +45,12 @@ file appeared, the window did not move, and the spread between them is host
 noise. `ps eww` does print the variables for a pane — that is the exec-time
 copy in the kernel's argument area, not the environment the process runs with.
 
-Not adopted in this pass. Each candidate is product code under
-`third_party/grok-build`, so it reopens the Linux acceptance threshold, and
-the three belong in one cycle or none. What that cycle would buy is bounded by
-the conditions in the table: the auth budget is only paid where `auth.json`
-is missing or unreadable, and the tmux probes only in tmux-backed panes. The
-always-paid item is the OTLP client build, and it is deliberately built at
-init, outside the batch-processor thread, to avoid a "no reactor" panic when
-an export runs there; deferring it to the first export is a behaviour change
-with its own verification, not a mechanical move.
+Adopted in this pass: the OTLP client build, the one item on that list every
+launch paid for (next section). The other two stay not adopted: the auth
+budget is only paid where `auth.json` is missing or unreadable and the tmux
+probes only in tmux-backed panes, so their win is bounded by those
+conditions, and both are product code under `third_party/grok-build` that
+needs its own cycle against the Linux acceptance threshold.
 
 ### Verification for this section
 
@@ -75,6 +72,79 @@ with its own verification, not a mechanical move.
 - Raw evidence: `.git/integration-backups/perf-launch-gap-2026-09-18-evidence.tar.gz`,
   SHA-256
   `a97c8c7d5b001492123f7d3b8ae0b16d07e8f66fb1dd3f26b1d7c01356c90a3e`.
+
+## 2026-09-18: the OTLP client build leaves the startup window
+
+`otlp_http::build_blocking_client` was 105ms of the window sampled above, and
+every launch with trace export enabled — the default — paid it in
+`init_tracing`, ahead of the first frame, whether or not the session ever
+sent a batch. The traces exporter now resolves its HTTP client on first use
+(`otlp_http::DeferredOtlpClient`): the build lands on the OTLP batch
+processor's own std thread at the first export, and a launch that never
+exports never builds the client at all.
+
+| Pair | Before: window / `startup complete` | After: window / `startup complete` |
+| --- | ---: | ---: |
+| `base-0b` / `lazy-0` | 202ms / 1527ms | 116ms / 901ms |
+| `base-0c` / `lazy-1` | 193ms / 839ms | 107ms / 756ms |
+| `base-0d` / `lazy-2` | 242ms / 1845ms | 108ms / 1139ms |
+| `base-0e` / `lazy-3` | 209ms / 979ms | 110ms / 872ms |
+
+Window is the launcher's own `connect finished` → `app_init` gap, read from
+the profile's `unified.jsonl`; four interleaved before/after pairs on the
+same harness and profile, macOS arm64 under sustained foreign load (load
+average 14.05/15.46/13.60). The ranges do not overlap — 193-242ms before,
+107-116ms after — and the pairs differ by 86, 86, 134 and 99ms. The first two
+launches of each session ran against a cold page cache, and their totals sit
+above the warm pair that follows, so the pairs are what compare. Pairs 1-2
+use the pre-refactor build of the same change, which differs only in where
+the failure warning is emitted; pairs 3-4 use the final revision. All four
+runs report an empty OTLP request list: the isolated profile carries no
+credential, the export gate is off, and the client is now never built. That
+is the case the change targets.
+
+The client is still built on the calling thread, and the one-shot exporter
+still constructed there, before the async export body runs: the blocking
+client must not be built or dropped inside an async executor. The deferred
+cell keeps the connection-pooled client alive
+for the process, the per-export clones that reach each one-shot exporter have
+the same lifetime structure as before, and the build closure runs at most
+once with a failed build cached — so a host that cannot build a client warns
+once and then degrades to "no spans exported" for the rest of the process
+instead of retrying, and logging, on every flush.
+
+### Verification for this section
+
+- Four interleaved before/after launches of the real launcher over a loopback
+  gateway with an isolated `DSCODE_HOME`, ports 8931-8947; the binaries are
+  the release build at the revision before this change (`dscode-base`,
+  SHA-256
+  `6e6f2b00161cf632451cf6a2bd3a0f4f951bc967683c8933fb7edb9094fafc02`) and at
+  the revision after (`c76cbcf45295a7da2803f79ba46c8d464f2b1e9dd3dbf41c51291d7621bf8c8a`,
+  built with `scripts/build-deepseek-tui.sh`). The `ab-*.out.json` files and
+  the harness are in the archive below.
+- The export path itself is covered end to end by
+  `crates/codegen/xai-grok-telemetry/tests/otel_traces_export.rs`: a plain
+  `#[test]` — the blocking client must not be dropped inside an async
+  executor, so deliberately no Tokio — runs `client::init` in
+  `SessionMetrics` mode, builds the layer against a loopback `traces_url`,
+  emits one span through the global tracer, flushes with `shutdown_otel()`
+  and asserts that a raw `TcpListener` collector got `POST /v1/traces` with
+  the provider's `Authorization: Bearer` header and a protobuf body that
+  decodes to that span.
+- `cargo test -p xai-grok-telemetry`: 227 unit tests and all 11 integration
+  binaries pass, including the new `otel_traces_export`; `cargo fmt -p
+  xai-grok-telemetry -- --check`, `scripts/check.sh`, `node --test
+  scripts/*.test.mjs` (43 pass, 1 skip) and `git diff --check` pass.
+- Raw evidence: `.git/integration-backups/perf-otlp-lazy-client-2026-09-18-evidence.tar.gz`,
+  SHA-256
+  `1ded98a9b621c6b3edb1347b2a31592018758ce5c804c6c911ee100be70733ac`.
+
+This section changes product code under `third_party/grok-build`, so it
+reopens the Linux acceptance threshold: the revision that contains it needs a
+fresh swoop run (15-case built-provider matrix, `check.sh`, script and
+bridge tests) before `main` counts as accepted on Linux again. The last
+accepted Linux revision is `dfe46647` (`docs/linux-acceptance-2026-09-17-main.md`).
 
 ## 2026-09-17: sustained product-loop soak
 
