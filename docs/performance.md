@@ -215,6 +215,109 @@ node --experimental-transform-types scripts/bench-macos-process.mjs /path/to/dsh
 
 No production code, polling setting, or cache policy changed in this pass.
 
+## 2026-09-17: session-picker cost at store scale
+
+`x.ai/session/list` answers thirty rows, but it folds every session in the
+listed working directory before sorting and slicing, so a pass costs what the
+directory stores rather than what it returns. The retention section below
+fixed what a pass does to its own cached entries; this section measures what
+one costs as the durable store grows, next to the store the picker reads on
+this machine.
+
+| Stored sessions | Cold pass | Warm passes | One changed session | Retained index | Peak RSS |
+| ---: | --- | --- | --- | ---: | ---: |
+| 22 | 27.9ms, 22 opens, 2,640 events | 3.9–4.9ms, 0 opens | 4.6ms, 1 open | below this method's noise | 130.7MiB |
+| 300 | 248.4ms, 300 opens, 36,000 events | 44.8–46.3ms, 0 opens | 50.1ms, 1 open | 1141.4KiB | 202.2MiB |
+| 900 | 701.2ms, 900 opens, 108,000 events | 131.0–132.7ms, 0 opens | 136.9ms, 1 open | 1492.8KiB | 271.4MiB |
+| 1800 | 1383.9ms, 1800 opens, 216,000 events | 264.8–280.8ms, 0 opens | 284.7ms, 1 open | 1832.4KiB | 272.3MiB |
+| 1800 (second run) | 1390.7ms, 1800 opens, 216,000 events | 255.5–263.7ms, 0 opens | 264.3ms, 1 open | 1843.1KiB | 266.3MiB |
+
+Each row is one JSONL root in the product's own `session.v3.jsonl.zstd`
+layout, 120 events per session, three lists and one changed session,
+`--strict`, Node 24.19.0 on Darwin ARM64. The runs' `violations` lists are
+empty, so the counting assertions and the timings come from the same passes:
+a cold list opens and reads each candidate exactly once, every warm pass opens
+nothing, and the changed session costs one open and its 121 events. The
+retention result below therefore holds at all five sizes, and the second 1800
+run repeats the first inside 1%.
+
+A warm pass that opens no log is still not free, because it takes a fresh
+store snapshot first. `scripts/bench-session-list.mjs` now reports that share
+per pass, which is the pinned backend's own walk of every project and session
+directory:
+
+| Stored sessions | Warm pass | Inside the store snapshot | Everything else | Per stored session |
+| ---: | ---: | ---: | ---: | ---: |
+| 22 | 3.9–4.9ms | 3.7–4.9ms | under 1ms | 0.20ms |
+| 300 | 44.8–46.3ms | 44.3–45.6ms | about 1ms | 0.150ms |
+| 900 | 131.0–132.7ms | 129.5–131.3ms | about 1.5ms | 0.145ms |
+| 1800 | 255.5–280.8ms | 253.1–277.9ms | 2–3ms | 0.145ms |
+
+Warm cost is linear in stored sessions at about 0.15ms each, and the snapshot
+is 95% of a pass at 22 stored sessions and 98–99% of one from 300 up, so that
+growth is not removable from outside the persistence contract: a cached
+listing would answer a pass with a store state a session created a moment ago
+is missing from, which is the assertion the changed-session column above
+carries. The point-query section below is the same trade taken where the
+contract does allow it — one pinned id answered by its own directory and
+header, 0.2–0.5ms against this walk's 253–278ms in the same runs.
+
+The store this picker reads on this machine holds four project directories and
+22 sessions in 820KiB under `~/.dsh/sessions`, all `session.jsonl.zstd`. Its
+real row is the first one: 27.9ms to fold in a fresh leader and 3.9–4.9ms per
+later pass. The larger rows are a boundary rather than a present problem.
+
+Cold cost tracks stored events, not stored sessions. Same 900 sessions, same
+900 cold opens, three and a third times the stored events:
+
+| Stored sessions | Events per session | Stored events | Root | Cold pass | Warm passes | Changed session |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 300 | 2,000 | 600,000 | 15.23MiB | 2164.5ms | 47.8–50.1ms | 53.1ms |
+| 900 | 120 | 108,000 | 3.52MiB | 701.2ms | 131.0–132.7ms | 136.9ms |
+| 900 | 400 | 360,000 | 10.55MiB | 1592.2ms | 132.0–136.9ms | 144.5ms |
+
+Across those points the fold grows by about 3.5µs per stored event and about
+0.36ms per stored session, so the deepest row — three hundred sessions of two
+thousand events each — first folds in about two seconds in a fresh leader,
+while its warm passes stay at the 300-session price. Event size, line lengths
+and compression all move that rate, so it describes these stores rather than
+every store; the direction is what carries: the picker pays for the history in
+the directory, not for the thirty rows it returns.
+
+The picker also lists other working directories as the client switches between
+them. 900 sessions across four working directories with `--sweep=true`: the
+cold pass folds only the listed directory (225 opens, 27,000 events, 351.7ms),
+a first pass over each of the other three folds its own 225 sessions
+(338.7–371.7ms each), and the second pass over all four opens nothing
+(128.5–133.0ms, all snapshot). Listing elsewhere evicts nothing, which is the
+property the retention section below was written for.
+
+No production change followed from this pass. At the store shapes this product
+has, a picker pass costs single-digit milliseconds, and the term that grows
+with the store is inside the pinned SDK's listing, where no contract-safe
+cache exists. What the numbers buy is the boundary: the fold is paid on the
+first listing of a directory in each fresh leader, so a machine whose history
+reaches thousands of sessions or hundreds of thousands of events in one
+directory would notice it on its first picker open after a launch rather than
+in steady state.
+
+Reproduce:
+
+```sh
+node --experimental-transform-types --expose-gc scripts/bench-session-list.mjs 1800
+node --experimental-transform-types --expose-gc scripts/bench-session-list.mjs 300 --events=2000
+node --experimental-transform-types --expose-gc scripts/bench-session-list.mjs 900 --projects=4 --sweep=true
+```
+
+Evidence: `/tmp/dscode-picker-scaling/bench-*.json` holds each run's summary
+(`bench-22.json`, `bench-300.json`, `bench-900-a.json`, `bench-900-p4.json`,
+`bench-900x400.json`, `bench-300x2000.json`, `bench-1800-a.json`,
+`bench-1800-b.json`). `indexRetainedKiB` is a post-GC heap delta taken across
+the fold, so at depth it also carries whatever the fold still holds rather
+than a per-session constant. Measurements are local macOS numbers for one
+module path against local stores, not a whole-application speedup, and peak
+RSS is whole-process across a run, seeding included.
+
 ## 2026-09-17: pinned session ids answer with a point query
 
 `session/new` and `session/fork` refuse a client-supplied id that a stored

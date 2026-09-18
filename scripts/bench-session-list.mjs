@@ -5,6 +5,9 @@
 // discovery module over a real JSONL persistence root and counts every
 // durable log open and event read, separating the unavoidable cold pass from
 // what a later call over unchanged sessions repeats.
+// Each pass also reports the time it spent inside the backend's own store
+// snapshot, because that is where a store which outgrows the answer's thirty
+// rows puts its cost.
 //
 // Usage:
 //   node --experimental-transform-types [--expose-gc] scripts/bench-session-list.mjs \
@@ -128,11 +131,17 @@ const seedMs = Number(process.hrtime.bigint() - seedStarted) / 1e6
 // Count every durable read the picker path performs, including through the
 // handle it opens; the discovery module itself is untouched.
 // The peak starts at zero here, after seeding, so it covers the picker phases.
-const counters = { list: 0, open: 0, read: 0, events: 0, peakRss: 0 }
+const counters = { list: 0, listMs: 0, open: 0, read: 0, events: 0, peakRss: 0 }
 const sampleRss = () => { counters.peakRss = Math.max(counters.peakRss, process.memoryUsage().rss) }
 const observed = new Proxy(persistence, {
   get(target, property) {
-    if (property === 'list') return async (...args) => { counters.list += 1; return target.list(...args) }
+    if (property === 'list') return async (...args) => {
+      counters.list += 1
+      const started = process.hrtime.bigint()
+      const value = await target.list(...args)
+      counters.listMs += Number(process.hrtime.bigint() - started) / 1e6
+      return value
+    }
     if (property === 'open') return async (...args) => {
       counters.open += 1
       const handle = await target.open(...args)
@@ -177,6 +186,7 @@ const measure = async (cwd) => {
   const ms = Number(process.hrtime.bigint() - started) / 1e6
   return {
     ms: +ms.toFixed(1), rows: result.sessions.length,
+    storeListMs: +(counters.listMs - before.listMs).toFixed(1),
     opens: counters.open - before.open, reads: counters.read - before.read, events: counters.events - before.events,
   }
 }
