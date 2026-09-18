@@ -11,8 +11,20 @@
 # reaches the wrong client, or a leader that dies while clients remain, fails
 # the run instead of passing as another client's render.
 #
+# SOAK_CANCEL_EVERY (default 0, off) adds the cancellation lane. Every Nth turn
+# window 1 asks for a step that never returns on its own; the harness waits for
+# that step to be live, cancels the turn with Ctrl+C, and then requires the
+# cancellation marker instead of a completion, no surviving step process under
+# this run's own leader, and the neighbouring windows' turns still rendering
+# next to it. A cancel that lands as a startup failure, a turn that completes
+# anyway, or a step that outlives the turn fails the run. The step must also be
+# visible inside this run's own process tree right before the Ctrl+C, so a probe
+# that could never have seen a survivor cannot pass as a clean one.
+#
 # Knobs: SOAK_TURNS (default 60), SOAK_TOOL_EVERY (default 5, 0 disables the
 # tool step), SOAK_WINDOWS (default 1), SOAK_PAUSE_MS, SOAK_TURN_TIMEOUT_S,
+# SOAK_CANCEL_EVERY (default 0, off), SOAK_CANCEL_DELAY_MS (default 250, the
+# pause between a live step and the Ctrl+C), SOAK_CANCEL_TIMEOUT_S (default 30),
 # SOAK_SESSION_ID, SOAK_PORT, DSCODE_E2E_OUT_DIR.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/test-environment.sh"
@@ -28,6 +40,9 @@ TOOL_EVERY="${SOAK_TOOL_EVERY:-5}"
 WINDOWS="${SOAK_WINDOWS:-1}"
 PAUSE_MS="${SOAK_PAUSE_MS:-0}"
 PER_TURN_TIMEOUT_S="${SOAK_TURN_TIMEOUT_S:-120}"
+CANCEL_EVERY="${SOAK_CANCEL_EVERY:-0}"
+CANCEL_DELAY_MS="${SOAK_CANCEL_DELAY_MS:-250}"
+CANCEL_TIMEOUT_S="${SOAK_CANCEL_TIMEOUT_S:-30}"
 PORT="${SOAK_PORT:-$((26000 + (RUN_ID % 16000)))}"
 SCRATCH="$OUT/home-$RUN_ID"
 SESSION="dscode-soak-$RUN_ID"
@@ -39,6 +54,7 @@ TURNS_LOG="$OUT/turns-$RUN_ID.jsonl"
 SAMPLES_LOG="$OUT/samples-$RUN_ID.jsonl"
 CROSSTALK_LOG="$OUT/crosstalk-$RUN_ID.jsonl"
 SUMMARY="$OUT/soak-summary-$RUN_ID.json"
+CANCEL_LOG="$OUT/cancels-$RUN_ID.jsonl"
 WORKSPACE="$SCRATCH/workspace"
 # The soak server keeps a deep history so the final cross-client sweep can see
 # replies that scrolled off the visible pane during a long run.
@@ -48,6 +64,9 @@ LEADER_EXIT="untested"
 LEADER_PID=""
 LAST_CLIENT="untested"
 CROSS_TALK=0
+CANCELS=0
+CANCEL_ERRORS=0
+ORPHAN_PIDS=""
 SESSION_ID="${SOAK_SESSION_ID:-}"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
@@ -100,6 +119,118 @@ cross_check() {
   done
 }
 
+# PIDs owned by this run's leader or its client panes. Leak checks only ever
+# look inside this tree, so a survivor can never be some unrelated host process
+# that happens to share the fixture's command line.
+run_tree_pids() {
+  local roots="" w pid
+  [[ -n "$LEADER_PID" ]] && roots="$LEADER_PID"
+  for w in $(seq 1 "$WINDOWS"); do
+    pid="$(pane_pid "$w")"
+    [[ -n "$pid" ]] && roots="$roots $pid"
+  done
+  [[ -n "${roots// /}" ]] || return 0
+  ps -Ao pid=,ppid= | awk -v roots="$roots" '
+    BEGIN { n = split(roots, list, " "); for (i = 1; i <= n; i += 1) if (list[i] != "") keep[list[i] + 0] = 1 }
+    { child[NR] = $1 + 0; parent[NR] = $2 + 0 }
+    END {
+      do {
+        changed = 0
+        for (i = 1; i <= NR; i += 1) {
+          if (!(child[i] in keep) && (parent[i] in keep)) { keep[child[i]] = 1; changed = 1 }
+        }
+      } while (changed)
+      for (i = 1; i <= NR; i += 1) if (child[i] in keep) print child[i]
+    }'
+}
+# The steps a cancellation probe is holding: the fixture's exact sleep command,
+# or the marker path that command writes, inside this run's process tree only.
+hold_step_pids() {
+  local w="$1" turn="$2" tree
+  tree="$(run_tree_pids | tr '\n' ' ')"
+  ps -Ao pid=,command= | awk -v tree="$tree" -v w="$w" -v turn="$turn" '
+    BEGIN {
+      n = split(tree, list, " ")
+      for (i = 1; i <= n; i += 1) if (list[i] != "") owned[list[i] + 0] = 1
+      exact = "^sleep 600\\." turn "$"
+      marker = "\\.soak-run-w" w "-t" turn
+    }
+    {
+      pid = $1 + 0
+      command = $0
+      sub(/^[ ]*[0-9]+[ ]+/, "", command)
+      if ((pid in owned) && (command ~ exact || command ~ marker)) print pid
+    }'
+}
+record_cancel() {
+  local scope="$1" window="$2" turn="$3" status="$4" hold_ms="$5" marker_ms="$6" orphans="$7" sighted="$8"
+  printf '{"turn":%s,"scope":"%s","window":%s,"status":"%s","holdMs":%s,"markerMs":%s,"stepSighted":%s,"orphanPids":[%s]}\n' \
+    "$turn" "$scope" "$window" "$status" "${hold_ms:-null}" "${marker_ms:-null}" "$sighted" "$orphans" >>"$CANCEL_LOG"
+  CANCELS=$((CANCELS + 1))
+  if [[ "$status" != "ok" ]]; then
+    CANCEL_ERRORS=$((CANCEL_ERRORS + 1))
+    echo "soak: cancel probe turn $turn on $scope: $status (evidence $OUT/cancel-$RUN_ID-turn-$turn-w$window.txt)" >&2
+    capture_scrollback "$window" >"$OUT/cancel-$RUN_ID-turn-$turn-w$window.txt" || true
+  fi
+  return 0
+}
+# A failed probe can leave its window mid-turn. Cancel whatever is still
+# running so the rest of the run still measures turns, and let the failing row
+# carry the recovery instead of a stuck pane.
+cancel_recover() {
+  local w="$1" waited=0
+  tmux -L "$SESSION" -f "$TMUX_CONF" send-keys -t "$(pane_target "$w")" C-c 2>/dev/null || true
+  while [[ $waited -lt 100 ]]; do
+    capture "$w" | grep -q '\[stop\]' || break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  return 0
+}
+# Settle one cancellation probe: a step that never started, a cancel that never
+# rendered, a turn that completed anyway, a startup-failure marker, a still
+# busy turn or a step that survived the cancel each fail the run.
+settle_cancel() {
+  local w="$1" turn="$2" status="ok" orphans="" waited=0 pids pid hold_ms="" marker_ms=""
+  if [[ "$hold_seen" == true ]]; then hold_ms=$(( hold_seen_ms - window_started[w] )); fi
+  if [[ "$hold_seen" != true ]]; then
+    status="no-start"
+  elif [[ -z "$cancel_seen_ms" ]]; then
+    status="no-cancel"
+  else
+    marker_ms=$(( cancel_seen_ms - cancel_sent_ms ))
+    # The cancelled step has to be reaped: give the runtime a moment to collect
+    # the group before a survivor is called a leak.
+    while [[ $waited -lt $(( CANCEL_TIMEOUT_S * 10 )) ]]; do
+      pids="$(hold_step_pids "$w" "$turn")"
+      [[ -z "$pids" ]] && break
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    pids="$(hold_step_pids "$w" "$turn")"
+    if [[ -n "$pids" ]]; then
+      for pid in $pids; do
+        orphans="$orphans$pid,"
+        ORPHAN_PIDS="$ORPHAN_PIDS $pid"
+      done
+      status="step-alive"
+    elif [[ "$hold_step_seen" != true ]]; then
+      # A reaped step proves nothing when this run never saw the step inside
+      # its own tree: the probe would have passed without ever looking.
+      status="step-unseen"
+    elif capture_scrollback "$w" | grep -qE "SOAK_W${w}_OK_$turn([^0-9]|$)"; then
+      status="ghost-ok"
+    elif capture_scrollback "$w" | grep -qE 'before its bootstrap consumed|Failed to start|Turn failed|Could not load session'; then
+      status="failure-text"
+    elif capture "$w" | grep -q '\[stop\]'; then
+      status="still-busy"
+    fi
+  fi
+  record_cancel "$(scope_name "$w")" "$w" "$turn" "$status" "$hold_ms" "$marker_ms" "${orphans%,}" "$hold_step_seen"
+  echo "soak: cancel probe turn $turn window $w -> $status (hold ${hold_ms:-?}ms, cancel ${marker_ms:-?}ms)"
+  [[ "$status" == "ok" ]] || cancel_recover "$w"
+  return 0
+}
 cleanup() {
   local pid="$LEADER_PID" waited=0
   tmux -L "$SESSION" -f /dev/null kill-server >/dev/null 2>&1 || true
@@ -123,6 +254,11 @@ cleanup() {
     kill "$MOCK_PID" >/dev/null 2>&1 || true
     wait "$MOCK_PID" >/dev/null 2>&1 || true
   fi
+  # Best effort: a probe that already failed must not leave its step sleeping
+  # past the run, and the failing row keeps the pids it found.
+  if [[ -n "${ORPHAN_PIDS// /}" ]]; then
+    for orphan in $ORPHAN_PIDS; do kill -TERM "$orphan" >/dev/null 2>&1 || true; done
+  fi
 }
 trap cleanup EXIT
 
@@ -130,6 +266,12 @@ trap cleanup EXIT
 if ! [[ "$WINDOWS" =~ ^[0-9]+$ ]] || [[ "$WINDOWS" -lt 1 ]]; then
   fail "SOAK_WINDOWS must be a positive integer (got $WINDOWS)"
 fi
+for knob in "SOAK_CANCEL_EVERY:$CANCEL_EVERY" "SOAK_CANCEL_DELAY_MS:$CANCEL_DELAY_MS" "SOAK_CANCEL_TIMEOUT_S:$CANCEL_TIMEOUT_S"; do
+  if ! [[ "${knob#*:}" =~ ^[0-9]+$ ]]; then
+    fail "${knob%%:*} must be a non-negative integer (got ${knob#*:})"
+  fi
+done
+[[ "$CANCEL_TIMEOUT_S" -ge 1 ]] || fail "SOAK_CANCEL_TIMEOUT_S must be at least 1 second (got $CANCEL_TIMEOUT_S)"
 [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || fail "Node is unavailable"
 command -v tmux >/dev/null 2>&1 || fail "tmux is required"
 "$NODE_BIN" -e 'const a=process.versions.node.split(".").map(Number), b=[22,19,0]; process.exit(a[0]>b[0] || (a[0]===b[0] && (a[1]>b[1] || (a[1]===b[1] && a[2]>=b[2]))) ? 0 : 1)' \
@@ -180,10 +322,28 @@ EOF
 cat >"$SCRATCH/soak-model.mjs" <<'EOF'
 export function contractReply(body) {
   const messages = body?.messages ?? []
+  // The runtime appends context snapshots after the prompt it belongs to, so
+  // both prompts are recognized by scanning user messages backwards instead of
+  // trusting the last one: read from the tail, a hold prompt hidden behind a
+  // snapshot would be answered as a plain reply and the probe would fail as
+  // "the step never started" for a reason that has nothing to do with cancels.
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
     if (message?.role !== 'user') continue
     const text = typeof message.content === 'string' ? message.content : JSON.stringify(message.content ?? '')
+    // The cancellation lane asks for a step that never returns on its own. The
+    // step writes this run's own marker path first, so the harness only ever
+    // cancels a live turn.
+    const hold = text.match(/SOAK_HOLD_W(\d+)_TURN_(\d+)/)
+    if (hold) {
+      // Once the step has come back the hold prompt is answered for good: a
+      // second step would loop instead of failing the probe.
+      if (messages.slice(index + 1).some(item => item.role === 'tool')) return { text: 'SOAK_HOLD_STREAM_OK' }
+      const window = Number(hold[1])
+      const turn = Number(hold[2])
+      const marker = (process.env.SOAK_RUN_DIR ?? '.') + '/.soak-run-w' + window + '-t' + turn
+      return { name: 'bash', arguments: { command: 'printf SOAK_HOLD_RUN > ' + marker + '; sleep 600.' + turn, description: 'SOAK hold step ' + turn } }
+    }
     const match = text.match(/SOAK_W(\d+)_TURN_(\d+)/)
     if (!match) continue
     const window = Number(match[1])
@@ -234,7 +394,7 @@ http.createServer((request, response) => {
 EOF
 
 : >"$GATEWAY_LOG"; : >"$TURNS_LOG"; : >"$SAMPLES_LOG"; : >"$CROSSTALK_LOG"
-SOAK_MODEL_FIXTURE="$SCRATCH/soak-model.mjs" SOAK_TOOL_EVERY="$TOOL_EVERY" \
+SOAK_MODEL_FIXTURE="$SCRATCH/soak-model.mjs" SOAK_TOOL_EVERY="$TOOL_EVERY" SOAK_RUN_DIR="$SCRATCH" \
   "$NODE_BIN" "$SCRATCH/soak-gateway.mjs" "$PORT" "$GATEWAY_LOG" &
 MOCK_PID=$!
 for _ in $(seq 1 100); do grep -q '^READY$' "$GATEWAY_LOG" 2>/dev/null && break; sleep 0.1; done
@@ -288,30 +448,78 @@ completed=0
 for turn in $(seq 1 "$TURNS"); do
   step=false
   if [[ "$TOOL_EVERY" -gt 0 ]] && (( turn % TOOL_EVERY == 0 )); then step=true; fi
+  cancel_turn=false
+  if [[ "$CANCEL_EVERY" -gt 0 ]] && (( turn % CANCEL_EVERY == 0 )); then cancel_turn=true; fi
   # Every client gets its own tagged prompt, each in one tmux send-keys call
   # the way the contract E2E drives it: a separate Enter call would inject a
   # harness-controlled gap into the keypress-to-provider time being measured.
   # Each window's clock starts at its own keypress.
   window_started=()
+  if [[ "$cancel_turn" == true ]]; then
+    # The hold prompt drives the fixture's never-returning step, which writes
+    # the marker path itself: waiting for that file proves the turn is in
+    # flight, so the Ctrl+C can only ever land on a live turn.
+    window_started[1]="$(ms)"
+    tmux -L "$SESSION" -f "$TMUX_CONF" send-keys -t "$(pane_target 1)" "SOAK_HOLD_W1_TURN_$turn probe" Enter
+  fi
   for w in $(seq 1 "$WINDOWS"); do
+    [[ "$cancel_turn" == true && "$w" -eq 1 ]] && continue
     window_started["$w"]="$(ms)"
     tmux -L "$SESSION" -f "$TMUX_CONF" send-keys -t "$(pane_target "$w")" "SOAK_W${w}_TURN_$turn probe" Enter
   done
   rendered=()
   pending="$WINDOWS"
+  hold_marker="$SCRATCH/.soak-run-w1-t$turn"
+  hold_seen=false
+  hold_seen_ms=""
+  hold_step_seen=false
+  cancel_sent_ms=""
+  cancel_seen_ms=""
+  if [[ "$cancel_turn" == true ]]; then pending=$((WINDOWS - 1)); fi
   deadline=$((SECONDS + PER_TURN_TIMEOUT_S))
-  while [[ $SECONDS -lt $deadline && "$pending" -gt 0 ]]; do
+  while [[ $SECONDS -lt $deadline ]]; do
+    if [[ "$pending" -le 0 ]]; then
+      if [[ "$cancel_turn" != true || -n "$cancel_seen_ms" ]]; then break; fi
+      # A probe that cannot reach its cancel marker must not hold the turn open
+      # for the whole per-turn timeout.
+      if [[ -z "$cancel_sent_ms" ]]; then
+        if (( $(ms) - window_started[1] >= CANCEL_TIMEOUT_S * 1000 )); then break; fi
+      else
+        if (( $(ms) - cancel_sent_ms >= CANCEL_TIMEOUT_S * 1000 )); then break; fi
+      fi
+    fi
     for w in $(seq 1 "$WINDOWS"); do
+      [[ "$cancel_turn" == true && "$w" -eq 1 ]] && continue
       [[ -n "${rendered[$w]:-}" ]] && continue
       if capture "$w" | grep -qE "SOAK_W${w}_OK_$turn([^0-9]|$)"; then
         rendered["$w"]="$(ms)"
         pending=$((pending - 1))
       fi
     done
-    [[ "$pending" -gt 0 ]] && sleep 0.02
+    if [[ "$cancel_turn" == true && -z "$cancel_seen_ms" ]]; then
+      if [[ -z "$cancel_sent_ms" ]]; then
+        if [[ -f "$hold_marker" ]]; then
+          hold_seen=true
+          hold_seen_ms="$(ms)"
+          sleep "$(perl -e "print $CANCEL_DELAY_MS / 1000")"
+          # Positive control: at this instant the held step has to be visible
+          # in this run's own tree, otherwise the survivor check below is
+          # unattributed and the probe proves nothing.
+          [[ -n "$(hold_step_pids 1 "$turn")" ]] && hold_step_seen=true
+          tmux -L "$SESSION" -f "$TMUX_CONF" send-keys -t "$(pane_target 1)" C-c
+          cancel_sent_ms="$(ms)"
+        fi
+      elif capture 1 | grep -q 'Turn cancelled by user'; then
+        cancel_seen_ms="$(ms)"
+      fi
+    fi
+    if [[ "$pending" -gt 0 ]]; then sleep 0.02
+    elif [[ "$cancel_turn" == true && -z "$cancel_seen_ms" ]]; then sleep 0.02
+    fi
   done
   missed=""
   for w in $(seq 1 "$WINDOWS"); do
+    [[ "$cancel_turn" == true && "$w" -eq 1 ]] && continue
     if [[ -z "${rendered[$w]:-}" ]]; then
       printf '{"turn":%s,"window":%s,"error":"not rendered within %ss","startedMs":%s}\n' \
         "$turn" "$w" "$PER_TURN_TIMEOUT_S" "${window_started[$w]}" >>"$TURNS_LOG"
@@ -321,6 +529,12 @@ for turn in $(seq 1 "$TURNS"); do
   done
   [[ -z "$missed" ]] || fail "turn $turn never rendered for$missed (scrollback in $OUT/timeout-$RUN_ID-turn-$turn-w*.txt)"
   for w in $(seq 1 "$WINDOWS"); do
+    if [[ "$cancel_turn" == true && "$w" -eq 1 ]]; then
+      # The cancelled turn is measured by its own probe row, not by the render
+      # ledger: its clock would otherwise include the cancel round trip.
+      sample "$(scope_name "$w")" "$(pane_pid "$w")" "$turn"
+      continue
+    fi
     started="${window_started[$w]}"; probe="$(provider_ms "$w" "$turn")"
     if [[ -n "$probe" ]]; then
       printf '{"turn":%s,"window":%s,"tool":%s,"startedMs":%s,"providerMs":%s,"renderedMs":%s,"totalMs":%s,"providerWaitMs":%s}\n' \
@@ -337,10 +551,16 @@ for turn in $(seq 1 "$TURNS"); do
     for w in $(seq 1 "$WINDOWS"); do capture_scrollback "$w" >"$OUT/crosstalk-$RUN_ID-turn-$turn-w$w.txt" || true; done
     fail "cross-talk on turn $turn: a window rendered another window's reply (evidence $OUT/crosstalk-$RUN_ID-turn-$turn-w*.txt)"
   fi
+  if [[ "$cancel_turn" == true ]]; then
+    settle_cancel 1 "$turn"
+  fi
   completed=$((completed + 1))
   if (( turn % 10 == 0 )); then
     progress="turn $turn ok"
-    for w in $(seq 1 "$WINDOWS"); do progress="$progress w$w=$(( rendered[w] - window_started[w] ))ms"; done
+    for w in $(seq 1 "$WINDOWS"); do
+      if [[ "$cancel_turn" == true && "$w" -eq 1 ]]; then progress="$progress w1=cancelled"; continue; fi
+      progress="$progress w$w=$(( rendered[w] - window_started[w] ))ms"
+    done
     echo "$progress"
   fi
   if [[ "$PAUSE_MS" -gt 0 ]]; then sleep "$(perl -e "print $PAUSE_MS / 1000")"; fi
@@ -369,7 +589,7 @@ trap - EXIT
 cat >"$SCRATCH/soak-summary.mjs" <<'EOF'
 import { existsSync, readFileSync } from 'node:fs'
 const read = file => existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
-const [turnsPath, samplesPath, leaderExit, lastClient, crossTalk] = process.argv.slice(2)
+const [turnsPath, samplesPath, leaderExit, lastClient, crossTalk, cancelPath, cancelEvery] = process.argv.slice(2)
 const turns = read(turnsPath), samples = read(samplesPath)
 const ok = turns.filter(turn => !turn.error)
 const numeric = (list, key) => list.map(item => item[key]).filter(value => typeof value === 'number')
@@ -389,6 +609,13 @@ const scope = name => {
     maxRssKiB: rss.length ? Math.max(...rss) : null, firstHalfAvgRssKiB: average(rss.slice(0, half)), secondHalfAvgRssKiB: average(rss.slice(half)),
     firstFds: fds[0] ?? null, lastFds: fds.at(-1) ?? null, maxFds: fds.length ? Math.max(...fds) : null }
 }
+const cancels = read(cancelPath)
+const cancelStatuses = {}
+for (const row of cancels) cancelStatuses[row.status] = (cancelStatuses[row.status] ?? 0) + 1
+const cancelField = key => {
+  const values = cancels.map(row => row[key]).filter(value => typeof value === 'number').sort((a, b) => a - b)
+  return { p50: pick(values, 0.5), max: values.at(-1) ?? null }
+}
 const windows = [...new Set(ok.map(turn => turn.window ?? 1))].sort((a, b) => a - b)
 const multi = windows.length > 1
 const scopes = [...(multi ? windows.map(w => 'tui-w' + w) : ['tui']), 'leader']
@@ -399,7 +626,14 @@ console.log(JSON.stringify({ rows: turns.length, completedTurns: done.length, co
   totalMsByStep: { plain: stat(ok.filter(turn => turn.tool !== true)), tool: stat(ok.filter(turn => turn.tool === true)) },
   totalMsByWindow: Object.fromEntries(windows.map(w => ['w' + w, stat(ok.filter(turn => (turn.window ?? 1) === w))])),
   providerWaitMs: { p50: pick(waits, 0.5), p90: pick(waits, 0.9), max: waits.at(-1) ?? null },
-  rss: Object.fromEntries(scopes.map(name => [name, scope(name)])), leaderExit, lastClient, crossTalk: Number(crossTalk) }, null, 2))
+  rss: Object.fromEntries(scopes.map(name => [name, scope(name)])), leaderExit, lastClient, crossTalk: Number(crossTalk),
+  cancel: { every: Number(cancelEvery), probes: cancels.length, errors: cancels.filter(row => row.status !== 'ok').length,
+    statuses: cancelStatuses, stepSighted: cancels.filter(row => row.stepSighted === true).length,
+    holdMs: cancelField('holdMs'), cancelMs: cancelField('markerMs') } }, null, 2))
 EOF
-"$NODE_BIN" "$SCRATCH/soak-summary.mjs" "$TURNS_LOG" "$SAMPLES_LOG" "$LEADER_EXIT" "$LAST_CLIENT" "$CROSS_TALK" | tee "$SUMMARY"
+"$NODE_BIN" "$SCRATCH/soak-summary.mjs" "$TURNS_LOG" "$SAMPLES_LOG" "$LEADER_EXIT" "$LAST_CLIENT" "$CROSS_TALK" "$CANCEL_LOG" "$CANCEL_EVERY" | tee "$SUMMARY"
+if [[ "$CANCEL_EVERY" -gt 0 ]]; then
+  echo "soak: $CANCELS cancellation probe(s), $CANCEL_ERRORS failure(s), log $CANCEL_LOG"
+fi
 echo "soak: $completed/$TURNS turns x $WINDOWS window(s), evidence $OUT (leader $LEADER_EXIT, last client $LAST_CLIENT)"
+[[ "$CANCEL_ERRORS" -eq 0 ]] || fail "$CANCEL_ERRORS of $CANCELS cancellation probe(s) failed (log $CANCEL_LOG, scrollbacks $OUT/cancel-$RUN_ID-turn-*.txt)"
