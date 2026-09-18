@@ -33,6 +33,7 @@ const settingsPath = join(home, 'settings.yaml')
 assert.ok(!existsSync(settingsPath), `${settingsPath} already exists; refusing to overwrite provider settings`)
 const out = option('out') ?? join(tmpdir(), `dsclcc-${process.pid}`)
 const port = Number(option('port') ?? 26000 + (process.pid % 16000))
+const timeoutMs = Number(option('timeout') ?? 120000)
 const ws = join(out, 'ws')
 const dscTui = join(out, 'dsc-tui')
 const cache = join(out, 'compile-cache')
@@ -76,6 +77,7 @@ http.createServer((request, response) => {
   request.on('data', part => { body += part })
   request.on('end', () => {
     const path = request.url?.split('?')[0] ?? ''
+    appendFileSync(logPath, 'REQ ' + request.method + ' ' + path + ' ' + Date.now() + '\\n')
     if (request.method !== 'POST' || !path.endsWith('/chat/completions')) { response.writeHead(404); response.end(); return }
     const title = body.includes('Create a concise title')
     appendFileSync(logPath, (title ? 'TITLE ' : 'TURN ') + Date.now() + '\\n')
@@ -149,24 +151,43 @@ async function launch(label, enabled) {
   const before = cacheStats(cache)
   writeFileSync(gatewayLog, '')
   const started = performance.now()
+  const startedWall = Date.now()
   const at = () => +(performance.now() - started).toFixed(1)
   writeFileSync(log, '')
-  tmux(['new-session', '-d', '-s', 'launch', '-x', '120', '-y', '40', '-c', ws, 'env', ...env,
+  const session = tmux(['new-session', '-d', '-s', 'launch', '-x', '120', '-y', '40', '-c', ws, 'env', ...env,
     tuiBin, '--model', 'fake-model', '--no-plan', '--session-id', sessionId, 'say hello'], server)
+  assert.equal(session.status, 0, `${label}: tmux new-session failed (${session.status}): ${(session.stderr ?? '').trim()}`)
   // The pane is watched, not driven: a client connection during boot would
   // change the thing being measured.
-  const capture = () => tmux(['capture-pane', '-p', '-t', 'launch:0.0'], server).stdout ?? ''
+  const capture = () => tmux(['capture-pane', '-p', '-t', 'launch:0.0'], server)
+  // A pane whose command cannot start closes silently, and a bare timeout
+  // would hide that: report what the pane, the leader and the gateway did.
+  const diagnose = reason => {
+    const pane = capture()
+    console.error('LAUNCH-FAILURE ' + JSON.stringify({
+      label, reason, elapsedMs: at(), socketExists: existsSync(socket), lockExists: existsSync(lock),
+      tmuxSessions: (tmux(['list-sessions'], server).stdout ?? '').trim(),
+      paneStatus: pane.status, paneText: (pane.stdout ?? '').slice(0, 300), paneError: (pane.stderr ?? '').trim(),
+      leaderLog: readFileSync(log, 'utf8').slice(0, 300), gatewayLog: readFileSync(gatewayLog, 'utf8').trim(),
+    }))
+  }
   // Two independent clocks: the leader's listening moment, and the first
   // painted frame (what a user sees). Both are watched, never driven.
-  const [socketMs, frameMs] = await Promise.all([
-    waitFor(() => existsSync(socket) ? at() : undefined, 120000, `${label}: leader socket`),
-    waitFor(() => /\S/.test(capture()) ? at() : undefined, 120000, `${label}: first frame`, 20),
-  ])
-  const turnMs = await waitFor(() => readFileSync(gatewayLog, 'utf8').includes('TURN ') ? at() : undefined, 120000, `${label}: turn request`)
-  const renderMs = await waitFor(() => {
-    return capture().includes(reply) ? at() : undefined
-  }, 120000, `${label}: rendered reply`, 20)
-  writeFileSync(join(out, `${label}.pane.txt`), capture())
+  let socketMs, frameMs, turnMs, renderMs
+  try {
+    ;[socketMs, frameMs] = await Promise.all([
+      waitFor(() => existsSync(socket) ? at() : undefined, timeoutMs, `${label}: leader socket`),
+      waitFor(() => /\S/.test(capture().stdout ?? '') ? at() : undefined, timeoutMs, `${label}: first frame`, 20),
+    ])
+    turnMs = await waitFor(() => readFileSync(gatewayLog, 'utf8').includes('TURN ') ? at() : undefined, timeoutMs, `${label}: turn request`)
+    renderMs = await waitFor(() => {
+      return (capture().stdout ?? '').includes(reply) ? at() : undefined
+    }, timeoutMs, `${label}: rendered reply`, 20)
+  } catch (error) {
+    diagnose(String(error?.message ?? error))
+    throw error
+  }
+  writeFileSync(join(out, `${label}.pane.txt`), capture().stdout ?? '')
   tmux(['kill-server'], server)
   const leaderPid = Number(readFileSync(lock, 'utf8').trim())
   const deadline = performance.now() + 4000
@@ -180,7 +201,12 @@ async function launch(label, enabled) {
   if (!enabled) assert.equal(after.files, before.files, `${label}: the disabled cache still changed (${before.files} -> ${after.files})`)
   else if (before.files === 0) assert.ok(after.files > 0, `${label}: the enabled cache stayed empty, so the launch never used it`)
   else assert.equal(after.files, before.files, `${label}: a warm launch rewrote the cache (${before.files} -> ${after.files})`)
-  return { label, socketMs, frameMs, turnMs, renderMs, cache: after }
+  // Per-launch gateway timeline, in milliseconds from this launch's start, so
+  // the window between the leader's socket and the first frame can be
+  // attributed to the requests the product actually makes.
+  const requests = readFileSync(gatewayLog, 'utf8').split('\n').filter(line => line.startsWith('REQ '))
+    .map(line => { const [, method, path, ts] = line.split(' '); return { method, path, ms: +(Number(ts) - startedWall).toFixed(1) } })
+  return { label, socketMs, frameMs, turnMs, renderMs, requests, cache: after }
 }
 
 const result = { node: process.version, tuiBin, dshBin, home, pairs, cache, off: [], cold: null, warm: [] }
