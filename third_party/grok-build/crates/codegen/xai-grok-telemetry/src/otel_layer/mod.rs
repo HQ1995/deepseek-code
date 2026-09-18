@@ -119,11 +119,12 @@ struct RefreshableSpanExporter {
     static_headers: Arc<std::collections::HashMap<String, String>>,
     credentials: Arc<dyn AuthCredentialProvider>,
     last_token: parking_lot::Mutex<String>,
-    /// Pre-built HTTP client shared across all export calls. Created once at
-    /// init (outside the batch processor thread) to avoid the "no reactor"
-    /// panic that occurs when `hyper-util` tries DNS resolution on a non-Tokio
-    /// thread.
-    http_client: crate::otlp_http::BlockingOtlpClient,
+    /// HTTP client shared across all export calls, resolved on first use
+    /// (`DeferredOtlpClient`): the ~100ms build moves out of `init_tracing`,
+    /// ahead of the first frame, and lands on the batch processor's own std
+    /// thread instead. The resolved blocking client must not be dropped
+    /// inside an async executor.
+    http_client: crate::otlp_http::DeferredOtlpClient,
     /// Resource set by the `BatchSpanProcessor` via `set_resource()`.
     /// Forwarded to each one-shot exporter so OTLP payloads include
     /// `service.name`, `service.version`, `user.id`, etc.
@@ -207,6 +208,52 @@ async fn export_batch(
     exporter.export(batch).await
 }
 impl RefreshableSpanExporter {
+    /// Build the inputs for one export attempt, on the calling thread.
+    ///
+    /// Returns `None` when span export is opted out for this process or when
+    /// the OTLP HTTP client cannot be built (that build runs once and its
+    /// failure is cached, and `DeferredOtlpClient` reports it once, so a host
+    /// that cannot build the client does not log on every flush).
+    fn prepare_export(&self) -> Option<ExportInputs> {
+        if !crate::client::is_session_metrics_enabled() || !self.credentials.has_usable_credential()
+        {
+            return None;
+        }
+        let http_client = match self.http_client.get() {
+            Ok(client) => client,
+            // `get()` already logged the failure (once) when it happened.
+            Err(_) => return None,
+        };
+        let snapshot = self.credentials.snapshot();
+        let token = snapshot.token.clone().unwrap_or_else(|| {
+            tracing::debug!("auth: otel credential snapshot has no token, using cached last_token");
+            self.last_token.lock().clone()
+        });
+        *self.last_token.lock() = token.clone();
+        let token_auth = self
+            .credentials
+            .needs_token_auth_header()
+            .then(|| Arc::clone(&self.token_header_value));
+        Some(ExportInputs {
+            one_shot: build_otlp_exporter(
+                &self.endpoint,
+                &self.static_headers,
+                &token,
+                token_auth.as_deref(),
+                &self.extra_headers,
+                http_client.clone(),
+                &snapshot,
+            ),
+            resource: resource_with_tenant_id(self.resource.lock().clone(), &snapshot),
+            credentials: Arc::clone(&self.credentials),
+            endpoint: Arc::clone(&self.endpoint),
+            static_headers: Arc::clone(&self.static_headers),
+            token_header_value: Arc::clone(&self.token_header_value),
+            http_client,
+            extra_headers: Arc::clone(&self.extra_headers),
+        })
+    }
+
     #[cfg(test)]
     fn current_token(&self) -> String {
         self.credentials.snapshot().token.unwrap_or_else(|| {
@@ -250,8 +297,9 @@ fn resource_with_tenant_id(
 }
 /// Inputs for one export attempt, built on the calling thread: the
 /// `BatchSpanProcessor` drives `export()` from a non-Tokio `std::thread`, so
-/// constructing the exporter/HTTP client inside the future would hit the
-/// "no reactor" panic.
+/// constructing the exporter inside the future would hit the "no reactor"
+/// panic. `http_client` is the exporter's client, already resolved here (the
+/// first attempt builds it, at most once per process, on this same thread).
 struct ExportInputs {
     one_shot: Result<opentelemetry_otlp::SpanExporter, opentelemetry_otlp::ExporterBuildError>,
     resource: opentelemetry_sdk::Resource,
@@ -267,40 +315,9 @@ impl opentelemetry_sdk::trace::SpanExporter for RefreshableSpanExporter {
         &self,
         batch: Vec<opentelemetry_sdk::trace::SpanData>,
     ) -> impl std::future::Future<Output = opentelemetry_sdk::error::OTelSdkResult> + Send {
-        let prepared = (crate::client::is_session_metrics_enabled()
-            && self.credentials.has_usable_credential())
-        .then(|| {
-            let snapshot = self.credentials.snapshot();
-            let token = snapshot.token.clone().unwrap_or_else(|| {
-                tracing::debug!(
-                    "auth: otel credential snapshot has no token, using cached last_token"
-                );
-                self.last_token.lock().clone()
-            });
-            *self.last_token.lock() = token.clone();
-            let token_auth = self
-                .credentials
-                .needs_token_auth_header()
-                .then(|| Arc::clone(&self.token_header_value));
-            ExportInputs {
-                one_shot: build_otlp_exporter(
-                    &self.endpoint,
-                    &self.static_headers,
-                    &token,
-                    token_auth.as_deref(),
-                    &self.extra_headers,
-                    self.http_client.clone(),
-                    &snapshot,
-                ),
-                resource: resource_with_tenant_id(self.resource.lock().clone(), &snapshot),
-                credentials: Arc::clone(&self.credentials),
-                endpoint: Arc::clone(&self.endpoint),
-                static_headers: Arc::clone(&self.static_headers),
-                token_header_value: Arc::clone(&self.token_header_value),
-                http_client: self.http_client.clone(),
-                extra_headers: Arc::clone(&self.extra_headers),
-            }
-        });
+        // Resolved on the calling thread — the batch processor's own std
+        // thread — never inside the async body; see `ExportInputs`.
+        let prepared = self.prepare_export();
         async move {
             let Some(ExportInputs {
                 one_shot,
@@ -421,19 +438,12 @@ fn build_server_provider(client: OtelClientInfo, config: OtelLayerConfig) -> Sdk
             .exporter
             .timeout
             .unwrap_or(std::time::Duration::from_secs(10));
-        let http_client = match crate::otlp_http::build_blocking_client(timeout, &[]) {
-            Ok(client) => client,
-            Err(err) => {
-                tracing::warn!(error = %err, "otel: OTLP HTTP client build failed; span export disabled");
-                return provider.build();
-            }
-        };
         let refreshable_exporter = RefreshableSpanExporter {
             endpoint: Arc::from(traces_url),
             static_headers: Arc::new(static_headers),
             credentials: config.credentials,
             last_token: parking_lot::Mutex::new(initial_token),
-            http_client,
+            http_client: crate::otlp_http::DeferredOtlpClient::new(timeout),
             resource: parking_lot::Mutex::new(opentelemetry_sdk::Resource::builder_empty().build()),
             token_header_value: Arc::from(config.token_header_value.as_str()),
             extra_headers: Arc::new(config.exporter.extra_headers),
@@ -542,9 +552,11 @@ mod tests {
             }
         }
     }
-    /// Must be called from a non-async test (`#[test]`, not `#[tokio::test]`).
-    /// The blocking client spawns an internal tokio runtime that panics if
-    /// dropped inside an async executor.
+    /// Tests that resolve the exporter's HTTP client (call `export()` or
+    /// `prepare_export()`) must run in a non-async test (`#[test]`, not
+    /// `#[tokio::test]`): the blocking client spawns an internal tokio
+    /// runtime that panics if dropped inside an async executor. Constructing
+    /// the exporter itself is lazy and safe either way.
     fn make_exporter(
         provider: Arc<dyn AuthCredentialProvider>,
         last_token: &str,
@@ -554,11 +566,9 @@ mod tests {
             static_headers: Arc::new(std::collections::HashMap::new()),
             credentials: provider,
             last_token: parking_lot::Mutex::new(last_token.to_string()),
-            http_client: crate::otlp_http::build_blocking_client(
-                std::time::Duration::from_secs(30),
-                &[],
-            )
-            .expect("test OTLP HTTP client must build"),
+            http_client: crate::otlp_http::DeferredOtlpClient::new(std::time::Duration::from_secs(
+                30,
+            )),
             resource: parking_lot::Mutex::new(opentelemetry_sdk::Resource::builder().build()),
             token_header_value: Arc::from("xai-grok-cli"),
             extra_headers: Arc::new(Vec::new()),

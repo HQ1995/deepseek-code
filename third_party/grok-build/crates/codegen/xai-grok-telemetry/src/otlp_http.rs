@@ -46,6 +46,71 @@ pub(crate) struct ClientIdentityPaths<'a> {
     pub key: &'a str,
 }
 
+/// Build-once cell with a sticky error: the first `get_or_build` runs the
+/// builder, later calls reuse its result — including a failure, so a host
+/// where the client cannot be built does not pay the build attempt again on
+/// every export.
+#[derive(Debug)]
+struct BuildOnce<T> {
+    state: parking_lot::Mutex<Option<Result<T, String>>>,
+}
+
+impl<T: Clone> BuildOnce<T> {
+    fn new() -> Self {
+        Self {
+            state: parking_lot::Mutex::new(None),
+        }
+    }
+
+    fn get_or_build(&self, build: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        self.state.lock().get_or_insert_with(build).clone()
+    }
+}
+
+/// The trace exporter's blocking OTLP client, built on first use instead of
+/// inside startup. `build_blocking_client` costs around 100ms (TLS backend
+/// setup) and the traces provider used to pay it in `init_tracing`, ahead of
+/// the first frame, for every launch with export enabled — including sessions
+/// that never send a batch. The result is cached, so the cost lands at most
+/// once per process.
+///
+/// Call `get()` from a plain (non-Tokio) thread: the resolved blocking client
+/// owns a runtime that panics when the last reference is dropped inside an
+/// async executor. The OTLP batch processors drive exports from their own std
+/// threads, which satisfies this.
+#[derive(Debug)]
+pub(crate) struct DeferredOtlpClient {
+    timeout: std::time::Duration,
+    client: BuildOnce<BlockingOtlpClient>,
+}
+
+impl DeferredOtlpClient {
+    pub(crate) fn new(timeout: std::time::Duration) -> Self {
+        Self {
+            timeout,
+            client: BuildOnce::new(),
+        }
+    }
+
+    /// Resolve the client, building it on the first call.
+    ///
+    /// A failed build is warned about from inside the build itself, and the
+    /// builder runs at most once per process, so the warning is emitted once
+    /// rather than on every export the caller attempts afterwards.
+    pub(crate) fn get(&self) -> Result<BlockingOtlpClient, String> {
+        self.client.get_or_build(|| {
+            let result = build_blocking_client(self.timeout, &[]);
+            if let Err(err) = &result {
+                tracing::warn!(
+                    error = %err,
+                    "otel: OTLP HTTP client build failed; span export disabled"
+                );
+            }
+            result
+        })
+    }
+}
+
 /// Build the blocking OTLP HTTP client on a dedicated thread.
 ///
 /// The blocking client can't be built inside a Tokio runtime, and the batch
@@ -253,5 +318,59 @@ mod tests {
             }),
         )
         .expect("HTTP client with mTLS identity must build");
+    }
+
+    /// The deferred wrapper must run the builder at most once and keep
+    /// serving the cached value on later calls.
+    #[test]
+    fn build_once_runs_the_builder_once() {
+        fn counting_builder(builds: &std::sync::atomic::AtomicU32) -> Result<u8, String> {
+            builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(7)
+        }
+        let slot: BuildOnce<u8> = BuildOnce::new();
+        let builds = std::sync::atomic::AtomicU32::new(0);
+        assert_eq!(slot.get_or_build(|| counting_builder(&builds)), Ok(7));
+        assert_eq!(slot.get_or_build(|| counting_builder(&builds)), Ok(7));
+        assert_eq!(builds.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// A failed build must stay failed: callers treat it as a permanent
+    /// degradation, and retrying would re-pay the (~100ms) build attempt on
+    /// every export. `DeferredOtlpClient::get` warns from inside the builder
+    /// closure, so running it once is also what keeps the warning from
+    /// repeating on every flush.
+    #[test]
+    fn build_once_caches_failures() {
+        let slot: BuildOnce<u8> = BuildOnce::new();
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        assert_eq!(
+            slot.get_or_build(|| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err("no client".to_string())
+            }),
+            Err("no client".to_string())
+        );
+        assert_eq!(
+            slot.get_or_build(|| Ok(1)),
+            Err("no client".to_string()),
+            "the cached failure must win over a later builder"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the failed attempt must not be retried"
+        );
+    }
+
+    /// The traces exporter's deferred client must resolve to a usable client
+    /// on first use, through the same builder path the exporter uses.
+    #[test]
+    fn deferred_otlp_client_resolves_a_usable_client() {
+        let deferred = DeferredOtlpClient::new(std::time::Duration::from_secs(5));
+        deferred.get().expect("first get must build the client");
+        deferred
+            .get()
+            .expect("second get must reuse the cached client");
     }
 }
