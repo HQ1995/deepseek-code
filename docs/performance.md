@@ -542,6 +542,9 @@ the macOS pass does not clear that separate release gate. The
 that correction into this backport at `f5052559`; the built-provider matrix
 that failed on main then passed all 15 cases on both Node versions, together
 with the source, script, bridge, snapshot, updater, E2E and audit gates.
+Two production commits landed after that settlement; the same host
+re-accepted the revision main carries today as [the current-main
+re-acceptance](linux-acceptance-2026-09-17-main.md).
 
 ## 2026-09-15: macOS current-identity checks (76300cfe)
 

@@ -238,3 +238,8 @@ E2E run 90442` and `PASS provider-manage e2e run 26084`, exit 0. Assets:
 `dscode-plugin.tgz` (1,449,255 bytes) `5762ae6d…`; the evidence set is
 archived as `.git/integration-backups/macos-full-e549786c-evidence.tar.gz`,
 SHA-256 `071079eec1b21433f3c5c5636b9eb98cf680dc46af5c257d5b858f0a471df2f9`.
+
+Main carries this settlement as `f5052559`; the revision main carries today
+was re-accepted on the same host the same day, over the two production commits
+that landed after this run, as [the current-main
+re-acceptance](linux-acceptance-2026-09-17-main.md).

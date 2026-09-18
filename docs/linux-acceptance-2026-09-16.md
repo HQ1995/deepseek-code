@@ -78,6 +78,11 @@ correction from the earlier candidate, preserving genuine startup errors and
 signal-delivery failures. It needs a reproducible source patch/provenance and
 revalidation alongside the current macOS changes; this report does not adopt
 the candidate pin or its unrelated capabilities.
+The settlement correction was merged into the backport as `f5052559` and
+accepted the next day in [the combined settlement
+acceptance](linux-acceptance-2026-09-17.md); the revision main carries today
+was re-accepted over the two later production commits as [the current-main
+re-acceptance](linux-acceptance-2026-09-17-main.md).
 
 ## Fixture correction
 
