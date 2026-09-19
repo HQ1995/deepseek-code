@@ -6,6 +6,108 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-19: the cold picker folds on the store's two-entry decode handoff
+
+The first picker call walks every stored session, and each walk is a pair:
+`open()` parses the log, `read()` serves the page, and both halves scan the
+session's directories for the id they name. Those pairs run on a fixed pool of
+concurrent lanes (`SessionListIndex.inspectionTails`), four of them, sized for
+overlap. The pinned JSONL store answers that shape badly: it hands the log it
+decoded in `open()` to the `read()` that follows it through a two-entry memo
+(`COLD_LOG_MEMO_MAX_ENTRIES = 2` in
+`dsh-session-persistence-jsonl` 0.1.5-rc.2, whose `readStoredLog` re-reads and
+re-decodes on a miss), so a lane whose handoff has been evicted parses,
+validates and directory-walks its own log a second time, and the lanes beyond
+the memo's width buy that re-decode instead of overlap.
+
+One store of 2000 sessions × 120 events, one cold pass per lane width, the
+width overridden in the working tree (macOS arm64, Node 24.19.0):
+
+| 2000 stored sessions, one cold pass | 1 lane | 2 lanes | 4 lanes | 8 lanes | 16 lanes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| wall clock | 1653.4 | 1371.2 | 1478.0 | 1850.8 | 1849.0 |
+| summed read time | 277.1 | 619.5 | 1546.2 | 6059.6 | 13004.1 |
+| peak RSS MiB | 265.0 | 271.5 | 280.3 | 288.0 | 293.8 |
+
+One lane pays no overlap at all (1653.4ms of wall) and only its own reads;
+two lanes cut the wall to 1371.2ms, and past two it rises again. The read
+column is summed over lanes, so it can exceed the wall clock — it prices the
+work, not the critical path — and it grows severalfold with every doubling
+past the memo's width: 0.62s at two lanes, 1.55s at four, 6.06s at eight,
+13.0s at sixteen, the extra lanes decoding logs a neighbour already decoded.
+Three lanes (1355.1ms wall) sit inside the two-lane noise. The instrumented
+repeats price the effect at the store's own seam: `open()` takes 1.53s on two
+lanes, 2.41s on three and 3.24s on four, for 2.41s, 2.56s and 2.89s of
+process CPU.
+
+Ten thousand sessions × 120 events, one cold pass per column: the four-lane
+tree before the change, a paired A/B on two lanes and on four, and the
+shipped revision.
+
+| 10000 stored sessions, cold pass | four before | two (A) | four (B) | shipped |
+| --- | ---: | ---: | ---: | ---: |
+| wall clock | 7368.2 | 6893.1 | 7342.7 | 6952.6 |
+| CPU in the pass | — | 13908.1 | 15737.1 | 14246.1 |
+| store `open()` time | — | 7904.4 | 15979.5 | 7953.6 |
+| summed read time | 7559.8 | 2921.6 | 7599.4 | 2864.1 |
+| store listing | 1437.0 | 1410.4 | 1401.6 | 1474.7 |
+| warm pass 1 | 1466.7 | 1454.3 | 1437.7 | 1413.0 |
+| peak RSS MiB | 345.0 | 352.7 | 356.0 | 344.5 |
+
+The four-lane columns spend 16.0s opening 10000 logs where the two-lane pair
+spends 7.9s, and the pair pays 13.9s of process CPU in the pass against
+15.7s, on a wall clock that moves 7342.7ms → 6893.1ms. Every column returns
+its 30 rows per phase with no `violations`, and the warm pass is unmoved: its
+~1.4s is the store's own listing (1.40-1.47s), which this change does not
+touch (zero opens, zero reads). The shipped revision carries the width as a
+named constant, `INSPECTION_LANES = 2` in
+`bridge/grok-leader/src/session-list.ts`, with the handoff written down beside
+it, and its run reproduces the two-lane column.
+
+### Verification for this section
+
+- Evidence: `/tmp/dscstress-scale/bench-lanes/` (`lanes-1` to `lanes-16`,
+  `cpu-2` to `cpu-4`, `m-2-8`, `m-3-4`, `m-4-8`, `split-2`, `split-4`)
+  and `/tmp/dscstress-scale/bench-10k-window/` (`before.json`,
+  `lane2-a.json`, `lane4-b.json`, `after.json`, their `.err` logs and
+  `lane-ab.sh`). Each run seeds its own store under `$TMPDIR`; the four
+  10000-session runs all report 40964096 root bytes, 10000 candidates and 120
+  events per session, and every run's `violations` is empty.
+- Reproduction: `node --experimental-transform-types --expose-gc
+  scripts/bench-session-list.mjs 10000 --events=120 --projects=1
+  --roster=5 --concurrent=3 --titles=hit --reuse=true`, one run per column,
+  each seeding its store first (~181s); the A/B pair's width came from a
+  working-tree override of the lane array, and the shipped run uses the
+  constant.
+- The handoff is the pin's own: `COLD_LOG_MEMO_MAX_ENTRIES = 2` in the
+  runtime's `@deepseek-ai/dsh-session-persistence-jsonl` 0.1.5-rc.2, under
+  `~/.dsh/profiles/dscode/runtime/node_modules/`, where `readStoredLog`
+  re-reads and re-decodes on a miss and `memoizeStoredLog` evicts past the
+  bound; the 1000-turn section above reached the same bound from the other
+  side, as the reason pages cannot be read piecemeal.
+- The bench now also counts `open()` time and per-phase process CPU, which
+  is how the re-decode shows up as store time instead of fold time; nothing
+  pins those fields (`node --test scripts/*.test.mjs` and
+  `bash scripts/check.sh` both pass).
+- Tests: both helpers pinned the peak concurrent load at four ("four handle
+  lanes"), and each now fails on the four-lane tree — `Tests 2 failed | 58
+  passed (60)` across `tests/session-list.spec.ts` and
+  `tests/session-discovery.spec.ts`, the list case at its
+  `expect(peak).toBe(2)` — and passes here. From `bridge/grok-leader`:
+  `npx tsc -b tsconfig.json` passes; `npx vitest run` 47 files, 948
+  passed; `bash scripts/dev-bridge-tests.sh` 46 files passed / 1 skipped
+  (944 passed / 4 skipped); `node --test scripts/*.test.mjs` 44 cases (43
+  passing, 1 skipped); `bash scripts/check.sh` passes.
+- This section ships a production change and the module ships inside the
+  plugin tarball, so the Linux acceptance threshold reopens: the macOS lanes
+  here say nothing about Linux. The re-run at `bd4e79da` repeated the
+  15-case built-provider matrix, the script cases, the bridge suite and
+  `check.sh` on Node 22.19.0 and 24.19.0, and is recorded in
+  `docs/linux-acceptance-2026-09-17-main.md`.
+- macOS arm64 on a shared host, page cache warm on both sides, one store per
+  run; the absolute milliseconds are upper bounds and only the comparisons
+  inside this section hold.
+
 ## 2026-09-19: a cordis lookup wraps the service, so the caches key on the instance
 
 The two sections above landed their reuse against the bench, which hands
