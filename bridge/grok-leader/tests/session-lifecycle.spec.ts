@@ -89,7 +89,7 @@ function fixture() {
   }
   const permissions = vi.fn((_record: SessionRecord, _meta: unknown) => { order.push('permissions') })
   const discovery = createSessionDiscovery({ persistence: () => persistence as never, query: () => undefined,
-    owns: () => false, onEvent: () => () => {} })
+    projectionCache: () => undefined, owns: () => false, onEvent: () => () => {} })
   stops.push(() => discovery.dispose())
   const host = { discovery, agents, registry: sessions, models, presets, flush, persistence: (): PersistenceLike | undefined => persistence as unknown as PersistenceLike,
     client: (id: number) => clients.get(id), queue: { combineQueued: false, followUpSteer: false },

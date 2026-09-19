@@ -17,6 +17,10 @@
 // maps every stored snapshot without folding a log. Each phase reports the
 // call, the store listing inside it, the JSON the transport then writes and
 // that JSON's byte count, so the poll's price is separated from the picker's.
+// Every row it maps also asks the persisted projection cache for a cached
+// title (the zero-I/O listing read, never a log open), so the phase counts
+// those reads too; --titles=hit answers all of them the way a store with warm
+// checkpoints would, which prices the titles the poll now carries on the wire.
 //
 // --concurrent=K fires that roster poll from K callers at once, the way every
 // window of one profile polls the shared leader, and reports how many durable
@@ -25,7 +29,7 @@
 // Usage:
 //   node --experimental-transform-types [--expose-gc] scripts/bench-session-list.mjs \
 //     <sessions> [bridgeRoot] [--events=120] [--projects=1] [--lists=3] [--touch=1] [--sweep=true]
-//     [--roster=N] [--concurrent=K]
+//     [--roster=N] [--concurrent=K] [--titles=hit]
 //
 // The bridge root supplies the pinned SDK dependencies, exactly like the
 // shipped plugin; the benchmark itself stays in scripts/.
@@ -146,7 +150,7 @@ const seedMs = Number(process.hrtime.bigint() - seedStarted) / 1e6
 // Count every durable read the picker path performs, including through the
 // handle it opens; the discovery module itself is untouched.
 // The peak starts at zero here, after seeding, so it covers the picker phases.
-const counters = { list: 0, listMs: 0, open: 0, read: 0, readMs: 0, events: 0, peakRss: 0 }
+const counters = { list: 0, listMs: 0, open: 0, read: 0, readMs: 0, events: 0, titleReads: 0, peakRss: 0 }
 // Every picker pass runs in the leader's own JS thread, next to live turns, so
 // the pass is measured with the delays the loop actually suffered rather than
 // with its wall clock alone. The histogram resets per phase.
@@ -188,9 +192,30 @@ const observed = new Proxy(persistence, {
     return typeof value === 'function' ? value.bind(target) : value
   },
 })
+// The roster poll serves each row's durable title from the persisted
+// projection cache, the same zero-I/O listing read the shipped dashboard path
+// uses. This store has no checkpoint beside it, so the default stub answers
+// the way a store that never folded a session would; --titles=hit answers
+// every row instead, one title per session, so a pass can price what a warm
+// cache puts on the wire.
+const titleMode = flags.get('titles') ?? 'miss'
+assert.ok(titleMode === 'miss' || titleMode === 'hit', '--titles is miss or hit')
+const projectionCache = {
+  cachedSnapshot: () => {
+    counters.titleReads += 1
+    return titleMode === 'hit'
+      ? { values: { title: `session covering turns through ${eventsPerSession - 1}` } }
+      : undefined
+  },
+  cachedPredecessorTitle: () => {
+    counters.titleReads += 1
+    return undefined
+  },
+}
 const discovery = createSessionDiscovery({
   persistence: () => observed,
   query: () => undefined,
+  projectionCache: () => projectionCache,
   owns: () => false,
   onEvent: () => () => {},
 })
@@ -289,7 +314,9 @@ for (let index = 0; index < rosterCount; index += 1) {
     ms: +ms.toFixed(1), rows: result.result.sessions.length,
     storeListMs: +(counters.listMs - before.listMs).toFixed(1),
     encodeMs: +encodeMs.toFixed(1), bytes: Buffer.byteLength(encoded),
-    opens: counters.open - before.open, reads: counters.read - before.read, ...loopDelayNow(),
+    opens: counters.open - before.open, reads: counters.read - before.read,
+    titled: result.result.sessions.filter(row => typeof row.title === 'string').length,
+    titleReads: counters.titleReads - before.titleReads, ...loopDelayNow(),
   })
 }
 
@@ -308,7 +335,9 @@ if (concurrentCount > 1) {
     calls: concurrentCount, ms: +ms.toFixed(1), rows: results[0].result.sessions.length,
     listings: counters.list - before.list,
     storeListMs: +(counters.listMs - before.listMs).toFixed(1),
-    opens: counters.open - before.open, reads: counters.read - before.read, ...loopDelayNow(),
+    opens: counters.open - before.open, reads: counters.read - before.read,
+    titled: results[0].result.sessions.filter(row => typeof row.title === 'string').length,
+    titleReads: counters.titleReads - before.titleReads, ...loopDelayNow(),
   })
 }
 

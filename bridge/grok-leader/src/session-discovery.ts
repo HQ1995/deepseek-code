@@ -1,4 +1,4 @@
-import { SessionId, type Session, type SessionEvent, type SessionHeader, type SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset, type Session, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   SessionFormatUnsupportedError, SessionPersistenceCorruptionError, SessionPersistenceNotFoundError,
   type SessionHandle, type SessionInspection, type SessionPersistence, type SessionPersistenceSnapshot,
@@ -16,6 +16,18 @@ export interface SessionQueryLike {
     nextCursor?: string
   }>
 }
+/** The one value the roster reads out of a projection cut. */
+export interface SessionProjectionCutLike {
+  readonly values: { readonly title?: unknown }
+}
+/** Structural capability of the optional persisted projection cache
+ * (`ctx.sessionProjectionCache`): the synchronous zero-I/O listing read of a
+ * session's durable projection values, plus the narrower predecessor-format
+ * title hint. */
+export interface SessionProjectionCacheLike {
+  cachedSnapshot(meta: SessionHeader, inheritedEventCount: SessionLogOffset, keys?: readonly string[]): SessionProjectionCutLike | undefined
+  cachedPredecessorTitle(meta: SessionHeader, inheritedEventCount: SessionLogOffset): SessionProjectionCutLike | undefined
+}
 type DiscoveryPersistence = Pick<SessionPersistence, 'list' | 'open'>
 type ListMethod = 'session/list' | 'x.ai/session/list' | 'x.ai/sessions/list'
 interface InspectionOptions {
@@ -27,6 +39,10 @@ type ReadOperation<T> = (handle: SessionHandle, signal: AbortSignal, assertActiv
 interface DiscoveryHost {
   persistence(): DiscoveryPersistence | undefined
   query(): SessionQueryLike | undefined
+  projectionCache(): SessionProjectionCacheLike | undefined
+  /** Diagnostics for a hint the cache could not supply; every other missing
+   * hint is ordinary and stays silent. */
+  log?(message: string): void
   owns(session: Session): boolean
   onEvent(listener: (session: Session, event: SessionEvent) => void): () => void
 }
@@ -150,6 +166,29 @@ export function createSessionDiscovery(host: DiscoveryHost) {
       }
       return selected
     }))
+  /** Title hint for one roster row, read from the persisted projection cache
+   * without opening the session log. An unseeded listing knows its inherited
+   * cut is exactly zero and can prove the cache identity; a seeded header-only
+   * listing cannot name its cut and stays titleless until an authoritative
+   * read supplies it. An absent, not yet initialized or unprovable cache row
+   * is a missing hint, never a failed listing, and only a cache that throws is
+   * reported. */
+  const cachedTitle = (cache: SessionProjectionCacheLike | undefined, header: SessionHeader): string | undefined => {
+    if (cache === undefined || header.isSeeded) return undefined
+    try {
+      // The current lifecycle first; a record an older format generation left
+      // behind still contributes its format-invariant title.
+      const cut = cache.cachedSnapshot(header, SessionLogOffset(0), ['title'])
+        ?? cache.cachedPredecessorTitle(header, SessionLogOffset(0))
+      const title = cut?.values.title
+      return typeof title === 'string' && title.trim().length > 0 ? title.trim() : undefined
+    } catch (error) {
+      // The row is still a row: it is served without the hint, the way an
+      // unseeded header is, and the failure is reported rather than swallowed.
+      host.log?.('grok-leader: roster title for "' + String(header.id) + '" failed; serving the row without it: ' + String(error))
+      return undefined
+    }
+  }
   const list = async (method: ListMethod, params: unknown) => {
     const p = method === 'x.ai/session/list' ? paramRecord(params, method) : {}
     const store = persistence(), projectionIndex = indexFor(store)
@@ -162,10 +201,15 @@ export function createSessionDiscovery(host: DiscoveryHost) {
       })) }
     }
     if (method === 'x.ai/sessions/list') {
-      return { result: { sessions: snapshots.map(({ header }) => ({
-        sessionId: header.id, cwd: header.cwd ?? '', isWorktree: false, yolo: false,
-        activity: 'dormant', resident: false, lastChangeUnixMs: header.createdAt,
-      })) } }
+      const cache = host.projectionCache()
+      return { result: { sessions: snapshots.map(({ header }) => {
+        const title = cachedTitle(cache, header)
+        return {
+          sessionId: header.id, cwd: header.cwd ?? '', isWorktree: false, yolo: false,
+          activity: 'dormant', resident: false, lastChangeUnixMs: header.createdAt,
+          ...title === undefined ? {} : { title },
+        }
+      }) } }
     }
     const query = typeof p.query === 'string' ? p.query.toLowerCase() : undefined
     const cwd = typeof p.cwd === 'string' ? p.cwd : undefined

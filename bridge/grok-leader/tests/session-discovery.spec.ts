@@ -4,7 +4,7 @@ import {
   SessionFormatUnsupportedError, SessionPersistenceCorruptionError, SessionPersistenceNotFoundError,
   SessionPersistenceRevision, type SessionHandle, type SessionPersistence,
 } from '@deepseek-ai/dsh-session-persistence'
-import { createSessionDiscovery, type SessionQueryLike } from '../src/session-discovery.ts'
+import { createSessionDiscovery, type SessionProjectionCacheLike, type SessionQueryLike } from '../src/session-discovery.ts'
 
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(stops.splice(0).map(stop => stop())) })
@@ -41,7 +41,11 @@ function fixture(cleanupError?: string) {
   let engine: SessionQueryLike | undefined = { searchSessions: query }
   const unsubscribe = vi.fn(), owns = vi.fn((session: Session) => owned.has(session))
   const persistence = vi.fn(() => store), queryEngine = vi.fn(() => engine)
-  const discovery = createSessionDiscovery({ persistence, query: queryEngine, owns,
+  let cache: SessionProjectionCacheLike | undefined
+  const projectionCache = vi.fn(() => cache)
+  const warnings: string[] = []
+  const discovery = createSessionDiscovery({ persistence, query: queryEngine, owns, projectionCache,
+    log: message => { warnings.push(message) },
     onEvent: callback => { listener = callback; return unsubscribe } })
   stops.push(async () => {
     if (cleanupError === undefined) await discovery.dispose()
@@ -58,6 +62,7 @@ function fixture(cleanupError?: string) {
   }>
   return { discovery, picker, add, live, emit: (session: Session, event: SessionEvent) => listener(session, event),
     read, open, close, list, query, owns, unsubscribe, headers, logs, revisions, persistence, queryEngine,
+    projectionCache, warnings, provideCache: (next: SessionProjectionCacheLike | undefined) => { cache = next },
     store: () => store!, replace: (next: typeof store) => { store = next }, queryAvailable: (available: boolean) => { engine = available ? { searchSessions: query } : undefined },
     get active() { return active }, get peak() { return peak } }
 }
@@ -82,6 +87,65 @@ describe('owned session discovery', () => {
       sessionId: header.id, cwd: header.cwd ?? '', isWorktree: false, yolo: false, activity: 'dormant', resident: false, lastChangeUnixMs: header.createdAt,
     })) } })
     expect(f.open).not.toHaveBeenCalled()
+  })
+
+  it('fills roster titles from the projection cache without opening logs', async () => {
+    const f = fixture()
+    f.add('titled', '/work', [], 10)
+    f.add('blank', '/work', [], 20)
+    f.add('unknown', '/work', [], 30)
+    const seen: Array<{ id: string; cut: number; keys: readonly string[] | undefined }> = []
+    f.provideCache({
+      cachedSnapshot: (header, cut, keys) => {
+        seen.push({ id: String(header.id), cut: Number(cut), keys })
+        if (header.id === SessionId('titled')) return { values: { title: '  Cached roster title  ' } }
+        if (header.id === SessionId('blank')) return { values: { title: '   ' } }
+        return undefined
+      },
+      cachedPredecessorTitle: () => undefined,
+    })
+    await expect(f.discovery.list('x.ai/sessions/list')).resolves.toEqual({ result: { sessions: [
+      { sessionId: 'titled', cwd: '/work', isWorktree: false, yolo: false, activity: 'dormant', resident: false, lastChangeUnixMs: 10, title: 'Cached roster title' },
+      { sessionId: 'blank', cwd: '/work', isWorktree: false, yolo: false, activity: 'dormant', resident: false, lastChangeUnixMs: 20 },
+      { sessionId: 'unknown', cwd: '/work', isWorktree: false, yolo: false, activity: 'dormant', resident: false, lastChangeUnixMs: 30 },
+    ] } })
+    expect(f.open).not.toHaveBeenCalled()
+    expect(seen.map(entry => [entry.id, entry.cut])).toEqual([['titled', 0], ['blank', 0], ['unknown', 0]])
+    expect(seen.map(entry => entry.keys)).toEqual([['title'], ['title'], ['title']])
+    expect(f.warnings).toEqual([])
+  })
+
+  it('reads the predecessor title when only an older format left a record', async () => {
+    const f = fixture()
+    f.add('older', '/work', [], 10)
+    const predecessor = vi.fn((header: SessionHeader) => header.id === SessionId('older') ? { values: { title: 'Predecessor title' } } : undefined)
+    f.provideCache({ cachedSnapshot: () => undefined, cachedPredecessorTitle: predecessor })
+    await expect(f.discovery.list('x.ai/sessions/list')).resolves.toMatchObject({ result: { sessions: [
+      expect.objectContaining({ sessionId: 'older', title: 'Predecessor title' }),
+    ] } })
+    expect(predecessor).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a seeded header titleless and a broken cache from failing the listing', async () => {
+    const f = fixture()
+    f.add('seeded', '/work', [], 10)
+    f.add('broken', '/work', [], 20)
+    f.headers.set('seeded', { ...f.headers.get('seeded')!, isSeeded: true })
+    const cachedSnapshot = vi.fn((header: SessionHeader) => {
+      if (header.id === SessionId('broken')) throw new Error('cache is not initialized')
+      return { values: { title: 'must not be used' } }
+    })
+    const cachedPredecessorTitle = vi.fn(() => ({ values: { title: 'must not be used' } }))
+    f.provideCache({ cachedSnapshot, cachedPredecessorTitle })
+    await expect(f.discovery.list('x.ai/sessions/list')).resolves.toEqual({ result: { sessions: [
+      { sessionId: 'seeded', cwd: '/work', isWorktree: false, yolo: false, activity: 'dormant', resident: false, lastChangeUnixMs: 10 },
+      { sessionId: 'broken', cwd: '/work', isWorktree: false, yolo: false, activity: 'dormant', resident: false, lastChangeUnixMs: 20 },
+    ] } })
+    expect(cachedSnapshot.mock.calls.map(call => String(call[0].id))).toEqual(['broken'])
+    expect(cachedPredecessorTitle).not.toHaveBeenCalled()
+    expect(f.warnings).toEqual([
+      'grok-leader: roster title for "broken" failed; serving the row without it: Error: cache is not initialized',
+    ])
   })
 
   it('answers every caller that lands during one durable listing from that listing', async () => {

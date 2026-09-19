@@ -322,7 +322,7 @@ describe('native task ownership', () => {
         access: 'read', read, close, [Symbol.asyncDispose]: close,
         append: async () => { throw new Error('read handle cannot append') }, flush: async () => { throw new Error('read handle cannot flush') },
       }) }),
-      query: () => undefined, owns: () => false, onEvent: () => () => {},
+      query: () => undefined, projectionCache: () => undefined, owns: () => false, onEvent: () => () => {},
     })
     f.select.mockImplementation(discovery.select)
     await f.tasks.snapshot(f.owner)

@@ -6,7 +6,7 @@ import { createSessionInput } from './session-input.ts'
 import { createSessionArtifacts, type NativeSessionTitles, type NativeSessionReferences } from './session-artifacts.ts'
 import { createNativeExecution, type NativeExecutionHost, type NativeTerminals } from './native-execution.ts'
 import { createSessionCommands, type NativeCommands, type NativeSkills } from './session-commands.ts'
-import { createSessionDiscovery, type SessionQueryLike } from './session-discovery.ts'
+import { createSessionDiscovery, type SessionProjectionCacheLike, type SessionQueryLike } from './session-discovery.ts'
 import { createNativeInteractions } from './native-interactions.ts'
 import { createSessionLifecycle, type SessionRecord } from './session-lifecycle.ts'
 import { createSessionPresets, type AgentPresetsLike } from './session-presets.ts'
@@ -230,6 +230,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   })
   const discovery = createSessionDiscovery({
     persistence, query: () => ctx.get('sessionQuery') as SessionQueryLike | undefined,
+    projectionCache: () => ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined,
+    log: message => logger.warn(message),
     owns: session => sessions.get(session.header.id)?.agent.session === session,
     onEvent: listener => ctx.on('session/event', listener),
   })

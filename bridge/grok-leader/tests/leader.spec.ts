@@ -380,6 +380,7 @@ interface HarnessOptions {
   sessionProjections?: unknown
   sessionTitle?: unknown
   sessionQuery?: unknown
+  sessionProjectionCache?: unknown
   combineQueuedPrompts?: boolean
   followUpBehavior?: 'queue' | 'steer'
   idleExitMs?: number
@@ -540,6 +541,7 @@ async function makeHarness(
   if (options.jobs !== undefined) Object.assign(new (class extends Service {})(ctx, 'jobs'), options.jobs)
   if (options.sessionTitle !== undefined) ctx.provide('sessionTitle', options.sessionTitle as never)
   if (options.sessionQuery !== undefined) ctx.provide('sessionQuery', options.sessionQuery as never)
+  if (options.sessionProjectionCache !== undefined) ctx.provide('sessionProjectionCache', options.sessionProjectionCache as never)
   ctx.provide('sessionPersistence', persistence as unknown as Context['sessionPersistence'])
   const sessionsStore = (options.sessionsStore ?? mockSessionsStore) as typeof mockSessionsStore
   ctx.provide('sessions', { ...sessionsStore, flush: async (session: Agent['session']) => {
@@ -7253,4 +7255,25 @@ it('serves two windows polling the roster in the same second from one durable li
   } finally {
     release(); first.socket.destroy(); second.socket.destroy(); await made.ctx.fiber.dispose()
   }
+})
+
+it('serves cached roster titles and keeps seeded headers titleless', async () => {
+  const made = await makeHarness({ sessionProjectionCache: {
+    cachedSnapshot: (meta: { id: unknown }) => String(meta.id) === 'roster-titled' ? { values: { title: 'Cached roster title' } } : undefined,
+    cachedPredecessorTitle: () => undefined,
+  } })
+  const client = await makeClient(made.socketPath)
+  try {
+    made.persistence.list = async () => [
+      { header: { ...made.persistence.header, id: SessionId('roster-titled'), createdAt: 1 }, revision: SessionPersistenceRevision('roster') },
+      { header: { ...made.persistence.header, id: SessionId('roster-seeded'), createdAt: 2, isSeeded: true }, revision: SessionPersistenceRevision('roster') },
+    ]
+    register(client); await client.next()
+    const response = await client.request(1, 'x.ai/sessions/list')
+    const rows = (response.result as { result: { sessions: Array<Record<string, unknown>> } }).result.sessions
+    expect(rows.map(row => [row.sessionId, row.title])).toEqual([
+      ['roster-titled', 'Cached roster title'],
+      ['roster-seeded', undefined],
+    ])
+  } finally { client.socket.destroy(); await made.ctx.fiber.dispose() }
 })
