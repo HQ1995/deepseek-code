@@ -146,7 +146,7 @@ reopened the Linux acceptance threshold. The re-run at `243e2616`, the head
 that contains it, executed the approved threshold green (15-case
 built-provider matrix, `check.sh`, script and bridge suites on Node 22.19.0
 and 24.19.0) with a supplementary Linux compile and test of the changed
-crate, so `243e2616` is the last accepted Linux revision
+crate, so `243e2616` became the last accepted Linux revision
 (`docs/linux-acceptance-2026-09-17-main.md`).
 
 ## 2026-09-18: the auth budget and the tmux probes leave the startup window
@@ -230,6 +230,14 @@ still run in a tmux-backed pane, they just no longer pad every query.
   `.git/integration-backups/perf-tmux-auth-2026-09-18-evidence.tar.gz`,
   SHA-256
   `8a937d2e76adf3b1ae045cd54cbb1e29c8a22b7686a9defe7077bf57ce6768c7`.
+
+This section changes product code under `third_party/grok-build`, so it
+reopened the Linux acceptance threshold. The re-run at `6736f162`, the head
+that contains it, executed the approved threshold green (15-case
+built-provider matrix, `check.sh`, script and bridge suites on Node 22.19.0
+and 24.19.0) with a supplementary Linux compile and test of the changed
+crates, so `6736f162` is the last accepted Linux revision
+(`docs/linux-acceptance-2026-09-17-main.md`).
 
 ## 2026-09-17: sustained product-loop soak
 

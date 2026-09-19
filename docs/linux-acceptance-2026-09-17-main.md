@@ -278,3 +278,90 @@ and bench harnesses, and the plugin payload hash is byte-identical to the
 accepted run. As before, this validates a local revision, not a published
 artifact: main is 52 commits ahead of `origin/main` `f6524d40` and nothing
 is pushed, so distribution remains its own gate.
+
+## Re-run on `6736f162` (2026-09-19)
+
+The owner approved another re-execution and the run was carried out at
+`6736f162f14703c61f4807bc6437a8f7877549ba`, the head main carries after the
+startup-cost delta. Pin and patch digest are unchanged
+(`fb2c4b9e698e30edb738bca4cf0618587db7d203` and
+`5c893b2efa320965d19efa64d33fc24c8d72621fe7a259004533bb29d642a748`), and the
+shipped-code delta since accepted `243e2616` is exactly one commit: the
+startup perf commit takes the auth budget and the tmux probes out of the
+launch window — the OTLP provider now seeds `last_token` from a new
+in-memory `cached_snapshot()` instead of the disk-reconciling
+`snapshot()` (the export path and its 401 retry still call `snapshot()`,
+and the accepted `aefb700b` deferral of the OTLP HTTP client is
+untouched), and the tmux wait loop replaces its fixed 15ms poll tick with a
+1ms start that doubles to a 15ms cap. Two test-side expectations in the
+pager-render crate were corrected alongside, and the telemetry crate gained
+the unit test that pins the new seed path. The rest of the range is
+`0cfd45fb`, a documentation commit, so everything the owner asked about
+(`9bd0d4a0`, `c556e079`, `53b7dab4`, `f5052559`) is inside the
+previously accepted runs.
+
+**Accepted for the executed gates on Linux.** The run re-executed the
+approved threshold — the 15-case built-provider matrix, `scripts/check.sh`
+and the script/bridge suites, each on Node 22.19.0 and 24.19.0 — in 135
+seconds of gate time (setup 14s, build 50s, matrix 4s, tests 66s, check 1s),
+plus a supplementary Linux compile and test of the changed crates that the
+JS-level gates never reach. Private root
+`/home/hanqing/dscode-main-6736f162.Q2hF0m`; toolchains, caches and the
+upstream `third_party/grok-build/target` build are reused from the earlier
+approved roots. No sudo, paid model, push or release is involved.
+
+- Setup cloned the product from a local bundle
+  (`d34680a61ed9162187cae1c8372481bf8bb4bebdcbf63f323f86d64894ab3ea8`) and
+  asserted the revision, the `package.json` identities (source commit,
+  source patch digest and version) and the patch digest against
+  `sourcePatchSha256` before any build (`logs/setup-env.txt`).
+- **The built-provider 15-case matrix passed on both Nodes**
+  (`logs/built-*`, `built-*/PASS.json`): ordinary and PTY native cancel after
+  readiness, five immediate disposals of each kind — the lane whose failure
+  at the pre-fix revision blocked the first acceptance — immediate ordinary
+  abort before target output, genuine pre-exec ENOENT/EACCES, and direct exit
+  kept separate from escaped-descendant cleanup. Every case records the owned
+  PID, its `/proc` start time, the `dsh-subprocess-*` / `dsh-terminal-*`
+  scope, `systemctl show` state, per-case milliseconds (50–334ms) and
+  `remainingScopes: []`.
+- Both Nodes passed all 44 release/runtime/gateway script cases, the 935
+  bridge cases in 47 files (931 passed, 4 macOS-conditional skips) and
+  `scripts/check.sh` with the version sources agreeing on
+  `0.0.14-alpha.12`.
+- The changed crates were compiled and tested on Linux in that host's warm
+  release target (`logs/tui-*.log`, cargo/rustc 1.94.0, 1h37m at nice 15,
+  every gate exit 0): pager-render 1106 passed / 0 failed / 2 ignored,
+  including the tmux-probe backoff cases, auth 1, shell
+  `credential_provider` 17, telemetry 228 unit tests — the one above 227 at
+  the accepted run is the new seed-path test — all 11 integration binaries
+  and the doctests. This is supplementary to the threshold: the JS-level
+  gates never compile the vendored tree, so without it the compiled form of
+  the delta would be untested on Linux.
+- Artifacts: `dscode-plugin.tgz` `aad2471a…` — byte-identical to the
+  accepted `dfe46647`/`243e2616` runs, so the shipped plugin payload is
+  unchanged — `dscode-runtime-linux-x86_64.tar.gz` `08a31516…` (bytes
+  differ from `243e2616`'s `6678514b…`, but the tar listing is identical:
+  34,501 entries, `diff` 0 lines, and the embedded `dscode-runtime.json`
+  still reports `0.1.5-rc.2`, pin `fb2c4b9e…` and patch `5c893b2e…`) and
+  `dscode-consumer.json` `3ac92597…` (`logs/artifact-sha256.txt`).
+- The post-run audit (`logs/post-run-audit.json`) found `newScopes: []`,
+  `residualProcesses: []` and all 6 recorded matrix PIDs stopped, each with
+  its `/proc` start time, cgroup and unit preserved for the check. The
+  product worktree is clean at `6736f162` with no extra worktree.
+- Evidence: `linux-main-6736f162-evidence.tar.gz`, SHA-256
+  `5d9d71ca3814bce310aabbed603766940ed0e45c048d852f778d671830e6efa5`; the
+  local copy is
+  `.git/integration-backups/linux-main-6736f162-evidence.tar.gz` and its
+  hash matches the remote archive.
+
+**Coverage limits.** This pass re-ran the approved threshold plus the crate
+check above. The focused source owner/consumer selection, the
+`unshare --user --pid` reaper/namespace sweep, `build:lib` with the 16
+`test:docs` gates, the recorded-session corpus, the managed-update E2E and
+the full installed-product E2E were not re-executed: the delta since the
+accepted revision is one startup-perf commit inside the vendored tree plus a
+documentation commit, and the artifact listing is identical to the accepted
+run. As before, this validates a local revision, not a published artifact:
+main is 54 commits ahead of `origin/main` `f6524d40` and nothing is
+pushed, so distribution remains its own gate. `6736f162` is now the last
+accepted Linux revision.
