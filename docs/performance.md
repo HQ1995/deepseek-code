@@ -6,6 +6,113 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-19: the roster's settled listing answers the next ten seconds of ticks
+
+Leader mode's dashboard polls `x.ai/sessions/list` once per second, and the
+previous section removed only the repeat between the windows that land on the
+same second. Every later tick still paid its own read, for rows that change
+only when a session is created or the store set moves. At 3000 stored sessions
+(`node --experimental-transform-types --expose-gc scripts/bench-session-list.mjs
+3000 --events=120 --projects=1 --roster=5 --concurrent=3 --titles=hit
+--reuse=true`, Node 24.19.0 / Darwin ARM64, one JSONL root, 54.7s and 55.3s of
+seeding) five consecutive roster ticks took 433.6/421.8/475.1/438.4/435.8ms
+and performed five listings — 421.2-474.5ms of store work each, for 600,025
+bytes and 0.6-0.8ms of encoding per answer, and no log opened or read.
+
+`listStore` in `bridge/grok-leader/src/session-discovery.ts` now keeps the
+settled listing (`{ store, snapshots, settledAt }`) and answers the two
+header-shaped calls — `session/list` and `x.ai/sessions/list` — from it for
+`LISTING_REUSE_MS` (10s). Those rows are the immutable header the listing
+carried plus the projection cache's current title, so the only row a settled
+listing cannot answer is a session it never saw, and both ways such a row
+appears are handled: `ctx.on('session/created')` — wired in `index.ts`
+through the host's new `onCreated` — clears the window and bumps the
+announcement count, and a listing that started before an announcement never
+opens one, because it compares the count taken before `store.list` with the
+count at settle and cannot prove which side of its own store read the new
+session's durable artifact fell on. The deadline bounds what no local event
+covers: a store another process writes, and a durable artifact that lands
+after the listing's read.
+
+| Roster phase | Listings | Store list | Wall | Rows | Opens | Reads |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| five ticks, before | 1 each | 421.2-474.5ms | 433.6-475.1ms | 3000 | 0 | 0 |
+| five ticks, after | 0 each | 0ms | 0.2-0.5ms | 3000 | 0 | 0 |
+| three-window burst, before | 1 | 413.5ms | 414.4ms | 3000 | 0 | 0 |
+| three-window burst, after | 0 | 0ms | 0.4ms | 3000 | 0 | 0 |
+
+The burst is the one the previous section already shared: three callers that
+land during one in-flight listing still take one listing between them
+(413.5ms), and the settled window now answers them too (0 listings, 0.4ms).
+The picker keeps listing per call — its rows fold the logs behind the listing's
+revisions — so its warm passes in the same run still paid 399.1-400.4ms of
+`storeListMs`; a remounted service is a different store instance with
+incomparable revisions and never reuses one; and disposal clears the window
+with the rest (`[unsubscribe, unsubscribeCreated, close]`, the second
+unsubscribe's failure retained in `cleanupFailures` like the first).
+
+The row a window cannot carry stays honest. The bench writes a session straight
+through the bare backend — a store another process wrote — and polls without an
+announcement: the settled window answers in 0.5ms from the rows it has (3000,
+not 3001), which is the price of the ten seconds the deadline bounds.
+Announcing it the way `session/created` does ends the window, so the next poll
+pays its own 422.0ms listing that carries the row (3001 rows,
+`carriesLate: true`), and the tick after that is reused again in 0.2ms with
+the row intact.
+
+| Late-session poll | Listings | Wall | Rows | Carries the row |
+| --- | ---: | ---: | ---: | --- |
+| unannounced, before | 1 | 416.4ms | 3001 | yes |
+| unannounced, after | 0 | 0.5ms | 3000 | no |
+| announced, after | 1 | 422.0ms | 3001 | yes |
+| announced then reused, after | 0 | 0.2ms | 3001 | yes |
+
+Both ends are pinned. `tests/session-discovery.spec.ts` gained four cases: a
+settled listing answers the roster until its window expires; an announcement
+ends the window and the next listing reopens it; a listing that started before
+an announcement never opens one; and a remounted service never reuses one. Its
+share case now also drives the settled window and the picker behind it
+(`session/list` and the roster are served, the picker lists).
+`tests/leader.spec.ts` drives the contract over the real socket with two
+registered windows: the second window's next-second tick is served from the
+settled listing (listings stays 1), and the tick past the 10s deadline lists
+again (2), with `Date.now` stubbed for the deadline only. Reverting only
+`bridge/grok-leader/src/session-discovery.ts` and `bridge/grok-leader/src/index.ts`
+fails 6 of the 313 tests across the two files — the wire case (`expected 2 to
+be 1`), the share case (3 listings where it pins 1), three of the four reuse
+cases (window expiry, announcement, and the pre-announcement listing, which
+fails with `announced is not a function` and its 10s hook timeout), and the
+disposal case's error list (the reversed tree registers no second unsubscribe,
+so `creation unsubscribe failed` is missing) — while the remount case passes
+in both trees. Restoring the two files reproduces the reviewed diff byte for
+byte.
+
+### Verification for this section
+
+- Evidence: `/tmp/dscstress-picker/roster3000-reuse-old.json` and
+  `roster3000-reuse-after.json` (the same 3000-session run on this head and
+  with only the two source files reverted), with the `--reuse=true` contract's
+  8 violations in `roster3000-reuse-old.err` and none in the after run
+  (`--strict` exits 0).
+- Reproduction: the command above with `--reuse=true --strict` on this tree
+  and on a tree with only `bridge/grok-leader/src/session-discovery.ts` and
+  `bridge/grok-leader/src/index.ts` reverted, ~55s of seeding per run. The
+  decisive numbers are the ticks' listings (1 each -> 0), the unannounced late
+  poll's rows (3001 -> 3000) and the announced poll that pays its own listing
+  and carries the row.
+- Suites: `npx tsc -b tsconfig.json` passes; `tests/session-discovery.spec.ts`
+  (38 passed), `tests/leader.spec.ts` (275 tests, 313 passed together),
+  `npx vitest run` (47 files, 946 passed), `bash scripts/dev-bridge-tests.sh`
+  (46 passed / 1 skipped files; 942 passed / 4 skipped tests),
+  `node --test scripts/*.test.mjs` (44 cases: 43 passing, 1 skipped),
+  `bash scripts/check.sh` and `git diff --check` pass.
+- This section ships a production change, so it reopens the Linux acceptance
+  threshold: the macOS lanes above say nothing about Linux, and the next swoop
+  run must repeat the 15-case built-provider matrix, `check.sh` and the
+  script/bridge suites on Node 22.19.0 and 24.19.0 at the new head.
+- macOS arm64 on a shared host, one JSONL root per run; the absolute
+  milliseconds are upper bounds and only comparisons inside this section hold.
+
 ## 2026-09-19: a roster row carries its durable title, so a leader dashboard lists stored sessions
 
 Leader mode's dashboard shows what the bridge answers to
