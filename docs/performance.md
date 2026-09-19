@@ -6,6 +6,104 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-19: a roster row carries its durable title, so a leader dashboard lists stored sessions
+
+Leader mode's dashboard shows what the bridge answers to
+`x.ai/sessions/list`, and the pinned pager keeps a stored session only when
+the row has something to show: `append_roster_rows` in
+`crates/codegen/xai-grok-pager/src/views/dashboard/row.rs` skips every entry
+that carries no title, is neither working nor awaiting input, and is not
+pinned (`if !has_title && !active && !pinned.contains(&id) { continue; }`).
+The bridge's row never carried a `title`, so every stored session was dropped,
+the Inactive section that would hold them starts collapsed, and a profile with
+stored sessions showed `No agents yet, type a prompt to start one.` — the
+rows were on the wire all along; only the label was missing.
+
+`bridge/grok-leader/src/session-discovery.ts` now fills that label from the
+persisted projection cache (`ctx.sessionProjectionCache`), the same
+synchronous zero-I/O listing read the runtime gives its own
+`x.ai/sessions/list` in
+`dsh-api-session-controller/lib/types/list.js`: the current lifecycle's cut
+first, then the format-invariant predecessor title, both read under the
+unseeded listing's exact zero inherited count
+(`cachedSnapshot(header, SessionLogOffset(0), ['title']) ??
+cachedPredecessorTitle(header, SessionLogOffset(0))`).
+
+- Nothing new is opened or folded. One tick still lists the store once and
+  opens and reads no log (`opens: 0`, `reads: 0` in both rows below), and the
+  title read is a synchronous cache row, not a log walk.
+- The hint is exact rather than approximate: an unseeded listing knows its
+  inherited cut is zero and can prove the cache identity, while a
+  `header.isSeeded` listing — a header-only record that cannot name its cut —
+  stays titleless until an authoritative read supplies one, which is what the
+  runtime's own listing does in the same place.
+- The field appears only when the cache answers a non-empty title after
+  trimming, so an uncheckpointed store emits exactly the JSON it emitted
+  before (465,025 bytes, unchanged) and pays one `cachedSnapshot` plus one
+  `cachedPredecessorTitle` probe per row.
+- A cache that throws is reported through the host's `log` (wired to the
+  bridge logger) and the row is served without the title the way an unseeded
+  header is: a hint can never fail the listing.
+
+| Titles | Rows | Titled | Title reads | Store list | Tick | JSON bytes | Encode |
+| --- | ---: | ---: | ---: | --- | --- | ---: | --- |
+| miss | 3000 | 0 | 6000 | 396.2-443.4ms | 396.7-444.0ms | 465,025 | 0.5-0.6ms |
+| hit | 3000 | 3000 | 3000 | 396.7-527.8ms | 418.8-528.2ms | 600,025 | 0.7-0.8ms |
+
+`scripts/bench-session-list.mjs` gained `--titles=hit|miss`, which answers
+the roster's cache reads as a warm or a cold store would, and now wires the
+host's `projectionCache` at all (the module is required, so the bench would
+otherwise throw). At 3000 stored sessions (`--roster=5 --concurrent=3`,
+Node 24.19.0 / Darwin ARM64, 53.0s and 55.1s of seeding) the titles cost
+nothing measurable in the tick — 396.7-444.0ms without them, 418.8-528.2ms
+with every row answering — and 135,000 bytes on the wire, exactly the 3,000
+rows at 45 bytes each. The burst still shares one listing across three
+callers (`listings: 1`, `opens: 0`, `reads: 0`) with the titles on every
+row.
+
+End to end, on a fixture profile whose store holds one session with a cached
+`rows.title` (`SOAK Session`) and one session with no cache row, the leader's
+answer to the roster poll carries `"title": "SOAK Session"` on the titled row
+and no `title` field at all on the untitled one, and the same pager pane goes
+from `No agents yet, type a prompt to start one.` to `▸ Inactive 1`, which
+expands to `▾ Inactive 1` with `◇ SOAK Session` under it.
+
+The row's other columns are untouched: `lastChangeUnixMs` still reports
+`header.createdAt` rather than the projection's last-change time, so the
+roster's ordering and relative times are unchanged by this section.
+
+### Verification for this section
+
+- Evidence: `/tmp/dscstress-picker/roster3000-titles-miss.json` and
+  `roster3000-titles-hit.json` (the same 3000-session run with the cache cold
+  and warm), and the probe lane in `/tmp/dscstress-picker/roster-probe/`:
+  `roster-wire-after.json` (the leader's own answer), `pane-dashboard-no-title.txt`
+  against `pane-dashboard-after.txt` and `pane-dashboard-after-expanded.txt`
+  (the same pager pane either side of the change).
+- Reproduction: the command above with `--titles=miss` and `--titles=hit`,
+  then the probe lane's leader over a fixture HOME whose
+  `storages/session_projcache/sessions/*.json` carries `rows.title`. The
+  decisive numbers are the 0 -> 3000 titled rows, the unchanged 465,025 bytes
+  when the cache is cold, and the wire row that gains `"title"`.
+- Suites: `npx tsc -b tsconfig.json` passes; `tests/session-discovery.spec.ts`
+  (34 passed, including the three title cases), `tests/leader.spec.ts`
+  (275 tests, including the wire case over the real socket),
+  `npx vitest run` (47 files, 942 passed),
+  `bash scripts/dev-bridge-tests.sh` (46 files passed / 1 skipped; 938 passed
+  / 4 skipped), `node --test scripts/*.test.mjs` (44 cases: 43 passing, 1
+  skipped), `bash scripts/check.sh` and `git diff --check` pass.
+- The cases pin the change and nothing else: reverting only
+  `bridge/grok-leader/src/session-discovery.ts` fails exactly the four new
+  cases (4 failed | 305 passed across the two files) and restoring the file
+  reproduces the reviewed diff byte for byte.
+- This section ships a production change, so it reopens the Linux acceptance
+  threshold: the macOS lanes above say nothing about Linux, and the next swoop
+  run must repeat the 15-case built-provider matrix, `check.sh` and the
+  script/bridge suites on Node 22.19.0 and 24.19.0 at the new head.
+- macOS arm64 on a shared host, one JSONL root per run, loopback leader; the
+  absolute milliseconds are upper bounds and only comparisons inside this
+  section hold.
+
 ## 2026-09-19: the dashboard roster poll pays the store listing once per burst
 
 Leader mode's dashboard asks the bridge for `x.ai/sessions/list` once per
