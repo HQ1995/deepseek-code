@@ -109,8 +109,10 @@ than an offset per index.
   on the old service.
 - This section ships a production change and the module ships inside the
   plugin tarball, so the macOS lanes here say nothing about Linux: the
-  acceptance threshold reopens, and `bd4e79da` stays the last accepted
-  revision until a new run records otherwise.
+  acceptance threshold reopened, and the re-run at `cd7380f7` repeated the
+  15-case built-provider matrix, the script cases, the bridge suite and
+  `check.sh` on Node 22.19.0 and 24.19.0, recorded in
+  `docs/linux-acceptance-2026-09-17-main.md`.
 - macOS arm64 on a shared host, page cache warm on both sides, one store per
   run; the absolute milliseconds are upper bounds and only the comparisons
   inside this section hold.

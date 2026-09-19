@@ -811,3 +811,78 @@ bridge module, its two specs and a benchmark script. As before, this validates
 a local revision, not a published artifact: main is 71 commits ahead of
 `origin/main` `f6524d40` and nothing is pushed, so distribution remains its
 own gate. `bd4e79da` is now the last accepted Linux revision.
+
+## Re-run at `cd7380f7` (2026-09-19)
+
+Main moved from the accepted `bd4e79da` to `cd7380f7` through four
+commits: `9485604d`, the previous section's performance notes, `c9d91869`,
+this document's record of the `bd4e79da` re-acceptance, `4778c475`
+(`perf(bridge)`: the picker's calls inside one tick now share a single
+settled store listing instead of each walking the store — 4 files, +230/-82,
+of which 49 changed lines are in `session-discovery.ts`, 55 in
+`tests/leader.spec.ts`, 143 in `tests/session-discovery.spec.ts` and 65 in
+`scripts/bench-session-list.mjs`) and `cd7380f7`, its performance notes and
+the picker-scale bench record. The module ships inside the plugin tarball, so
+the threshold reopened.
+
+**Accepted for the executed gates on Linux.** The built-provider matrix passes
+all 15 cases on Node 22.19.0 and 24.19.0, and so do the script cases, the
+bridge suite and `scripts/check.sh` — 133 seconds of gate time (setup 8s,
+build 50s, matrix 4s, tests 68s, check 2s, collect 1s). Private root
+`/home/hanqing/dscode-main-cd7380f7.NGNVQM`; the toolchains, caches, the
+pristine pin clone and the build consumer are reused from the earlier approved
+roots, one worker per gate at nice 15. No sudo, paid model, push or release is
+involved.
+
+- Setup cloned the product from a local bundle
+  (`f241946ab1f5e956d7257ee1ae258fb2ba9f568e2e5cbbc3209068e82503b27b`, head
+  `cd7380f7`) and asserted the revision, the package version and pin
+  identities, and the patch digest `5c893b2e…` against `sourcePatchSha256`
+  before any build (`logs/setup-env.txt`).
+- The build passed and the built CLI reports `0.1.5-rc.2`;
+  `dscode-plugin.tgz` is `1b853ffc…`. Against the accepted run's
+  `390f0901…` plugin it carries the same 604 entries with nothing added and
+  nothing removed, and exactly the two members the delta touches
+  (`package/src/session-discovery.ts` and its compiled
+  `package/lib/types/session-discovery.js`), so the artifact change is
+  accounted for by the revision. `dscode-consumer.json` is `3ac92597…`,
+  byte-identical to the accepted runs, and
+  `dscode-runtime-linux-x86_64.tar.gz` is `c2aac5e8…`: against the accepted
+  `59e880f4…` archive it carries the same 34,501 entries with no additions,
+  no removals and zero content differences, so the two are the same pin build
+  and differ only in entry mtimes.
+- **The built-provider 15-case matrix passed on both Nodes**
+  (`built-*/PASS.json`): ordinary and PTY native cancel after readiness, five
+  immediate disposals of each kind, immediate ordinary abort before target
+  output, genuine pre-exec ENOENT/EACCES, and direct exit kept separate from
+  escaped-descendant cleanup. Per-case times are 55–328ms on Node 22.19.0 and
+  54–334ms on Node 24.19.0, and every check records its owned PID, its scope,
+  its outcome signal and `remainingScopes: []`.
+- Node 22.19.0 and 24.19.0 each passed all 44 release/runtime/gateway script
+  cases (44 passed, 0 failed, 0 skipped) and the 946 bridge cases in 47 files
+  (946 passed, 4 macOS-conditional skips, 46 files passed / 1 skipped), with
+  `session-discovery.spec.ts`'s 42 cases green on both lines — 40 before this
+  revision — and `scripts/check.sh` with the version sources agreeing on
+  `0.0.14-alpha.12`.
+- The post-run audit (`logs/post-run-audit.json`, checked `21:08:19Z`) found
+  `newScopes: []` and `residualProcesses: []`, and all six observed scope
+  PIDs already gone; the product worktree is clean at `cd7380f7` with no
+  extra worktree (`logs/product-final-worktrees.txt`).
+- Evidence: `linux-main-cd7380f7-evidence.tar.gz`, SHA-256
+  `c0294913b6639c51dcd06e671630cdf0d85fb630172643f212e77127977c8cb9`; the
+  local copy is
+  `.git/integration-backups/linux-main-cd7380f7-evidence.tar.gz` and its
+  hash matches the remote archive, and the input bundle is kept beside it as
+  `.git/integration-backups/linux-main-cd7380f7.bundle`.
+
+**Coverage limits.** This pass re-ran the approved threshold only. The
+supplementary TUI-crate gate was not executed because the vendored tree is
+byte-identical to the `6736f162` run that compiled and tested it, and the
+focused source owner/consumer selection, the `unshare --user --pid`
+reaper/namespace sweep, `build:lib` with the 16 `test:docs` gates, the
+recorded-session corpus, the managed-update E2E and the full installed-product
+E2E were not re-executed either: the delta since the accepted revision is one
+bridge module, its two specs and the bench's listing counters. As before, this
+validates a local revision, not a published artifact: main is 75 commits ahead
+of `origin/main` `f6524d40` and nothing is pushed, so distribution remains
+its own gate. `cd7380f7` is now the last accepted Linux revision.
