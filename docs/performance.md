@@ -6,6 +6,91 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-19: the dashboard roster poll pays the store listing once per burst
+
+Leader mode's dashboard asks the bridge for `x.ai/sessions/list` once per
+second for as long as a dashboard view is open (`ROSTER_POLL_INTERVAL` in the
+pinned pager's `app/event_loop.rs`, armed only on `ActiveView::AgentDashboard`;
+non-leader mode instead polls `x.ai/session/list` through
+`Effect::FetchDashboardSessions`). The bridge never emits the pager's
+`x.ai/sessions/changed` broadcast — a search for `notify|notification` under
+`bridge/grok-leader/src` finds only `x.ai/session_notification` and
+`x.ai/models/update` — so this poll is the roster's only refresh and it stays.
+Its answer folds no log: it maps stored snapshot headers, and the whole tick is
+the pinned `store.list()` behind them.
+
+At 3000 stored sessions (`node --experimental-transform-types --expose-gc
+scripts/bench-session-list.mjs 3000 --events=120 --projects=1 --roster=5`, Node
+24.19.0 / Darwin ARM64, one JSONL root, 55.0s of seeding) one tick costs
+394.9-461.0ms and 394.5-460.6ms of that is the store listing; the JSON the
+transport then writes is 465,025 bytes and encodes in 0.5-0.6ms. The tick opens
+and reads no logs, and the event-loop delay it inflicts stays at 5.0-5.4ms max
+/ 5.0-5.1ms p99, because the store's per-session work is directory and header
+I/O rather than a synchronous walk. The picker in the same run pays the same
+listing: 406.7ms of its 411.2ms warm pass is `storeListMs`.
+
+| Burst | Calls | Listings | Store list | Wall | Rows | Opens | Reads | Peak RSS |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| before | 3 | 3 | 1930.1ms | 644.2ms | 3000 | 0 | 0 | 291.2MiB |
+| after | 3 | 1 | 386.6ms | 387.3ms | 3000 | 0 | 0 | 296.3MiB |
+
+One leader serves every window of a profile, so each open dashboard's tick
+lands on the same second: three calls used to take three listings and 1930.1ms
+of store work to answer the same 3000 rows, and the last caller waited 644.2ms
+for a read the other two had already paid for. `listStore` in
+`bridge/grok-leader/src/session-discovery.ts` keeps the in-flight listing and
+hands it to callers that arrive before it settles, the way one inspection
+already serves every pass over one session: the burst becomes 1 listing /
+386.6ms / 387.3ms. The share is bounded by construction.
+
+- The entry is cleared in the settled promise's own handlers, so only callers
+  in flight during that listing use it; the next caller lists again and pays
+  its own read, which the bench confirms one call later.
+- It is keyed by the store instance, so a remounted service — a different
+  persistence with incomparable revisions — never picks up the old listing.
+- The snapshot array is shared read-only. Every caller maps or filters it into
+  its own rows and none touches it: the picker builds `rows` from a fresh
+  `candidates.map`, and both minimal methods map into new objects.
+- A rejection is shared too: every in-flight caller sees the same failure
+  instead of one of them re-listing a store that just failed.
+
+Both ends are pinned. `tests/session-discovery.spec.ts` drives three callers
+into one gated listing (they share it, and the next caller lists again) and a
+remounted service (it lists on its own); `tests/leader.spec.ts` fires the same
+burst from two registered windows over the real socket and reads both answers
+back through the pager's `result` envelope. Reverting only
+`bridge/grok-leader/src/session-discovery.ts` fails the first discovery case
+(two callers of one gated listing deadlock and it times out at 10s) and turns
+the wire case into `expected 1, received 2`, while the remount case still
+passes, so the cases pin the share and only the share.
+
+A single dashboard still pays one listing per second, so this only removes the
+repeat between windows. Spending less per tick needs a listing that outlives
+the call that paid for it, which needs a change signal the bridge does not have
+for stored sessions; that direction is not started.
+
+### Verification for this section
+
+- Evidence: `/tmp/dscstress-picker/roster3000.json` (single-caller roster
+  phases with the picker in the same run), `roster3000-before.json` and
+  `roster3000-after.json` (the three-call burst either side of the change).
+- Reproduction: the command above with `--roster=5 --concurrent=3` on a tree
+  with and without the `listStore` share. The decisive numbers are the
+  listings a burst takes (3 -> 1) and the store work it repeats
+  (1930.1ms -> 386.6ms); the wall times follow from them.
+- Suites: `tests/session-discovery.spec.ts` (31 passed), `tests/leader.spec.ts`
+  (274 tests, including the two-window roster burst over the real socket),
+  `bash scripts/dev-bridge-tests.sh` (47 files, 938 tests: 934 passing, 4
+  skipped), `node --test scripts/*.test.mjs` (44 cases: 43 passing, 1
+  skipped), `bash scripts/check.sh` and `git diff --check` pass.
+- This section ships a production change, so it reopens the Linux acceptance
+  threshold: the macOS lanes above say nothing about Linux, and the next swoop
+  run must repeat the 15-case built-provider matrix, `check.sh` and the
+  script/bridge suites on Node 22.19.0 and 24.19.0 at the new head.
+- macOS arm64 on a shared host, loopback synthetic gateway, one JSONL root per
+  run; the absolute milliseconds are upper bounds and only comparisons inside
+  this section hold.
+
 ## 2026-09-19: the 1000-turn soak, three-window cancellation, picker scale and descriptor attribution
 
 The sustained product-loop soak was extended to 1000 consecutive turns
