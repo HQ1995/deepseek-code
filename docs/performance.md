@@ -6,6 +6,90 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-19: a cordis lookup wraps the service, so the caches key on the instance
+
+The two sections above landed their reuse against the bench, which hands
+`createSessionDiscovery` a stable store object. The host reads the service
+out of cordis, and cordis answers every `ctx.get('sessionPersistence')` with
+a fresh traceable proxy over the same instance (`@deepseek-ai/cordis` 4.0.2,
+`src/utils.ts` `createTraceable`: `if (prop === symbols.original)` then
+`return target`). Every identity this module cached — the settled listing's
+`store`, the in-flight listing's, and `indexFor`'s `indexedStore` — was one
+of those wrappers, so in the product both caches missed on every call. At
+3000 stored sessions in the real product home, one real TUI client and the
+real leader:
+
+| Real product, 3000 stored sessions | Before | After |
+| --- | ---: | ---: |
+| roster listings in the sampled window | 66 / 74.7s | 7 / 66.7s |
+| store list per roster tick | 447-659ms | 432-451ms |
+| picker warm call, on the wire | 2801ms | 496ms |
+| picker warm call, durable log opens | 3001 | 0 |
+| picker warm call, store time in opens | 6275ms | 0ms |
+| leader CPU, mean of 50 steady samples | 67.0% | 8.7% |
+| leader RSS, mean of 50 steady samples | 405894KiB | 362606KiB |
+
+`serviceIdentity` in `bridge/grok-leader/src/session-discovery.ts` walks that
+symbol chain to the instance and the new `lookupPersistence` returns it, so
+the settled window, the shared listing and the picker's resident index now
+compare one live service with one live service — a remount still brings a
+different instance and still invalidates, and `persistence()` keeps the
+`session persistence is not configured` error for a host that answers
+`undefined`. The symbol is read structurally, the way this file reads every
+other host capability: `tests/architecture.spec.ts` forbids the cordis
+import in this module, and importing it broke that gate before the
+structural read replaced it.
+
+Nothing else moved. The picker still lists per call, because its rows are
+folded from the logs behind the listing's revisions, and a cold pass still
+pays its 3001 opens (6526ms of store time) before the resident index answers
+the later calls. The rows are unchanged: the cold roster wire documents of
+the two bundles are byte-identical (3001 rows, 3000 titled, 816043 bytes),
+both panes render `Inactive 3000` under the section marker, and the picker
+answers 50 titled rows either way.
+
+The bench cannot see this bug. It builds the host around the object it keeps
+in scope, so `settled.store === store` holds there whatever cordis does with
+the lookup the product makes. `tests/session-discovery.spec.ts` now has a
+fixture that hands out stacked wrappers (`wrapLookups()`) and the pair that
+pins both directions: three in-flight lookups share the one listing they
+paid for and the settled window answers the roster call after them (listings
+stay 1, and the second pick opens nothing), while a remount behind the
+wrappers still refuses both (the roster lists again, the picker folds
+again). The first case fails on the tree before this change (`Tests 1 failed
+| 39 skipped`).
+
+### Verification for this section
+
+- Evidence: `/tmp/dscstress-scale/ab/scale-run-a` and `scale-run-b` (the
+  roster: `ticks.jsonl`, `samples.jsonl`, `roster-wire-cold.json`, the pane
+  captures) and `/tmp/dscstress-scale/ab/picker-run-a` and `picker-run-b`
+  (the picker: `ticks.jsonl`, `windows.txt`, `picker-*.stdout`), with the run
+  logs beside them in `/tmp/dscstress-scale/ab/*.log`. The store probe is the
+  external `/tmp/dscstress-picker/roster-probe`; the local proof that one
+  lookup is a fresh wrapper over one instance is
+  `/tmp/dscstress-scale/proxy-identity-probe.mjs`, run against the
+  checkout's own cordis and JSONL store.
+- Reproduction: `bash /tmp/dscstress-scale/ab/picker-scale-a.sh` and
+  `scale-dashboard-a.sh`, then the `-b` pair after copying the built
+  `lib/types/session-discovery.js` into the scratch home's deployed bundle:
+  one seeded store, one TUI, one leader, and `diff -rq` over the two payloads
+  shows that file as the only difference. A keeps the payload build's bytes,
+  archived at `/tmp/dscstress-scale/deployed/session-discovery.js.prefix`,
+  so the two sides differ only by this change.
+- Suites: `./node_modules/.bin/tsc -b tsconfig.json` passes from
+  `bridge/grok-leader`; `npx vitest run` (47 files, 948 passed);
+  `bash scripts/dev-bridge-tests.sh` (46 files passed / 1 skipped; 944
+  passed / 4 skipped); `node --test scripts/*.test.mjs` (44 cases: 43
+  passing, 1 skipped); `bash scripts/check.sh` and `git diff --check` pass.
+- This section ships a production change, so it reopens the Linux acceptance
+  threshold: the macOS lanes above say nothing about Linux, and the next
+  swoop run must repeat the 15-case built-provider matrix, `check.sh` and the
+  script/bridge suites on Node 22.19.0 and 24.19.0 at the new head.
+- macOS arm64 on a shared host, warm page cache on both sides, the before run
+  taken first; the absolute milliseconds are upper bounds and only the
+  comparisons inside this section hold.
+
 ## 2026-09-19: the roster's settled listing answers the next ten seconds of ticks
 
 Leader mode's dashboard polls `x.ai/sessions/list` once per second, and the

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { symbols } from '@deepseek-ai/cordis'
 import { SessionId, SessionLogOffset, type Session, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   SessionFormatUnsupportedError, SessionPersistenceCorruptionError, SessionPersistenceNotFoundError,
@@ -14,6 +15,12 @@ function deferred<T = void>() {
   return { promise, resolve }
 }
 const tick = async () => { for (let i = 0; i < 16; i++) await Promise.resolve() }
+/** The wrapper cordis puts in front of a service on every ctx lookup: a fresh
+ * proxy per call whose only contract here is that symbols.original names the
+ * instance it stands for. */
+const traceable = <T extends object>(value: T): T => new Proxy(value, {
+  get: (target, property, receiver) => property === symbols.original ? target : Reflect.get(target, property, receiver),
+})
 const event = (type: string, data: unknown, time: number): SessionEvent => ({ type, data, time, seq: time }) as SessionEvent
 const prompt = (text: string, time = 1) => event('user/message', { source: { kind: 'user' }, content: [{ type: 'text', text }] }, time)
 const title = (text: string, time = 2) => event('session/title', { title: text }, time)
@@ -38,10 +45,17 @@ function fixture(cleanupError?: string) {
     header, revision: SessionPersistenceRevision(revisions.get(header.id) ?? 'r1'),
   })))
   let store: Pick<SessionPersistence, 'open' | 'list'> | undefined = { open, list }
+  // The host reads the service out of cordis, which answers every lookup with
+  // a fresh proxy over the same instance. The plain object above never
+  // reproduced that churn — and the identity caches only ever see wrappers in
+  // production — so wrapLookups() hands out stacked wrappers like the runtime
+  // can, and the instance underneath still has to be what those caches key on.
+  let lookupWraps = false
   const query = vi.fn<SessionQueryLike['searchSessions']>(async () => ({ items: [] }))
   let engine: SessionQueryLike | undefined = { searchSessions: query }
   const unsubscribe = vi.fn(), unsubscribeCreated = vi.fn(), owns = vi.fn((session: Session) => owned.has(session))
-  const persistence = vi.fn(() => store), queryEngine = vi.fn(() => engine)
+  const persistence = vi.fn(() => store === undefined ? undefined : lookupWraps ? traceable(traceable(store)) : store)
+  const queryEngine = vi.fn(() => engine)
   let cache: SessionProjectionCacheLike | undefined
   const projectionCache = vi.fn(() => cache)
   const warnings: string[] = []
@@ -70,6 +84,7 @@ function fixture(cleanupError?: string) {
     read, open, close, list, query, owns, unsubscribe, unsubscribeCreated, headers, logs, revisions, persistence, queryEngine,
     projectionCache, warnings, provideCache: (next: SessionProjectionCacheLike | undefined) => { cache = next },
     store: () => store!, replace: (next: typeof store) => { store = next }, queryAvailable: (available: boolean) => { engine = available ? { searchSessions: query } : undefined },
+    wrapLookups: () => { lookupWraps = true },
     get active() { return active }, get peak() { return peak } }
 }
 
@@ -244,6 +259,46 @@ describe('owned session discovery', () => {
     f.replace({ open: f.open, list: f.list })
     expect(await f.roster()).toHaveLength(1)
     expect(f.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('keys the shared listing, the settled window and the picker index on the service a cordis lookup wraps', async () => {
+    const f = fixture()
+    f.wrapLookups()
+    f.add('a', '/work', [prompt('kept'), title('Reviewed title', 20)])
+    // Three lookups hand discovery three different wrappers over one service;
+    // the callers in flight still share the one listing those wrappers paid for.
+    const roster = f.discovery.list('x.ai/sessions/list')
+    const legacy = f.discovery.list('session/list')
+    const picker = f.picker({ cwd: '/work' })
+    await expect(roster).resolves.toMatchObject({ result: { sessions: [expect.objectContaining({ sessionId: 'a' })] } })
+    await expect(legacy).resolves.toMatchObject({ sessions: [expect.objectContaining({ sessionId: 'a' })] })
+    expect(await picker).toMatchObject([{ sessionId: 'a', firstPrompt: 'kept', title: 'Reviewed title' }])
+    expect(f.list).toHaveBeenCalledOnce()
+    // The settled window covers the wrappers that arrive after it, the way it
+    // covers repeat polls on one stable object.
+    expect((await f.roster()).map(row => row.sessionId)).toEqual(['a'])
+    expect(f.list).toHaveBeenCalledOnce()
+    // The picker lists per call by design, but its resident projections belong
+    // to the service, so a new wrapper does not evict the log read behind them.
+    expect(await f.picker({ cwd: '/work' })).toMatchObject([{ sessionId: 'a', firstPrompt: 'kept' }])
+    expect(f.list).toHaveBeenCalledTimes(2)
+    expect(f.open).toHaveBeenCalledOnce()
+  })
+
+  it('still refuses a settled listing and the picker index when a remount brings a new service behind the wrappers', async () => {
+    const f = fixture()
+    f.wrapLookups()
+    f.add('a', '/work', [prompt('kept')])
+    await f.roster()
+    await f.picker({ cwd: '/work' })
+    expect(f.open).toHaveBeenCalledOnce()
+    // Same method references, new instance: identities handed out before the
+    // remount describe revisions this store cannot vouch for.
+    f.replace({ open: f.open, list: f.list })
+    expect(await f.roster()).toHaveLength(1)
+    expect(f.list).toHaveBeenCalledTimes(3)
+    await f.picker({ cwd: '/work' })
+    expect(f.open).toHaveBeenCalledTimes(2)
   })
 
   it('never serves an in-flight listing to a remounted service', async () => {

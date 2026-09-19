@@ -29,6 +29,11 @@ export interface SessionProjectionCacheLike {
   cachedPredecessorTitle(meta: SessionHeader, inheritedEventCount: SessionLogOffset): SessionProjectionCutLike | undefined
 }
 type DiscoveryPersistence = Pick<SessionPersistence, 'list' | 'open'>
+/** Cordis registers the wrapper-to-instance symbol globally
+ * (`Symbol.for('cordis.original')`), and this module reads it structurally the
+ * way it reads every other host capability: services reach it through cordis
+ * lookups, but the file keeps no framework dependency of its own. */
+const TRACEABLE_ORIGINAL = Symbol.for('cordis.original')
 type ListMethod = 'session/list' | 'x.ai/session/list' | 'x.ai/sessions/list'
 interface InspectionOptions {
   /** Complete prefix required by a live lifecycle snapshot, never a moving tail. */
@@ -70,10 +75,28 @@ export function createSessionDiscovery(host: DiscoveryHost) {
     void result.then(() => pending.delete(result), () => pending.delete(result))
     return result
   }
-  const persistence = (): DiscoveryPersistence => {
+  /** Cordis answers a service lookup with a fresh traceable proxy over the
+   * same instance, so a lookup is not a new service. Every identity this
+   * module caches — the settled listing, the listing in flight, the picker's
+   * resident index — belongs to the instance underneath those wrappers: one
+   * live service keeps one identity across any number of lookups, and a
+   * remount still brings a different one. */
+  const serviceIdentity = (store: DiscoveryPersistence): DiscoveryPersistence => {
+    let owner = store as DiscoveryPersistence & Record<symbol, unknown>
+    for (;;) {
+      const next = owner[TRACEABLE_ORIGINAL] as (DiscoveryPersistence & Record<symbol, unknown>) | undefined
+      if (next === undefined) return owner
+      owner = next
+    }
+  }
+  const lookupPersistence = (): DiscoveryPersistence | undefined => {
     assertOpen()
     const store = host.persistence()
     assertOpen()
+    return store === undefined ? undefined : serviceIdentity(store)
+  }
+  const persistence = (): DiscoveryPersistence => {
+    const store = lookupPersistence()
     if (store === undefined) throw internalError('session persistence is not configured')
     return store
   }
@@ -282,8 +305,7 @@ export function createSessionDiscovery(host: DiscoveryHost) {
     const service = host.query()
     assertOpen()
     if (service === undefined) throw internalError('session full-text search is not configured')
-    const store = host.persistence()
-    assertOpen()
+    const store = lookupPersistence()
     const projectionIndex = indexFor(store)
     const cursor = typeof p.cursor === 'string' && p.cursor.length > 0 ? p.cursor : undefined
     const page = await service.searchSessions({ query, limit, ...cursor === undefined ? {} : { cursor } }, { signal: shutdown.signal })
