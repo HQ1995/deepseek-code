@@ -6,6 +6,116 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-19: the picker's later ticks reuse one settled listing
+
+The TUI session selector calls `x.ai/session/list`, and every one of those
+calls was a full store listing: at 10000 stored sessions a warm picker pass
+pays 1.50-1.53s, of which 1.49-1.52s is the store's own listing, for rows
+that change only when a session is created or a durable artifact moves. The
+roster (`x.ai/sessions/list`) has answered its ticks from one settled
+listing for `LISTING_REUSE_MS` (10s) since `57fe2e0f`; the picker was
+left out deliberately, because its rows fold the logs behind the listing's
+revisions rather than the immutable header alone.
+
+That reason does not hold for the rows such a window would answer. The
+picker folds each row from the header the listing carried and the revision
+it carried, and the resident `SessionListIndex` answers an unchanged
+revision from its own projection and re-reads a changed one, so a row is at
+most as stale as the listing behind it — the staleness the deadline already
+bounds, and the same trade the roster already makes. `listStore(store,
+reuse)` becomes `listStore(store)`: every list shares the in-flight
+listing and reuses the settled one, and the three callers differ only in the
+rows they fold from the snapshots they are handed.
+
+Two 10000-session runs of the same harness over the same store shape, the
+accepted main (`c9d91869`) against this change (macOS arm64, Node 24.19.0):
+
+| 10000 stored sessions | cold | warm 1 | warm 2 | after write | past window |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| wall clock ms, accepted main | 6930.3 | 1532.1 | 1500.0 | 1449.6 | 1549.6 |
+| durable listings, accepted main | 1 | 1 | 1 | 1 | 1 |
+| wall clock ms, this change | 7026.5 | 13.0 | 11.6 | 13.7 | 1520.8 |
+| durable listings, this change | 1 | 0 | 0 | 0 | 1 |
+
+`warm 1` and `warm 2` are the same picker call again; `after write` is
+that call right after another process wrote one stored session; `past
+window` repeats it after the reuse deadline. The cold pass is unmoved: one
+listing, 10000 opens, 6930.3ms against 7026.5ms, inside the run-to-run
+spread of a shared host, and 1.40-1.46s of each is the store's listing.
+Everything after it moves. The two warm passes pay 1532.1ms and 1500.0ms on
+the accepted main, 1.49-1.52s of it store listing, and 13.0ms and 11.6ms
+here with zero listings, zero opens and zero reads, because each row is
+folded from the header and revision that listing already carried and the
+projection the resident index already holds. The third column prices the
+trade: the accepted main folds an external write on the next call (1449.6ms,
+one listing, one open, the new title on the row); this change answers rows up
+to one deadline old (13.7ms, zero listings, zero opens) and carries that
+title only in the last column, where the tick past the deadline pays one
+listing (1504.3ms of its 1520.8ms) and re-opens exactly the one session whose
+revision moved.
+
+The rows a window cannot answer stay unanswered: the harness's late phases
+still withhold a session another process created without an announcement and
+still serve it on the first tick after one (0 listings, then 1 carrying the
+row, then 0 from the window the announcement opened). The roster's contract
+is untouched — five ticks at 0.4-1.1ms on the accepted main and 1.7-2.5ms
+here, zero listings both sides, with a three-caller burst at 1.2ms and 4.4ms
+and zero listings — as are the announcement, remount and unreadable-artifact
+behaviours the spec files pin. Peak RSS is 336.7 MiB against 304.8 MiB, which
+follows the two 1.5s fold passes the run no longer performs rather than
+anything the change retains, and both runs report 40964096 root bytes, 10000
+candidates and 120 events per session.
+
+The benchmark now pins this contract instead of only recording it: picker
+phases carry their `listings` and `retitles`, `--reuse=true` requires
+every tick inside the window to take none of them, and the phase past the
+deadline to take exactly one listing and carry exactly `--touch` retitles.
+Its `--touch` also works past one session now: each touched session carries
+the template's events, so the append cursor is the template's length rather
+than an offset per index.
+
+### Verification for this section
+
+- Evidence: `/tmp/dscstress-scale/picker-window-20260919/` (`before.json`,
+  `after.json`, `before.err`, `after.err`, `ab.sh`,
+  `session-discovery.reuse.ts`). `after.json`'s `violations` is empty and
+  `before.json`'s six are the reverted source failing the new contract at
+  10000: three ticks took a listing inside the window, the post-write tick
+  opened a log and carried a title only a listing can carry, and the
+  post-deadline tick had nothing left to re-read.
+- Reproduction: `bash ab.sh` runs each side in turn — it restores the
+  accepted `src/session-discovery.ts`, runs `before`, restores this change
+  and runs `after` — so both sides are the same command on the same host:
+  `node --experimental-transform-types --expose-gc
+  scripts/bench-session-list.mjs 10000 --events=120 --projects=1
+  --roster=5 --concurrent=3 --titles=hit --reuse=true`, each seeding its own
+  store first (~181s).
+- Negative proof below the benchmark: with only `src/session-discovery.ts`
+  reverted, `npx vitest run tests/session-discovery.spec.ts
+  tests/leader.spec.ts` fails 8 of 317 cases (2 failed files, 309 passed),
+  among them `serves the picker from one settled listing and pays its own
+  only past the window`, `ends the picker window when the process announces
+  a session` and `refreshes picker metadata after an external durable
+  revision changes`.
+- Tests here: `npx tsc -b tsconfig.json` passes; `npx vitest run` 47
+  files, 950 passed; `bash scripts/dev-bridge-tests.sh` 46 files passed / 1
+  skipped (946 passed / 4 skipped); `node --test scripts/*.test.mjs` 44
+  cases (43 passing, 1 skipped); `bash scripts/check.sh` passes.
+- The window must not weaken the controls around it, and each is pinned in
+  `tests/session-discovery.spec.ts`: an announcement still ends the window,
+  a listing that began before one never opens it, an unreadable artifact is
+  never cached and still re-arms its retry inside the window, and a remounted
+  service still refuses both the settled listing and the picker index keyed
+  on the old service.
+- This section ships a production change and the module ships inside the
+  plugin tarball, so the macOS lanes here say nothing about Linux: the
+  acceptance threshold reopens, and `bd4e79da` stays the last accepted
+  revision until a new run records otherwise.
+- macOS arm64 on a shared host, page cache warm on both sides, one store per
+  run; the absolute milliseconds are upper bounds and only the comparisons
+  inside this section hold.
+- Measured on macOS only; this production change reopens the Linux acceptance threshold.
+
 ## 2026-09-19: the cold picker folds on the store's two-entry decode handoff
 
 The first picker call walks every stored session, and each walk is a pair:
