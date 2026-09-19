@@ -6,6 +6,117 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-19: the 1000-turn soak, three-window cancellation, picker scale and descriptor attribution
+
+The sustained product-loop soak was extended to 1000 consecutive turns
+(`SOAK_TURNS=1000 bash scripts/soak-product-loop.sh`, the default tool step
+every fifth turn). It ran 26.5 minutes of wall clock (1588s between the first
+and the last turn, median inter-turn gap 1778ms) and every row passed.
+
+| Turns | Windows | Rows | Errors | p50 | p90 | max | first 5 | last 5 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| 1000 | 1 | 1000 | 0 | 83ms | 169ms | 371ms | 307, 55, 60, 57, 88 | 83, 65, 63, 65, 120 |
+
+Latency does not drift over a thousand turns: the last five sit between 63 and
+120ms around the run's 83ms p50, and the first turn is again the only outlier.
+Split by step, the 800 plain turns ran 77ms p50 / 165ms p90 / 340ms max and
+the 200 tool turns 118ms / 306ms / 371ms; provider wait (keypress to the
+gateway receiving the request) was 40ms p50 / 87ms p90 / 269ms max.
+`leaderExit` read `exited-after-1900ms` with `alive-with-1-of-1-client(s)`, and
+cross-talk was 0 rows.
+
+Leader RSS is a plateau here too, and this run reaches it inside the first 250
+turns: the 50-turn means run 248.0, 305.5, 322.1, 337.2, 350.3 and 353.0MiB
+over turns 1-300, then hold between 343.6 and 355.9MiB for the remaining 700
+(233.0MiB at turn 1, 356.4MiB at turn 1000, 358.4MiB max). TUI RSS went 71.3
+to 83.1MiB. Descriptors did not grow: leader 41 -> 40 with a maximum of 41,
+TUI 34 -> 35.
+
+The cancellation lane runs with three windows as well as one:
+`SOAK_TURNS=200 SOAK_WINDOWS=3 SOAK_CANCEL_EVERY=10 bash
+scripts/soak-product-loop.sh` rendered 580 rows across three concurrent
+clients with 0 errors and 0 cross-talk rows, and all 20 probes passed.
+
+| Turns | Windows | Cancel every | Probes | Statuses | Step sighted | Hold p50/max | Cancel p50/max | Cross-talk | Leader exit |
+| ---: | ---: | ---: | ---: | --- | ---: | --- | --- | ---: | --- |
+| 200 | 3 | 10 | 20 | 20 ok | 20 | 86ms / 128ms | 61ms / 88ms | 0 | exited-after-1900ms |
+
+`holdMs` is keypress-to-marker and `cancelMs` is Ctrl+C-to-`Turn cancelled by
+user`. Turn latency was 80ms p50 / 128ms p90 / 562ms max, with the worst rows
+the tool turns of windows 2 and 3, and the leader stayed with its clients and
+exited on its own (`exited-after-1900ms`, `alive-with-3-of-3-client(s)`).
+Leader RSS followed the same shape as the 1000-turn run (240.2 -> 353.8MiB,
+358.4MiB max), while descriptors grew 47 -> 64.
+
+That descriptor growth is the run's own marker files. A hook on the leader
+that records every `fs.watch` (`hook-open.js`, log `hook-open.log`) shows 13
+watches at boot: the home directory itself, each regular file directly inside
+it (`settings.yaml`, `settings.yaml.lock`, `runtime-paths`,
+`soak-gateway.mjs`, `soak-model.mjs`, `tmux-soak.conf`) and `profiles/dscode`
+with its five files. Every one of them arrives through chokidar's
+`_handleFile`/`_handleDir` -> `_watchWithNodeFs` -> `createFsWatchInstance`,
+which on Darwin is one libuv FSEvents `O_EVTONLY` descriptor per path. When the
+probe's marker appears, the log shows readdirp's `lstat`/`stat` on
+`.soak-run-w1-t6` followed by one more `WATCH` on that path, which is the
+per-file descriptor the summaries count. The root is registered by the profile
+boot for the home patch layer `$DSH_HOME/cordis.patch.yml` through
+`registerConfig` in `@deepseek-ai/cordis-plugin-hmr/lib/index.js`, whose
+`findWatchRoot` resolves to `$DSH_HOME` at depth 0, so the growth is bounded by
+the number of files sitting directly in the home rather than by turn count, and
+`watcher.close()` releases them (a standalone probe of the same watch shape
+held one descriptor per file and none after close, `chokidar-probe.mjs`). The
+control lanes track that shape: 41 -> 42 for a single probe file, 41 -> 45 for
+four, 41 -> 48 when eight tool markers are written, and 41 -> 60 for nineteen
+(the 80-turn `cancel-fd` lane, whose three `lsof` snapshots show 4, 11 and 19
+read-only rows on exactly those marker files). The 1000-turn lane, which
+creates no file in the home at all, stays at 41 -> 40; the only file added
+there is the harness's own summary generator, written after cleanup.
+
+Session-list scale was re-measured on the bench behind the 2026-09-17 picker
+numbers, now with the two changes that landed after them: the retention cap
+`9bd0d4a0` and the pinned-id point query `c556e079`.
+
+| Stored sessions | Cold list | Warm list | Snapshot (all stored) | Point query stored / absent | Peak RSS | Index retained |
+| ---: | ---: | ---: | ---: | --- | ---: | ---: |
+| 1000 | 779.7-828.9ms, 1000 opens | 137-147ms, 0 opens | 173-176ms | 0.2ms / 0.1ms | 249.3-256.5MiB | 1.5MiB |
+| 3000 | 2654.9-2856.7ms, 3000 opens | 590.7-1089.9ms, 0 opens | 478.7-495.9ms | 0.2-0.3ms / 0.1ms | 270.1-287.3MiB | 2.3MiB |
+
+Each run is two cold lists, two to three warm lists and one list after an
+external change, on Node 24.19.0 darwin-arm64 with 120 events per session, one
+project and `--limit 30`; `violations` was empty in all four runs, which is
+the bench's own contract: the cold list opens exactly one log per candidate, a
+warm list opens none, and only the touched session re-opens after a change.
+The warm path's zero opens is the retention cap holding at 3000 stored
+sessions, and a pinned id answers in 0.2-0.3ms for a stored session and 0.1ms
+for an absent one. Cost per stored session is 0.83 and 0.88ms on the cold
+list, so the first list is linear in stored sessions, and the warm list cost
+137-147ms at 1000 and 590-1090ms at 3000. A control run with `--lists=8` (seven
+warm passes instead of two or three) left the cold list where it was (974.8ms
+at 1000 stored sessions, 2805.8ms at 3000 against 2654.9ms) and only warmed the
+3000-session replay (404.8-436.3ms), so the first list stays the one a picker
+actually pays for.
+
+### Verification for this section
+
+- Evidence: `/tmp/dscode-stress/endurance` (1000 turns), `cancel3` (200 turns
+  x 3 windows), `cancel-fd`, `attrib2`-`attrib7`, `toolfd` and `variants` hold
+  `turns-*.jsonl`, `samples-*.jsonl`, `cancels-*.jsonl`, `crosstalk-*.jsonl`
+  and the summary JSON; `hook-open.js` with `hook-open.log` is the descriptor
+  hook and its log, `chokidar-probe.mjs` the standalone watch probe, and
+  `scaling/` the four picker runs with their `--lists` controls.
+- Reproduction: `SOAK_TURNS=1000 bash scripts/soak-product-loop.sh`;
+  `SOAK_TURNS=200 SOAK_WINDOWS=3 SOAK_CANCEL_EVERY=10 bash
+  scripts/soak-product-loop.sh`; `node --experimental-transform-types
+  --expose-gc scripts/bench-session-list.mjs 3000 --events=120 --projects=1
+  --lists=3 --touch=1` (the bench prints an `ExperimentalWarning` line ahead
+  of its JSON).
+- `scripts/check.sh` and `git diff --check` pass. This section records
+  measurements only; no production code changed with it, so the Linux
+  acceptance threshold is not reopened.
+- macOS arm64 on a shared host, loopback synthetic gateway, whole-process RSS;
+  the absolute milliseconds are upper bounds and only comparisons inside this
+  section hold.
+
 ## 2026-09-18: the launch gap between `connect finished` and `app_init`
 
 The TUI's own startup phases leave a fixed window between the connect result
