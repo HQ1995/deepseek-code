@@ -429,3 +429,73 @@ documentation. As before, this validates a local revision, not a published
 artifact: main is 57 commits ahead of `origin/main` `f6524d40` and nothing is
 pushed, so distribution remains its own gate. `b7e69a7c` is now the last
 accepted Linux revision.
+
+## Re-run at `1c5383c1` (2026-09-19)
+
+Main moved from the accepted `b7e69a7c` to `1c5383c1` through three commits:
+`1551f482` (`perf(bridge)`: one durable listing shared across callers in the
+same dashboard-poll burst), its record in
+[the performance notes](performance.md) (`1c5383c1`, which carries the
+threshold reopening), and `094f2bf5` (the acceptance record above). `1551f482`
+is a shipped change, the only one since the accepted revision, so the
+threshold reopened and this pass re-executes it. The pin and the patch digest
+are byte-identical to the accepted run.
+
+**Accepted for the executed gates on Linux.** The built-provider matrix passes
+all 15 cases on Node 22.19.0 and 24.19.0, and so do the script cases, the
+bridge suite and `scripts/check.sh` — 133 seconds of gate time (setup 7s,
+build 51s, matrix 4s, tests 69s, check 2s) plus a second of collection.
+Private root `/home/hanqing/dscode-main-1c5383c1.fph461`; the toolchains,
+caches, the pristine pin clone and the build consumer are reused from the
+earlier approved roots, one worker per gate at nice 15. No sudo, paid model,
+push or release is involved.
+
+- Setup cloned the product from a local bundle
+  (`90b7c40a2dc796d984de8ecff90bddefaeb9fe05044768ffba68ffd28b781c8f`) and
+  asserted the revision, the package version and pin identities, and the
+  patch digest `5c893b2e…` against `sourcePatchSha256` before any build
+  (`logs/setup-env.txt`).
+- The build passed and the built CLI reports `0.1.5-rc.2`; the embedded
+  `dscode-runtime.json` still reports the pin `fb2c4b9e…` and the patch
+  digest, and `dscode-consumer.json` is `3ac92597…`, byte-identical to the
+  accepted run. `dscode-plugin.tgz` is `93bdaf4f…`: its 604 entry names match
+  the accepted run's tarball, and the only files that differ are
+  `src/session-discovery.ts` and its built `lib/types/session-discovery.js` —
+  the single module `1551f482` touched. `dscode-runtime-linux-x86_64.tar.gz`
+  is `221f7478…` and keeps the accepted run's 34,501-entry listing
+  `diff`-clean.
+- **The built-provider 15-case matrix passed on both Nodes**
+  (`built-*/PASS.json`): ordinary and PTY native cancel after readiness, five
+  immediate disposals of each kind, immediate ordinary abort before target
+  output, genuine pre-exec ENOENT/EACCES, and direct exit kept separate from
+  escaped-descendant cleanup. Per-case times are 44–332ms on Node 22.19.0 and
+  62–348ms on Node 24.19.0, and every check records its owned PID, `/proc`
+  start time, scope and `remainingScopes: []`.
+- Node 22.19.0 and 24.19.0 each passed all 44 release/runtime/gateway script
+  cases (44 passed, 0 failed, 0 skipped) and the 938 bridge cases in 47 files
+  (934 passed, 4 macOS-conditional skips, 46 files passed / 1 skipped), the
+  three wire cases `1551f482` added included, and `scripts/check.sh` with the
+  version sources agreeing on `0.0.14-alpha.12`.
+- The post-run audit (`logs/post-run-audit.json`, checked `09:14:14Z`) found
+  `newScopes: []` and `residualProcesses: []`, and every observed scope PID
+  already gone; the product worktree is clean at `1c5383c1` with no extra
+  worktree (`logs/product-final-status.txt`). An earlier collect pass on the
+  same revision was discarded because the audit had flagged the operator's own
+  polling loop, whose command line carried the private root — the audit
+  working as intended; the re-run with no such process present passed clean.
+- Evidence: `linux-main-1c5383c1-evidence.tar.gz`, SHA-256
+  `7acafb00371ca30c433eed72b591d4f1656278468592d15a6191674723e307b8`; the
+  local copy is `.git/integration-backups/linux-main-1c5383c1-evidence.tar.gz`
+  and its hash matches the remote archive.
+
+**Coverage limits.** This pass re-ran the approved threshold only. The
+supplementary TUI-crate gate was not executed because the vendored tree is
+byte-identical to the `6736f162` run that compiled and tested it, and the
+focused source owner/consumer selection, the `unshare --user --pid`
+reaper/namespace sweep, `build:lib` with the 16 `test:docs` gates, the
+recorded-session corpus, the managed-update E2E and the full installed-product
+E2E were not re-executed either: the delta since the accepted revision is one
+bridge module, its tests, documentation and a bench. As before, this validates
+a local revision, not a published artifact: main is 60 commits ahead of
+`origin/main` `f6524d40` and nothing is pushed, so distribution remains its own
+gate. `1c5383c1` is now the last accepted Linux revision.
