@@ -316,7 +316,7 @@ describe('owned session discovery', () => {
     await expect(Promise.all([first, second])).resolves.toHaveLength(2)
   })
 
-  it('caps rows after activity sorting while concurrent requests share cold loads and four handle lanes', async () => {
+  it('caps rows after activity sorting while concurrent requests share cold loads and two handle lanes', async () => {
     const f = fixture(), gate = deferred()
     for (let i = 0; i < 105; i++) f.add(String(i), '/work', [prompt('prompt ' + i, i)])
     const read = f.read.getMockImplementation()!
@@ -325,7 +325,7 @@ describe('owned session discovery', () => {
     await tick(); const held = f.active
     gate.resolve()
     const [a, b] = await Promise.all([first, second])
-    expect(held).toBe(4); expect(f.peak).toBe(4); expect(f.active).toBe(0)
+    expect(held).toBe(2); expect(f.peak).toBe(2); expect(f.active).toBe(0)
     expect(f.open).toHaveBeenCalledTimes(105)
     expect(a).toEqual(b); expect(a).toHaveLength(50)
     expect(a[0]).toMatchObject({ sessionId: '104', firstPrompt: 'prompt 104' })

@@ -15,6 +15,23 @@ export interface SessionProjection {
 const DEFAULT_FIRST_PROMPT_CACHE_LIMIT = 100
 
 /**
+ * Concurrent lanes one cold fold runs its durable reads on.
+ *
+ * More lanes are not faster here. The JSONL store hands the log it parsed
+ * during `open()` to the `read()` that follows it through a two-entry memo
+ * (`COLD_LOG_MEMO_MAX_ENTRIES`), so a fold whose lanes outnumber those entries
+ * evicts the handoff before its own read arrives and every log is read, parsed
+ * and validated twice. Two lanes keep each handoff resident and still overlap
+ * the directory walks and file reads that frame the parse.
+ *
+ * Measured over one store on this machine (docs/performance.md): the coldest
+ * pass at 10000 sessions of 120 events takes 6893ms and 13.9s CPU on two lanes
+ * against 7343ms and 15.7s CPU on four, after 2000 sessions had already shown
+ * the read phase alone going 0.6s -> 1.5s and 8 lanes 6.0s.
+ */
+const INSPECTION_LANES = 2
+
+/**
  * Fold the first non-empty user-authored text block from an event log.
  * Only `user/message` events whose `source.kind === 'user'` count (plugin and
  * tool injections are not the human's first prompt). Returns '' when absent.
@@ -65,7 +82,7 @@ export class SessionListIndex {
   private readonly sessionActivityCache = new Map<string, number>()
   private readonly inspections = new Map<string, { revision?: string; result: Promise<SessionProjection> }>()
   private readonly revisions = new Map<string, string>()
-  private readonly inspectionTails = Array.from({ length: 4 }, () => Promise.resolve())
+  private readonly inspectionTails = Array.from({ length: INSPECTION_LANES }, () => Promise.resolve())
   private nextInspection = 0
   private readonly firstPromptSeen = new Set<string>()
   /** Monotone cap; raising it never invalidates a resident entry. */
@@ -113,7 +130,7 @@ export class SessionListIndex {
     if (needed > this.firstPromptCacheLimit) this.firstPromptCacheLimit = needed
   }
 
-  /** Share cold reads across requests and cap open logs at four. The returned
+  /** Share cold reads across requests and cap open logs at INSPECTION_LANES. The returned
    * snapshot belongs to the request, so LRU eviction cannot change its rows. */
   inspect(sessionId: string, createdAt: number, load: () => Promise<readonly SessionEvent[] | undefined>, revision?: string): Promise<SessionProjection> {
     const pending = this.inspections.get(sessionId)

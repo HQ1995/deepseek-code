@@ -158,7 +158,7 @@ const seedMs = Number(process.hrtime.bigint() - seedStarted) / 1e6
 // Count every durable read the picker path performs, including through the
 // handle it opens; the discovery module itself is untouched.
 // The peak starts at zero here, after seeding, so it covers the picker phases.
-const counters = { list: 0, listMs: 0, open: 0, read: 0, readMs: 0, events: 0, titleReads: 0, peakRss: 0 }
+const counters = { list: 0, listMs: 0, open: 0, openMs: 0, read: 0, readMs: 0, events: 0, titleReads: 0, peakRss: 0 }
 // Every picker pass runs in the leader's own JS thread, next to live turns, so
 // the pass is measured with the delays the loop actually suffered rather than
 // with its wall clock alone. The histogram resets per phase.
@@ -179,7 +179,9 @@ const observed = new Proxy(persistence, {
     }
     if (property === 'open') return async (...args) => {
       counters.open += 1
+      const openStarted = process.hrtime.bigint()
       const handle = await target.open(...args)
+      counters.openMs += Number(process.hrtime.bigint() - openStarted) / 1e6
       return new Proxy(handle, {
         get(source, key) {
           if (key === 'read') return async (...readArgs) => {
@@ -252,11 +254,15 @@ const phases = []
 const measure = async (cwd) => {
   const before = { ...counters }
   loopDelay.reset()
+  const cpuBefore = process.cpuUsage()
   const started = process.hrtime.bigint()
   const result = await discovery.list('x.ai/session/list', { cwd, limit: 30 })
   const ms = Number(process.hrtime.bigint() - started) / 1e6
+  const cpu = process.cpuUsage(cpuBefore)
   return {
     ms: +ms.toFixed(1), rows: result.sessions.length,
+    cpuMs: +((cpu.user + cpu.system) / 1e3).toFixed(1),
+    storeOpenMs: +(counters.openMs - before.openMs).toFixed(1),
     storeListMs: +(counters.listMs - before.listMs).toFixed(1),
     readMs: +(counters.readMs - before.readMs).toFixed(1), ...loopDelayNow(),
     opens: counters.open - before.open, reads: counters.read - before.read, events: counters.events - before.events,

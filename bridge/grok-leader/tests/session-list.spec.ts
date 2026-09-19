@@ -27,7 +27,7 @@ it('retains request snapshots past eviction, shares cold loads, and bounds open 
   expect(a.map(row => row.firstPrompt)).toEqual(Array.from({ length: 105 }, (_, i) => String(i)))
   expect(b).toEqual(a)
   expect(loads).toBe(105)
-  expect(peak).toBe(4)
+  expect(peak).toBe(2)
   index.recordEvent('0', 0, userMessage(2, 'later prompt'))
   expect(index.projection('0', 0).firstPrompt).toBe('')
   expect((await read('0')).firstPrompt).toBe('0')
