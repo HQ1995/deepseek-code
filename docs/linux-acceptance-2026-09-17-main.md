@@ -653,3 +653,88 @@ the test-clock fix. As before, this validates a local revision, not a
 published artifact: main is 67 commits ahead of `origin/main` `f6524d40`
 and nothing is pushed, so distribution remains its own gate. `6152be7f` is
 now the last accepted Linux revision.
+
+## Re-run at `2b6f2f56` (2026-09-19)
+
+Main moved from the accepted `6152be7f` to `2b6f2f56` through two commits:
+`5283907e`, this document's record of the previous re-acceptance, and
+`2b6f2f56` (`fix(bridge)`: the caches in `session-discovery.ts` are now keyed
+on the service a cordis lookup wraps, +28 in that module). The module ships
+inside the plugin tarball, so the threshold reopened.
+
+The first pass at this threshold (private root
+`/home/hanqing/dscode-main-2b6f2f56.73AmFf`) took every gate green — setup,
+build, the 15-case matrix, both Node lines' script and bridge suites and
+`check.sh` all exited 0 — and then aborted in collection: the post-run audit
+flags any process whose argv or cwd mentions the root, the operator's own
+status poll (`zsh -c 'sleep 45; cat …/logs/run-all-status.txt'`, cwd
+`/home/hanqing`) was still alive, so the `residualProcesses` assertion
+failed and collection stopped before the evidence archive, the gate summary
+and the driver's own exit file were written. Nothing else was affected: no
+gate re-ran differently, and no product or gate script changed. The pass was
+re-run end to end at the root recorded below, polling with glob patterns
+that never carry the literal path; the aborted pass's status file and node
+trace are kept beside this record as
+`.git/integration-backups/2b6f2f56-attempt1-collect-abort/`.
+
+**Accepted for the executed gates on Linux.** The built-provider matrix passes
+all 15 cases on Node 22.19.0 and 24.19.0, and so do the script cases, the
+bridge suite and `scripts/check.sh` — 133 seconds of gate time (setup 7s,
+build 51s, matrix 4s, tests 68s, check 2s, collect 1s). Private root
+`/home/hanqing/dscode-main-2b6f2f56-r2.222333`; the toolchains, caches, the
+pristine pin clone and the build consumer are reused from the earlier
+approved roots, one worker per gate at nice 15. No sudo, paid model, push or
+release is involved.
+
+- Setup cloned the product from a local bundle
+  (`330fc3d0f30c24a0b7fdd02131822e9fd0e6e1f57c4e3e63d3e01e987c651d5d`, head
+  `2b6f2f56`) and asserted the revision, the package version and pin
+  identities, and the patch digest `5c893b2e…` against `sourcePatchSha256`
+  before any build (`logs/setup-env.txt`).
+- The build passed and the built CLI reports `0.1.5-rc.2`;
+  `dscode-plugin.tgz` is `edfd41ae…`. Against the accepted run's `fa88d3fa…`
+  plugin it carries the same 604 entries with nothing added and nothing
+  removed, and exactly the two members the delta touches
+  (`package/src/session-discovery.ts` and its compiled
+  `package/lib/types/session-discovery.js`), so the artifact change is
+  accounted for by the revision. `dscode-consumer.json` is `3ac92597…`,
+  byte-identical to the accepted runs, and
+  `dscode-runtime-linux-x86_64.tar.gz` is `0a5ceb9b…`: against the accepted
+  `8bb10e29…` archive it carries the same 34,501 entries, no additions, no
+  removals and zero content differences, so the two are the same pin build
+  and differ only in entry mtimes.
+- **The built-provider 15-case matrix passed on both Nodes**
+  (`built-*/PASS.json`): ordinary and PTY native cancel after readiness, five
+  immediate disposals of each kind, immediate ordinary abort before target
+  output, genuine pre-exec ENOENT/EACCES, and direct exit kept separate from
+  escaped-descendant cleanup. Per-case times are 66–334ms on Node 22.19.0 and
+  61–330ms on Node 24.19.0, and every check records its owned PID, its scope
+  and `remainingScopes: []`.
+- Node 22.19.0 and 24.19.0 each passed all 44 release/runtime/gateway script
+  cases (44 passed, 0 failed, 0 skipped) and the 944 bridge cases in 47 files
+  (944 passed, 4 macOS-conditional skips, 46 files passed / 1 skipped),
+  `session-discovery.spec.ts`'s 40 cases green on both lines — 38 before this
+  revision — and `scripts/check.sh` with the version sources agreeing on
+  `0.0.14-alpha.12`.
+- The post-run audit (`logs/post-run-audit.json`, checked `14:12:46Z`) found
+  `newScopes: []` and `residualProcesses: []`, and all six observed scope PIDs
+  already gone; the product worktree is clean at `2b6f2f56` with no extra
+  worktree (`logs/product-final-status.txt`).
+- Evidence: `linux-main-2b6f2f56-evidence.tar.gz`, SHA-256
+  `edf08f109a64109c0961926739eedebe181d02b91c3907d542fc6f0bdc7fdd10`; the
+  local copy is
+  `.git/integration-backups/linux-main-2b6f2f56-evidence.tar.gz` and its
+  hash matches the remote archive, and the input bundle is kept beside it as
+  `.git/integration-backups/linux-main-2b6f2f56.bundle`.
+
+**Coverage limits.** This pass re-ran the approved threshold only. The
+supplementary TUI-crate gate was not executed because the vendored tree is
+byte-identical to the `6736f162` run that compiled and tested it, and the
+focused source owner/consumer selection, the `unshare --user --pid`
+reaper/namespace sweep, `build:lib` with the 16 `test:docs` gates, the
+recorded-session corpus, the managed-update E2E and the full installed-product
+E2E were not re-executed either: the delta since the accepted revision is one
+bridge module and its tests. As before, this validates a local revision, not
+a published artifact: main is 69 commits ahead of `origin/main` `f6524d40`
+and nothing is pushed, so distribution remains its own gate. `2b6f2f56` is
+now the last accepted Linux revision.
