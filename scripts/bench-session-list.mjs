@@ -12,6 +12,15 @@
 // beside live turns, so the pass reports the event-loop delay it inflicted
 // too: a pass can be quick in wall clock and still stall the session.
 //
+// A settled listing also answers the picker's later ticks for the module's
+// reuse deadline: a tick inside that window folds the same snapshots against
+// the revisions they carried, so it neither lists the store again nor opens a
+// log the resident index already holds, and a durable write this process did
+// not announce stays exactly as stale as that listing. The picker phases
+// record both sides of the deadline: the tick after an external write still
+// answers the window's rows, and the tick past the deadline pays its own
+// listing and re-opens the sessions it now sees changed.
+//
 // --roster=N re-measures the dashboard's other list: leader-mode FleetView
 // polls x.ai/sessions/list once per second per open dashboard, and that path
 // maps every stored snapshot without folding a log. Each phase reports the
@@ -37,7 +46,7 @@
 // Usage:
 //   node --experimental-transform-types [--expose-gc] scripts/bench-session-list.mjs \
 //     <sessions> [bridgeRoot] [--events=120] [--projects=1] [--lists=3] [--touch=1] [--sweep=true]
-//     [--roster=N] [--concurrent=K] [--titles=hit] [--reuse=true]
+//     [--roster=N] [--concurrent=K] [--titles=hit] [--reuse=true] [--window=false]
 //
 // The bridge root supplies the pinned SDK dependencies, exactly like the
 // shipped plugin; the benchmark itself stays in scripts/.
@@ -62,6 +71,9 @@ const eventsPerSession = Number(flags.get('events') ?? 120)
 const projects = Number(flags.get('projects') ?? 1)
 const listCount = Number(flags.get('lists') ?? 3)
 const touchCount = Number(flags.get('touch') ?? 1)
+// session-discovery answers a settled listing for its own LISTING_REUSE_MS
+// (10s); the window phase has to cross that deadline to see the store again.
+const LISTING_WINDOW_WAIT_MS = 10_200
 assert.ok(Number.isSafeInteger(sessionCount) && sessionCount > 0)
 assert.ok(Number.isSafeInteger(eventsPerSession) && eventsPerSession > 0)
 assert.ok(Number.isSafeInteger(projects) && projects > 0)
@@ -265,7 +277,9 @@ const measure = async (cwd) => {
     storeOpenMs: +(counters.openMs - before.openMs).toFixed(1),
     storeListMs: +(counters.listMs - before.listMs).toFixed(1),
     readMs: +(counters.readMs - before.readMs).toFixed(1), ...loopDelayNow(),
+    listings: counters.list - before.list,
     opens: counters.open - before.open, reads: counters.read - before.read, events: counters.events - before.events,
+    retitles: result.sessions.filter(row => typeof row.title === 'string' && row.title.startsWith('retitled ')).length,
   }
 }
 const listOnce = async (label, cwd = listCwd) => {
@@ -300,18 +314,31 @@ const first = await listOnce('cold')
 for (let index = 2; index <= listCount; index += 1) await listOnce(`warm ${index - 1}`)
 const heapWarm = await heapNow()
 
-// A later client advances one stored session: exactly that row must re-read.
+// A later client advances the newest stored sessions: exactly those rows must
+// re-read, and they are the rows the picker's thirty-row page shows, so the
+// staleness a reused listing leaves is visible in the answer itself.
 for (let index = 0; index < touchCount; index += 1) {
-  const entry = sessionIds[index]
+  const entry = sessionIds[sessionCount - touchCount + index]
   const handle = await persistence.open(entry.id, 'write')
+  // Every session carries the template's events, so each append cursor is the
+  // template's length; only the row's time moves.
   await handle.append([{
-    type: 'session/title', seq: eventsPerSession + index, time: entry.createdAt + 10_000 + index,
+    type: 'session/title', seq: eventsPerSession, time: entry.createdAt + 10_000 + index,
     data: { title: `retitled ${index}`, messageSeqs: [], source: { kind: 'user' } },
   }])
   await handle.flush()
   await handle.close()
 }
 await listOnce('after external change')
+
+// That tick still answered the window the cold pass settled, so the store it
+// cannot see is exactly as stale as the listing bounds. Cross the deadline and
+// the next tick has to pay its own listing and re-read what changed.
+const windowPhases = []
+if (flags.get('window') !== 'false') {
+  await new Promise(resolve => setTimeout(resolve, LISTING_WINDOW_WAIT_MS))
+  windowPhases.push({ label: 'past the window', ...await measure(listCwd) })
+}
 
 // The picker also opens other working directories. Everything a previous pass
 // folded must stay resident, or switching projects pays the cold cost again.
@@ -409,11 +436,18 @@ for (const phase of rosterPhases) {
   if (phase.opens !== 0 || phase.reads !== 0) violations.push(`roster poll opened ${phase.opens} logs and read ${phase.reads} pages`)
 }
 if (phases[0].opens !== candidates) violations.push(`cold list opened ${phases[0].opens} logs for ${candidates} candidates`)
-for (const phase of phases.slice(1, -1)) {
-  if (phase.opens !== 0) violations.push(`${phase.label} re-opened ${phase.opens} unchanged logs`)
+// Every tick after the cold pass runs inside the window it settled: the rows it
+// answers come from that listing and the projections resident behind the
+// revisions the listing carried, so none of them may open a log — including
+// the tick after the external write, which is the staleness the window phase
+// bounds by crossing the deadline.
+for (const phase of phases.slice(1)) {
+  if (phase.opens !== 0) violations.push(`${phase.label} opened ${phase.opens} logs inside the settled window`)
 }
-if (phases.at(-1).opens !== touchCount) {
-  violations.push(`after external change opened ${phases.at(-1).opens} logs for ${touchCount} changed sessions`)
+for (const phase of windowPhases) {
+  if (phase.opens !== touchCount) {
+    violations.push(`past the window opened ${phase.opens} logs for ${touchCount} changed sessions`)
+  }
 }
 for (const phase of sweepPhases) {
   const stored = sessionIds.filter(entry => entry.cwd === phase.cwd).length
@@ -427,6 +461,20 @@ for (const phase of sweepPhases) {
 // out of the window's answer, the announcement closes the window, and the
 // window it opens serves the row that was announced.
 if (flags.get('reuse') === 'true') {
+  // The picker's ticks ride the same window the roster's do: the first tick
+  // pays the listing and everything inside the deadline after it pays none.
+  phases.slice(1).forEach((phase, index) => {
+    if (phase.listings !== 0) violations.push(`picker tick ${index + 2} took ${phase.listings} listings inside the reuse window`)
+  })
+  if (phases.at(-1).retitles !== 0) {
+    violations.push(`after external change carried ${phases.at(-1).retitles} rows only a listing after it can carry`)
+  }
+  for (const phase of windowPhases) {
+    if (phase.listings !== 1) violations.push(`past the window took ${phase.listings} listings instead of one`)
+    if (phase.retitles !== touchCount) {
+      violations.push(`past the window carried ${phase.retitles} retitled rows for ${touchCount} changed sessions`)
+    }
+  }
   rosterPhases.slice(1).forEach((phase, index) => {
     if (phase.listings !== 0) violations.push(`roster tick ${index + 2} took ${phase.listings} listings inside the reuse window`)
   })
@@ -453,6 +501,7 @@ console.log(JSON.stringify({
   peakRssMiB: +(counters.peakRss / 1024 / 1024).toFixed(1),
   indexRetainedKiB: global.gc === undefined ? undefined : +((heapWarm - heapBefore) / 1024).toFixed(1),
   phases, ...sweepPhases.length === 0 ? {} : { sweepPhases },
+  ...windowPhases.length === 0 ? {} : { windowPhases },
   ...rosterPhases.length === 0 ? {} : { rosterPhases }, violations,
   ...latePhases.length === 0 ? {} : { latePhases },
   ...concurrentPhases.length === 0 ? {} : { concurrentPhases },

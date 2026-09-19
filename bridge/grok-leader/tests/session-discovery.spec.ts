@@ -185,13 +185,14 @@ describe('owned session discovery', () => {
     await expect(legacy).resolves.toMatchObject({ sessions: [expect.objectContaining({ sessionId: 'a' })] })
     expect(f.list).toHaveBeenCalledTimes(1)
     // The share belongs to the callers that were in flight; the settled
-    // listing then keeps answering both header-shaped calls for its window,
-    // and the picker behind them still lists on every call.
+    // listing then keeps answering every list for its window, the picker
+    // included — its row folds the header and revision that listing carried,
+    // so it costs no second listing.
     expect((await f.roster()).map(row => row.sessionId)).toEqual(['a'])
     await expect(f.discovery.list('session/list')).resolves.toMatchObject({ sessions: [expect.objectContaining({ sessionId: 'a' })] })
     expect(f.list).toHaveBeenCalledTimes(1)
     expect(await f.picker()).toHaveLength(1)
-    expect(f.list).toHaveBeenCalledTimes(2)
+    expect(f.list).toHaveBeenCalledTimes(1)
   })
 
   it('keeps one settled listing answering the roster until its window expires', async () => {
@@ -261,6 +262,46 @@ describe('owned session discovery', () => {
     expect(f.list).toHaveBeenCalledTimes(2)
   })
 
+  it('serves the picker from one settled listing and pays its own only past the window', async () => {
+    const f = fixture()
+    f.add('a', '/work', [prompt('kept', 9)], 9)
+    const BASE = Date.now(), clock = vi.spyOn(Date, 'now').mockReturnValue(BASE)
+    try {
+      expect((await f.picker())[0]).toMatchObject({ sessionId: 'a', firstPrompt: 'kept' })
+      expect(f.list).toHaveBeenCalledOnce(); expect(f.open).toHaveBeenCalledOnce()
+      // The row a settled listing serves the picker is folded from the header
+      // and the revision that listing carried, which the resident index still
+      // answers, so a repeat pass pays no listing and no log read.
+      expect((await f.picker())[0]).toMatchObject({ sessionId: 'a', firstPrompt: 'kept' })
+      expect(f.list).toHaveBeenCalledOnce(); expect(f.open).toHaveBeenCalledOnce()
+      // A session another process wrote is a row this process never announced,
+      // so nothing ends the window early: the set it settled stands until the
+      // deadline, and the listing after that carries the row.
+      f.add('b', '/work', [prompt('kept b', 5)], 5)
+      expect((await f.picker()).map(row => row.sessionId)).toEqual(['a'])
+      expect(f.list).toHaveBeenCalledOnce()
+      clock.mockReturnValue(BASE + 10_001)
+      expect((await f.picker()).map(row => row.sessionId)).toEqual(['a', 'b'])
+      expect(f.list).toHaveBeenCalledTimes(2); expect(f.open).toHaveBeenCalledTimes(2)
+    } finally { clock.mockRestore() }
+  })
+
+  it('ends the picker window when the process announces a session', async () => {
+    const f = fixture()
+    f.add('a', '/work', [prompt('kept', 9)], 9)
+    expect(await f.picker()).toHaveLength(1)
+    expect(await f.picker()).toHaveLength(1)
+    expect(f.list).toHaveBeenCalledOnce()
+    // An announced session is a row the listing never carried, so the next
+    // picker call lists again rather than answer without it.
+    f.add('b', '/work', [prompt('kept b', 5)], 5)
+    f.announce({ header: f.headers.get('b')! } as Session)
+    expect((await f.picker()).map(row => row.sessionId)).toEqual(['a', 'b'])
+    expect(f.list).toHaveBeenCalledTimes(2)
+    expect(await f.picker()).toHaveLength(2)
+    expect(f.list).toHaveBeenCalledTimes(2)
+  })
+
   it('keys the shared listing, the settled window and the picker index on the service a cordis lookup wraps', async () => {
     const f = fixture()
     f.wrapLookups()
@@ -278,10 +319,11 @@ describe('owned session discovery', () => {
     // covers repeat polls on one stable object.
     expect((await f.roster()).map(row => row.sessionId)).toEqual(['a'])
     expect(f.list).toHaveBeenCalledOnce()
-    // The picker lists per call by design, but its resident projections belong
-    // to the service, so a new wrapper does not evict the log read behind them.
+    // The picker is answered by the same settled listing, and its resident
+    // projections belong to the service, so neither a fresh wrapper nor the
+    // window's reuse evicts the log read behind the row.
     expect(await f.picker({ cwd: '/work' })).toMatchObject([{ sessionId: 'a', firstPrompt: 'kept' }])
-    expect(f.list).toHaveBeenCalledTimes(2)
+    expect(f.list).toHaveBeenCalledOnce()
     expect(f.open).toHaveBeenCalledOnce()
   })
 
@@ -290,14 +332,22 @@ describe('owned session discovery', () => {
     f.wrapLookups()
     f.add('a', '/work', [prompt('kept')])
     await f.roster()
+    // The picker inside the roster's window folds the same service's header
+    // and revision: no second listing, and the resident index still owns the
+    // one log read behind the row.
     await f.picker({ cwd: '/work' })
+    expect(f.list).toHaveBeenCalledOnce()
     expect(f.open).toHaveBeenCalledOnce()
     // Same method references, new instance: identities handed out before the
     // remount describe revisions this store cannot vouch for.
     f.replace({ open: f.open, list: f.list })
     expect(await f.roster()).toHaveLength(1)
-    expect(f.list).toHaveBeenCalledTimes(3)
+    expect(f.list).toHaveBeenCalledTimes(2)
+    // The window the remount's own listing settled serves the picker its row,
+    // but the index behind it was keyed on the old instance: the row is read
+    // again from the new store rather than answered from the old projection.
     await f.picker({ cwd: '/work' })
+    expect(f.list).toHaveBeenCalledTimes(2)
     expect(f.open).toHaveBeenCalledTimes(2)
   })
 
@@ -335,32 +385,48 @@ describe('owned session discovery', () => {
   it('keeps a picker pass wider than the default cap resident instead of evicting itself', async () => {
     const f = fixture()
     for (let i = 0; i < 150; i++) f.add(String(i), '/work', [prompt('prompt ' + i, i)])
-    expect(await f.picker()).toHaveLength(50)
-    expect(f.open).toHaveBeenCalledTimes(150)
-    // A pass over the whole store must not evict its own earliest rows: both a
-    // repeated pass and a cwd-scoped one reuse every unchanged session.
-    await f.picker()
-    await f.picker({ cwd: '/work', query: 'prompt 9' })
-    expect(f.open).toHaveBeenCalledTimes(150)
-    expect(f.active).toBe(0)
-    // Only a changed revision re-reads, and only that session.
-    f.revisions.set('0', 'r2')
-    expect((await f.picker({ query: 'prompt 0', limit: 1 }))[0]).toMatchObject({ sessionId: '0', firstPrompt: 'prompt 0' })
-    expect(f.open).toHaveBeenCalledTimes(151)
+    const BASE = Date.now(), clock = vi.spyOn(Date, 'now').mockReturnValue(BASE)
+    try {
+      expect(await f.picker()).toHaveLength(50)
+      expect(f.open).toHaveBeenCalledTimes(150)
+      // A pass over the whole store must not evict its own earliest rows: both
+      // a repeated pass and a cwd-scoped one reuse every unchanged session.
+      await f.picker()
+      await f.picker({ cwd: '/work', query: 'prompt 9' })
+      expect(f.open).toHaveBeenCalledTimes(150)
+      expect(f.active).toBe(0)
+      // A durable revision no listing has reported yet is invisible to the
+      // window that settled before it: the row it folded still answers.
+      f.revisions.set('0', 'r2')
+      expect((await f.picker({ query: 'prompt 0', limit: 1 }))[0]).toMatchObject({ sessionId: '0', firstPrompt: 'prompt 0' })
+      expect(f.open).toHaveBeenCalledTimes(150)
+      // The listing past the deadline reports it, and only that session reads.
+      clock.mockReturnValue(BASE + 10_001)
+      expect((await f.picker({ query: 'prompt 0', limit: 1 }))[0]).toMatchObject({ sessionId: '0', firstPrompt: 'prompt 0' })
+      expect(f.open).toHaveBeenCalledTimes(151)
+    } finally { clock.mockRestore() }
   })
 
   it('caches empty logs with unchanged revisions and refreshes changed revisions', async () => {
     const f = fixture(); f.add('a', '/work', [])
-    expect((await f.picker())[0]!.firstPrompt).toBe('')
-    f.logs.set('a', [prompt('late prompt'), title('old')])
-    expect((await f.picker())[0]!.firstPrompt).toBe('')
-    expect(f.open).toHaveBeenCalledOnce()
-    f.revisions.set('a', 'r1.1')
-    expect((await f.picker())[0]!.firstPrompt).toBe('late prompt')
-    await f.picker(); expect(f.open).toHaveBeenCalledTimes(2)
-    f.logs.set('a', [prompt('late prompt'), title('new', 3)]); f.revisions.set('a', 'r2')
-    expect((await f.picker())[0]!.title).toBe('new')
-    expect(f.open).toHaveBeenCalledTimes(3)
+    const BASE = Date.now(), clock = vi.spyOn(Date, 'now').mockReturnValue(BASE)
+    try {
+      expect((await f.picker())[0]!.firstPrompt).toBe('')
+      // The log moved but its revision did not, so the window's row stands.
+      f.logs.set('a', [prompt('late prompt'), title('old')])
+      expect((await f.picker())[0]!.firstPrompt).toBe('')
+      expect(f.open).toHaveBeenCalledOnce()
+      // A revision is only reported by a listing, so it is folded past the
+      // deadline, and the listing that carried it settles the next window.
+      f.revisions.set('a', 'r1.1')
+      clock.mockReturnValue(BASE + 10_001)
+      expect((await f.picker())[0]!.firstPrompt).toBe('late prompt')
+      await f.picker(); expect(f.open).toHaveBeenCalledTimes(2)
+      f.logs.set('a', [prompt('late prompt'), title('new', 3)]); f.revisions.set('a', 'r2')
+      clock.mockReturnValue(BASE + 20_002)
+      expect((await f.picker())[0]!.title).toBe('new')
+      expect(f.open).toHaveBeenCalledTimes(3)
+    } finally { clock.mockRestore() }
   })
 
   it.each([
@@ -369,12 +435,19 @@ describe('owned session discovery', () => {
     new SessionFormatUnsupportedError('future log'),
   ])('retries an unreadable artifact without swallowing operational failure: %s', async error => {
     const f = fixture(); f.add('a')
-    f.open.mockRejectedValueOnce(error)
-    expect((await f.picker())[0]!.firstPrompt).toBe('')
-    expect((await f.picker())[0]!.firstPrompt).toBe('a')
-    f.revisions.set('a', 'r2')
-    const operational = new Error('storage offline'); f.open.mockRejectedValueOnce(operational)
-    await expect(f.picker()).rejects.toBe(operational)
+    const BASE = Date.now(), clock = vi.spyOn(Date, 'now').mockReturnValue(BASE)
+    try {
+      f.open.mockRejectedValueOnce(error)
+      expect((await f.picker())[0]!.firstPrompt).toBe('')
+      // An unreadable artifact was never folded, so the retry opens it again
+      // inside the window rather than answer from the settled listing.
+      expect((await f.picker())[0]!.firstPrompt).toBe('a')
+      // A revision the settled listing never carried needs its own listing.
+      f.revisions.set('a', 'r2')
+      clock.mockReturnValue(BASE + 10_001)
+      const operational = new Error('storage offline'); f.open.mockRejectedValueOnce(operational)
+      await expect(f.picker()).rejects.toBe(operational)
+    } finally { clock.mockRestore() }
   })
 
   it('never treats handle cleanup failure as a retryable missing artifact', async () => {

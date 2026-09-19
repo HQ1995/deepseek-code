@@ -115,33 +115,33 @@ export function createSessionDiscovery(host: DiscoveryHost) {
    * answer. The snapshot array is shared read-only — callers map or filter it
    * into their own rows and never mutate it.
    *
-   * A settled listing keeps answering the header-shaped calls for
-   * LISTING_REUSE_MS as well. Their rows cannot go stale while it stands: the
-   * roster and the bare session list read the immutable header the listing
-   * carried and the projection cache's current title, so the only row such a
-   * listing cannot answer is a session it never saw. An announcement ends the
-   * window, and a listing that started before one never opens it — it cannot
-   * prove which side of its own store read the session's durable artifact
-   * fell on, so the next poll pays a listing rather than trust a set that may
-   * miss the new row. The deadline covers what no local event does: a store
-   * another process writes, and a durable artifact that lands after the
-   * listing's read. A remounted service is a different store with incomparable
-   * revisions, so its listing is never reused here; the picker's rows are
-   * folded from the logs behind those revisions, so its calls keep listing per
-   * call. */
+   * A settled listing keeps answering every list for LISTING_REUSE_MS as
+   * well. None of those rows is invented: the roster and the bare session
+   * list read the immutable header the listing carried plus the projection
+   * cache's current title, and the picker folds that same header against the
+   * revision the listing carried, which its resident index answers when the
+   * revision is unchanged and re-reads when it changed. So the only row such a
+   * listing cannot answer is a session it never saw, and a row whose durable
+   * artifact moved behind it is at most as stale as the listing itself, which
+   * is what the deadline bounds. An announcement ends the window, and a
+   * listing that started before one never opens it — it cannot prove which
+   * side of its own store read the session's durable artifact fell on, so the
+   * next poll pays a listing rather than trust a set that may miss the new
+   * row. The deadline covers what no local event does: a store another process
+   * writes, and a durable artifact that lands after the listing's read. A
+   * remounted service is a different store with incomparable revisions, so its
+   * listing is never reused here. */
   const LISTING_REUSE_MS = 10_000
   let sharedListing: { store: DiscoveryPersistence; snapshots: Promise<readonly SessionPersistenceSnapshot[]> } | undefined
   let settledListing: { store: DiscoveryPersistence; snapshots: readonly SessionPersistenceSnapshot[]; settledAt: number } | undefined
   let announcements = 0
-  const listStore = (store: DiscoveryPersistence, reuse = false): Promise<readonly SessionPersistenceSnapshot[]> => {
+  const listStore = (store: DiscoveryPersistence): Promise<readonly SessionPersistenceSnapshot[]> => {
     // An in-flight listing is the freshest answer there is and is already
-    // paid for, so a caller that may reuse one shares it instead.
+    // paid for, so a caller that arrives inside it shares it instead.
     if (sharedListing !== undefined && sharedListing.store === store) return sharedListing.snapshots
-    if (reuse) {
-      const settled = settledListing
-      if (settled !== undefined && settled.store === store && Date.now() - settled.settledAt < LISTING_REUSE_MS) {
-        return Promise.resolve(settled.snapshots)
-      }
+    const settled = settledListing
+    if (settled !== undefined && settled.store === store && Date.now() - settled.settledAt < LISTING_REUSE_MS) {
+      return Promise.resolve(settled.snapshots)
     }
     const announcedBefore = announcements
     const requested = store.list({ signal: shutdown.signal })
@@ -246,10 +246,9 @@ export function createSessionDiscovery(host: DiscoveryHost) {
   const list = async (method: ListMethod, params: unknown) => {
     const p = method === 'x.ai/session/list' ? paramRecord(params, method) : {}
     const store = persistence(), projectionIndex = indexFor(store)
-    // The two header-shaped answers are what a settled listing can still serve;
-    // the picker's rows are folded from the logs behind the listing's
-    // revisions, so it lists on every call.
-    const snapshots = await listStore(store, method !== 'x.ai/session/list')
+    // Every list shares the in-flight listing and reuses the settled one; the
+    // three callers differ only in the rows they fold from the snapshots.
+    const snapshots = await listStore(store)
     assertOpen()
     if (method === 'session/list') {
       // Bare ACP remains deliberately minimal; the pager uses the richer name.

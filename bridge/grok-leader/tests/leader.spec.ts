@@ -2131,20 +2131,39 @@ describe('grok leader over a unix socket', () => {
   it('refreshes picker metadata after an external durable revision changes', async () => {
     const { persistence, client: c } = await start()
     register(c); await c.next()
-    let revision = 'r1'
-    persistence.list = async () => [{ header: persistence.header, revision: SessionPersistenceRevision(revision) }]
+    let revision = 'r1', listings = 0
+    persistence.list = async () => { listings += 1; return [{ header: persistence.header, revision: SessionPersistenceRevision(revision) }] }
     persistence.events.push(
       { type: 'user/message', seq: SessionSeq(0), time: 1, data: createUserMessage({ content: [{ type: 'text', text: 'prompt' }], source: { kind: 'user' } }) },
       { type: 'session/title', seq: SessionSeq(1), time: 2, data: { title: 'old' } },
     )
     const list = async (id: number) => (await c.request(id, 'x.ai/session/list', {})).result as { sessions: Array<{ title: string; updatedAt: string }> }
-    expect((await list(1)).sessions[0]?.title).toBe('old')
-    await list(2)
-    expect(persistence.loaded).toHaveLength(1)
-    persistence.events.push({ type: 'session/title', seq: SessionSeq(2), time: 3, data: { title: 'external change' } })
-    revision = 'r2'
-    expect((await list(3)).sessions[0]).toMatchObject({ title: 'external change', updatedAt: new Date(3).toISOString() })
-    expect(persistence.loaded).toHaveLength(2)
+    const clock = vi.spyOn(Date, 'now')
+    try {
+      expect((await list(1)).sessions[0]?.title).toBe('old')
+      // The harness's read handle walks the store itself, so only the deltas
+      // below say whether a tick paid a listing of its own.
+      const paidFirst = listings
+      expect(paidFirst).toBeGreaterThan(0)
+      // The second tick lands inside the window the first settled, so the
+      // picker reads that listing instead of the store and folds its revision
+      // from the resident index.
+      await list(2)
+      expect(persistence.loaded).toHaveLength(1)
+      expect(listings).toBe(paidFirst)
+      // An external revision reaches the window only through a listing, so the
+      // row stands as stale as the listing behind it — and the tick past the
+      // deadline pays its own listing and re-reads the session it changed.
+      persistence.events.push({ type: 'session/title', seq: SessionSeq(2), time: 3, data: { title: 'external change' } })
+      revision = 'r2'
+      expect((await list(3)).sessions[0]?.title).toBe('old')
+      expect(persistence.loaded).toHaveLength(1)
+      expect(listings).toBe(paidFirst)
+      clock.mockReturnValue(Date.now() + 10_001)
+      expect((await list(4)).sessions[0]).toMatchObject({ title: 'external change', updatedAt: new Date(3).toISOString() })
+      expect(persistence.loaded).toHaveLength(2)
+      expect(listings).toBeGreaterThan(paidFirst)
+    } finally { clock.mockRestore() }
   })
 
   it('paginates owned native child history and protects a newer attempt from late completion', async () => {
@@ -5552,11 +5571,19 @@ describe('grok leader over a unix socket', () => {
     persistence.readEvents = async () => prompted
         ? [{ type: 'user/message', seq: SessionSeq(0), time: 0, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Late title' }] } }]
         : []
-    const first = await c.request(1, 'x.ai/session/list', {})
-    expect((first.result as { sessions: Array<{ firstPrompt: string }> }).sessions[0]!.firstPrompt).toBe('')
-    prompted = true
-    const second = await c.request(2, 'x.ai/session/list', {})
-    expect((second.result as { sessions: Array<{ firstPrompt: string }> }).sessions[0]!.firstPrompt).toBe('Late title')
+    const clock = vi.spyOn(Date, 'now')
+    try {
+      const first = await c.request(1, 'x.ai/session/list', {})
+      expect((first.result as { sessions: Array<{ firstPrompt: string }> }).sessions[0]!.firstPrompt).toBe('')
+      // The durable change is only visible to the listing that reports it, so
+      // the window that settled before it keeps answering its empty prompt.
+      prompted = true
+      const second = await c.request(2, 'x.ai/session/list', {})
+      expect((second.result as { sessions: Array<{ firstPrompt: string }> }).sessions[0]!.firstPrompt).toBe('')
+      clock.mockReturnValue(Date.now() + 10_001)
+      const third = await c.request(3, 'x.ai/session/list', {})
+      expect((third.result as { sessions: Array<{ firstPrompt: string }> }).sessions[0]!.firstPrompt).toBe('Late title')
+    } finally { clock.mockRestore() }
   })
 
   it('session/load replay repopulates the up-arrow prompt history', async () => {
