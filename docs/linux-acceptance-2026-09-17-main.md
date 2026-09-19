@@ -365,3 +365,67 @@ run. As before, this validates a local revision, not a published artifact:
 main is 54 commits ahead of `origin/main` `f6524d40` and nothing is
 pushed, so distribution remains its own gate. `6736f162` is now the last
 accepted Linux revision.
+
+## Re-run at `b7e69a7c` (2026-09-19)
+
+Main moved from the accepted `6736f162` to `b7e69a7c` through three commits,
+all documentation: `e59000df` (the acceptance record above) and `bcb75f87`
+and `b7e69a7c` (the performance notes on the soak, the cancel lane and the
+picker boundary). No shipped file changed, so this pass re-executes the
+approved threshold on a revision whose plugin payload is byte-identical to
+the accepted run's.
+
+**Accepted for the executed gates on Linux.** The built-provider matrix passes
+all 15 cases on Node 22.19.0 and 24.19.0, and so do the script cases, the
+bridge suite and `scripts/check.sh` — 134 seconds of gate time (setup 7s,
+build 52s, matrix 4s, tests 68s, check 2s) plus a second of collection.
+Private root `/home/hanqing/dscode-main-b7e69a7c.Kd4Wn8`; the toolchains,
+caches, the pristine pin clone and the build consumer are reused from the
+earlier approved roots. No sudo, paid model, push or release is involved.
+
+- Setup cloned the product from a local bundle
+  (`9a5c1da668c08cfa668ac8db90c9ad0f31831cf5174879702c6a1ac8020ef3d2`) and
+  asserted the revision, all three `package.json` identities and the patch
+  digest `5c893b2e…` against `sourcePatchSha256` before any build
+  (`logs/setup-env.txt`).
+- The build passed and the built CLI reports `0.1.5-rc.2`; the embedded
+  `dscode-runtime.json` still reports the pin `fb2c4b9e…` and the patch
+  digest. `dscode-plugin.tgz` is `aad2471a…` and `dscode-consumer.json` is
+  `3ac92597…`, both byte-identical to the accepted `6736f162` run;
+  `dscode-runtime-linux-x86_64.tar.gz` is `1f3d02c7…`, whose 34,501-entry
+  listing is identical to that run's `08a31516…` (`diff` 0 lines).
+- **The built-provider 15-case matrix passed on both Nodes**
+  (`built-*/PASS.json`): ordinary and PTY native cancel after readiness, five
+  immediate disposals of each kind, immediate ordinary abort before target
+  output, genuine pre-exec ENOENT/EACCES, and direct exit kept separate from
+  escaped-descendant cleanup. Every case records its owned PID, `/proc` start
+  time, `dsh-subprocess-*` / `dsh-terminal-*` scope and `systemctl show`
+  state; all 30 checks report `remainingScopes: []`, with per-case times of
+  63–329ms on Node 22.19.0 and 66–334ms on Node 24.19.0.
+- Node 22.19.0 and 24.19.0 each passed all 44 release/runtime/gateway script
+  cases (44 passed, 0 failed, 0 skipped), the 935 bridge cases in 47 files
+  (931 passed, 4 macOS-conditional skips, 46 files passed / 1 skipped) and
+  `scripts/check.sh` with the version sources agreeing on `0.0.14-alpha.12`.
+- The paired macOS gates at the same revision: `scripts/check.sh` reports
+  `PASS` for `dscode-macos-aarch64` and the 44 script cases return 43 passed,
+  1 skipped, 0 failed on Darwin ARM64.
+- The post-run audit (`logs/post-run-audit.json`) found `newScopes: []` and
+  `residualProcesses: []`; the product worktree is clean at `b7e69a7c` with no
+  extra worktree (`logs/product-final-status.txt`).
+- Evidence: `linux-main-b7e69a7c-evidence.tar.gz`, SHA-256
+  `c5dda77b5e009979432fc94594e0316bdf93532c738c2eb17d74bc2dadbb435d`; the
+  local copy is
+  `.git/integration-backups/linux-main-b7e69a7c-evidence.tar.gz` and its hash
+  matches the remote archive.
+
+**Coverage limits.** This pass re-ran the approved threshold only. The
+supplementary TUI-crate gate was not executed because the vendored tree is
+byte-identical to the `6736f162` run that compiled and tested it, and the
+focused source owner/consumer selection, the `unshare --user --pid`
+reaper/namespace sweep, `build:lib` with the 16 `test:docs` gates, the
+recorded-session corpus, the managed-update E2E and the full installed-product
+E2E were not re-executed either: the delta since the accepted revision is
+documentation. As before, this validates a local revision, not a published
+artifact: main is 57 commits ahead of `origin/main` `f6524d40` and nothing is
+pushed, so distribution remains its own gate. `b7e69a7c` is now the last
+accepted Linux revision.
