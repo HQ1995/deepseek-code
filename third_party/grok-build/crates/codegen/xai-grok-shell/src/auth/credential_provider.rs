@@ -308,6 +308,20 @@ impl HttpAuth for OtelAuthCredentialProvider {
 }
 impl OtelAuthCredentialProvider {
     fn snapshot_inner(&self) -> CredentialSnapshot {
+        self.snapshot_inner_with_reload(true)
+    }
+
+    /// In-memory-only variant of [`Self::snapshot_inner`]: identical result
+    /// except that the bootstrap branch never issues the disk re-read. Startup
+    /// callers use this so the reload budget (`RELOAD_RETRY_TRIES` x
+    /// `RELOAD_RETRY_BACKOFF` while `auth.json` is missing or unreadable)
+    /// stays off the launch path; the first export calls
+    /// [`AuthCredentialProvider::snapshot`] and still observes disk updates.
+    fn snapshot_cached(&self) -> CredentialSnapshot {
+        self.snapshot_inner_with_reload(false)
+    }
+
+    fn snapshot_inner_with_reload(&self, reload_from_disk: bool) -> CredentialSnapshot {
         if let Some(ref dk) = **self.deployment_key.load() {
             return CredentialSnapshot {
                 token: Some(dk.clone()),
@@ -316,7 +330,7 @@ impl OtelAuthCredentialProvider {
             };
         }
         let (am, is_live) = self.load_state();
-        if !is_live {
+        if !is_live && reload_from_disk {
             am.force_reload_from_disk();
         }
         let auth = am.current_or_expired();
@@ -339,6 +353,9 @@ impl OtelAuthCredentialProvider {
 impl AuthCredentialProvider for OtelAuthCredentialProvider {
     fn snapshot(&self) -> CredentialSnapshot {
         self.snapshot_inner()
+    }
+    fn cached_snapshot(&self) -> CredentialSnapshot {
+        self.snapshot_cached()
     }
     fn has_usable_credential(&self) -> bool {
         if self.deployment_key.load().is_some() {
@@ -936,5 +953,38 @@ mod tests {
         let snap = provider.snapshot();
         assert_eq!(snap.token.as_deref(), Some("deployment-key-12345"));
         assert!(snap.user_id.is_none());
+    }
+    /// The OTLP startup path must not pay the bootstrap disk re-read budget
+    /// (`force_reload_from_disk` retries a missing/unreadable `auth.json`
+    /// x `RELOAD_RETRY_BACKOFF` inside the launch window): `cached_snapshot`
+    /// reads only memory, while the export-path `snapshot` still reconciles
+    /// with a token written by a sibling process.
+    #[test]
+    fn cached_snapshot_skips_the_bootstrap_disk_reread() {
+        let _guard = EarlyInvalidationGuard::pin_to_default();
+        let dir = tempfile::tempdir().unwrap();
+        let provider = OtelAuthCredentialProvider::new(make_manager(
+            &dir,
+            Some(make_auth("in-memory", ChronoDuration::hours(1))),
+        ));
+        // A sibling process (a second `dscode`, `grok login`) rotates the
+        // on-disk credential after the bootstrap manager was constructed.
+        let mut store = crate::auth::model::AuthStore::new();
+        store.insert(
+            GrokComConfig::default().auth_scope(),
+            make_auth("written-by-sibling", ChronoDuration::hours(2)),
+        );
+        crate::auth::storage::write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
+
+        assert_eq!(
+            provider.cached_snapshot().token.as_deref(),
+            Some("in-memory"),
+            "the startup snapshot must read only the in-memory credential"
+        );
+        assert_eq!(
+            provider.snapshot().token.as_deref(),
+            Some("written-by-sibling"),
+            "the export-path snapshot must still observe sibling writes"
+        );
     }
 }

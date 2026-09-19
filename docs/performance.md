@@ -46,11 +46,12 @@ noise. `ps eww` does print the variables for a pane — that is the exec-time
 copy in the kernel's argument area, not the environment the process runs with.
 
 Adopted in this pass: the OTLP client build, the one item on that list every
-launch paid for (next section). The other two stay not adopted: the auth
-budget is only paid where `auth.json` is missing or unreadable and the tmux
-probes only in tmux-backed panes, so their win is bounded by those
-conditions, and both are product code under `third_party/grok-build` that
-needs its own cycle against the Linux acceptance threshold.
+launch paid for (next section). The other two were left open here because
+their win is bounded by their conditions — the auth budget is only paid where
+`auth.json` is missing or unreadable, the tmux probes only in tmux-backed
+panes — and both are product code under `third_party/grok-build` that needs
+its own cycle against the Linux acceptance threshold. Both were measured and
+adopted later the same day (the last section of this date).
 
 ### Verification for this section
 
@@ -147,6 +148,88 @@ built-provider matrix, `check.sh`, script and bridge suites on Node 22.19.0
 and 24.19.0) with a supplementary Linux compile and test of the changed
 crate, so `243e2616` is the last accepted Linux revision
 (`docs/linux-acceptance-2026-09-17-main.md`).
+
+## 2026-09-18: the auth budget and the tmux probes leave the startup window
+
+The window sample above charged two more items to specific code: the
+`AuthManager::force_reload_from_disk` reload budget (93ms of 3ms samples) and
+the startup-warning tmux probes (51ms). Both are now out of the launch path.
+
+`AuthCredentialProvider::cached_snapshot()` is a new trait method that
+defaults to `snapshot()`; `OtelAuthCredentialProvider` implements it as an
+in-memory-only read, so a cold, missing or unreadable `auth.json` no longer
+spends the reload budget (`RELOAD_RETRY_TRIES` x `RELOAD_RETRY_BACKOFF`)
+inside the launch window. Its only startup caller is `build_server_provider`,
+which uses the snapshot just to seed the exporter's `last_token` fallback;
+the export path (`prepare_export` and the 401 retry) still calls `snapshot()`,
+so a credential rotated by a sibling process is still observed at the first
+export.
+
+The tmux wait loop slept a fixed 15ms per tick, so a healthy query — client
+spawn plus one server round trip returns in single-digit milliseconds on a
+warm server — paid the tick itself as padding. It now starts at 1ms and
+doubles to a 15ms cap (`TMUX_QUERY_POLL_MIN` / `TMUX_QUERY_POLL_MAX`): fast
+queries are not padded, and a slow or wedged server keeps the same bounded,
+low-CPU cadence.
+
+| Run (interleaved) | Binary | `connect finished` → `app_init` | `startup complete` | Prompt rendered |
+| --- | --- | ---: | ---: | ---: |
+| b1 / b2 / b3 / b4 | before | 120 / 114 / 117 / 115ms | 820 / 801 / 802 / 793ms | 1041 / 1019 / 1017 / 1011ms |
+| c1 / c2 (control) | before | 126 / 118ms | 827 / 804ms | 1075 / 1038ms |
+| a1 / a2 / a3 / a4 | after | 1 / 1 / 1 / 0ms | 592 / 590 / 602 / 596ms | 810 / 806 / 833 / 807ms |
+
+Medians: the gap 116ms → 1ms, with the control pair — the same before binary
+run later in the session — at 122ms, so the floor is not drift; `startup
+complete` 801.5 → 594.0ms; prompt rendered 1018 → 808.5ms. The phase
+deltas between b2 and a2 are confined to the removed work: `acp_initialize`
+422 → 416ms (host noise), `eager_auth` 455 → 450ms, `app_init` 569 →
+451ms, `session_create` 645 → 484ms.
+
+The sampler pins the attribution to those two functions: in the before run
+`OtelAuthCredentialProvider::snapshot_inner` holds 31 main-thread samples
+(93ms at 3ms each), every one of them inside
+`AuthManager::force_reload_from_disk`, and `collect_tmux` 18 samples (54ms);
+in the after run there are no `snapshot_inner` or `force_reload_from_disk`
+frames at all and `collect_tmux` is down to 4 samples (12ms) — the probes
+still run in a tmux-backed pane, they just no longer pad every query.
+
+### Verification for this section
+
+- Ten interleaved launches of the real launcher (`b1 b2 a1 a2 b3 a3 c1 b4 a4
+  c2`) over a loopback gateway and OTLP collector with an isolated
+  `HOME`/`DSH_HOME`/`DSC_HOME`, ports 8731-8732; `series.log` and the
+  `*.out.json` timelines are in the archive below. macOS arm64 under
+  sustained foreign load (load average 9.14-9.69), so these milliseconds are
+  upper bounds and only same-session comparisons hold.
+- Binaries: before
+  `49c2d330d53b99bf53ed2f4f62c740fc8bba6d8740bc73b7a605259fd8ab450a` (the
+  four product files of this change stashed out of the working tree for the
+  build), after
+  `b6ffa93bd9a95f7e43a3f5c07b2c85dbd9e45335d4c3b6a73f9846046d06013b`; the
+  tree was restored byte-identically between the two builds
+  (`shas-worktree-edited.txt` / `shas-worktree-restored.txt`).
+- Stack attribution: `/usr/bin/sample`, 5 seconds at 3ms run time between
+  samples, main thread filtered, process held open past the sample window so
+  the call graph is written (`bs.sample.txt` / `as.sample.txt`). The two runs
+  sampled without the linger (`b2`/`a2`) exited inside the sample window and
+  hold an empty call graph.
+- Crate gates: `cargo test -p xai-grok-pager-render --lib` 1103 passed / 0
+  failed / 2 ignored, against a pristine baseline of 1101 passed / 2 failed at
+  this revision — the two failures are test-side expectations that lagged the
+  product and are fixed in this change (the clipboard feedback contract wanted
+  the old `grok wrap` literal at `clipboard/mod.rs:2149`, the product emits
+  `dscode wrap` at line 378; the image-overlay transmission test wanted
+  placement id 0, the product clears `clear_kitty_image(1)` for
+  `KITTY_PLACEMENT_ID = 1` at `terminal/image.rs:485`); `cargo test -p
+  xai-grok-auth --lib` 1 passed; `cargo test -p xai-grok-shell --lib
+  credential_provider` 17 passed; `cargo test -p xai-grok-telemetry` 228 unit
+  tests plus all 11 integration binaries pass.
+- `scripts/check.sh`, `node --test scripts/*.test.mjs` (43 passed / 1 skipped,
+  44 total) and `git diff --check` pass.
+- Raw evidence:
+  `.git/integration-backups/perf-tmux-auth-2026-09-18-evidence.tar.gz`,
+  SHA-256
+  `8a937d2e76adf3b1ae045cd54cbb1e29c8a22b7686a9defe7077bf57ce6768c7`.
 
 ## 2026-09-17: sustained product-loop soak
 

@@ -401,7 +401,10 @@ fn build_server_provider(client: OtelClientInfo, config: OtelLayerConfig) -> Sdk
         service_version,
         app_entrypoint,
     } = client;
-    let snapshot = config.credentials.snapshot();
+    // In-memory read only: this runs inside the launch window, and the
+    // snapshot is used solely to seed `last_token`, which only matters as a
+    // fallback until the first export calls `snapshot()` on the export path.
+    let snapshot = config.credentials.cached_snapshot();
     let initial_token = snapshot.token.unwrap_or_default();
     if initial_token.is_empty() {
         tracing::debug!(
@@ -775,6 +778,78 @@ mod tests {
                 .refresh_count
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
+        );
+    }
+    /// Startup seeds `last_token` from the in-memory snapshot only: the
+    /// launch path must not issue the disk-reconciling `snapshot()`
+    /// (bootstrap mode re-reads `auth.json` with a retry budget when the
+    /// file is missing or unreadable).
+    #[test]
+    fn server_provider_seeds_last_token_without_the_disk_snapshot() {
+        struct CountingProvider {
+            snapshots: std::sync::atomic::AtomicU32,
+            cached_snapshots: std::sync::atomic::AtomicU32,
+        }
+        impl HttpAuth for CountingProvider {
+            fn apply(
+                &self,
+                builder: reqwest::RequestBuilder,
+                _base_url: &str,
+            ) -> reqwest::RequestBuilder {
+                builder
+            }
+        }
+        #[async_trait]
+        impl AuthCredentialProvider for CountingProvider {
+            fn snapshot(&self) -> CredentialSnapshot {
+                self.snapshots
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                CredentialSnapshot {
+                    token: Some("disk-token".into()),
+                    ..Default::default()
+                }
+            }
+            fn cached_snapshot(&self) -> CredentialSnapshot {
+                self.cached_snapshots
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                CredentialSnapshot {
+                    token: Some("memory-token".into()),
+                    ..Default::default()
+                }
+            }
+            async fn refresh_after_unauthorized(&self) -> bool {
+                false
+            }
+        }
+        let provider = Arc::new(CountingProvider {
+            snapshots: std::sync::atomic::AtomicU32::new(0),
+            cached_snapshots: std::sync::atomic::AtomicU32::new(0),
+        });
+        let _provider_handle = build_server_provider(
+            OtelClientInfo {
+                client_name: "test-client",
+                client_version: "0.0.0",
+                service_version: "0.0.0-test",
+                app_entrypoint: "cli",
+            },
+            OtelLayerConfig {
+                credentials: provider.clone(),
+                token_header_value: "xai-grok-cli".to_string(),
+                alpha_test_key: None,
+                exporter: OtelExporterConfig::default(),
+            },
+        );
+        assert_eq!(
+            provider.snapshots.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "startup must not issue the disk-reconciling snapshot"
+        );
+        assert_eq!(
+            provider
+                .cached_snapshots
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "startup must seed last_token from the in-memory snapshot"
         );
     }
 }

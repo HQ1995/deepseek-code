@@ -114,11 +114,18 @@ fn paint_pixels_with_path_returns_footer_and_exact_transmission() {
         text.contains("Path: /tmp/logo.png"),
         "rendered footer missing path: {text:?}",
     );
-    assert!(escapes.as_str().starts_with(&format!(
-        "\x1b[{};{}H",
-        placement.y + 1,
-        placement.x + 1
-    )));
+    // Kitty re-placement clears placement 1 first, so the exact transmission
+    // opens with the clear then positions the cursor (see
+    // `build_overlay_image_escapes_for_protocol`).
+    let clear = crate::terminal::image::clear_kitty_image(1);
+    assert!(
+        escapes.as_str().starts_with(&format!(
+            "{clear}\x1b[{};{}H",
+            placement.y + 1,
+            placement.x + 1
+        )),
+        "unexpected transmission prefix: {escapes:?}",
+    );
     assert!(
         escapes
             .as_str()

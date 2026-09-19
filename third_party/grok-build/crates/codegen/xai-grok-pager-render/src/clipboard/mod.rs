@@ -2146,14 +2146,14 @@ mod tests {
             (
                 ClipboardFeedback::UnverifiedOscRemote,
                 ClipboardDelivery::Unverified,
-                "Copy sent. If paste fails, use grok wrap or /minimal.",
+                "Copy sent. If paste fails, use dscode wrap or /minimal.",
                 "unverified_osc_remote",
                 120,
             ),
             (
                 ClipboardFeedback::UnverifiedOscContainer,
                 ClipboardDelivery::Unverified,
-                "Copy sent. If paste fails, use grok wrap or /minimal.",
+                "Copy sent. If paste fails, use dscode wrap or /minimal.",
                 "unverified_osc_container",
                 120,
             ),

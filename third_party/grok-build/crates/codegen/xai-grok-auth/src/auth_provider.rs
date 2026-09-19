@@ -45,6 +45,20 @@ pub trait AuthCredentialProvider: HttpAuth + Send + Sync + 'static {
     /// 401-attribution prefixes match the actual request.
     fn snapshot(&self) -> CredentialSnapshot;
 
+    /// Snapshot of the credentials already held in memory, with no I/O.
+    ///
+    /// Startup paths (OTLP layer construction) use this instead of
+    /// [`Self::snapshot`] so a cold, unreadable, or missing `auth.json`
+    /// cannot spend the provider's disk-reload budget inside the launch
+    /// window. The first export still calls [`Self::snapshot`] and picks up
+    /// updates written by sibling processes.
+    ///
+    /// Defaults to [`Self::snapshot`] for providers whose snapshot is
+    /// already an in-memory read.
+    fn cached_snapshot(&self) -> CredentialSnapshot {
+        self.snapshot()
+    }
+
     /// Attempt to obtain a fresh token. Returns `true` if a different
     /// token was obtained -- caller should retry the failed request once.
     /// Returns `false` if no refresher is configured or refresh failed.

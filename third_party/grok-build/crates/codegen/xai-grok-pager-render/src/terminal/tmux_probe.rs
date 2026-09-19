@@ -4,6 +4,14 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const TMUX_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+/// Wait-loop cadence while the tmux client is alive. The first polls are
+/// tight because a healthy query returns in 5-8ms end to end on a warm server
+/// (client spawn plus one server round trip), so a fixed tick would pad every
+/// fast query up to the tick itself; the interval then doubles up to
+/// [`TMUX_QUERY_POLL_MAX`] so a slow or wedged server keeps the same bounded,
+/// low-CPU wait it had with the fixed tick.
+const TMUX_QUERY_POLL_MIN: Duration = Duration::from_millis(1);
+const TMUX_QUERY_POLL_MAX: Duration = Duration::from_millis(15);
 /// After the leader exits, allow this much additional time for process-group
 /// teardown and concurrent pipe drains so a near-deadline success is not turned
 /// into a drain timeout. The main process wait still uses only
@@ -71,12 +79,14 @@ fn run_tmux_bounded(
     let stdout = spawn_pipe_drain(stdout, "stdout");
     let stderr = spawn_pipe_drain(stderr, "stderr");
     let deadline = std::time::Instant::now() + timeout;
+    let mut poll = TMUX_QUERY_POLL_MIN;
 
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(15));
+                std::thread::sleep(poll);
+                poll = next_poll_interval(poll);
             }
             Ok(None) => {
                 terminate_tmux_tree(&group, &mut child);
@@ -101,6 +111,12 @@ fn run_tmux_bounded(
         stdout,
         stderr,
     })
+}
+
+/// Next wait-loop interval: double the current one, capped at
+/// [`TMUX_QUERY_POLL_MAX`].
+fn next_poll_interval(current: Duration) -> Duration {
+    (current * 2).min(TMUX_QUERY_POLL_MAX)
 }
 
 fn spawn_pipe_drain(
@@ -544,6 +560,31 @@ mod tests {
         assert!(
             !status.success(),
             "the child must have been killed, got {status:?}"
+        );
+    }
+
+    /// The wait loop must start tight — a healthy query returns in
+    /// single-digit milliseconds, so a fixed tick would pad every fast query
+    /// up to the tick — and must stay bounded, so a slow or wedged server
+    /// keeps the same low-CPU cadence the fixed tick had.
+    #[test]
+    fn poll_backoff_starts_at_the_minimum_and_stays_bounded() {
+        assert_eq!(
+            next_poll_interval(TMUX_QUERY_POLL_MIN),
+            Duration::from_millis(2),
+            "the first wait after the minimum must stay tight"
+        );
+        let mut interval = TMUX_QUERY_POLL_MIN;
+        for _ in 0..8 {
+            interval = next_poll_interval(interval);
+            assert!(
+                interval <= TMUX_QUERY_POLL_MAX,
+                "poll cadence must stay bounded, got {interval:?}"
+            );
+        }
+        assert_eq!(
+            interval, TMUX_QUERY_POLL_MAX,
+            "doubling must saturate at the maximum rather than keep growing"
         );
     }
 }
