@@ -182,16 +182,21 @@ describe('owned session discovery', () => {
   it('keeps one settled listing answering the roster until its window expires', async () => {
     const f = fixture()
     f.add('a', '/work')
-    expect((await f.roster()).map(row => row.sessionId)).toEqual(['a'])
-    expect(f.list).toHaveBeenCalledOnce()
-    const settled = Date.now(), clock = vi.spyOn(Date, 'now').mockReturnValue(settled + 9_999)
+    // The listing stamps its own settle time, so the clock has to be pinned
+    // before the call that settles it. Reading Date.now() afterwards hands the
+    // window the gap between the two as time it had already spent, and a slow
+    // enough worker then measures a deadline that never existed.
+    const BASE = Date.now(), clock = vi.spyOn(Date, 'now').mockReturnValue(BASE)
     try {
+      expect((await f.roster()).map(row => row.sessionId)).toEqual(['a'])
+      expect(f.list).toHaveBeenCalledOnce()
+      clock.mockReturnValue(BASE + 9_999)
       expect((await f.roster()).map(row => row.sessionId)).toEqual(['a'])
       await expect(f.discovery.list('session/list')).resolves.toMatchObject({ sessions: [expect.objectContaining({ sessionId: 'a' })] })
       expect(f.list).toHaveBeenCalledOnce()
       // The deadline covers a store this process never hears about: a store
       // another process writes is re-listed, not reused.
-      clock.mockReturnValue(settled + 10_001)
+      clock.mockReturnValue(BASE + 10_001)
       expect((await f.roster()).map(row => row.sessionId)).toEqual(['a'])
       expect(f.list).toHaveBeenCalledTimes(2)
     } finally { clock.mockRestore() }
