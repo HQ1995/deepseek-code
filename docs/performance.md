@@ -96,6 +96,34 @@ at 1000 stored sessions, 2805.8ms at 3000 against 2654.9ms) and only warmed the
 3000-session replay (404.8-436.3ms), so the first list stays the one a picker
 actually pays for.
 
+The events-heavy rows of the 2026-09-17 section were re-measured with this
+bench at the same 30-row limit, at 2,000 and 400 events per session:
+
+| Stored sessions | Events per session | Stored events | Cold list | Warm lists | Changed session | Peak RSS | Index retained |
+| ---: | ---: | ---: | ---: | --- | --- | ---: | ---: |
+| 300 | 2,000 | 600,000 | 2077.7ms, 300 opens | 42.8-45.3ms, 0 opens | 50.1ms, 1 open, 2,001 events | 438.4MiB | 5665.3KiB |
+| 900 | 400 | 360,000 | 1419.2ms, 900 opens | 127.8-128.0ms, 0 opens | 138.7ms, 1 open, 401 events | 282.8MiB | 2234.5KiB |
+
+`violations` was empty in both runs, the cold list again opened exactly one
+log per candidate, and the warm and changed-session columns stayed at the
+stored-session price. The cold fold paid about 3.5µs per stored event (600,000
+events in 2077.7ms), the same rate as the 2026-09-17 rows: a first list costs
+what the directory stores, not what it returns.
+
+That cost is not removable from the bridge. The pinned backend's
+`readStoredLog` reconstructs and validation-scans the complete event array
+before a `read` slices it, so a page-and-project read would still walk the
+whole artifact for each page, and its `coldLogMemo` — the only place a
+decoded log survives a call — holds just two entries
+(`COLD_LOG_MEMO_MAX_ENTRIES = 2`), so pages from interleaved sessions would
+miss it and re-walk. The decode and scan yield to the event loop but still run
+in the process's JS thread, where the picker's fold follows. One full walk and
+one validation pass per stored session is what the persistence seam imposes on
+a first observation; the retention cap above already removed the repeats, and
+the measured peak RSS (438.4MiB at 600,000 stored events) and retained index
+(5.7MiB at 300 sessions) bound the memory this leaves. No production change
+followed from this re-measurement.
+
 ### Verification for this section
 
 - Evidence: `/tmp/dscode-stress/endurance` (1000 turns), `cancel3` (200 turns
@@ -103,13 +131,15 @@ actually pays for.
   `turns-*.jsonl`, `samples-*.jsonl`, `cancels-*.jsonl`, `crosstalk-*.jsonl`
   and the summary JSON; `hook-open.js` with `hook-open.log` is the descriptor
   hook and its log, `chokidar-probe.mjs` the standalone watch probe, and
-  `scaling/` the four picker runs with their `--lists` controls.
+  `scaling/` the four picker runs with their `--lists` controls; `deep/`
+  holds the two events-heavy picker runs.
 - Reproduction: `SOAK_TURNS=1000 bash scripts/soak-product-loop.sh`;
   `SOAK_TURNS=200 SOAK_WINDOWS=3 SOAK_CANCEL_EVERY=10 bash
   scripts/soak-product-loop.sh`; `node --experimental-transform-types
   --expose-gc scripts/bench-session-list.mjs 3000 --events=120 --projects=1
-  --lists=3 --touch=1` (the bench prints an `ExperimentalWarning` line ahead
-  of its JSON).
+  --lists=3 --touch=1`, and the same command at `300 --events=2000` or
+  `900 --events=400` for the events-heavy pair (the bench prints an
+  `ExperimentalWarning` line ahead of its JSON).
 - `scripts/check.sh` and `git diff --check` pass. This section records
   measurements only; no production code changed with it, so the Linux
   acceptance threshold is not reopened.
