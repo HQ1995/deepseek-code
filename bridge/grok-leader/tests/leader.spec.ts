@@ -7217,3 +7217,40 @@ it('cold session query must not lose first prompts above the 100-entry cache', a
     c.socket.destroy(); await made.ctx.fiber.dispose()
   }
 })
+
+it('serves two windows polling the roster in the same second from one durable listing', async () => {
+  const made = await makeHarness()
+  const first = await makeClient(made.socketPath), second = await makeClient(made.socketPath)
+  let release!: () => void, listings = 0
+  try {
+    const stored = Array.from({ length: 3 }, (_, i) => ({
+      header: { ...made.persistence.header, id: SessionId('roster-window-' + String(i)), createdAt: i },
+      revision: SessionPersistenceRevision('roster'),
+    }))
+    const gate = new Promise<void>(resolve => { release = resolve })
+    made.persistence.list = async () => { listings += 1; await gate; return stored }
+    register(first); await first.next()
+    register(second); await second.next()
+    // One leader serves every window of a profile, so both dashboards tick on
+    // the same second. The second tick lands on the listing the first already
+    // paid for instead of listing the store again.
+    sendRequest(first, 1, 'x.ai/sessions/list')
+    sendRequest(second, 1, 'x.ai/sessions/list')
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(listings).toBe(1)
+    release()
+    // The pager unwraps `result` before reading `sessions` (the pinned
+    // `parse_roster_list_response` contract), so the ext-response body is the
+    // frame's `result.result`.
+    const rows = async (client: ClientHandle) => ((await waitForId(client, 1)).result as { result: { sessions: Array<{ sessionId: string }> } }).result.sessions.map(row => row.sessionId)
+    const expected = ['roster-window-0', 'roster-window-1', 'roster-window-2']
+    expect(await rows(first)).toEqual(expected)
+    expect(await rows(second)).toEqual(expected)
+    // The share belongs to the callers that were waiting, not to the store:
+    // the next second's tick lists again.
+    await second.request(2, 'x.ai/sessions/list')
+    expect(listings).toBe(2)
+  } finally {
+    release(); first.socket.destroy(); second.socket.destroy(); await made.ctx.fiber.dispose()
+  }
+})

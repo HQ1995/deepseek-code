@@ -84,6 +84,42 @@ describe('owned session discovery', () => {
     expect(f.open).not.toHaveBeenCalled()
   })
 
+  it('answers every caller that lands during one durable listing from that listing', async () => {
+    const f = fixture(), gate = deferred()
+    f.add('a', '/work', [prompt('kept')])
+    const list = f.list.getMockImplementation()!
+    f.list.mockImplementation(async options => { await gate.promise; return list(options) })
+    const roster = f.discovery.list('x.ai/sessions/list')
+    const legacy = f.discovery.list('session/list')
+    const picker = f.picker({ cwd: '/work' })
+    await tick()
+    expect(f.list).toHaveBeenCalledTimes(1)
+    gate.resolve()
+    expect((await picker)[0]).toMatchObject({ sessionId: 'a', firstPrompt: 'kept' })
+    await expect(roster).resolves.toMatchObject({ result: { sessions: [expect.objectContaining({ sessionId: 'a' })] } })
+    await expect(legacy).resolves.toMatchObject({ sessions: [expect.objectContaining({ sessionId: 'a' })] })
+    expect(f.list).toHaveBeenCalledTimes(1)
+    // The shared listing belongs to the callers that were in flight; the next
+    // caller after it settles pays its own read rather than reusing it.
+    await f.discovery.list('x.ai/sessions/list')
+    expect(f.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('never serves an in-flight listing to a remounted service', async () => {
+    const f = fixture(), gate = deferred()
+    f.add('a', '/work')
+    const list = f.list.getMockImplementation()!
+    f.list.mockImplementation(async options => { await gate.promise; return list(options) })
+    const first = f.discovery.list('x.ai/sessions/list')
+    await tick()
+    f.replace({ open: f.open, list: f.list })
+    const second = f.discovery.list('x.ai/sessions/list')
+    await tick()
+    expect(f.list).toHaveBeenCalledTimes(2)
+    gate.resolve()
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2)
+  })
+
   it('caps rows after activity sorting while concurrent requests share cold loads and four handle lanes', async () => {
     const f = fixture(), gate = deferred()
     for (let i = 0; i < 105; i++) f.add(String(i), '/work', [prompt('prompt ' + i, i)])

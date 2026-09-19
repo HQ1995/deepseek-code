@@ -1,7 +1,7 @@
 import { SessionId, type Session, type SessionEvent, type SessionHeader, type SessionLogOffset } from '@deepseek-ai/dsh-session'
 import {
   SessionFormatUnsupportedError, SessionPersistenceCorruptionError, SessionPersistenceNotFoundError,
-  type SessionHandle, type SessionInspection, type SessionPersistence,
+  type SessionHandle, type SessionInspection, type SessionPersistence, type SessionPersistenceSnapshot,
 } from '@deepseek-ai/dsh-session-persistence'
 import { internalError, invalidParams, paramRecord } from './acp.ts'
 import { SessionListIndex } from './session-list.ts'
@@ -65,6 +65,26 @@ export function createSessionDiscovery(host: DiscoveryHost) {
     if (indexedStore !== undefined && indexedStore !== store) index = new SessionListIndex()
     indexedStore = store
     return index
+  }
+  /** One durable listing serves every caller that arrives while it is in
+   * flight, the way one inspection already serves every pass over the same
+   * session: two windows' dashboard polls and the picker behind them land on
+   * the same second, and the store read they share is the whole cost of the
+   * answer. The snapshot array is shared read-only — callers map or filter it
+   * into their own rows and never mutate it — and the next caller after it
+   * settles lists again, so a listing never outlives the call that paid for
+   * it. A remounted service is a different store with incomparable revisions,
+   * so its listing is never reused here. */
+  let sharedListing: { store: DiscoveryPersistence; snapshots: Promise<readonly SessionPersistenceSnapshot[]> } | undefined
+  const listStore = (store: DiscoveryPersistence): Promise<readonly SessionPersistenceSnapshot[]> => {
+    if (sharedListing !== undefined && sharedListing.store === store) return sharedListing.snapshots
+    const requested = store.list({ signal: shutdown.signal })
+    const shared = requested.then(
+      value => { if (sharedListing?.snapshots === shared) sharedListing = undefined; return value },
+      error => { if (sharedListing?.snapshots === shared) sharedListing = undefined; throw error },
+    )
+    sharedListing = { store, snapshots: shared }
+    return shared
   }
   const unavailableArtifact = (error: unknown) => error instanceof SessionPersistenceNotFoundError
     || error instanceof SessionPersistenceCorruptionError || error instanceof SessionFormatUnsupportedError
@@ -133,7 +153,7 @@ export function createSessionDiscovery(host: DiscoveryHost) {
   const list = async (method: ListMethod, params: unknown) => {
     const p = method === 'x.ai/session/list' ? paramRecord(params, method) : {}
     const store = persistence(), projectionIndex = indexFor(store)
-    const snapshots = await store.list({ signal: shutdown.signal })
+    const snapshots = await listStore(store)
     assertOpen()
     if (method === 'session/list') {
       // Bare ACP remains deliberately minimal; the pager uses the richer name.
@@ -218,7 +238,7 @@ export function createSessionDiscovery(host: DiscoveryHost) {
       disposal = Promise.resolve().then(async () => {
         // A failed parent list may leave sibling/queued inspections in flight.
         while (pending.size > 0) await Promise.allSettled([...pending])
-        index = new SessionListIndex(); indexedStore = undefined
+        index = new SessionListIndex(); indexedStore = undefined; sharedListing = undefined
         if (cleanupFailures.length > 0) throw new AggregateError(cleanupFailures, 'session discovery cleanup failed')
       })
       try { unsubscribe() } catch (error) { cleanupFailures.push(error) }
