@@ -234,6 +234,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     log: message => logger.warn(message),
     owns: session => sessions.get(session.header.id)?.agent.session === session,
     onEvent: listener => ctx.on('session/event', listener),
+    onCreated: listener => ctx.on('session/created', listener),
   })
   const lifecycle = createSessionLifecycle({
     agents, registry, models: sessionModels, presets: sessionPresets, persistence, discovery,

@@ -26,10 +26,18 @@
 // window of one profile polls the shared leader, and reports how many durable
 // listings the burst actually took.
 //
+// The last roster phases cover what a poll may serve from a listing it did not
+// pay for: a session lands in the root with no event this process can see (a
+// store another process wrote) and the harness then announces one the way the
+// runtime's session/created does, so the run records both the row a settled
+// window still owes and what the polls on either side of the announcement take.
+// --reuse=true asserts that contract — which ticks must take a listing and
+// which must not — instead of only recording it.
+//
 // Usage:
 //   node --experimental-transform-types [--expose-gc] scripts/bench-session-list.mjs \
 //     <sessions> [bridgeRoot] [--events=120] [--projects=1] [--lists=3] [--touch=1] [--sweep=true]
-//     [--roster=N] [--concurrent=K] [--titles=hit]
+//     [--roster=N] [--concurrent=K] [--titles=hit] [--reuse=true]
 //
 // The bridge root supplies the pinned SDK dependencies, exactly like the
 // shipped plugin; the benchmark itself stays in scripts/.
@@ -212,12 +220,24 @@ const projectionCache = {
     return undefined
   },
 }
+// The runtime announces a session the moment it exists, before its durable
+// artifact could have been written, and session-discovery treats that as the
+// end of any listing window it has already settled. The harness keeps the
+// listeners so a phase can fire the same signal over this real root.
+const createdListeners = new Set()
+const announce = () => {
+  for (const listener of [...createdListeners]) listener({ header: { id: 'bench-late-0' } })
+}
 const discovery = createSessionDiscovery({
   persistence: () => observed,
   query: () => undefined,
   projectionCache: () => projectionCache,
   owns: () => false,
   onEvent: () => () => {},
+  onCreated: listener => {
+    createdListeners.add(listener)
+    return () => { createdListeners.delete(listener) }
+  },
 })
 
 const heapNow = async () => {
@@ -301,7 +321,10 @@ if (flags.get('sweep') === 'true') {
 // per open dashboard, on the same thread as live turns.
 const rosterPhases = []
 const rosterCount = Number(flags.get('roster') ?? 0)
-for (let index = 0; index < rosterCount; index += 1) {
+// One dashboard tick, measured the way the product pays for it: the call, the
+// durable listing inside it, the JSON the transport then writes, and the rows
+// it carried, so a later phase can prove which row set a window served.
+const rosterTick = async () => {
   const before = { ...counters }
   loopDelay.reset()
   const started = process.hrtime.bigint()
@@ -310,15 +333,20 @@ for (let index = 0; index < rosterCount; index += 1) {
   const encodeStarted = process.hrtime.bigint()
   const encoded = JSON.stringify(result)
   const encodeMs = Number(process.hrtime.bigint() - encodeStarted) / 1e6
-  rosterPhases.push({
-    ms: +ms.toFixed(1), rows: result.result.sessions.length,
-    storeListMs: +(counters.listMs - before.listMs).toFixed(1),
-    encodeMs: +encodeMs.toFixed(1), bytes: Buffer.byteLength(encoded),
-    opens: counters.open - before.open, reads: counters.read - before.read,
-    titled: result.result.sessions.filter(row => typeof row.title === 'string').length,
-    titleReads: counters.titleReads - before.titleReads, ...loopDelayNow(),
-  })
+  return {
+    result,
+    phase: {
+      ms: +ms.toFixed(1), rows: result.result.sessions.length,
+      listings: counters.list - before.list,
+      storeListMs: +(counters.listMs - before.listMs).toFixed(1),
+      encodeMs: +encodeMs.toFixed(1), bytes: Buffer.byteLength(encoded),
+      opens: counters.open - before.open, reads: counters.read - before.read,
+      titled: result.result.sessions.filter(row => typeof row.title === 'string').length,
+      titleReads: counters.titleReads - before.titleReads, ...loopDelayNow(),
+    },
+  }
 }
+for (let index = 0; index < rosterCount; index += 1) rosterPhases.push((await rosterTick()).phase)
 
 // One leader serves every window of a profile, so each open dashboard polls
 // on the same second. Fire that burst and count the durable listings it took
@@ -337,8 +365,33 @@ if (concurrentCount > 1) {
     storeListMs: +(counters.listMs - before.listMs).toFixed(1),
     opens: counters.open - before.open, reads: counters.read - before.read,
     titled: results[0].result.sessions.filter(row => typeof row.title === 'string').length,
-    titleReads: counters.titleReads - before.titleReads, ...loopDelayNow(),
+      titleReads: counters.titleReads - before.titleReads, ...loopDelayNow(),
   })
+}
+
+// The rows a listing cannot carry are the rows that landed after its read.
+// Write one straight through the bare backend — not the observed proxy, so
+// the poll's counters stay the poll's — the way a store another process owns
+// would, and poll over it: nothing in this process announced that session, so
+// a settled window answers the set it already had, which is the staleness the
+// reuse deadline bounds. Then announce one the way the runtime does and poll
+// twice: the next tick has to pay its own listing and carry the row, and the
+// tick after that is served by the window the announcement opened.
+const latePhases = []
+if (rosterPhases.length > 0) {
+  const lateId = SessionId('bench-late-0'), lateCreatedAt = base + sessionCount * 60_000
+  const handle = await persistence.create({ version: SESSION_FORMAT_VERSION, id: lateId, createdAt: lateCreatedAt, cwd: listCwd, isSeeded: false })
+  await handle.append(structuredClone(template.slice(0, 2)).map((event, seq) => ({ ...event, seq, time: lateCreatedAt + seq })))
+  await handle.flush()
+  await handle.close()
+  const carries = result => result.result.sessions.some(row => row.sessionId === lateId)
+  const unannounced = await rosterTick()
+  latePhases.push({ label: 'late session, no announcement', ...unannounced.phase, carriesLate: carries(unannounced.result) })
+  announce()
+  const announced = await rosterTick()
+  latePhases.push({ label: 'late session, announced', ...announced.phase, carriesLate: carries(announced.result) })
+  const reused = await rosterTick()
+  latePhases.push({ label: 'announced, then reused', ...reused.phase, carriesLate: carries(reused.result) })
 }
 
 assert.equal(first.rows, Math.min(30, candidates))
@@ -362,6 +415,28 @@ for (const phase of sweepPhases) {
     violations.push(`sweep pass ${phase.pass} opened ${phase.opens} logs for ${stored} stored sessions in ${phase.cwd}`)
   }
 }
+// The reuse contract, when the run is asked to pin it rather than record it:
+// the first tick of a window pays the listing and every tick inside the
+// deadline after it pays none, a row that landed with no announcement stays
+// out of the window's answer, the announcement closes the window, and the
+// window it opens serves the row that was announced.
+if (flags.get('reuse') === 'true') {
+  rosterPhases.slice(1).forEach((phase, index) => {
+    if (phase.listings !== 0) violations.push(`roster tick ${index + 2} took ${phase.listings} listings inside the reuse window`)
+  })
+  if (concurrentPhases[0] !== undefined && concurrentPhases[0].listings !== 0) {
+    violations.push(`the burst took ${concurrentPhases[0].listings} listings inside the reuse window`)
+  }
+  const [unannounced, announced, reused] = latePhases
+  if (unannounced !== undefined) {
+    if (unannounced.listings !== 0) violations.push(`the poll over an unannounced row took ${unannounced.listings} listings instead of the window's zero`)
+    if (unannounced.carriesLate) violations.push('the window served a row only a listing after it can carry')
+    if (announced.listings !== 1) violations.push(`the announced poll took ${announced.listings} listings instead of one`)
+    if (!announced.carriesLate) violations.push('the announced poll did not carry the row it announced')
+    if (reused.listings !== 0) violations.push(`the poll after the announcement took ${reused.listings} listings instead of the window's zero`)
+    if (!reused.carriesLate) violations.push('the window the announcement opened did not carry the row')
+  }
+}
 for (const violation of violations) console.error(`violation: ${violation}`)
 console.log(JSON.stringify({
   node: process.version, platform: `${process.platform}-${process.arch}`,
@@ -373,6 +448,7 @@ console.log(JSON.stringify({
   indexRetainedKiB: global.gc === undefined ? undefined : +((heapWarm - heapBefore) / 1024).toFixed(1),
   phases, ...sweepPhases.length === 0 ? {} : { sweepPhases },
   ...rosterPhases.length === 0 ? {} : { rosterPhases }, violations,
+  ...latePhases.length === 0 ? {} : { latePhases },
   ...concurrentPhases.length === 0 ? {} : { concurrentPhases },
 }, null, 2))
 if (flags.get('strict') === 'true' && violations.length > 0) process.exitCode = 1

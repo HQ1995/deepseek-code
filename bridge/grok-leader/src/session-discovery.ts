@@ -45,6 +45,9 @@ interface DiscoveryHost {
   log?(message: string): void
   owns(session: Session): boolean
   onEvent(listener: (session: Session, event: SessionEvent) => void): () => void
+  /** Announced sessions: one that reached this process's store is a row a
+   * listing taken before it can never carry. */
+  onCreated(listener: (session: Session) => void): () => void
 }
 export type SessionDiscovery = ReturnType<typeof createSessionDiscovery>
 
@@ -87,16 +90,44 @@ export function createSessionDiscovery(host: DiscoveryHost) {
    * session: two windows' dashboard polls and the picker behind them land on
    * the same second, and the store read they share is the whole cost of the
    * answer. The snapshot array is shared read-only — callers map or filter it
-   * into their own rows and never mutate it — and the next caller after it
-   * settles lists again, so a listing never outlives the call that paid for
-   * it. A remounted service is a different store with incomparable revisions,
-   * so its listing is never reused here. */
+   * into their own rows and never mutate it.
+   *
+   * A settled listing keeps answering the header-shaped calls for
+   * LISTING_REUSE_MS as well. Their rows cannot go stale while it stands: the
+   * roster and the bare session list read the immutable header the listing
+   * carried and the projection cache's current title, so the only row such a
+   * listing cannot answer is a session it never saw. An announcement ends the
+   * window, and a listing that started before one never opens it — it cannot
+   * prove which side of its own store read the session's durable artifact
+   * fell on, so the next poll pays a listing rather than trust a set that may
+   * miss the new row. The deadline covers what no local event does: a store
+   * another process writes, and a durable artifact that lands after the
+   * listing's read. A remounted service is a different store with incomparable
+   * revisions, so its listing is never reused here; the picker's rows are
+   * folded from the logs behind those revisions, so its calls keep listing per
+   * call. */
+  const LISTING_REUSE_MS = 10_000
   let sharedListing: { store: DiscoveryPersistence; snapshots: Promise<readonly SessionPersistenceSnapshot[]> } | undefined
-  const listStore = (store: DiscoveryPersistence): Promise<readonly SessionPersistenceSnapshot[]> => {
+  let settledListing: { store: DiscoveryPersistence; snapshots: readonly SessionPersistenceSnapshot[]; settledAt: number } | undefined
+  let announcements = 0
+  const listStore = (store: DiscoveryPersistence, reuse = false): Promise<readonly SessionPersistenceSnapshot[]> => {
+    // An in-flight listing is the freshest answer there is and is already
+    // paid for, so a caller that may reuse one shares it instead.
     if (sharedListing !== undefined && sharedListing.store === store) return sharedListing.snapshots
+    if (reuse) {
+      const settled = settledListing
+      if (settled !== undefined && settled.store === store && Date.now() - settled.settledAt < LISTING_REUSE_MS) {
+        return Promise.resolve(settled.snapshots)
+      }
+    }
+    const announcedBefore = announcements
     const requested = store.list({ signal: shutdown.signal })
     const shared = requested.then(
-      value => { if (sharedListing?.snapshots === shared) sharedListing = undefined; return value },
+      value => {
+        if (sharedListing?.snapshots === shared) sharedListing = undefined
+        if (announcements === announcedBefore) settledListing = { store, snapshots: value, settledAt: Date.now() }
+        return value
+      },
       error => { if (sharedListing?.snapshots === shared) sharedListing = undefined; throw error },
     )
     sharedListing = { store, snapshots: shared }
@@ -192,7 +223,10 @@ export function createSessionDiscovery(host: DiscoveryHost) {
   const list = async (method: ListMethod, params: unknown) => {
     const p = method === 'x.ai/session/list' ? paramRecord(params, method) : {}
     const store = persistence(), projectionIndex = indexFor(store)
-    const snapshots = await listStore(store)
+    // The two header-shaped answers are what a settled listing can still serve;
+    // the picker's rows are folded from the logs behind the listing's
+    // revisions, so it lists on every call.
+    const snapshots = await listStore(store, method !== 'x.ai/session/list')
     assertOpen()
     if (method === 'session/list') {
       // Bare ACP remains deliberately minimal; the pager uses the richer name.
@@ -271,6 +305,7 @@ export function createSessionDiscovery(host: DiscoveryHost) {
   const unsubscribe = host.onEvent((session, event) => {
     if (!closed && host.owns(session)) index.recordEvent(session.header.id, session.header.createdAt, event)
   })
+  const unsubscribeCreated = host.onCreated(() => { settledListing = undefined; announcements += 1 })
   return {
     inspect: (id: SessionId, { end, signal }: InspectionOptions = {}) => accepted(() => read(persistence(), id, { end, signal }, inspection(end))),
     select,
@@ -282,10 +317,11 @@ export function createSessionDiscovery(host: DiscoveryHost) {
       disposal = Promise.resolve().then(async () => {
         // A failed parent list may leave sibling/queued inspections in flight.
         while (pending.size > 0) await Promise.allSettled([...pending])
-        index = new SessionListIndex(); indexedStore = undefined; sharedListing = undefined
+        index = new SessionListIndex(); indexedStore = undefined; sharedListing = undefined; settledListing = undefined
         if (cleanupFailures.length > 0) throw new AggregateError(cleanupFailures, 'session discovery cleanup failed')
       })
       try { unsubscribe() } catch (error) { cleanupFailures.push(error) }
+      try { unsubscribeCreated() } catch (error) { cleanupFailures.push(error) }
       shutdown.abort()
       return disposal
     },

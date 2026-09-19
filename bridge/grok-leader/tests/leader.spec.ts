@@ -7223,6 +7223,7 @@ it('cold session query must not lose first prompts above the 100-entry cache', a
 it('serves two windows polling the roster in the same second from one durable listing', async () => {
   const made = await makeHarness()
   const first = await makeClient(made.socketPath), second = await makeClient(made.socketPath)
+  const clock = vi.spyOn(Date, 'now')
   let release!: () => void, listings = 0
   try {
     const stored = Array.from({ length: 3 }, (_, i) => ({
@@ -7248,12 +7249,17 @@ it('serves two windows polling the roster in the same second from one durable li
     const expected = ['roster-window-0', 'roster-window-1', 'roster-window-2']
     expect(await rows(first)).toEqual(expected)
     expect(await rows(second)).toEqual(expected)
-    // The share belongs to the callers that were waiting, not to the store:
-    // the next second's tick lists again.
+    // The settled listing then answers the same header-shaped poll for its
+    // window, so the next second's tick is served from it, not from the store.
     await second.request(2, 'x.ai/sessions/list')
+    expect(listings).toBe(1)
+    // What no local event covers — a store another process writes — is the
+    // window's deadline: the tick after it lists again.
+    clock.mockReturnValue(Date.now() + 10_001)
+    await second.request(3, 'x.ai/sessions/list')
     expect(listings).toBe(2)
   } finally {
-    release(); first.socket.destroy(); second.socket.destroy(); await made.ctx.fiber.dispose()
+    clock.mockRestore(); release(); first.socket.destroy(); second.socket.destroy(); await made.ctx.fiber.dispose()
   }
 })
 

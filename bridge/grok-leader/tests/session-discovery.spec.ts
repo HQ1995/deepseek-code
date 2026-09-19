@@ -20,7 +20,8 @@ const title = (text: string, time = 2) => event('session/title', { title: text }
 function fixture(cleanupError?: string) {
   const headers = new Map<string, SessionHeader>(), logs = new Map<string, readonly SessionEvent[]>()
   const revisions = new Map<string, string>(), owned = new Set<Session>()
-  let active = 0, peak = 0, listener!: (session: Session, event: SessionEvent) => void
+  let active = 0, peak = 0
+  let listener!: (session: Session, event: SessionEvent) => void, announced!: (session: Session) => void
   const read = vi.fn(async (id: string, offset = 0, length = Number.MAX_SAFE_INTEGER, _options?: { signal?: AbortSignal }) => ({ events: (logs.get(id) ?? []).slice(offset, offset + length), eventState: 'owned' as const }))
   const close = vi.fn(async (_id: string) => { active-- })
   const open = vi.fn(async (id: SessionId, access: string, _options?: { signal?: AbortSignal }): Promise<SessionHandle> => {
@@ -39,14 +40,15 @@ function fixture(cleanupError?: string) {
   let store: Pick<SessionPersistence, 'open' | 'list'> | undefined = { open, list }
   const query = vi.fn<SessionQueryLike['searchSessions']>(async () => ({ items: [] }))
   let engine: SessionQueryLike | undefined = { searchSessions: query }
-  const unsubscribe = vi.fn(), owns = vi.fn((session: Session) => owned.has(session))
+  const unsubscribe = vi.fn(), unsubscribeCreated = vi.fn(), owns = vi.fn((session: Session) => owned.has(session))
   const persistence = vi.fn(() => store), queryEngine = vi.fn(() => engine)
   let cache: SessionProjectionCacheLike | undefined
   const projectionCache = vi.fn(() => cache)
   const warnings: string[] = []
   const discovery = createSessionDiscovery({ persistence, query: queryEngine, owns, projectionCache,
     log: message => { warnings.push(message) },
-    onEvent: callback => { listener = callback; return unsubscribe } })
+    onEvent: callback => { listener = callback; return unsubscribe },
+    onCreated: callback => { announced = callback; return unsubscribeCreated } })
   stops.push(async () => {
     if (cleanupError === undefined) await discovery.dispose()
     else await expect(discovery.dispose()).rejects.toThrow(cleanupError)
@@ -60,8 +62,12 @@ function fixture(cleanupError?: string) {
   const picker = async (params: unknown = {}) => (await discovery.list('x.ai/session/list', params)).sessions as Array<{
     sessionId: string; cwd: string; firstPrompt: string; title: string; summary: string; updatedAt: string;
   }>
-  return { discovery, picker, add, live, emit: (session: Session, event: SessionEvent) => listener(session, event),
-    read, open, close, list, query, owns, unsubscribe, headers, logs, revisions, persistence, queryEngine,
+  const roster = async (params?: unknown) => ((await discovery.list('x.ai/sessions/list', params)) as {
+    result: { sessions: Array<Record<string, unknown>> }
+  }).result.sessions
+  return { discovery, picker, roster, add, live, emit: (session: Session, event: SessionEvent) => listener(session, event),
+    announce: (session: Session) => announced(session),
+    read, open, close, list, query, owns, unsubscribe, unsubscribeCreated, headers, logs, revisions, persistence, queryEngine,
     projectionCache, warnings, provideCache: (next: SessionProjectionCacheLike | undefined) => { cache = next },
     store: () => store!, replace: (next: typeof store) => { store = next }, queryAvailable: (available: boolean) => { engine = available ? { searchSessions: query } : undefined },
     get active() { return active }, get peak() { return peak } }
@@ -163,9 +169,75 @@ describe('owned session discovery', () => {
     await expect(roster).resolves.toMatchObject({ result: { sessions: [expect.objectContaining({ sessionId: 'a' })] } })
     await expect(legacy).resolves.toMatchObject({ sessions: [expect.objectContaining({ sessionId: 'a' })] })
     expect(f.list).toHaveBeenCalledTimes(1)
-    // The shared listing belongs to the callers that were in flight; the next
-    // caller after it settles pays its own read rather than reusing it.
-    await f.discovery.list('x.ai/sessions/list')
+    // The share belongs to the callers that were in flight; the settled
+    // listing then keeps answering both header-shaped calls for its window,
+    // and the picker behind them still lists on every call.
+    expect((await f.roster()).map(row => row.sessionId)).toEqual(['a'])
+    await expect(f.discovery.list('session/list')).resolves.toMatchObject({ sessions: [expect.objectContaining({ sessionId: 'a' })] })
+    expect(f.list).toHaveBeenCalledTimes(1)
+    expect(await f.picker()).toHaveLength(1)
+    expect(f.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps one settled listing answering the roster until its window expires', async () => {
+    const f = fixture()
+    f.add('a', '/work')
+    expect((await f.roster()).map(row => row.sessionId)).toEqual(['a'])
+    expect(f.list).toHaveBeenCalledOnce()
+    const settled = Date.now(), clock = vi.spyOn(Date, 'now').mockReturnValue(settled + 9_999)
+    try {
+      expect((await f.roster()).map(row => row.sessionId)).toEqual(['a'])
+      await expect(f.discovery.list('session/list')).resolves.toMatchObject({ sessions: [expect.objectContaining({ sessionId: 'a' })] })
+      expect(f.list).toHaveBeenCalledOnce()
+      // The deadline covers a store this process never hears about: a store
+      // another process writes is re-listed, not reused.
+      clock.mockReturnValue(settled + 10_001)
+      expect((await f.roster()).map(row => row.sessionId)).toEqual(['a'])
+      expect(f.list).toHaveBeenCalledTimes(2)
+    } finally { clock.mockRestore() }
+  })
+
+  it('ends the window when the process announces a session and reopens it from the next listing', async () => {
+    const f = fixture()
+    f.add('a', '/work')
+    expect(await f.roster()).toHaveLength(1)
+    expect(await f.roster()).toHaveLength(1)
+    expect(f.list).toHaveBeenCalledOnce()
+    // An announced session is a row the listing never carried, so the next
+    // poll must list again rather than answer without it.
+    f.add('b', '/work')
+    f.announce({ header: f.headers.get('b')! } as Session)
+    expect((await f.roster()).map(row => row.sessionId)).toEqual(['a', 'b'])
+    expect(f.list).toHaveBeenCalledTimes(2)
+    expect(await f.roster()).toHaveLength(2)
+    expect(f.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('never opens the window from a listing that started before an announcement', async () => {
+    const f = fixture(), gate = deferred()
+    f.add('a', '/work')
+    const list = f.list.getMockImplementation()!
+    f.list.mockImplementation(async options => { await gate.promise; return list(options) })
+    const inFlight = f.roster()
+    await tick()
+    f.add('b', '/work')
+    f.announce({ header: f.headers.get('b')! } as Session)
+    gate.resolve()
+    expect((await inFlight).map(row => row.sessionId)).toEqual(['a', 'b'])
+    expect(f.list).toHaveBeenCalledOnce()
+    // The listing cannot prove which side of its own store read the announced
+    // session's artifact fell on, so the next poll pays its own read.
+    expect((await f.roster()).map(row => row.sessionId)).toEqual(['a', 'b'])
+    expect(f.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('never serves a settled listing to a remounted service', async () => {
+    const f = fixture()
+    f.add('a', '/work')
+    await f.roster()
+    expect(f.list).toHaveBeenCalledOnce()
+    f.replace({ open: f.open, list: f.list })
+    expect(await f.roster()).toHaveLength(1)
     expect(f.list).toHaveBeenCalledTimes(2)
   })
 
@@ -449,16 +521,18 @@ describe('owned session discovery', () => {
 
   it('publishes one disposal before unsubscribe reentry and retains late cleanup errors', async () => {
     const f = fixture('session discovery cleanup failed'), gate = deferred(); f.add('a')
-    const unsubscribe = new Error('unsubscribe failed'), close = new Error('close failed')
+    const unsubscribe = new Error('unsubscribe failed'), createdFeed = new Error('creation unsubscribe failed'), close = new Error('close failed')
     f.read.mockImplementationOnce(async () => { await gate.promise; return { events: [], eventState: 'owned' } })
     f.close.mockRejectedValueOnce(close)
     const request = f.discovery.inspect(SessionId('a')), failed = request.catch(error => error)
     await tick()
     let reentered!: Promise<void>
     f.unsubscribe.mockImplementationOnce(() => { reentered = f.discovery.dispose(); throw unsubscribe })
-    const disposal = f.discovery.dispose(), cleanup = expect(disposal).rejects.toMatchObject({ errors: [unsubscribe, close] })
+    f.unsubscribeCreated.mockImplementationOnce(() => { throw createdFeed })
+    const disposal = f.discovery.dispose(), cleanup = expect(disposal).rejects.toMatchObject({ errors: [unsubscribe, createdFeed, close] })
     expect(reentered).toBe(disposal); expect(f.discovery.dispose()).toBe(disposal)
     gate.resolve(); await failed; await cleanup
+    expect(f.unsubscribeCreated).toHaveBeenCalledOnce()
     await expect(f.discovery.search({ query: 'x' })).rejects.toThrow('disposed')
     await expect(f.picker()).rejects.toThrow('disposed')
     expect(f.query).not.toHaveBeenCalled()
