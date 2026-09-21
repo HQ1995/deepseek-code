@@ -801,11 +801,15 @@ pub enum ConnectionError {
          requirement)"
     )]
     SandboxConfinement(&'static str),
+    #[error("{0}")]
+    IncompatibleLeader(String),
 }
 /// Handle for a connection to the leader process.
 ///
 /// Provides send/receive methods for ACP message payloads.
-/// The connection is automatically cleaned up when dropped.
+/// Call [`cancel`](Self::cancel) to unregister this client when the connection
+/// will not be kept. `into_channels` consumes the client, so this type cannot
+/// implement Drop cleanup.
 pub struct LeaderConnection {
     client: LeaderClient,
 }
@@ -855,6 +859,10 @@ impl LeaderConnection {
     /// `LeaderConnection`, not `LeaderClient` directly.
     pub fn shutting_down_reason(&self) -> watch::Receiver<Option<protocol::ShutdownReason>> {
         self.client.shutting_down_reason()
+    }
+    /// Unregister this client with the leader without consuming the handle.
+    pub fn cancel(&self) {
+        self.client.cancel();
     }
     /// Decompose this connection into raw channels.
     ///
@@ -1419,7 +1427,10 @@ fn is_connect_level_failure(error: &ConnectionError) -> bool {
 }
 /// Policy refusals that can never succeed on reconnect retry (not zombie-evictable).
 fn is_terminal_refusal(error: &ConnectionError) -> bool {
-    matches!(error, ConnectionError::SandboxConfinement(_))
+    matches!(
+        error,
+        ConnectionError::SandboxConfinement(_) | ConnectionError::IncompatibleLeader(_)
+    )
 }
 /// Evict a suspected zombie leader (holds the flock but is not connectable).
 /// SIGTERM, wait, then escalate to SIGKILL if it overran the grace window.
@@ -1533,7 +1544,8 @@ pub async fn connect_or_spawn_external(
     .await?;
     let reported = conn.registration().leader_binary_version.as_deref();
     if !external_version_matches(reported, CLIENT_LEADER_VERSION) {
-        return Err(ConnectionError::SpawnFailed(format!(
+        conn.cancel();
+        return Err(ConnectionError::IncompatibleLeader(format!(
             "external bridge reports {}, expected {}; run dscode update or select the matching profile/socket",
             reported.unwrap_or("no version"),
             CLIENT_LEADER_VERSION,
@@ -2126,6 +2138,9 @@ mod tests {
         assert!(is_terminal_refusal(&ConnectionError::SandboxConfinement(
             "strict"
         )));
+        assert!(is_terminal_refusal(&ConnectionError::IncompatibleLeader(
+            "external bridge reports 0.0.0, expected 1.0.0".into()
+        )));
         assert!(!is_terminal_refusal(&ConnectionError::Timeout));
         assert!(!is_terminal_refusal(&ConnectionError::SpawnFailed(
             "boom".into()
@@ -2489,10 +2504,10 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(result, Err(ConnectionError::SpawnFailed(message)) if message.contains("external bridge reports"))
+            matches!(result, Err(ConnectionError::IncompatibleLeader(message)) if message.contains("external bridge reports"))
         );
-        // The fake holds its first client until cancellation; probe the
-        // listener without waiting for a second protocol registration.
+        // cancel() unregisters the mismatched client; the fake still holds
+        // its listener. Probe without waiting for a second registration.
         let probe = transport::LeaderStream::connect(&socket).await;
         assert!(
             probe.is_ok(),

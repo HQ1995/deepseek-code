@@ -320,7 +320,8 @@ pub async fn connect_via_leader(
     )
     .await
     .map_err(|e| match &e {
-        xai_grok_shell::leader::ConnectionError::SpawnFailed(_) => anyhow::anyhow!(
+        xai_grok_shell::leader::ConnectionError::SpawnFailed(_)
+        | xai_grok_shell::leader::ConnectionError::IncompatibleLeader(_) => anyhow::anyhow!(
             "{e}. dsh leader log: {}",
             crate::dsh_leader::leader_log_path().display()
         ),

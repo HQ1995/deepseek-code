@@ -99,14 +99,17 @@ after entering the namespace to handle older util-linux launchers.
   spawns "dsh --profile dscode" with DSCODE_SOCKET /
   DSH_TELEMETRY_DISABLED=1, logs to /tmp/dscode.log, and records the PID in the
   sibling .lock. pager-bin main.rs synthesizes --leader/--leader-socket/
-  --sandbox off; explicit --sandbox restrictions and --no-leader fail closed.
-  The user's auto-update opt-in/out is preserved. Host NUMA binding is applied
-  by the caller, not by this portable launcher. acp::connect_via_leader and the
-  LeaderReconnector call the new xai-grok-shell connect_or_spawn_external
-  (connect-first adoption of a live leader, flock-serialized single spawner,
-  one ~30s wait that covers a cold node boot, failed spawns are killed) so
-  sessions spawned by the old shell leader on the same socket
-  are still adopted. scripts/install.sh links ~/.local/bin/dscode to the
+  --sandbox off for interactive launches and `dscode dashboard`; explicit
+  --sandbox restrictions and --no-leader fail closed, including
+  `--no-leader dashboard`. The user's auto-update opt-in/out is preserved.
+  Host NUMA binding is applied by the caller, not by this portable launcher.
+  acp::connect_via_leader and the LeaderReconnector call the new
+  xai-grok-shell connect_or_spawn_external (connect-first adoption of a live
+  leader, flock-serialized single spawner, one ~30s wait that covers a cold
+  node boot, failed spawns are killed) so sessions spawned by the old shell
+  leader on the same socket are still adopted. A binary-version mismatch is
+  `IncompatibleLeader` (terminal, not retried) and cancels the registered
+  client before returning; generic spawn failures stay retryable. scripts/install.sh links ~/.local/bin/dscode to the
   stable profile-owned JS bootstrap; historical direct-binary links are migrated.
   The bootstrap survives interrupted directory swaps, recovers the durable
   update journal under the profile lock, then loads the installed launcher.

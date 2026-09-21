@@ -2217,7 +2217,9 @@ fn main() {
 }
 fn configure_dsh_launch(args: &mut PagerArgs) -> Result<()> {
     // Preserve the user's update preference when selecting the DSH backend.
-    if args.command.is_none() {
+    // Dashboard is a session-producing TUI launch: it still needs the DSH
+    // leader, unlike standalone subcommands (login, completions, wrap).
+    if args.command.is_none() || matches!(args.command, Some(Command::Dashboard)) {
         if args.no_leader {
             anyhow::bail!("dscode requires the DSH backend; --no-leader is unsupported");
         }
@@ -3439,16 +3441,17 @@ mod tests {
         assert_eq!(confined.sandbox.as_deref(), Some("restricted"));
     }
     use clap::Parser as _;
-    /// `grok dashboard` flags the startup hook without forcing leader mode —
-    /// the dashboard is independent of leader mode, so the launch keeps
-    /// whatever leader setting the user (or config) chose.
+    /// `dscode dashboard` is a session-producing launch: it still synthesizes
+    /// the DSH leader, then the dashboard soft-subcommand is consumed so the
+    /// interactive path opens the roster.
     #[serial_test::serial(GROK_AGENT_DASHBOARD)]
     #[test]
     fn dashboard_subcommand_flags_startup_without_forcing_leader() {
-        let mut args = PagerArgs::try_parse_from(["grok", "dashboard"]).unwrap();
+        let mut args = PagerArgs::try_parse_from(["dscode", "dashboard"]).unwrap();
         assert!(!args.leader, "fixture: no explicit --leader");
+        configure_dsh_launch(&mut args).unwrap();
         flag_dashboard_at_startup_if_requested(&mut args).unwrap();
-        assert!(!args.leader, "dashboard must NOT force leader mode");
+        assert!(args.leader, "dashboard must synthesize the DSH leader");
         assert!(
             args.command.is_none(),
             "soft subcommand must be consumed so the interactive path runs",
@@ -3460,27 +3463,36 @@ mod tests {
         );
         unsafe { std::env::remove_var("GROK_OPEN_DASHBOARD_AT_STARTUP") };
     }
-    /// `grok dashboard --no-leader` is allowed — the dashboard does not
-    /// require a leader, so the combination launches into the dashboard in
-    /// non-leader mode.
+    /// `dscode --no-leader dashboard` fails closed: dashboard still needs DSH.
     #[serial_test::serial(GROK_AGENT_DASHBOARD)]
     #[test]
     fn dashboard_subcommand_allows_no_leader() {
-        let mut args = PagerArgs::try_parse_from(["grok", "--no-leader", "dashboard"]).unwrap();
-        flag_dashboard_at_startup_if_requested(&mut args)
-            .expect("--no-leader + dashboard must be allowed");
-        assert!(args.no_leader, "--no-leader must be preserved");
-        assert!(!args.leader, "dashboard must not force leader mode");
+        let mut args = PagerArgs::try_parse_from(["dscode", "--no-leader", "dashboard"]).unwrap();
+        let err =
+            configure_dsh_launch(&mut args).expect_err("--no-leader dashboard must fail closed");
         assert!(
-            args.command.is_none(),
-            "soft subcommand must be consumed so the interactive path runs",
+            err.to_string().contains("--no-leader is unsupported"),
+            "got: {err}"
         );
-        assert_eq!(
-            std::env::var("GROK_OPEN_DASHBOARD_AT_STARTUP").as_deref(),
-            Ok("1"),
-            "startup hook flag must be set",
+        assert!(args.no_leader, "--no-leader must be preserved");
+        assert!(
+            matches!(args.command, Some(Command::Dashboard)),
+            "failure path must not consume the subcommand",
         );
-        unsafe { std::env::remove_var("GROK_OPEN_DASHBOARD_AT_STARTUP") };
+        assert!(
+            std::env::var("GROK_OPEN_DASHBOARD_AT_STARTUP").is_err(),
+            "failure path must not flag the startup hook",
+        );
+    }
+    #[test]
+    fn dashboard_subcommand_forces_dsh_leader() {
+        let mut args = PagerArgs::try_parse_from(["dscode", "dashboard"]).unwrap();
+        assert!(matches!(args.command, Some(Command::Dashboard)));
+        configure_dsh_launch(&mut args).unwrap();
+        assert!(args.leader);
+        assert!(args.leader_socket.is_some());
+        assert_eq!(args.sandbox.as_deref(), Some("off"));
+        assert!(matches!(args.command, Some(Command::Dashboard)));
     }
     /// `GROK_AGENT_DASHBOARD=0` disables the feature — the subcommand
     /// must error visibly before the TUI starts.
