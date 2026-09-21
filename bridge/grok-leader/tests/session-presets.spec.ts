@@ -152,6 +152,16 @@ describe('session preset ownership', () => {
     await expect(f.presets.command(record, '/preset standard')).rejects.toThrow('close and reload')
   })
 
+  it('rolls back a live switch when flush fails so composition stays on the previous preset', async () => {
+    const f = fixture(), { record, source, ctx, events } = f.add()
+    f.flush.mockRejectedValueOnce(new Error('flush failed'))
+    await expect(f.presets.prepare({ kind: 'load', live: record, source, meta: { agentPreset: 'minimal' } })).rejects.toThrow('flush failed')
+    expect(f.choices.get(ctx)).toBe('standard')
+    expect(f.order).toEqual(['recompose:minimal', 'append:minimal', 'recompose:standard'])
+    expect(events).toHaveLength(1)
+    f.presets.assertReady(record)
+  })
+
   it('retains and flushes the committed live choice when remembering the default fails', async () => {
     const f = fixture(), { record, source, events, ctx } = f.add()
     f.settings.mutate.mockRejectedValueOnce(new Error('settings unavailable'))

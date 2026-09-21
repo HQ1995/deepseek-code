@@ -186,6 +186,9 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
       assertLive(record)
       if (busy(record) || host.history(record).locked) throw invalidParams(lockedMessage)
       record.agent.session.append('agent-preset/selected', { agentPreset: target })
+      // Flush is part of the same commit as append: a durable-write failure
+      // must restore the previous composition, like an append failure.
+      await host.flush(record.agent.session)
     } catch (error) {
       if (previous !== undefined) {
         try { await roster.recompose(record.agent.ctx, previous) }
@@ -196,9 +199,6 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
       } else stateOf(record).inconsistent = true
       throw error
     }
-    // Once appended, the choice is committed even if the default write fails.
-    // Flush before starting that optional write and before native retirement.
-    await host.flush(record.agent.session)
   }
   const prepare = async (request: Preparation<S>): Promise<PreparedPreset<S>> => {
     const roster = host.roster()
