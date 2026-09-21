@@ -331,6 +331,23 @@ describe('session lifecycle ownership', () => {
     await expect(f.lifecycle.fork(1, { sourceSessionId: 'root' })).rejects.toThrow('turn is open')
   })
 
+  it('rejects a relative fork cwd instead of inheriting the source workspace', async () => {
+    const f = fixture()
+    await f.add()
+    await expect(f.lifecycle.fork(1, { sourceSessionId: 'root', newCwd: 'relative', newSessionId: 'fork' })).rejects.toThrow('absolute path')
+    expect(f.agents.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a non-integer rewind index instead of copying the full source history', async () => {
+    const f = fixture(), source = await f.add()
+    source.agent.session.append('turn/start', { turn: 0 })
+    source.agent.session.append('user/message', { content: [{ type: 'text', text: 'first' }], source: { kind: 'user' } })
+    source.agent.session.append('turn/end', { turn: 0, reason: { kind: 'completed' } })
+    await expect(f.lifecycle.fork(1, { sourceSessionId: 'root', targetPromptIndex: 1.5, newSessionId: 'fork' })).rejects.toThrow('non-negative integer')
+    await expect(f.lifecycle.fork(1, { sourceSessionId: 'root', targetPromptIndex: '0', newSessionId: 'fork' })).rejects.toThrow('non-negative integer')
+    expect(f.agents.create).toHaveBeenCalledTimes(1)
+  })
+
   it('reloads from a flushed storage snapshot without any live transcript reads', async () => {
     const f = fixture(), source = await f.add()
     source.agent.session.append('model/selection', { provider: 'saved', model: 'choice' })

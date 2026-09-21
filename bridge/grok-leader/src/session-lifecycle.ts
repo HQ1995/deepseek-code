@@ -308,11 +308,13 @@ export function createSessionLifecycle(host: LifecycleHost) {
       }
     }
     let rewindPromptText: string | undefined
-    const targetPromptIndex = typeof p.targetPromptIndex === 'number' && Number.isInteger(p.targetPromptIndex)
-      ? p.targetPromptIndex
-      : undefined
+    if (p.targetPromptIndex !== undefined) {
+      if (typeof p.targetPromptIndex !== 'number' || !Number.isInteger(p.targetPromptIndex) || p.targetPromptIndex < 0) {
+        throw invalidParams('targetPromptIndex must be a non-negative integer')
+      }
+    }
+    const targetPromptIndex = typeof p.targetPromptIndex === 'number' ? p.targetPromptIndex : undefined
     if (targetPromptIndex !== undefined) {
-      if (targetPromptIndex < 0) throw invalidParams('targetPromptIndex must be non-negative')
       const promptEvents = events
         .map((event, index) => ({ event, index }))
         .filter(({ event }) => event.type === 'user/message'
@@ -330,7 +332,10 @@ export function createSessionLifecycle(host: LifecycleHost) {
       }
       events = events.slice(0, boundary)
     }
-    const newCwd = typeof p.newCwd === 'string' && isAbsolute(p.newCwd) ? p.newCwd : sourceHeader.cwd
+    if (p.newCwd !== undefined && (typeof p.newCwd !== 'string' || !isAbsolute(p.newCwd))) {
+      throw invalidParams('newCwd must be an absolute path')
+    }
+    const newCwd = typeof p.newCwd === 'string' ? p.newCwd : sourceHeader.cwd
     if (typeof newCwd !== 'string' || !isAbsolute(newCwd)) throw invalidParams('newCwd must be an absolute path')
     const suppliedId = typeof p.newSessionId === 'string' && p.newSessionId.length > 0 ? p.newSessionId : undefined
     const sessionId = suppliedId === undefined ? SessionId(randomUUID()) : SessionId(suppliedId)
