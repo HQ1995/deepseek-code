@@ -20,12 +20,27 @@ for arg in "$@"; do
   esac
 done
 if [[ $# -gt 0 ]]; then release_args=("$@"); local_install=0; fi
-if [[ -n "${DSC_CHANNEL:-}" ]]; then
-  release_args+=("--$DSC_CHANNEL"); local_install=0
+has_channel_flag=0
+has_version_flag=0
+if ((${#release_args[@]} > 0)); then
+  for arg in "${release_args[@]}"; do
+    case "$arg" in
+      --stable|--beta|--alpha|--enterprise) has_channel_flag=1 ;;
+      --version|--version=*) has_version_flag=1 ;;
+    esac
+  done
+fi
+# Ambient DSC_CHANNEL only fills a lane on an already-remote install. CLI
+# flags win; a no-arg run stays on checkout VERSION even when the env is set.
+if [[ -n "${DSC_CHANNEL:-}" && "$local_install" == 0 && "$has_channel_flag" == 0 ]]; then
+  release_args+=("--$DSC_CHANNEL")
 fi
 if [[ -n "${DEEPSEEK_CODE_TUI_RELEASE:-}" ]]; then
   echo "note: DEEPSEEK_CODE_TUI_RELEASE now selects the entire exact release tuple, not only the TUI" >&2
-  release_args+=(--version "$DEEPSEEK_CODE_TUI_RELEASE"); local_install=0
+  if [[ "$has_version_flag" == 0 ]]; then
+    release_args+=(--version "$DEEPSEEK_CODE_TUI_RELEASE")
+    local_install=0
+  fi
 fi
 if ! command -v node >/dev/null 2>&1 || ! node -e 'const a=process.versions.node.split(".").map(Number); process.exit(a[0]>22 || (a[0]===22 && (a[1]>19 || (a[1]===19 && a[2]>=0))) ? 0 : 1)'; then
   echo "error: node >=22.19.0 is required; install it first" >&2; exit 1
