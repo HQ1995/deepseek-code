@@ -85,7 +85,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       throw new AggregateError(failures, 'native child subscription setup failed')
     }
   }
-  type ChildRow = { kind: 'child' | 'diagnostic'; id: string; mode?: 'continuable' | 'one-shot'; label?: string; parentId?: string }
+  type ChildRow = { kind: 'child' | 'diagnostic'; id: string; mode?: 'continuable' | 'one-shot'; label?: string; parentId?: string; activity?: 'running' | 'inactive' }
   const liveWorkflows = new Map<string, LiveWorkflow>()
   const emitWorkflows = (record: S, replay = false, runId?: string): void => {
     if (!isLive(record)) return
@@ -113,7 +113,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     deferredWorkflowEnds.add(timer)
   })
   type SubagentsLike = {
-    listDescendants(root: SessionId): Promise<ChildRow[]>
+    listDescendants(root: SessionId, signal?: AbortSignal): Promise<ChildRow[]>
     interrupt(id: SessionId, authority: { kind: 'ancestor'; agent: Agent }): void
     prompt?: SubagentRuntime['prompt']
   }
@@ -134,16 +134,18 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
   const turnWatches = new Map<Agent['session'], Set<{ latest?: SessionEvent<'turn/start'> }>>()
   const childTerminalStatus = (kind: string): string => kind === 'completed' || kind === 'max-tokens' ? 'completed'
     : kind === 'aborted' || kind === 'interrupted' ? 'cancelled' : 'failed'
-  const childOverview = (id: string, events: readonly SessionEvent[], status?: Agent['status']): Pick<ChildState, 'attemptId' | 'status'> => {
+  const childOverview = (id: string, events: readonly SessionEvent[], status?: Agent['status'], activity?: ChildRow['activity']): Pick<ChildState, 'attemptId' | 'status'> => {
     const start = events.findLast(event => event.type === 'turn/start')
     const end = events.findLast(event => event.type === 'turn/end')
     return {
       attemptId: id + ':' + String(start?.type === 'turn/start' ? start.data.turn : 'pending'),
-      status: status === 'running' ? 'running'
+      status: status === 'running' || activity === 'running' ? 'running'
         : end?.type === 'turn/end' && (start?.type !== 'turn/start' || end.data.turn === start.data.turn)
           ? childTerminalStatus(end.data.reason.kind) : 'cancelled',
     }
   }
+  const listChildRows = (service: SubagentsLike, record: S, scope: SessionOperation) =>
+    service.listDescendants(record.agent.session.id, AbortSignal.any([scope.signal, shutdown.signal]))
   const childLogs = new WeakMap<S, Map<string, { source?: object; index: ChildHistoryIndex; tail: Promise<unknown> }>>()
   const withChildLog = async <T>(record: S, id: string, scope: SessionOperation,
     action: (index: ChildHistoryIndex, meta: SessionInspection['meta'], read: ChildEventReader, status?: Agent['status']) => Promise<T> | T,
@@ -242,14 +244,14 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
   const emitChildrenForRecord = async (record: S, scope: SessionOperation): Promise<void> => {
     const service = subagentsService(record)
     if (service === undefined) return
-    const rows = await service.listDescendants(record.agent.session.id)
+    const rows = await listChildRows(service, record, scope)
     if (!isLive(record)) return
     let known = childStates.get(record)
     if (known === undefined) { known = new Map(); childStates.set(record, known) }
     let discoveredWorkflowChild = false
     for (const row of rows) {
       if (row.kind !== 'child') continue
-      const overview = await withChildLog(record, row.id, scope, (index, _meta, _read, status) => childOverview(row.id, index.overviewEvents, status))
+      const overview = await withChildLog(record, row.id, scope, (index, _meta, _read, status) => childOverview(row.id, index.overviewEvents, status, row.activity))
       if (!isLive(record)) return
       const discovery = workflowChildDiscovery.get(record)
       if (discovery?.ids.delete(row.id)) {
@@ -334,7 +336,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     const record = owned(clientId, sessionId)
     if (record === undefined) throw invalidParams('unknown session: ' + sessionId)
     return record.work.read(async scope => {
-      const rows = await subagentsService(record)?.listDescendants(record.agent.session.id)
+      const rows = await subagentsService(record)?.listDescendants(record.agent.session.id, AbortSignal.any([scope.signal, shutdown.signal]))
       if (!isLive(record)) throw invalidParams('session closed')
       if (!rows?.some(row => row.kind === 'child' && row.id === p.childSessionId)) throw invalidParams('unknown subagent')
       const after = p.after ?? 0
@@ -382,7 +384,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       const result = (cancelled: boolean, kind: 'cancelled' | 'already_finished' | 'not_found', status?: string): unknown => ({ result: { subagentId, cancelled, outcome: { kind, ...status === undefined ? {} : { status } } } })
       const service = subagentsService(record)
       if (service === undefined) return result(false, 'not_found')
-      const rows = await service.listDescendants(record.agent.session.id)
+      const rows = await listChildRows(service, record, scope)
       if (!isLive(record) || record.clientId !== clientId) throw invalidParams('unknown session: ' + p.sessionId)
       scope.assertActive()
       const row = rows.find(entry => entry.id === subagentId && entry.kind === 'child')
@@ -395,7 +397,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       turnWatches.set(child.session, watches); watches.add(watch)
       let overview: Pick<ChildState, 'attemptId' | 'status'>
       try {
-        overview = await withChildLog(record, subagentId, scope, (index, _meta, _read, status) => childOverview(subagentId, index.overviewEvents, status))
+        overview = await withChildLog(record, subagentId, scope, (index, _meta, _read, status) => childOverview(subagentId, index.overviewEvents, status, row.activity))
       } finally {
         watches.delete(watch)
         if (watches.size === 0) turnWatches.delete(child.session)
@@ -448,7 +450,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     return record.work.run(async scope => {
       const service = subagentsService(record)
       if (service === undefined) throw invalidParams('Subagents unavailable')
-      const rows = (await service.listDescendants(record.agent.session.id)).filter(row => row.kind === 'child' && row.mode === 'continuable')
+      const rows = (await listChildRows(service, record, scope)).filter(row => row.kind === 'child' && row.mode === 'continuable')
       if (owned(clientId, record.agent.session.id) !== record) throw invalidParams('session closed')
       scope.assertActive()
       if (p.childId === undefined || p.childId === null) {
@@ -498,7 +500,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       const success = (text: string) => ({ result: { kind: 'success' as const, text } })
       const service = subagentsService(record)
       if (service === undefined) throw new Error('Subagents are unavailable in this preset.')
-      const rows = (await service.listDescendants(record.agent.session.id)).filter(row => row.kind === 'child')
+      const rows = (await listChildRows(service, record, scope)).filter(row => row.kind === 'child')
       if (owned(clientId, record.agent.session.id) !== record) throw new Error('The owning session was closed.')
       scope.assertActive()
       if (verb === 'list' && selector === undefined) {

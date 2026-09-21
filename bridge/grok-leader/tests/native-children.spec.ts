@@ -7,7 +7,7 @@ import { createNativeChildren } from '../src/native-children.ts'
 import { createSessionWork } from '../src/session-work.ts'
 import { workflowProjection } from '../src/workflows.ts'
 
-type Row = { kind: 'child' | 'diagnostic'; id: string; mode: 'continuable' | 'one-shot'; label?: string; parentId?: string }
+type Row = { kind: 'child' | 'diagnostic'; id: string; mode: 'continuable' | 'one-shot'; label?: string; parentId?: string; activity?: 'running' | 'inactive' }
 function deferred<T>() {
   let resolve!: (value: T) => void
   const promise = new Promise<T>(yes => { resolve = yes })
@@ -61,7 +61,7 @@ function fixture() {
     return event
   }
   const service = {
-    listDescendants: vi.fn(async (id: SessionId): Promise<Row[]> => rows.get(id) ?? []),
+    listDescendants: vi.fn(async (id: SessionId, _signal?: AbortSignal): Promise<Row[]> => rows.get(id) ?? []),
     interrupt: vi.fn(),
     prompt: vi.fn(async (_request: unknown, _signal: AbortSignal) => ({ messageId: 'accepted' })),
   }
@@ -113,6 +113,34 @@ describe('native child/workflow ownership', () => {
     await f.children.snapshot(f.root)
     expect(f.notes().filter(note => note.sessionUpdate === 'subagent_finished').map(note => note.status)).toEqual(['completed'])
     expect(f.notes().filter(note => note.sessionUpdate === 'subagent_spawned')).toHaveLength(1)
+    await f.children.dispose()
+  })
+
+  it('cancels descendant listing with the session and host shutdown signals', async () => {
+    const f = fixture(), listing = deferred<Row[]>()
+    let seen: AbortSignal | undefined
+    f.service.listDescendants.mockImplementationOnce(async (_id, signal) => {
+      seen = signal
+      return listing.promise
+    })
+    const refresh = f.children.snapshot(f.root)
+    await Promise.resolve()
+    expect(seen).toBeInstanceOf(AbortSignal)
+    expect(seen!.aborted).toBe(false)
+    const closing = f.children.dispose()
+    await Promise.resolve()
+    expect(seen!.aborted).toBe(true)
+    listing.resolve([])
+    await Promise.all([refresh, closing])
+  })
+
+  it('keeps a descendant running from native activity when no live agent exists', async () => {
+    const f = fixture()
+    f.rows.get('root')!.push({ kind: 'child', id: 'orphan', mode: 'continuable', label: 'orphan', activity: 'running' })
+    f.logs.set('orphan', [])
+    await f.children.snapshot(f.root)
+    expect(f.notes().filter(note => note.sessionUpdate === 'subagent_spawned')).toHaveLength(1)
+    expect(f.notes().filter(note => note.sessionUpdate === 'subagent_finished')).toEqual([])
     await f.children.dispose()
   })
 
