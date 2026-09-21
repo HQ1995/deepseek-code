@@ -3777,7 +3777,7 @@ describe('grok leader over a unix socket', () => {
           expect(provider).toBe('spawn')
           expect(request.prompt).toEqual([{ type: 'text', text: 'check this independently' }])
           return {
-            result: Promise.resolve({ output: [{ type: 'text', text: 'independent answer' }], stopReason: 'end_turn' }),
+            result: Promise.resolve({ output: [{ type: 'text', text: 'independent answer' }], stopReason: 'completed' }),
             dispose: async () => { subagentDisposed = true },
           }
         },

@@ -141,7 +141,7 @@ describe('architecture ownership and dependency gate', () => {
     ['native-session-status', ['acp', 'prompt-content', 'projection', 'session-output', 'session-work']],
     ['native-interactions', ['acp', 'leader-transport']],
     ['native-execution', ['acp', 'package-location', 'session-work']],
-    ['native-asides', ['acp', 'session-work']],
+    ['native-asides', ['acp', 'projection', 'session-work']],
     ['native-capabilities', []],
     ['profile-plugins', ['package-location', 'acp']],
   ] as const)('keeps the %s implementation behind its declared dependencies', (name, allowed) => {

@@ -2,6 +2,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentRun, SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { internalError, invalidParams, paramRecord } from './acp.ts'
+import { textBlocks } from './projection.ts'
 import type { SessionOperation, SessionWork } from './session-work.ts'
 
 export type NativeAsideRuntime = Pick<SubagentRuntime, 'start'> & Partial<Pick<SubagentRuntime, 'list'>>
@@ -66,7 +67,12 @@ export function createNativeAsides<S extends AsideSession>(host: AsideHost<S>) {
       const result = await Promise.race([outcome, interrupted])
       if (result !== undefined && 'error' in result) throw result.error
       active(record, scope)
-      if (result !== undefined) answer = (result.value.output ?? []).map(block => 'text' in block ? block.text : '').join('').trim()
+      if (result !== undefined) {
+        if (result.value.stopReason !== 'completed') {
+          throw internalError('/btw did not complete (' + result.value.stopReason + ')')
+        }
+        answer = textBlocks(result.value.output).map(block => block.text).join('').trim()
+      }
     } catch (error) { failures.push(error) }
     finally { cancellation.removeEventListener('abort', onCancel) }
     try { await release() } catch (error) { failures.push(error) }

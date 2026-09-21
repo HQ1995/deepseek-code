@@ -63,11 +63,20 @@ describe('one-shot native aside ownership', () => {
   it('joins native text blocks and preserves the empty-answer fallback', async () => {
     const f = fixture()
     f.runtime.start.mockResolvedValueOnce({ ...f.run, result: Promise.resolve({ ...answer(), output: [
-      { type: 'text', text: ' first' }, { type: 'text', text: 'second ' },
+      { type: 'text', text: ' first' }, { type: 'reasoning', text: 'hidden' }, { type: 'text', text: 'second ' },
     ] }) })
     await expect(f.btw()).resolves.toEqual({ result: { answer: 'firstsecond' } })
     f.runtime.start.mockResolvedValueOnce({ ...f.run, result: Promise.resolve(answer('  ')) })
     await expect(f.btw()).resolves.toEqual({ result: { answer: '(no answer)' } })
+  })
+
+  it('does not return partial output when the aside does not complete', async () => {
+    const f = fixture()
+    f.runtime.start.mockResolvedValueOnce({ ...f.run, result: Promise.resolve({
+      output: [{ type: 'text', text: 'partial' }], stopReason: 'aborted' as const,
+    }) })
+    await expect(f.btw()).rejects.toThrow('/btw did not complete (aborted)')
+    expect(f.run.dispose).toHaveBeenCalledOnce()
   })
 
   it.each(['capability', 'runtime', 'providers'])('does not start after cancellation reentered from the %s getter', async getter => {
