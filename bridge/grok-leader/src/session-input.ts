@@ -137,6 +137,11 @@ export function createSessionInput<S extends InputSession>(host: InputHost<S>) {
       const record = host.owned(clientId, typeof p?.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
       if (record === undefined) return
       const failures: unknown[] = []
+      // session/cancel must abort composer work that has not reached the queue
+      // yet; cancelPrompt already does this for a targeted promptId.
+      for (const request of requests.get(record)?.values() ?? []) {
+        if (!request.queued) request.controller.abort()
+      }
       for (const cancel of [() => host.goal.pauseGoal(record), () => record.queue.cancel(),
         () => host.cancelHuman(clientId, record.agent.session.id), () => host.goal.refresh(record)]) {
         try { cancel() } catch (error) { failures.push(error) }

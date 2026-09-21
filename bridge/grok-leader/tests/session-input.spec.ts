@@ -69,6 +69,18 @@ describe('session input routing', () => {
     gate.resolve(undefined); await request
   })
 
+  it('aborts unqueued command dispatch on session cancel before the queue is involved', async () => {
+    const f = fixture(), gate = deferred<undefined>()
+    f.host.commands.execute.mockReturnValueOnce(gate.promise)
+    const request = f.prompt('/unknown')
+    const signal = f.host.commands.execute.mock.calls[0]![3]!
+    f.input.cancel(1, { sessionId: 'one' })
+    expect(signal.aborted).toBe(true)
+    gate.resolve(undefined)
+    await expect(request).resolves.toMatchObject({ stopReason: 'cancelled', _meta: { promptId: 'request' } })
+    expect(f.followup).not.toHaveBeenCalled()
+  })
+
   it('cancels asynchronous command dispatch before its unhandled fallback reaches the queue', async () => {
     const f = fixture(), gate = deferred<undefined>()
     f.host.commands.execute.mockReturnValueOnce(gate.promise)
