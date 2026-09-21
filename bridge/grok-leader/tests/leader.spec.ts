@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { createAssistantMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import * as McpClient from '@deepseek-ai/dsh-mcp-client'
 import type {} from '@deepseek-ai/dsh-attachment'
 import { SessionId, SessionLogOffset, SessionSeq, type SessionEvent, type UserMessage } from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
@@ -357,6 +358,8 @@ interface LeaderHarness {
   registry: MockRegistry
   persistence: ReturnType<typeof makeMockPersistence>
   presets: ReturnType<typeof makeMockPresets> | undefined
+  /** Stubbed `dsh-mcp-client` fibers backing `x.ai/mcp/list`; restored by teardown. */
+  mcpFibers: { mockRestore(): void } | undefined
 }
 
 interface HarnessOptions {
@@ -381,6 +384,8 @@ interface HarnessOptions {
   sessionTitle?: unknown
   sessionQuery?: unknown
   sessionProjectionCache?: unknown
+  /** MCP servers the stub host reports as mounted by the mcp-client plugin. */
+  mcpServers?: Array<{ serverName: string; transport?: string }>
   combineQueuedPrompts?: boolean
   followUpBehavior?: 'queue' | 'steer'
   idleExitMs?: number
@@ -554,6 +559,14 @@ async function makeHarness(
   ctx.provide('agentDefaultModel', mockDefaultModel as unknown as Context['agentDefaultModel'])
   ctx.provide('appExit', mockAppExit.exit)
   const socketPath = resolve('/tmp', 'dgl-' + String(process.pid) + '-' + randomUUID().slice(0, 12) + '.sock')
+  // The bridge lists MCP servers from the mcp-client fibers that `session/new`
+  // mounts, so a stub host with only a tool catalog must model that mount.
+  const mcpFibers = options.mcpServers === undefined ? undefined : (() => {
+    const get = ctx.registry.get.bind(ctx.registry)
+    return vi.spyOn(ctx.registry, 'get').mockImplementation(plugin => plugin === McpClient
+      ? { fibers: options.mcpServers!.map(server => ({ ctx, config: { ...server } })) } as never
+      : get(plugin))
+  })()
   let pluginCtx: Context | undefined
   await ctx.plugin({
     name: 'grok-leader-test',
@@ -563,7 +576,7 @@ async function makeHarness(
       GrokLeader.apply(inner, { socketPath, ...options.model === undefined ? {} : { model: options.model }, ...options.combineQueuedPrompts === undefined ? {} : { combineQueuedPrompts: options.combineQueuedPrompts }, ...options.followUpBehavior === undefined ? {} : { followUpBehavior: options.followUpBehavior }, ...options.idleExitMs === undefined ? {} : { idleExitMs: options.idleExitMs } })
     },
   })
-  return { ctx, pluginCtx: pluginCtx!, socketPath, registry, persistence, presets }
+  return { ctx, pluginCtx: pluginCtx!, socketPath, registry, persistence, presets, mcpFibers }
 }
 
 const register = (client: ClientHandle): void => {
@@ -701,6 +714,7 @@ describe('grok leader over a unix socket', () => {
 
   afterEach(async () => {
     client?.socket.destroy()
+    harness?.mcpFibers?.mockRestore()
     await harness?.ctx.fiber.dispose()
     harness = undefined
     client = undefined
@@ -3748,6 +3762,7 @@ describe('grok leader over a unix socket', () => {
     let subagentDisposed = false
     const { registry, client: c } = await start({
       presets: true,
+      mcpServers: [{ serverName: 'github', transport: 'stdio' }, { serverName: 'filesystem', transport: 'streamable-http' }],
       planMode: { set: (_agent: unknown, active: boolean) => { planStates.push(active) } },
       sessionTitle: {
         rename: (_session: unknown, title: string) => { renamed.push(title) },

@@ -30,6 +30,30 @@ describe('ACP MCP adapter', () => {
     } finally { spy.mockRestore(); await ctx.fiber.dispose() }
   })
 
+  it('attributes tools to the longest matching fiber name and does not invent leftover servers', async () => {
+    const ctx = new Context()
+    const a = createScope(ctx, {})
+    ctx.provide('tools', { schemas: () => [
+      { name: 'mcp__team__tools__list', description: 'List' },
+      { name: 'mcp__unknown__echo', description: 'Echo' },
+    ] } as never)
+    const get = ctx.registry.get.bind(ctx.registry)
+    const spy = vi.spyOn(ctx.registry, 'get').mockImplementation(plugin => plugin === McpClient ? {
+      fibers: [
+        { ctx: a.ctx, config: { serverName: 'team', transport: 'stdio' } },
+        { ctx: a.ctx, config: { serverName: 'team__tools', transport: 'stdio' } },
+      ],
+    } as never : get(plugin))
+    try {
+      const listed = await listMcpServers(ctx, { ctx: a.ctx } as Agent)
+      expect(listed.servers).toMatchObject([
+        { name: 'team', session: { tools: [] } },
+        { name: 'team__tools', session: { tools: [{ name: 'list' }] } },
+      ])
+      expect(listed.servers.map(server => server.name)).toEqual(['team', 'team__tools'])
+    } finally { spy.mockRestore(); await ctx.fiber.dispose() }
+  })
+
   it('maps stdio and Streamable HTTP servers and mounts both', async () => {
     const configs = await resolveAcpMcpConfigs([
       {

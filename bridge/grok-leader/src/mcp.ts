@@ -94,12 +94,21 @@ export async function listMcpServers(ctx: Context, agent?: Agent): Promise<{ ser
   }
   const tools = activeCtx.get('tools') as { schemas(owner?: Agent): Array<{ name: string; description?: string }> } | undefined
   for (const tool of tools?.schemas(agent) ?? []) {
-    const match = /^mcp__([A-Za-z0-9_-]+)__(.+)$/.exec(tool.name)
-    if (match === null) continue
-    const name = match[1]!
-    let server = servers.get(name)
-    if (server === undefined) { server = { tools: [] }; servers.set(name, server) }
-    server.tools.push({ name: match[2]!, ...typeof tool.description === 'string' ? { description: tool.description } : {} })
+    if (!tool.name.startsWith('mcp__')) continue
+    const rest = tool.name.slice('mcp__'.length)
+    let matched: string | undefined, toolName: string | undefined
+    for (const serverName of servers.keys()) {
+      const prefix = serverName + '__'
+      if (!rest.startsWith(prefix)) continue
+      const remainder = rest.slice(prefix.length)
+      if (remainder.length === 0) continue
+      if (matched === undefined || serverName.length > matched.length) {
+        matched = serverName
+        toolName = remainder
+      }
+    }
+    if (matched === undefined || toolName === undefined) continue
+    servers.get(matched)!.tools.push({ name: toolName, ...typeof tool.description === 'string' ? { description: tool.description } : {} })
   }
   return { servers: [...servers].map(([name, server]) => ({
     name, displayName: name, source: 'plugin', sourceLabel: 'plugin: dsh',
