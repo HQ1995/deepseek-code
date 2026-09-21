@@ -6,6 +6,115 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-20: both spellings of the profile in the update lane, and a launcher that outwaits a hidden one
+
+A review pass over this checkout's working tree, before it was committed, found
+two defects in the update lane and a set of bridge contract gaps. The launcher
+one is why this section exists: the tree had an unguarded
+`realpathSync(profile)` inside `bin/bootstrap.mjs`'s 60-second retry loop, so a
+profile that an in-flight directory swap had hidden for a moment ended the
+launcher instead of being outwaited — `dscode: ENOENT: no such file or
+directory, lstat '<profile>'`, exit 1, and the retry loop the entrypoint exists
+for never ran. A/B against an absent profile (`/tmp/dscode-probe-20260920/`;
+`probe2.mjs` runs both variants, `bootstrap-regressed.mjs` and
+`bootstrap-fixed.mjs`): the unguarded variant exits 1 after 24ms with that
+message, while the fixed variant is still retrying when the 5s probe kills it —
+the same behaviour the committed entrypoint has. The fix keeps the unresolved
+spelling as the fallback (`let canonical = profile; try { canonical =
+canonicalProfile() } catch {}`), where `canonicalProfile()` resolves the
+profile when it exists and otherwise resolves its parent and re-joins the
+basename, and the stage scan covers both spellings of the parent, deduped, so
+the retry window is intact either way.
+
+The updater had the mirror-image bug. `installationStages(profile)` scanned
+`dirname(profile)` while comparing `transaction.profile` against the canonical
+profile, and `installRelease` staged beside `dirname(profile)` while journaling
+the canonical spelling. Where those two spellings differ — a profile reached
+through a symlink, or macOS's `/var` against `/private/var` for the same
+directory — a stage written beside one was invisible to the scan of the other,
+so an interrupted update was never recovered, and a stage reachable under both
+was recovered twice, the second rollback retrying against a backup the first
+had already moved away. `installationStages` now resolves both spellings of the
+parent, dedupes stages by `realpathSync(stage, { throwIfNoEntry: false })`, and
+`installRelease` stages beside `dirname(canonical)` (creating it) with the
+canonical profile in the journal, so the journal, the scan and the stage agree
+on one spelling. Negative proof: the new `recovers an interrupted update when
+the profile path is a symlink in another directory` fails on the committed
+`bin/` — 1 failed | 25 passed, `doctor --runtime --json` exiting 1 with
+`Cannot find module .../symlink-parent/active/node_modules/@hqzhao95/dscode/bin/dscode.mjs`,
+i.e. the stage beside the link's parent was never recovered — and passes on the
+fixed tree (26 passed). That test also pins that a sibling `.dscode-update-`
+directory whose journal is not ours is left byte-for-byte alone.
+
+The bridge gaps the same pass found, each with its spec:
+
+- `src/mcp.ts` derived a server name with `/^mcp__([A-Za-z0-9_-]+)__(.+)$/`
+  and invented a server for every tool whose name matched but no fiber owned.
+  `mcp__team__tools__list` was split off the mounted `team`, and an unmounted
+  name was listed as a server that does not exist. Tools are now attributed to
+  the longest mounted `serverName` that prefixes them (`team__tools` beats
+  `team`) and a tool no fiber claims is dropped rather than listed.
+- `src/session-input.ts`: `session/cancel` cancelled the queue and the goal but
+  not a composer request that had not reached the queue yet, which is exactly
+  the window a prompt-targeted cancel already covered. It now aborts every
+  unqueued request for the session.
+- `src/session-lifecycle.ts`: `fork` read a malformed `targetPromptIndex`
+  (non-integer, or a string) as absent and copied the whole source history,
+  and read a relative `newCwd` as absent and silently inherited the source
+  workspace. Both are now rejected with `invalidParams` when supplied.
+- `src/session-presets.ts`: the live preset switch appended the selection and
+  then flushed outside the `try`, so a durable-write failure left the
+  composition on the new preset with the append already committed. The flush
+  moved inside the same `try`, so a failed write restores the previous
+  composition like a failed append.
+- `src/native-asides.ts`: `/btw` joined whatever text an aside produced however
+  it ended, so an aborted aside answered with partial output. A stop reason
+  other than `completed` now raises `/btw did not complete (<reason>)`.
+- `src/native-children.ts`: `listDescendants` ran without a signal on every
+  path, so a descendant listing outlived both its session operation and host
+  shutdown; every call now passes
+  `AbortSignal.any([scope.signal, shutdown.signal])`. A row's native `activity`
+  also participates in the `running` verdict, so a descendant with no live
+  agent no longer reads as `cancelled` while it is still running.
+
+Two launcher-facing selection bugs are worth their own lines. `scripts/install.sh`
+let the ambient `DSC_CHANNEL` and `DEEPSEEK_CODE_TUI_RELEASE` override the
+command line: a no-arg run with `DSC_CHANNEL` set was pushed onto a remote lane
+instead of building the checkout's VERSION, and `DEEPSEEK_CODE_TUI_RELEASE`
+appended a second `--version` behind an explicit one. CLI flags now win and the
+ambient variables only fill a lane that is already remote;
+`scripts/install-selection.test.mjs` pins all three cases. And
+`configure_dsh_launch` skipped the DSH leader synthesis for `dscode dashboard`
+because it read the soft subcommand as standalone; the dashboard is a
+session-producing launch, so it now synthesizes the leader and
+`--no-leader dashboard` fails closed. `acp::connect_via_leader` maps the
+leader's version mismatch to the same leader-log hint as a spawn failure, and
+that mismatch is terminal — never retried, and it cancels the registered client
+before returning instead of leaving it on the leader.
+
+### Verification for this section
+
+- macOS arm64, Node 24.19.0, source tree: `npx tsc -b tsconfig.json` exit 0;
+  bridge suites `npx vitest run` in `bridge/grok-leader` 47 files passed, 959
+  tests passed; `node --test scripts/*.test.mjs` 47 cases (46 passing, 1
+  skipped); `bash scripts/check.sh` PASS; `bash scripts/check-rust.sh` PASS
+  Rust product contracts.
+- `scripts/dev-bridge-tests.sh` (built payload on the pinned runtime): 46 files
+  passed / 1 skipped, 955 passed / 4 skipped.
+- Launcher A/B and the updater's negative proof: `/tmp/dscode-probe-20260920/`
+  (both bootstrap variants, `probe2.mjs`, `saved/` with the restored files and
+  their SHA-256) and `tests/launcher-transaction.spec.ts` run against the
+  committed `bin/` (1 failed | 25 passed) and against this tree (26 passed).
+- Run the suites from `bridge/grok-leader`, not the repository root: a root
+  `npx vitest run` also globs `scripts/*.test.mjs`, which are `node:test`
+  files, so vitest reports four "No test suite found" failures and
+  `scripts/e2e-gateway-hold.test.mjs` leaves its mock gateway running.
+- Every change here is production code that ships in the plugin tarball, so the
+  macOS lanes say nothing about Linux: this reopens the Linux acceptance
+  threshold, and the re-run on swoop (the 15-case built-provider matrix,
+  `check.sh`, the script and bridge suites on Node 22.19.0 and 24.19.0) is
+  pending at this revision.
+
 ## 2026-09-19: the picker's later ticks reuse one settled listing
 
 The TUI session selector calls `x.ai/session/list`, and every one of those
