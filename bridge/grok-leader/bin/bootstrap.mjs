@@ -2,13 +2,17 @@
 // Stable entrypoint outside the directories replaced by an update. Only Node
 // builtins are usable until an interrupted tuple has been recovered.
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 
 const profile = resolve(process.env.DSCODE_HOME || dirname(fileURLToPath(import.meta.url)))
 const plugin = 'node_modules/@hqzhao95/dscode/bin'
 process.env.DSCODE_HOME = profile
+/** Same spelling the updater journals: a stage is only ours when the two agree. */
+const canonicalProfile = () => existsSync(profile)
+  ? realpathSync(profile)
+  : join(realpathSync(dirname(profile)), basename(profile))
 
 try {
   const deadline = performance.now() + 60000
@@ -16,17 +20,29 @@ try {
   while (!recovered) {
     const candidates = [join(profile, plugin, 'update.mjs')]
     let needsRecovery = false
-    for (const name of readdirSync(dirname(profile))) {
-      if (!name.startsWith('.dscode-update-')) continue
-      const stage = join(dirname(profile), name)
-      try {
-        const stat = lstatSync(stage)
-        if (!stat.isDirectory() || stat.uid !== process.getuid()) continue
-        const transaction = JSON.parse(readFileSync(join(stage, 'transaction.json'), 'utf8'))
-        if (transaction.schema !== 1 || transaction.profile !== realpathSync(profile)) continue
-        needsRecovery ||= transaction.state === 'pending'
-        candidates.push(join(stage, 'plugin/package/bin/update.mjs'), join(stage, 'profile', plugin, 'update.mjs'), join(stage, 'backup', plugin, 'update.mjs'))
-      } catch { /* An unrecognized staging directory is not ours to recover. */ }
+    // An in-flight swap can hide the profile for a moment; keep retrying
+    // rather than aborting the launcher with a raw ENOENT.
+    let canonical = profile
+    try { canonical = canonicalProfile() } catch { /* the unresolved spelling still scans its own parent */ }
+    const parents = [...new Set([dirname(profile), dirname(canonical)])]
+    const seen = new Set()
+    for (const parent of parents) {
+      let names
+      try { names = readdirSync(parent) } catch { continue }
+      for (const name of names) {
+        if (!name.startsWith('.dscode-update-')) continue
+        const stage = join(parent, name)
+        if (seen.has(stage)) continue
+        seen.add(stage)
+        try {
+          const stat = lstatSync(stage)
+          if (!stat.isDirectory() || stat.uid !== process.getuid()) continue
+          const transaction = JSON.parse(readFileSync(join(stage, 'transaction.json'), 'utf8'))
+          if (transaction.schema !== 1 || transaction.profile !== canonical) continue
+          needsRecovery ||= transaction.state === 'pending'
+          candidates.push(join(stage, 'plugin/package/bin/update.mjs'), join(stage, 'profile', plugin, 'update.mjs'), join(stage, 'backup', plugin, 'update.mjs'))
+        } catch { /* An unrecognized staging directory is not ours to recover. */ }
+      }
     }
     for (const candidate of candidates) {
       if (!existsSync(candidate)) continue

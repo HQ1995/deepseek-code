@@ -278,3 +278,48 @@ it('recovers through the stable entrypoint after interruption while the plugin d
     rmSync(f.root, { recursive: true, force: true })
   }
 })
+
+it('recovers an interrupted update when the profile path is a symlink in another directory', async () => {
+  const f = fixture()
+  const realRoot = join(f.root, 'canonical-parent'), linkRoot = join(f.root, 'symlink-parent')
+  const canonical = join(realRoot, 'active'), profile = join(linkRoot, 'active')
+  mkdirSync(realRoot); mkdirSync(linkRoot)
+  const unrelatedJournal = join(linkRoot, '.dscode-update-unrecognized', 'transaction.json')
+  f.put(unrelatedJournal, '{unrecognized staging data')
+  cpSync(f.profile, canonical, { recursive: true, verbatimSymlinks: true })
+  symlinkSync(canonical, profile)
+  const plugin = join(canonical, 'node_modules', current.name)
+  cpSync(join(bridge, 'bin'), join(plugin, 'bin'), { recursive: true })
+  symlinkSync(join(bridge, 'node_modules'), join(plugin, 'node_modules'))
+  cpSync(join(bridge, 'bin/bootstrap.mjs'), join(canonical, 'dscode.mjs'))
+  f.put(join(canonical, 'config.toml'), '[cli]\nchannel="alpha"\nchannel_format=1\n')
+  f.put(join(canonical, 'sessions/user'), 'preserved session')
+  const stage = join(linkRoot, '.dscode-update-crash')
+  cpSync(canonical, join(stage, 'profile'), { recursive: true, verbatimSymlinks: true })
+  const child = spawn(process.execPath, [fileURLToPath(new URL('./fixtures/update-worker.mjs', import.meta.url)), linkRoot, 'crash', new URL('../bin/update.mjs', import.meta.url).href], {
+    env: fixtureEnvironment(f.root), stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const exited = once(child, 'exit')
+  try {
+    for (let attempt = 0; !existsSync(join(linkRoot, 'paused')); attempt++) {
+      if (attempt > 500 || child.exitCode !== null) throw new Error('updater did not reach the interruption point')
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    expect(existsSync(join(plugin, 'bin/dscode.mjs'))).toBe(false)
+    child.kill('SIGKILL')
+    await exited
+    const recovered = spawnSync(process.execPath, [join(profile, 'dscode.mjs'), 'doctor', '--runtime', '--json'], {
+      env: fixtureEnvironment(f.root, { DSCODE_HOME: profile }), encoding: 'utf8', timeout: 20000,
+    })
+    expect(recovered.status, recovered.stderr).toBe(0)
+    expect(recovered.stderr).toContain('restored the previous installation')
+    expect(JSON.parse(recovered.stdout).filter((finding: { status: string }) => finding.status === 'ERROR')).toEqual([])
+    expect(readFileSync(join(canonical, 'sessions/user'), 'utf8')).toBe('preserved session')
+    expect(existsSync(stage)).toBe(false)
+    expect(readFileSync(unrelatedJournal, 'utf8')).toBe('{unrecognized staging data')
+    expect(installationMatches(canonical, current.name, current.version, current.dsh)).toBe(true)
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited }
+    rmSync(f.root, { recursive: true, force: true })
+  }
+})

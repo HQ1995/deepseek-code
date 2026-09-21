@@ -273,22 +273,40 @@ const validEntry = entry => typeof entry === 'string' && entry !== '' && !isAbso
   && !entry.split(/[\\/]/).some(part => part === '..' || part === '.' || part === '')
 /** Only our private, identified stages are candidates for recovery or cleanup. */
 const installationStages = profile => {
-  const parent = dirname(profile)
-  const stages = []
-  for (const name of readdirSync(parent)) {
-    if (!name.startsWith('.dscode-update-')) continue
-    const stage = join(parent, name)
-    try {
-      const stat = lstatSync(stage)
-      if (!stat.isDirectory() || stat.uid !== process.getuid()) continue
-      const transaction = json(join(stage, 'transaction.json'))
-      if (transaction.schema !== 1 || transaction.profile !== profile || !Number.isInteger(transaction.pid) || transaction.pid <= 0
-        || !['preparing', 'pending', 'committed', 'rolled-back'].includes(transaction.state)) continue
-      if (transaction.state === 'pending' && (!Array.isArray(transaction.entries)
-        || !transaction.entries.every(entry => validEntry(entry.path) && typeof entry.existed === 'boolean'))) continue
-      stages.push({ stage, transaction })
-    } catch (error) {
-      if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error
+  let canonical
+  try { canonical = canonicalProfile(profile) } catch { canonical = profile }
+  // A stage can sit beside either spelling of the profile directory: an
+  // updater that runs before the symlink exists stages next to the link, one
+  // that runs after it stages next to the target. Resolve both spellings
+  // first, because a symlinked ancestor (macOS `/var` vs `/private/var`)
+  // makes two spellings of one directory, and recovering a stage twice would
+  // retry a rollback whose backup is already gone.
+  const parents = new Set()
+  for (const parent of [dirname(profile), dirname(canonical)]) {
+    try { parents.add(realpathSync(parent)) } catch { parents.add(parent) }
+  }
+  const stages = [], seen = new Set()
+  for (const parent of parents) {
+    let names
+    try { names = readdirSync(parent) } catch (error) { if (error.code !== 'ENOENT') throw error; continue }
+    for (const name of names) {
+      if (!name.startsWith('.dscode-update-')) continue
+      const stage = join(parent, name)
+      const key = realpathSync(stage, { throwIfNoEntry: false }) ?? stage
+      if (seen.has(key)) continue
+      seen.add(key)
+      try {
+        const stat = lstatSync(stage)
+        if (!stat.isDirectory() || stat.uid !== process.getuid()) continue
+        const transaction = json(join(stage, 'transaction.json'))
+        if (transaction.schema !== 1 || transaction.profile !== canonical || !Number.isInteger(transaction.pid) || transaction.pid <= 0
+          || !['preparing', 'pending', 'committed', 'rolled-back'].includes(transaction.state)) continue
+        if (transaction.state === 'pending' && (!Array.isArray(transaction.entries)
+          || !transaction.entries.every(entry => validEntry(entry.path) && typeof entry.existed === 'boolean'))) continue
+        stages.push({ stage, transaction })
+      } catch (error) {
+        if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error
+      }
     }
   }
   return stages
@@ -329,7 +347,7 @@ const recoverInstallations = profile => {
 export const withProfileLock = async (profile, action, runtime = join(profile, 'runtime')) => {
   mkdirSync(dirname(profile), { recursive: true })
   const canonical = canonicalProfile(profile)
-  const runtimes = [runtime, join(canonical, 'runtime'), ...installationStages(canonical)
+  const runtimes = [runtime, join(canonical, 'runtime'), ...installationStages(profile)
     .flatMap(({ stage }) => [join(stage, 'backup/runtime'), join(stage, 'profile/runtime')])]
   const locations = [...runtimes.map(path => join(path, 'package.json')), import.meta.url]
   if (process.env.DSH_BIN && existsSync(process.env.DSH_BIN)) locations.push(realpathSync(process.env.DSH_BIN))
@@ -382,7 +400,7 @@ export const withProfileLock = async (profile, action, runtime = join(profile, '
       new Error('cannot lock dscode profile: the pinned runtime native addon is unavailable', { cause: bindingError }),
       { code: 'DSCODE_PROFILE_LOCK_UNAVAILABLE' },
     )
-    recoverInstallations(canonical)
+    recoverInstallations(profile)
     return await action()
   } finally { closeSync(fd) }
 }
@@ -431,8 +449,10 @@ const commit = async (profile, stage, entries) => {
 export const installRelease = async ({ profile, packageName, version, channel, asset, fetcher = fetch, base = `https://github.com/${repo}/releases/download/v${version}` }) => {
   if (!asset) throw new Error(unsupportedPlatformMessage())
   mkdirSync(dirname(profile), { recursive: true })
-  const stage = mkdtempSync(join(dirname(profile), '.dscode-update-'))
-  writeJournal(stage, { schema: 1, profile: canonicalProfile(profile), pid: process.pid, state: 'preparing' })
+  const canonical = canonicalProfile(profile)
+  mkdirSync(dirname(canonical), { recursive: true })
+  const stage = mkdtempSync(join(dirname(canonical), '.dscode-update-'))
+  writeJournal(stage, { schema: 1, profile: canonical, pid: process.pid, state: 'preparing' })
   const prepared = join(stage, 'profile')
   try {
     mkdirSync(join(prepared, 'bin'), { recursive: true })
