@@ -20,7 +20,7 @@ pub const DSH_BIN_ENV: &str = "DSH_BIN";
 /// Socket path env for the dsh leader (the bridge binds it via
 /// cordis.patch.yml: socketPath: process.env.DSCODE_SOCKET).
 pub const DSCODE_SOCKET_ENV: &str = "DSCODE_SOCKET";
-/// Leader log path env; defaults to /tmp/dscode.log.
+/// Leader log path env; defaults to the leader socket sibling .log file.
 pub const DSCODE_LOG_ENV: &str = "DSCODE_LOG";
 /// Explicit socket override, otherwise a profile- and build-specific leader.
 pub fn default_leader_socket() -> PathBuf {
@@ -45,12 +45,45 @@ fn profile_leader_socket(profile: &Path, version: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/dscode-{}-{}.sock", uid(), &digest[..24]))
 }
 
-/// The leader log path: DSCODE_LOG or /tmp/dscode.log.
+/// The leader log path: DSCODE_LOG verbatim, else the resolved leader
+/// socket sibling .log so the log inherits the socket uid/profile/build
+/// segregation instead of sharing one predictable /tmp/dscode.log across
+/// every user and profile on a host.
 pub fn leader_log_path() -> PathBuf {
+    leader_log_path_for(&resolved_leader_socket())
+}
+
+/// The log paired with the given socket: DSCODE_LOG wins verbatim,
+/// otherwise the sibling .log (/tmp/dscode-UID-DIGEST.sock becomes .log).
+fn leader_log_path_for(socket: &Path) -> PathBuf {
     std::env::var_os(DSCODE_LOG_ENV)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp/dscode.log"))
+        .unwrap_or_else(|| socket.with_extension("log"))
+}
+
+/// The socket the leader binds: the already-resolved GROK_LEADER_SOCKET
+/// override (main sets it from --leader-socket or default_leader_socket),
+/// else the profile-derived default.
+fn resolved_leader_socket() -> PathBuf {
+    std::env::var_os(xai_grok_shell::leader::LEADER_SOCKET_ENV)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(default_leader_socket)
+}
+
+/// Open options for the predictable /tmp leader files: owner-only on create
+/// and no symlink following, so a link planted on a shared host cannot
+/// redirect leader output or the pid record into another file.
+fn tmp_file_options() -> std::fs::OpenOptions {
+    #[allow(unused_mut)] // unix-only options below
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    options
 }
 
 /// Whether this build is running against the dsh backend (the managed dscode
@@ -129,8 +162,8 @@ pub fn spawn_dsh_leader(sock_path: &Path) -> Result<u32, ConnectionError> {
             sock_path.display()
         )));
     }
-    let log_path = leader_log_path();
-    let log_file = std::fs::OpenOptions::new()
+    let log_path = leader_log_path_for(sock_path);
+    let log_file = tmp_file_options()
         .create(true)
         .append(true)
         .open(&log_path)
@@ -177,8 +210,18 @@ pub fn spawn_dsh_leader(sock_path: &Path) -> Result<u32, ConnectionError> {
         let _ = child.wait();
     });
     // Record the leader PID in the sibling lock file (the grok lock contract
-    // stores the leader PID for diagnostics and sibling-adoption checks).
-    let _ = std::fs::write(sock_path.with_extension("lock"), pid.to_string());
+    // stores the leader PID for diagnostics and sibling-adoption checks). The
+    // /tmp path is predictable, so a planted symlink must not redirect the
+    // write into an unrelated file - fail closed and skip the record.
+    if let Ok(mut file) = tmp_file_options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(sock_path.with_extension("lock"))
+    {
+        use std::io::Write as _;
+        let _ = write!(file, "{pid}");
+    }
     Ok(pid)
 }
 
@@ -300,5 +343,71 @@ mod tests {
         let _ = std::fs::remove_file(&sock);
         let _ = std::fs::remove_file(&lock);
         let _ = std::fs::remove_file(&log);
+    }
+
+    /// The default leader log rides on the resolved socket path so it keeps
+    /// the uid/profile/build segregation instead of one shared /tmp file.
+    #[serial_test::serial(dsh_leader_env)]
+    #[test]
+    fn leader_log_defaults_to_socket_sibling() {
+        let _leader_socket = crate::test_util::EnvVarGuard::set(
+            xai_grok_shell::leader::LEADER_SOCKET_ENV,
+            "/tmp/dscode-resolved-test.sock",
+        );
+        let _log_env = crate::test_util::EnvVarGuard::set(DSCODE_LOG_ENV, "");
+        assert_eq!(
+            leader_log_path(),
+            PathBuf::from("/tmp/dscode-resolved-test.log"),
+            "default log is the resolved socket sibling"
+        );
+        let _explicit =
+            crate::test_util::EnvVarGuard::set(DSCODE_LOG_ENV, "/tmp/explicit-dscode.log");
+        assert_eq!(
+            leader_log_path(),
+            PathBuf::from("/tmp/explicit-dscode.log"),
+            "DSCODE_LOG stays authoritative"
+        );
+    }
+
+    /// A symlink planted at the predictable log path must fail closed:
+    /// spawn refuses instead of appending leader output into the target.
+    #[serial_test::serial(dsh_leader_env)]
+    #[test]
+    fn spawn_refuses_a_symlinked_log() {
+        let _env = crate::test_util::EnvVarGuard::set(DSH_BIN_ENV, "/bin/sh");
+        let _log_env = crate::test_util::EnvVarGuard::set(DSCODE_LOG_ENV, "");
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("leader.sock");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep me").unwrap();
+        std::os::unix::fs::symlink(&victim, sock.with_extension("log")).unwrap();
+        let error = spawn_dsh_leader(&sock).unwrap_err();
+        assert!(
+            error.to_string().contains("cannot open leader log"),
+            "symlinked log must fail closed: {error}"
+        );
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+    }
+
+    /// The pid record must not follow a planted lock symlink either; the
+    /// write is skipped rather than redirected into the target file.
+    #[serial_test::serial(dsh_leader_env)]
+    #[test]
+    fn spawn_skips_a_symlinked_lock() {
+        let _env = crate::test_util::EnvVarGuard::set(DSH_BIN_ENV, "/bin/sh");
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("leader.sock");
+        let log = dir.path().join("leader.log");
+        let _log_env = crate::test_util::EnvVarGuard::set(DSCODE_LOG_ENV, log.to_str().unwrap());
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep me").unwrap();
+        std::os::unix::fs::symlink(&victim, sock.with_extension("lock")).unwrap();
+        let pid = spawn_dsh_leader(&sock).unwrap();
+        assert!(pid > 0);
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "keep me",
+            "pid write must not follow the planted symlink"
+        );
     }
 }

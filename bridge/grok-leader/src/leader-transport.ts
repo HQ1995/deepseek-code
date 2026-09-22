@@ -43,6 +43,9 @@ export function createLeaderTransport(options: LeaderTransportOptions) {
   const sockets = new Set<Socket>()
   let sequence = 0, closed = false, started = false, bound = false
   let failure: NodeJS.ErrnoException | undefined
+  // Holds the umask restore while a bind is in flight; start() installs the
+  // real closure, close() calls it in case the listen callback never fires.
+  let restoreUmask: () => void = () => {}
   const debug = options.debug ?? process.env.DSCODE_DEBUG === '1'
   const server = createServer(accept)
   const trace = (direction: string, value: unknown, max: number): void => {
@@ -220,17 +223,35 @@ export function createLeaderTransport(options: LeaderTransportOptions) {
     start() {
       if (started || closed) throw new Error('leader transport cannot be started again')
       started = true
-      server.listen(options.socketPath, () => {
-        bound = true
-        if (closed) { server.close(); removeSocketFile(); return }
-        try { chmodSync(options.socketPath, 0o600) } catch (error) {
-          options.logger.warn('grok-leader: socket chmod failed: ' + String(error))
-        }
-      })
+      // bind() applies the process umask to the socket node, so hold 0o177
+      // until the listen callback (or a bind error): without it the socket is
+      // briefly world-connectable between bind and the chmod below.
+      const previousUmask = process.platform === 'win32' ? undefined : process.umask(0o177)
+      let restored = false
+      restoreUmask = () => {
+        if (restored) return
+        restored = true
+        if (previousUmask !== undefined) process.umask(previousUmask)
+      }
+      server.once('error', restoreUmask)
+      try {
+        server.listen(options.socketPath, () => {
+          restoreUmask()
+          bound = true
+          if (closed) { server.close(); removeSocketFile(); return }
+          try { chmodSync(options.socketPath, 0o600) } catch (error) {
+            options.logger.warn('grok-leader: socket chmod failed: ' + String(error))
+          }
+        })
+      } catch (error) {
+        restoreUmask()
+        throw error
+      }
     },
     close() {
       if (closed) return
       closed = true
+      restoreUmask()
       server.close()
       for (const socket of sockets) socket.destroy()
       removeSocketFile()

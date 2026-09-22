@@ -1,5 +1,5 @@
 import { once } from 'node:events'
-import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createConnection, type Socket } from 'node:net'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -62,6 +62,21 @@ it('owns registration, framing, ACP normalization and notification encoding with
   expect(await c.nextAcp()).toMatchObject({ method: '_x.ai/status' })
   client.notify('session/update', {})
   expect(await c.nextAcp()).toMatchObject({ method: 'session/update' })
+})
+
+it('binds the socket owner-only and restores the process umask afterwards', async () => {
+  const root = mkdtempSync('/tmp/dscode-umask-')
+  cleanup.push(async () => rmSync(root, { recursive: true, force: true }))
+  writeFileSync(join(root, 'before'), 'x')
+  const f = await fixture()
+  // existsSync resolves at bind time, before the listen callback restores
+  // the umask; a completed connection proves the callback has run.
+  await f.connect()
+  writeFileSync(join(root, 'after'), 'x')
+  expect(statSync(f.options.socketPath).mode & 0o777).toBe(0o600)
+  // A umask left at 0o177 would make this file 0o600 instead of matching
+  // the file created before the transport started.
+  expect(statSync(join(root, 'after')).mode).toBe(statSync(join(root, 'before')).mode)
 })
 
 it('scopes reverse requests to each client and session and releases them on reply, cancellation or disconnect', async () => {
