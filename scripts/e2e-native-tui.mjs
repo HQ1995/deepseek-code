@@ -23,6 +23,9 @@ export function nativeTuiReply(body) {
     if (!results.length) return { name: 'todo_write', arguments: { todos: [
       { content: `Native child ${child[1]} checklist`, status: 'pending' },
     ] } }
+    // Small runners give workflow only one agent slot. Let A finish so B can
+    // start; holding both until the UI sees both members would deadlock.
+    if (child[1] === 'A') return { text: 'DSCODE_NATIVE_WORKER_A_DONE' }
     return { text: `DSCODE_NATIVE_WORKER_${child[1]}_RUNNING`, hold: true,
       releaseKey: `native-${child[1]}`, releaseText: ` DSCODE_NATIVE_WORKER_${child[1]}_DONE` }
   }
@@ -112,7 +115,7 @@ export async function nativeTuiAcceptance(ui) {
     await key('C-t')
     await key('Escape')
     await key('g')
-    await release('A'); await release('B')
+    await release('B')
     await waitState(value => value.workflows.some(event => event.type === 'tool-workflow/run-end' && event.data.runId === run), `workflow-${iteration}-durable-end`)
     await waitState(value => value.status === 'idle', `workflow-${iteration}-parent-idle`)
   }
