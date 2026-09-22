@@ -45,6 +45,7 @@ use xai_grok_shell::leader::{
 use xai_grok_shell::leader::{
     ControlPayload, LeaderClient, LeaderEnvUrls, connect_or_spawn, socket_path_for_ws_url,
 };
+use xai_grok_shell::leader::{LeaderDiscoveryState, LeaderTargetErrorCode};
 use xai_grok_update::{UpdateConfig, auto_update, enforce_version_policy_or_exit};
 /// Apply headless args to an existing config, only overriding values that are
 /// explicitly set. This allows environment defaults to be preserved when
@@ -218,9 +219,13 @@ async fn run_setup_command(json: bool) {
 }
 async fn run_leader_mgmt(args: LeaderMgmtArgs) -> Result<()> {
     match args.command {
-        LeaderMgmtCommand::Kill => kill_leaders().await,
+        // dscode: the leader is the external dsh bridge at the deterministic
+        // profile socket (/tmp/dscode-<uid>-<digest>.sock); the upstream
+        // grok_home leader*.{sock,lock} scan never sees it, so probe that
+        // socket directly instead of discover_leaders().
+        LeaderMgmtCommand::Kill => kill_dsh_leader().await,
         LeaderMgmtCommand::List { json } => {
-            let leaders = xai_grok_shell::leader::discover_leaders().await;
+            let leaders: Vec<_> = probe_dsh_leader().await.into_iter().collect();
             if json {
                 let payload: Vec<_> = leaders.iter().map(leader_descriptor_json).collect();
                 println!(
@@ -237,7 +242,7 @@ async fn run_leader_mgmt(args: LeaderMgmtArgs) -> Result<()> {
             Ok(())
         }
         LeaderMgmtCommand::Info { target, json } => {
-            let (descriptor, client) = connect_to_leader(&target).await?;
+            let (descriptor, client) = connect_to_dsh_leader(&target).await?;
             let info = match ensure_control_caps(client.registration()) {
                 Ok(_) => client
                     .send_control(ControlCommand::GetLeaderInfo)
@@ -262,45 +267,179 @@ async fn run_leader_mgmt(args: LeaderMgmtArgs) -> Result<()> {
         }
     }
 }
-async fn kill_leaders() -> Result<()> {
-    let leaders = xai_grok_shell::leader::discover_leaders().await;
-    if leaders.is_empty() {
-        eprintln!("No leader candidates found.");
-        return Ok(());
+/// The dsh leader socket and its sibling lock file.
+fn dsh_leader_paths() -> (std::path::PathBuf, std::path::PathBuf) {
+    let socket = xai_grok_pager::dsh_leader::default_leader_socket();
+    let lock = socket.with_extension("lock");
+    (socket, lock)
+}
+
+/// The pid recorded in the dsh leader lock file, if it parses.
+fn dsh_lock_pid(lock: &std::path::Path) -> Option<u32> {
+    std::fs::read_to_string(lock).ok()?.trim().parse().ok()
+}
+
+/// The recorded lock pid is only safe to signal while the process still
+/// looks like the dsh bridge (`--profile dscode` in its argv); a recycled
+/// pid fails the check so stale files get cleaned instead of signalling an
+/// unrelated process. Non-unix has no unix-socket leader: never matches.
+fn looks_like_dsh_leader(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        return std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map(|bytes| {
+                let cmdline = String::from_utf8_lossy(&bytes);
+                cmdline.contains("--profile") && cmdline.contains("dscode")
+            })
+            .unwrap_or(false);
     }
-    let mut killed = 0u32;
-    let mut cleaned = 0u32;
-    for d in &leaders {
-        let Some(pid) = leader_pid(d) else {
-            continue;
-        };
-        if !xai_grok_shell::util::is_grok_process(pid) {
-            if let Some(ref lock) = d.lock_path {
-                eprintln!(
-                    "  PID {pid} is not a {} process, removing stale lock",
-                    env!("CARGO_BIN_NAME")
-                );
-                let _ = std::fs::remove_file(lock);
-                cleaned += 1;
-            }
-            if let Some(ref sock) = d.socket_path {
-                let _ = std::fs::remove_file(sock);
-            }
-            continue;
-        }
-        eprintln!("  Killing leader PID {pid}");
-        if let Err(e) = xai_grok_shell::util::kill_process_by_pid(pid) {
-            eprintln!("  warning: failed to terminate PID {pid}: {e}");
-            continue;
-        }
-        killed += 1;
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        return std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "command="])
+            .output()
+            .map(|out| {
+                let cmdline = String::from_utf8_lossy(&out.stdout);
+                cmdline.contains("--profile") && cmdline.contains("dscode")
+            })
+            .unwrap_or(false);
     }
-    if killed > 0 {
-        eprintln!("Killed {killed} leader process(es).");
-    } else if cleaned > 0 {
-        eprintln!("No live leader processes found (cleaned up {cleaned} stale lock(s)).");
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        return false;
+    }
+}
+
+/// Probe the deterministic dsh leader socket into a descriptor: Reachable
+/// when the bridge answers registration, Unreachable when the socket file
+/// exists but refuses, Stale when only the lock file remains. The bridge
+/// advertises no control_v1, so live_info stays empty and the lock pid is
+/// the displayed pid.
+async fn probe_dsh_leader() -> Option<LeaderDescriptor> {
+    let (socket, lock) = dsh_leader_paths();
+    let socket_exists = socket.exists();
+    if !socket_exists && !lock.exists() {
+        return None;
+    }
+    let (classification, target_error) = if socket_exists {
+        match LeaderClient::connect(
+            socket.clone(),
+            "dscode-leader-cli",
+            ClientMode::Stdio,
+            ClientCapabilities::default(),
+        )
+        .await
+        {
+            Ok(client) => {
+                client.cancel();
+                (LeaderDiscoveryState::Reachable, None)
+            }
+            Err(_) => (
+                LeaderDiscoveryState::Unreachable,
+                Some(LeaderTargetErrorCode::SocketUnreachable),
+            ),
+        }
     } else {
-        eprintln!("No live leader processes found.");
+        (LeaderDiscoveryState::Stale, None)
+    };
+    Some(LeaderDescriptor {
+        pid_from_lock: dsh_lock_pid(&lock),
+        lock_path: lock.exists().then_some(lock),
+        socket_path: socket_exists.then_some(socket),
+        ws_url_suffix: String::new(),
+        classification,
+        environment: Some(xai_grok_shell::env::GrokBuildEnvironment::Production),
+        live_info: None,
+        target_error,
+    })
+}
+
+/// Connect to the dsh leader for `info`: with --pid, verify the requested
+/// pid is the recorded leader before connecting.
+async fn connect_to_dsh_leader(
+    args: &LeaderTargetArgs,
+) -> Result<(LeaderDescriptor, xai_grok_shell::leader::LeaderClient)> {
+    let (socket, lock) = dsh_leader_paths();
+    if let Some(pid) = args.pid {
+        let recorded = dsh_lock_pid(&lock);
+        if recorded != Some(pid) {
+            anyhow::bail!(
+                "no dsh leader with pid {pid} (recorded: {})",
+                recorded
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "none".into())
+            );
+        }
+    }
+    let client = LeaderClient::connect(
+        socket.clone(),
+        "dscode-leader-cli",
+        ClientMode::Stdio,
+        ClientCapabilities::default(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("cannot reach the dsh leader at {}: {e}", socket.display()))?;
+    let descriptor = LeaderDescriptor {
+        pid_from_lock: dsh_lock_pid(&lock),
+        lock_path: Some(lock),
+        socket_path: Some(socket),
+        ws_url_suffix: String::new(),
+        classification: LeaderDiscoveryState::Reachable,
+        environment: Some(xai_grok_shell::env::GrokBuildEnvironment::Production),
+        live_info: None,
+        target_error: None,
+    };
+    Ok((descriptor, client))
+}
+
+async fn kill_dsh_leader() -> Result<()> {
+    let (socket, lock) = dsh_leader_paths();
+    if let Some(pid) = dsh_lock_pid(&lock) {
+        if xai_grok_shell::util::is_process_alive(pid) && looks_like_dsh_leader(pid) {
+            eprintln!("  Killing leader PID {pid}");
+            xai_grok_shell::util::kill_process_by_pid(pid)?;
+            eprintln!("Killed 1 leader process(es).");
+            return Ok(());
+        }
+        if xai_grok_shell::util::is_process_alive(pid) {
+            eprintln!("  PID {pid} is alive but not a dsh leader (recycled pid); leaving it alone");
+        }
+    }
+    // No trustworthy pid. A still-answering socket means a live leader we
+    // cannot attribute — never unlink it from under the process.
+    if socket.exists() {
+        let answering = LeaderClient::connect(
+            socket.clone(),
+            "dscode-leader-cli",
+            ClientMode::Stdio,
+            ClientCapabilities::default(),
+        )
+        .await
+        .map(|client| {
+            client.cancel();
+            true
+        })
+        .unwrap_or(false);
+        if answering {
+            eprintln!(
+                "A leader answers at {} but no pid is recorded; left running.",
+                socket.display()
+            );
+            return Ok(());
+        }
+    }
+    let mut cleaned = false;
+    for path in [&lock, &socket] {
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+            cleaned = true;
+        }
+    }
+    if cleaned {
+        eprintln!("No live leader process found (removed stale socket/lock files).");
+    } else {
+        eprintln!("No leader candidates found.");
     }
     Ok(())
 }
