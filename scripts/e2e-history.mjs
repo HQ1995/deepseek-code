@@ -7,16 +7,20 @@ const PREFIX = 'DSCODE_HISTORY_ACCEPTANCE ';
 const STANDARD = [
   'ask_user_question', 'bash', 'create_goal', 'edit', 'exit_plan_mode',
   'get_goal', 'glob', 'grep', 'interrupt_agent', 'job_kill', 'job_list',
-  'job_output', 'list_agents', 'present', 'ralph', 'read', 'read_image',
+  'job_output', 'list_agents', 'present', 'read', 'read_image',
   'schedule_create', 'schedule_delete', 'schedule_list', 'send_message',
   'skill', 'subagent', 'subagent_fork', 'todo_write', 'update_goal',
   'web_fetch', 'web_search', 'workflow', 'write',
 ].sort();
+// Upstream 0.1.6 ships `tool-ralph` disabled in the presets it owns, so the
+// shipped `standard` preset mounts no ralph row. The dscode-owned history
+// preset re-enables it on top of that roster.
+const STANDARD_WITH_RALPH = [...STANDARD, 'ralph'].sort();
 const HISTORY = [
   'session_search', 'session_event_search', 'session_trace',
   'session_event_trace', 'session_event_read',
 ];
-const ROSTER = [...STANDARD, ...HISTORY].sort();
+const ROSTER = [...STANDARD_WITH_RALPH, ...HISTORY].sort();
 
 function text(content) {
   if (typeof content === 'string') return content;

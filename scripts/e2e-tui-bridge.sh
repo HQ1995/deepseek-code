@@ -580,7 +580,7 @@ completion_count_after="$(grep -c 'POST /v1/chat/completions' "$MOCK_LOG" 2>/dev
   const expected = [
     "ask_user_question", "bash", "create_goal", "edit", "exit_plan_mode",
     "get_goal", "glob", "grep", "interrupt_agent", "job_kill", "job_list",
-    "job_output", "list_agents", "present", "ralph", "read", "read_image", "schedule_create", "schedule_delete", "schedule_list", "send_message",
+    "job_output", "list_agents", "present", "read", "read_image", "schedule_create", "schedule_delete", "schedule_list", "send_message",
     "skill", "subagent", "subagent_fork", "todo_write", "update_goal",
     "web_fetch", "web_search", "workflow", "write",
   ].sort()
@@ -636,19 +636,25 @@ audit_responses_preset() {
     const standard = [
       "ask_user_question", "bash", "create_goal", "edit", "exit_plan_mode",
       "get_goal", "glob", "grep", "interrupt_agent", "job_kill", "job_list",
-      "job_output", "list_agents", "present", "ralph", "read", "read_image", "schedule_create", "schedule_delete", "schedule_list", "send_message",
+      "job_output", "list_agents", "present", "read", "read_image", "schedule_create", "schedule_delete", "schedule_list", "send_message",
       "skill", "subagent", "subagent_fork", "todo_write", "update_goal",
       "web_fetch", "web_search", "workflow", "write",
     ].sort()
+    // Upstream 0.1.6 disables `tool-ralph` in every preset it owns; the three
+    // dscode presets are copies that keep it enabled. Cordis adds the profile
+    // manager upstream, which the shipped `standard` leaves disabled.
+    const owned = [...standard, "ralph"]
     const expected = {
       minimal: ["bash", "schedule_create", "schedule_delete", "schedule_list"],
       standard,
-      history: [...standard, "session_search", "session_event_search", "session_trace", "session_event_trace", "session_event_read"].sort(),
+      history: [...owned, "session_search", "session_event_search", "session_trace", "session_event_trace", "session_event_read"].sort(),
+      lsp: [...owned, "lsp"].sort(),
+      terminal: [...owned, "terminal_close", "terminal_list", "terminal_open", "terminal_read", "terminal_send", "terminal_signal"].sort(),
       ptc: ["run_code"],
       cordis: [
-        ...standard,
-        "cordis_define", "cordis_inspect_list", "cordis_inspect_query",
-        "cordis_inspect_self", "cordis_run", "cordis_stop", "cordis_undefine",
+        // 0.1.6 keeps the cordis preset read-only: the two inspection tools and
+        // the profile manager replaced the model-driven define/run/stop rows.
+        ...standard, "plugin_manager", "cordis_inspect_list", "cordis_inspect_query",
       ].sort(),
       "fixture-custom": ["bash", "fixture_echo", "schedule_create", "schedule_delete", "schedule_list"],
     }
@@ -684,7 +690,7 @@ audit_all_responses_presets() {
   if (!source.includes(current)) throw new Error("fake default model block was not found")
   fs.writeFileSync(path, source.replace(current, replacement))
   ' "$SCRATCH/settings.yaml" "$GATEWAY" || fail "could not switch the isolated profile to the Responses API provider"
-  for preset in minimal standard history ptc cordis fixture-custom; do
+  for preset in minimal standard history lsp terminal ptc cordis fixture-custom; do
     audit_responses_preset "$preset"
   done
   cat "$PRESET_ROSTER_LOG"
