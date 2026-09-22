@@ -11,26 +11,22 @@ installed-package matching. Unpatched and differently patched consumers are not
 reusable, even if their DSH versions and upstream commits match. To regenerate
 a consumer, select a new `--consumer` directory; do not relabel an old one.
 
-The current `fb2c4b9e...` backport reads macOS kernel process observations through
-the existing Koffi dependency instead of spawning `ps`. Full tree scans remain
-fresh; identity and foreground queries select one PID. Failed/partial reads
-throw, and pre-signal checks retain second-precision identities without a cache.
-The patch includes regression tests, a two-architecture SDK layout oracle,
-paired README contracts and decision notes. No native helper artifact is added.
-See [performance evidence](../docs/performance.md).
+The current `ddefc45f...` backport reads macOS kernel process observations
+through the existing Koffi dependency instead of spawning `ps`. Full tree scans
+remain fresh; identity and foreground queries select one PID. Failed/partial
+reads throw, and pre-signal checks retain second-precision identities without a
+cache. The patch includes regression tests, a two-architecture SDK layout
+oracle, paired README contracts and decision notes. No native helper artifact is
+added. See [performance evidence](../docs/performance.md).
 
-The same patch carries the Linux scope-settlement correction in
-`subprocess-local/src/linux-scope.ts` and its PTY binding in `src/index.ts`.
-A requested termination observed before the launch request is consumed resolves
-as cancellation; genuine startup failures and signal-delivery failures still
-reject. An empty but active scope owned by the terminated client settles and is
-released best-effort, a state observation invalidated by a termination signal is
-discarded and re-queried, and the final scope signal waits once for acknowledged
-direct settlement. A new early-bootstrap test fixture and the authored
-`bash-startup-timeout` recorded session accompany the change. This half is not
-an upstream-adopted pin either: it is a local backport whose real user-systemd
-acceptance is recorded in
-[the combined Linux settlement acceptance](../docs/linux-acceptance-2026-09-17.md).
+The Linux scope-settlement correction that earlier revisions of this patch
+carried is now upstream: `0.1.6-alpha.2` owns `TasksCurrent` scope accounting in
+`subprocess-local/src/linux-scope.ts`, the early-bootstrap test fixture and the
+authored `bash-startup-timeout` recorded session, so the backport no longer
+touches Linux. The acceptance that validated it on a real user systemd remains
+recorded in
+[the combined Linux settlement acceptance](../docs/linux-acceptance-2026-09-17.md)
+and is re-run for every payload that bumps the runtime.
 
 When upgrading the upstream source, review whether the change is already
 included. Remove the patch digest if it is; otherwise rebase the source change,

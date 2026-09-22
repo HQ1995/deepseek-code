@@ -20,6 +20,11 @@
 - id: llm-deepseek
   disabled: true
 
+# Enabling a native model route does not opt into uploading raw Session events.
+- id: session-log-deepseek
+  config:
+    enabled: false
+
 # Long-lived server: no module-reload HMR.
 - id: hmr
   disabled: true
@@ -70,7 +75,7 @@
   disabled: true
 - id: tool-subagent-fork
   disabled: true
-- id: workflow-worker-thread
+- id: workflow-ptc
   disabled: true
 - id: tool-workflow
   disabled: true
@@ -106,11 +111,6 @@
     # Host-owned subagent model selection sampled by preset-scoped tools.
     - id: subagent-model-selection-settings
       name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
-
-    # The shipped `ptc` preset needs the host-plane TypeScript runtime used by
-    # dsh's headless and web profiles.
-    - id: code-runtime
-      name: '@deepseek-ai/dsh-code-runtime-worker-thread'
 
 - insert:
     - id: agent-presets

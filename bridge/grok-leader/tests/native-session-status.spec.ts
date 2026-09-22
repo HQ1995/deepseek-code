@@ -46,6 +46,21 @@ function fixture() {
 }
 
 describe('native session status ownership', () => {
+  it('observes agent/created only for the exact attached owner', async () => {
+    const f = fixture()
+    f.goals.set(f.root.agent, f.goal())
+    f.emit('agent/created', { agent: { ...f.root.agent }, source: 'fresh' })
+    await Promise.resolve()
+    expect(f.root.output.notify).not.toHaveBeenCalled()
+    f.emit('agent/created', { agent: f.root.agent, source: 'fresh' })
+    await Promise.resolve()
+    expect(f.root.output.notify).toHaveBeenCalledExactlyOnceWith('x.ai/session_notification', {
+      update: expect.objectContaining({ goal_id: 'goal', status: 'disarmed' }),
+    }, {})
+    expect(f.listeners.has('agent/session-start')).toBe(false)
+    await f.status.dispose()
+  })
+
   it('restores snapshots, deduplicates live goals and retains the id in clear tombstones without arming', async () => {
     const f = fixture()
     f.status.snapshot(f.root, true)
@@ -103,7 +118,7 @@ describe('native session status ownership', () => {
     expect(f.status.contextValues(f.root)).toEqual({})
     expect(lateProjection.snapshot).toHaveBeenCalledWith(f.root.agent.session, ['tokenUsage', 'contextPressure', 'contextBreakdown'])
     f.changed(f.root.agent.session, 'goal')
-    f.emit('agent/session-start', { agent: f.root.agent })
+    f.emit('agent/created', { agent: f.root.agent, source: 'fresh' })
     f.sessions.set(f.root.agent.session.id, f.record('root', 1))
     f.status.contextValues(f.root)
     expect(lateProjection.snapshot).toHaveBeenCalledTimes(1)

@@ -24,7 +24,7 @@ interface StatusEvents {
   'goal/changed': [{ agent: Agent; change?: { ref?: { id?: string } } }]
   'goal/activation-changed': [{ sessionId: string }]
   'agent/status': [{ agent: Agent }]
-  'agent/session-start': [{ agent: Agent }]
+  'agent/created': [{ agent: Agent }]
 }
 interface StatusHost<S extends StatusSession> {
   sessions: ReadonlyMap<SessionId, S>
@@ -86,7 +86,7 @@ export function createNativeSessionStatus<S extends StatusSession>(host: StatusH
       record.output.activity(agent.status === 'running')
       queueMicrotask(() => refresh(record))
     })
-    on('agent/session-start', ({ agent }) => {
+    on('agent/created', ({ agent }) => {
       const record = ownedAgent(agent)
       if (record !== undefined) queueMicrotask(() => refresh(record))
     })

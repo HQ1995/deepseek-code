@@ -24,6 +24,11 @@ agents, tools, sessions, and services. Rendering belongs to the Rust TUI;
 model execution and durable storage belong to DSH. `cordis.patch.yml` composes
 the profile with a provider-neutral default and the shipped preset roster.
 
+The DSH base owns the PTC runtime; shipped workflow presets mount their own
+isolated `workflow-ptc` engine. Native DeepSeek session-log contribution is
+explicitly disabled in the profile, independently of telemetry settings.
+Experimental browser and computer providers are not enabled by default.
+
 | Setting | Default | Meaning |
 |---|---|---|
 | `socketPath` | `/tmp/dsh-grok-leader.sock` | Leader socket path |

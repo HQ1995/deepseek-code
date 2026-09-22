@@ -41,8 +41,8 @@ To upgrade dsh:
    metadata, but never install or switch the user's Node runtime;
 4. rebuild the bridge and run the complete E2E suite;
 
-The current source pin is `0.1.5-rc.2` at
-`fb2c4b9e698e30edb738bca4cf0618587db7d203`. The builder uses the official upstream
+The current source pin is `0.1.6-alpha.2` at
+`ddefc45fbc7f8e46dd73185e68295696d1297887`. The builder uses the official upstream
 package build, compiles the bridge against that installed SDK, bundles ordinary
 plugin dependencies without duplicating host peers, and packages the private
 runtime including native helpers. Users install those artifacts as a complete
@@ -75,10 +75,10 @@ include their own prereleases plus stable releases. Unmarked historical
 Checks never write that migration. The installer commits the channel only after
 the exact tuple is ready, restoring moved entries after ordinary commit errors.
 
-### DSH 0.1.5 feature coverage
+### DSH 0.1.6 feature coverage
 
-The [rc.2 release](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.5-rc.2)
-and [rc.1 feature summary](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.5-rc.1)
+The [alpha.2 release](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.6-alpha.2)
+and the [rc.2 release](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.5-rc.2)
 describe the target. Runtime features use official implementations. Browser
 presentation does not automatically become a TUI feature.
 
