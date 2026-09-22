@@ -980,7 +980,7 @@ involved.
   `.git/integration-backups/linux-main-cfc74184-evidence.tar.gz` and its
   hash matches the remote archive, and the input bundle is kept beside it as
   `.git/integration-backups/linux-main-cfc74184.bundle`.
-- The supplementary TUI-crate gate the two previous re-runs skipped was
+- The supplementary TUI-crate gate every re-run since `6736f162` skipped was
   executed here, because `705e3f16` touches four files under
   `third_party/grok-build` and the last Linux compile of the vendored tree
   was `6736f162`: `scripts/check-rust.sh` (SHA-256
@@ -990,8 +990,9 @@ involved.
   (`rustc 1.94.0 (4a4ef493e 2026-03-02)`, resolved through
   `third_party/grok-build/rust-toolchain.toml`, not the login `1.97.1`) —
   2697 passed, 0 failed, 2 ignored across its seven stanzas in 1114 s, with
-  a cold dev-profile target, since no other root on the host holds one and
-  the release targets cannot be reused across profiles. The gate's own
+  a cold dev-profile target at `nice -n 15` with `CARGO_BUILD_JOBS=12`,
+  since none of the earlier acceptance roots holds a dev-profile target and
+  their release targets cannot be reused across profiles. The gate's own
   `leader::` filter selects both cases `705e3f16` changed,
   `leader::tests::terminal_refusal_classification` and
   `leader::tests::mismatched_external_bridge_is_rejected_without_replacing_its_listener`,
@@ -1007,16 +1008,17 @@ involved.
   records `newScopes: []` and `residualProcesses: []`.
 
 **Coverage limits.** This pass re-ran the approved threshold, and unlike the
-two previous re-runs it also executed the supplementary TUI-crate gate: the
-vendored tree is not byte-identical this time — `705e3f16` touches four files
-under `third_party/grok-build` and the last Linux compile of the crate before
-this one was `6736f162` — so the leader/dashboard fix is now compiled and
-tested on Linux as well as in the local macOS lane at this revision. The
-focused source owner/consumer selection, the `unshare --user --pid`
-reaper/namespace sweep, `build:lib` with the 16 `test:docs` gates, the
-recorded-session corpus and the managed-update E2E were not re-executed
-either; the full installed-product E2E ran only in its local macOS lane at
-this revision. As before, this validates a local revision, not a published
-artifact: the pin bump changes what ships, but main is 3 commits ahead of
-`origin/main` `a795b154` and nothing is pushed, so distribution remains its
-own gate. `cfc74184` is now the last accepted Linux revision.
+seven re-runs since `6736f162` it also executed the supplementary TUI-crate
+gate: the vendored tree is not byte-identical this time — `705e3f16` touches
+four files under `third_party/grok-build` and the last Linux compile of the
+crate before this one was `6736f162` — so the leader/dashboard fix is now
+compiled and tested on Linux as well as in the local macOS lane at this
+revision. The focused source owner/consumer selection, the
+`unshare --user --pid` reaper/namespace sweep, `build:lib` with the 16
+`test:docs` gates, the recorded-session corpus and the managed-update E2E
+were not re-executed either; the full installed-product E2E ran only in its
+local macOS lane at this revision. As before, this validates a local
+revision, not a published artifact: the pin bump changes what ships, but
+main is 3 commits ahead of `origin/main` `a795b154` and nothing is pushed,
+so distribution remains its own gate. `cfc74184` is now the last accepted
+Linux revision.
