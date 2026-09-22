@@ -886,3 +886,114 @@ bridge module, its two specs and the bench's listing counters. As before, this
 validates a local revision, not a published artifact: main is 75 commits ahead
 of `origin/main` `f6524d40` and nothing is pushed, so distribution remains
 its own gate. `cd7380f7` is now the last accepted Linux revision.
+
+## Re-run at `cfc74184` (2026-09-21)
+
+Main moved from the accepted `cd7380f7` to `cfc74184` through fourteen
+commits: `efb4f0e1`, this document's record of the `cd7380f7`
+re-acceptance, six bridge fixes (`89692051` refusing a `/btw` answer from an
+aside that did not complete, `2595cc67` attributing MCP tools to the mounted
+fiber that owns them, `4a07eb7b` aborting unqueued composer requests on
+session cancel, `62252612` rejecting a malformed fork rewind index and a
+relative cwd, `85b47721` flushing a live preset switch inside its commit,
+`e5fb4179` carrying the session signal and native activity into descendant
+listings), `94c5d809` staging and scanning the update lane under one profile
+spelling, `600ec760` letting install CLI flags win over the ambient channel
+and version, `705e3f16` keeping the DSH leader under the dashboard and
+stopping the retry of a mismatch, `a795b154` their performance notes, and
+then the upstream adoption itself: `32b11ad5` (`feat(dsh)`: DeepSeek
+Harness `0.1.6-alpha.2` at pin `ddefc45fbc`, `testedVersion` and
+`supportedRange` repinned to the new version, a regenerated lock, profile
+composition, three preset snapshots, the `agent/created` lifecycle
+subscription, a new `tests/runtime-composition.spec.ts`, and a 755-line
+macOS patch replacing the 2,179-line `fb2c4b9e` one), `14685f94` aligning
+the installed-product rosters with the new presets, and `cfc74184`
+recording the upstream check — 44 files, +2598/-3839, of which the delta
+confined to bridge sources, presets, `bin/`, `cordis.patch.yml`,
+`scripts/install.sh` and the vendored Rust is 18 files, +234/-113. The
+runtime pin is a production change, so the threshold reopened.
+
+**Accepted for the executed gates on Linux.** The built-provider matrix passes
+all 15 cases on Node 22.19.0 and 24.19.0, and so do the script cases, the
+bridge suite and `scripts/check.sh` — 457 seconds of gate time (setup 10s,
+build 373s, matrix 4s, tests 67s, check 2s, collect 1s). Private root
+`/home/hanqing/dscode-main-cfc74184.Kp3Rvq`; the Node toolchains, package
+managers, caches and the shared pin clone are reused from the earlier approved
+roots, one worker per gate at nice 15. No sudo, paid model, push or release is
+involved.
+
+- Setup cloned the product from a local bundle
+  (`f0f17b74b33fc24ad60b2b41606cef49c430794b4f8f5fc48c4e8f840105007f`, head
+  `cfc74184`) and asserted the revision, the bridge manifest
+  (`sourceCommit`, `sourcePatchSha256`, `testedVersion`, product version
+  `0.0.14-alpha.12`) and the patch digest `54e27462…` before any build. The
+  shared pin clone predated the release, so the run fetched
+  `dsh-v0.1.6-alpha.2` shallowly from the official repository and asserted
+  the pin's tree `5aca5ee6…`, its subject (`Merge pull request #4469 from
+  deepseek-harness/worktree/release-dsh-0.1.6-alpha.2`) and a
+  `package.json` of `0.1.6-alpha.2` — the same tree the macOS build and
+  the patch regeneration were checked against. The gate then reports
+  `PASS isolated setup` with `unshare --user --map-root-user --pid --fork
+  --mount-proc` succeeding and the pin clone confirmed shallow
+  (`logs/run-setup.log`, `logs/setup-env.txt`).
+- The build passed, the runtime CLI reports `0.1.6-alpha.2`, and the fresh
+  `dscode-consumer.json` (`11597b6d…`) records `sourceCommit`
+  `ddefc45fbc…`, `sourcePatchSha256` `54e27462…`, `dshVersion`
+  `0.1.6-alpha.2`, `linux/x64` and tree `2583e308…`; the accepted
+  consumer cannot be reused because the commit, the digest and the SDK
+  version all changed, and the runtime build logs its patched source at the
+  pin head.
+  `dscode-plugin.tgz` is `26beb5ea…` and carries the accepted
+  `1b853ffc…` plugin's 604 member names with nothing added and nothing
+  removed, so the plugin difference is content-only, and its manifest pins
+  the same commit, the same digest and the same version range.
+  `dscode-runtime-linux-x86_64.tar.gz` is `450dd451…`, 396,730,249 bytes
+  and 37,854 entries against the accepted archive's 34,501, carrying 316
+  `@deepseek-ai/*` package manifests and a `dscode-runtime.json` with the
+  same version, commit and digest — the archive moves with the pin.
+- **The built-provider 15-case matrix passed on both Nodes**
+  (`built-*/PASS.json`): ordinary and PTY native cancel after readiness, five
+  immediate disposals of each kind, immediate ordinary abort before target
+  output, genuine pre-exec ENOENT/EACCES, and direct exit kept separate from
+  escaped-descendant cleanup. Per-case times are 59–326ms on Node 22.19.0 and
+  65–327ms on Node 24.19.0, with the provider and runner resolved from the
+  consumer's `@deepseek-ai/dsh-subprocess-local/lib/{index,runner}.js`, and
+  every check records its owned PID, its unit, its outcome signal and
+  `remainingScopes: []`.
+- Node 22.19.0 and 24.19.0 each passed all 44 release/runtime/gateway script
+  cases (44 passed, 0 failed, 0 skipped) and the 964 bridge cases in 47 files
+  (964 passed, 4 macOS-conditional skips, 47 files passed / 1 skipped), with
+  `session-discovery.spec.ts`'s 42 cases green on both lines, the new
+  `runtime-composition.spec.ts` at 8, and `scripts/check.sh` with the
+  version sources agreeing on `0.0.14-alpha.12`.
+- The post-run audit (`logs/post-run-audit.json`, checked `03:07:43Z`)
+  found `newScopes: []` and `residualProcesses: []`, and all six observed
+  scope PIDs (2640332/2640394/2640534 on Node 22, 2640555/2640600/2640729 on
+  Node 24) already stopped; the product worktree is clean at `cfc74184`
+  with no extra worktree (`logs/product-final-worktrees.txt`), and
+  `logs/run-all-status.txt` records all six gates at exit 0 and closes with
+  `RUN-ALL-COMPLETE` — the archived copy was taken during collection, one
+  second earlier, so those closing lines are read from the run root.
+- Evidence: `linux-main-cfc74184-evidence.tar.gz`, SHA-256
+  `eed05d844180184ef7c7654542b63eaa0f3e30c71b8f3bf513a162e78a5acdf5`; the
+  local copy is
+  `.git/integration-backups/linux-main-cfc74184-evidence.tar.gz` and its
+  hash matches the remote archive, and the input bundle is kept beside it as
+  `.git/integration-backups/linux-main-cfc74184.bundle`.
+
+**Coverage limits.** This pass re-ran the approved threshold only, and unlike
+the previous re-runs the suppositions behind the skipped gates do not all
+hold. The supplementary TUI-crate gate was not executed: the vendored tree is
+not byte-identical this time — `705e3f16` touches four files under
+`third_party/grok-build` and the last Linux run that compiled the crate is
+`6736f162` — so the leader/dashboard fix stands verified only by the local
+macOS lane at this revision (`scripts/check-rust.sh` PASS, 161 Rust
+contract cases) and has not been compiled on Linux. The focused source
+owner/consumer selection, the `unshare --user --pid` reaper/namespace sweep,
+`build:lib` with the 16 `test:docs` gates, the recorded-session corpus and
+the managed-update E2E were not re-executed either; the full installed-product
+E2E ran only in its local macOS lane at this revision. As before, this
+validates a local revision, not a published artifact: the pin bump changes
+what ships, but main is 3 commits ahead of `origin/main` `a795b154` and
+nothing is pushed, so distribution remains its own gate. `cfc74184` is now
+the last accepted Linux revision.
