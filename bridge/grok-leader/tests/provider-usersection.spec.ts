@@ -36,7 +36,7 @@ describe('providerUserSection', () => {
   })
 
   it('returns undefined when the llm-pi-ai ns is absent', () => {
-    const svc = settingsService([{ ns: 'agent-presets', user: { default: 'standard' } }])
+    const svc = settingsService([{ ns: 'agent-preset-registry', user: { selectedDefault: 'standard' } }])
     expect(providerUserSection(svc)).toBeUndefined()
   })
 
@@ -78,7 +78,7 @@ describe('hasUserProviderRoute', () => {
 
   it('is false without a section or providers', () => {
     expect(hasUserProviderRoute(undefined, 'provider-a')).toBe(false)
-    expect(hasUserProviderRoute(settingsService([{ ns: 'agent-presets', user: {} }]), 'provider-a')).toBe(false)
+    expect(hasUserProviderRoute(settingsService([{ ns: 'agent-preset-registry', user: {} }]), 'provider-a')).toBe(false)
     expect(hasUserProviderRoute(settingsService([{ ns: 'llm-pi-ai', user: { providers: undefined } }]), 'provider-a')).toBe(false)
   })
 })

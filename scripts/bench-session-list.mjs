@@ -124,8 +124,8 @@ for (let turn = 0; turn < turns; turn += 1) {
         turn, step,
         message: {
           source: { kind: 'tool', callId },
-          content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: outputFor(turn, step) }], isError: false }],
-          role: 'user', id: `bench-result-turn-${turn}-step-${step}`,
+          toolCallId: callId, content: [{ type: 'text', text: outputFor(turn, step) }], isError: false,
+          role: 'tool', id: `bench-result-turn-${turn}-step-${step}`,
         },
       },
     })

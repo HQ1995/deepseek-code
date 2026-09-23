@@ -250,10 +250,25 @@ describe('model catalog module', () => {
     catalog.dispose(); f.catalog.dispose()
   })
 
+  it('waits for the native legacy settings import before reading routes', async () => {
+    const f = fixture()
+    let finish!: () => void
+    const ready = new Promise<void>(resolve => { finish = resolve })
+    const settings = f.deps.settings()!
+    f.deps.settings = () => ({ ...settings, ready })
+    const catalog = createModelCatalog(f.deps)
+    const initial = catalog.initialize()
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(f.llm.listModels).not.toHaveBeenCalled()
+    finish()
+    expect((await initial).providers).toHaveLength(2)
+    await catalog.dispose(); await f.catalog.dispose()
+  })
+
   it.each([undefined, null, 'invalid', {}, { providers: null }, { providers: { alpha: 'invalid', beta: { baseURL: 42 } } }])(
     'does not invent editable provider fields from malformed or absent settings: %j', async user => {
       const f = fixture()
-      f.settings.describe = () => [{ ns: 'agent-presets', user: { providers: { alpha: { baseURL: 'ignored' } } } }, { ns: 'llm-pi-ai', user }]
+      f.settings.describe = () => [{ ns: 'agent-preset-registry', user: { providers: { alpha: { baseURL: 'ignored' } } } }, { ns: 'llm-pi-ai', user }]
       expect((await f.catalog.current()).providers).toEqual([{ id: 'alpha' }, { id: 'beta' }])
       f.catalog.dispose()
     },

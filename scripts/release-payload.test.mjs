@@ -110,6 +110,7 @@ test('consumer reuse requires the exact source, installed bytes, and copied runt
     assert.throws(() => validateConsumer(root, manifest), /no build provenance/);
     recordConsumerProvenance(root, manifest);
     validateConsumer(root, manifest);
+    assert.throws(() => validateConsumer(root, { ...manifest, dependencies: { 'js-yaml': '^4.1.1' } }), /mismatch/);
     const patched = { dsh: { ...manifest.dsh, sourcePatchSha256: 'c'.repeat(64) } };
     assert.throws(() => validateConsumer(root, patched), /mismatch/);
     recordConsumerProvenance(root, patched);

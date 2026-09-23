@@ -272,7 +272,7 @@ printf 'local keep\n' >"$PROFILE/sessions/local.keep"
 [[ ! -e "$PROFILE/bin/dscode" && ! -e "$PROFILE/runtime" ]] || fail "uninstall kept product binaries"
 [[ -f "$PROFILE/sessions/local.keep" && -f "$PROFILE/config.toml" ]] || fail "uninstall removed profile user data"
 [[ ! -e "$LAUNCHER" && ! -L "$LAUNCHER" ]] || fail "uninstall kept the launcher link"
-[[ -f "$DSH_HOME/settings.yaml" ]] || fail "uninstall removed shared dsh settings"
+[[ -f "$DSH_HOME/settings.yaml.imported" ]] || fail "uninstall removed archived shared dsh settings"
 [[ -f "$DSH_HOME/sessions/shared.keep" ]] || fail "uninstall removed shared sessions"
 [[ -f "$DSH_HOME/storages/shared.keep" ]] || fail "uninstall removed shared storages"
 

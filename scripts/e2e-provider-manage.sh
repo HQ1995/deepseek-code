@@ -3,7 +3,7 @@
 # Flow: add fake-gw through the modal, edit it
 # through the prefilled modal (Ctrl+E), assert the update preserved models
 # and the roster refreshed, then delete it (Ctrl+D, y confirm) and assert
-# the route left settings.yaml; the current provider's delete is refused
+# the route left the profile patch; the current provider's delete is refused
 # with the switch-first message. A second boot proves the edited settings
 # persist. Artifacts use DSCODE_E2E_OUT_DIR, defaulting to /tmp/provmanage-e2e/.
 set -euo pipefail
@@ -17,6 +17,7 @@ OUT="${DSCODE_E2E_OUT_DIR:-/tmp/provmanage-e2e}"
 mkdir -p "$OUT"
 RUN_ID="$$"
 SCRATCH="$OUT/home-$RUN_ID"
+PROFILE_PATCH="$SCRATCH/profiles/dscode/cordis.patch.yml"
 SOCK="$OUT/leader-$RUN_ID.sock"
 SOCK2="$OUT/leader-$RUN_ID-boot2.sock"
 PORT=$((23000 + (RUN_ID % 15000)))
@@ -25,7 +26,7 @@ SESSION="provmanage-$RUN_ID"
 MOCK_PID=""
 
 cleanup() { tmux -L "$SESSION" -f /dev/null kill-server 2>/dev/null || true; if [[ -n "$MOCK_PID" ]]; then kill "$MOCK_PID" 2>/dev/null || true; wait "$MOCK_PID" 2>/dev/null || true; fi; }
-fail() { echo "FAIL: $1" >&2; cp "$SCRATCH/settings.yaml" "$OUT/settings-$RUN_ID-FAIL.yaml" 2>/dev/null || true; tmux -L "$SESSION" -f /dev/null capture-pane -p -t "$SESSION:0.0" > "$OUT/frame-$RUN_ID-FAIL.txt" 2>/dev/null || true; exit 1; }
+fail() { echo "FAIL: $1" >&2; cp "$PROFILE_PATCH" "$OUT/settings-$RUN_ID-FAIL.yaml" 2>/dev/null || true; tmux -L "$SESSION" -f /dev/null capture-pane -p -t "$SESSION:0.0" > "$OUT/frame-$RUN_ID-FAIL.txt" 2>/dev/null || true; exit 1; }
 trap cleanup EXIT
 
 [[ -x "$BIN" ]] || fail "TUI binary is missing: $BIN"
@@ -80,6 +81,7 @@ printf '[cli]\nauto_update = false\n' >"$SCRATCH/profiles/dscode/config.toml"
   "$ROOT" >"$SCRATCH/profiles/dscode/trusted_folders.toml"
 
 export TERM=xterm-256color
+export HOME="$SCRATCH"
 export DSH_HOME="$SCRATCH"
 export DSCODE_SOCKET="$SOCK"
 export DSH_TELEMETRY_DISABLED=1
@@ -120,13 +122,16 @@ clear_prompt() { tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" C-c
 wait_default_selection() {
   local provider="$1" model="$2"
   for _ in $(seq 1 40); do
-    if awk -v provider="$provider" -v model="$model" '
-      /^agent-default-model:/ { in_default = 1; next }
-      in_default && /^[^[:space:]]/ { in_default = 0 }
-      in_default && $1 == "provider:" && $2 == provider { provider_ok = 1 }
-      in_default && $1 == "model:" && $2 == model { model_ok = 1 }
-      END { exit !(provider_ok && model_ok) }
-    ' "$SCRATCH/settings.yaml"; then
+    if "$NODE_BIN" --input-type=module - "$PROFILE_PATCH" "$provider" "$model" <<'JS'
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+const yaml = createRequire(process.env.DSH_BIN)('js-yaml');
+const [path, provider, model] = process.argv.slice(2);
+const rows = yaml.load(readFileSync(path, 'utf8')) ?? [];
+const config = rows.filter(row => row.id === 'agent-default-model' && row.config).at(-1)?.config;
+process.exit(config?.provider === provider && config?.model === model ? 0 : 1);
+JS
+    then
       return 0
     fi
     sleep 0.25
@@ -149,9 +154,9 @@ tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Tab "FAKE_KEY"
 snap filled
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Enter
 wait_frame after-add "Provider added"
-cp "$SCRATCH/settings.yaml" "$OUT/settings-$RUN_ID-after-add.yaml"
-grep -q 'fake-gw:' "$SCRATCH/settings.yaml" || fail "settings.yaml missing fake-gw"
-grep -q 'fake-model' "$SCRATCH/settings.yaml" || fail "settings.yaml missing discovered model"
+cp "$PROFILE_PATCH" "$OUT/settings-$RUN_ID-after-add.yaml"
+grep -q 'fake-gw:' "$PROFILE_PATCH" || fail "profile patch missing fake-gw"
+grep -q 'fake-model' "$PROFILE_PATCH" || fail "profile patch missing discovered model"
 
 # 4. Both providers expose fake-model. Switching providers keeps that raw
 # model id, while persisting the exact provider/model route.
@@ -178,11 +183,11 @@ tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "Fake GW Renamed"
 snap edit-filled
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Enter
 wait_frame after-edit "Provider updated"
-cp "$SCRATCH/settings.yaml" "$OUT/settings-$RUN_ID-after-edit.yaml"
-grep -q 'displayName: Fake GW Renamed' "$SCRATCH/settings.yaml" || fail "settings.yaml missing the renamed displayName"
-grep -q 'apiKeyEnv: FAKE_KEY' "$SCRATCH/settings.yaml" || fail "edit dropped apiKeyEnv"
-grep -q 'fake-model' "$SCRATCH/settings.yaml" || fail "edit dropped the discovered models"
-grep -q "$GW_URL" "$SCRATCH/settings.yaml" || fail "edit dropped baseURL"
+cp "$PROFILE_PATCH" "$OUT/settings-$RUN_ID-after-edit.yaml"
+grep -q 'displayName: Fake GW Renamed' "$PROFILE_PATCH" || fail "profile patch missing the renamed displayName"
+grep -q 'apiKeyEnv: FAKE_KEY' "$PROFILE_PATCH" || fail "edit dropped apiKeyEnv"
+grep -q 'fake-model' "$PROFILE_PATCH" || fail "edit dropped the discovered models"
+grep -q "$GW_URL" "$PROFILE_PATCH" || fail "edit dropped baseURL"
 clear_prompt
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "/provider fake"
 sleep 2
@@ -208,8 +213,8 @@ wait_frame delete-arm "unused saved key"
 grep -q 'Fake GW Renamed' "$OUT/frame-$RUN_ID-delete-arm.txt" || fail "delete confirm does not name the provider"
 tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" "y"
 wait_frame after-delete "Provider removed"
-cp "$SCRATCH/settings.yaml" "$OUT/settings-$RUN_ID-after-delete.yaml"
-if grep -q 'fake-gw:' "$SCRATCH/settings.yaml"; then fail "settings.yaml still has fake-gw after delete"; fi
+cp "$PROFILE_PATCH" "$OUT/settings-$RUN_ID-after-delete.yaml"
+if grep -q 'fake-gw:' "$PROFILE_PATCH"; then fail "profile patch still has fake-gw after delete"; fi
 
 # Blocked delete: the provider owning the current model cannot be removed.
 clear_prompt

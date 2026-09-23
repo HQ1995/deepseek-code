@@ -16,8 +16,8 @@ function fixture() {
   const choices = new Map<Context, string>()
   const histories = new WeakMap<Agent, { header: { agentPreset: string }; events: SessionEvent[] }>()
   const entries = [
-    { id: 'standard', name: '标准', trust: 'system' as const },
-    { id: 'minimal', name: '极简', trust: 'system' as const },
+    { id: 'standard' },
+    { id: 'minimal' },
     { id: 'custom', name: 'Custom', description: 'User-authored', path: '/tmp/custom/preset.yml', trust: 'user' as const },
   ]
   const roster = {
@@ -269,7 +269,7 @@ describe('session preset ownership', () => {
 
   it('does not rewrite an already remembered default and rejects missing optional settings explicitly', async () => {
     const f = fixture(), { record } = f.add()
-    f.settings.describe.mockReturnValue([{ ns: 'agent-presets', user: { default: 'standard' } }])
+    f.settings.describe.mockReturnValue([{ ns: 'agent-preset-registry', user: { selectedDefault: 'standard' } }])
     await expect(f.presets.command(record, '/preset standard')).resolves.toContain('is active')
     expect(f.settings.mutate).not.toHaveBeenCalled()
     f.setSettings()

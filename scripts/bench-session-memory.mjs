@@ -63,7 +63,8 @@ const appendTurn = (session, turn) => {
     })
     session.append('tool/result', {
       turn, step,
-      message: { content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: outputFor(turn, step) }] }] },
+      message: { role: 'tool', id: `result-${callId}`, source: { kind: 'tool', callId }, toolCallId: callId,
+        content: [{ type: 'text', text: outputFor(turn, step) }] },
     }, { surfaceOp: 'append' })
   }
   session.append('assistant/message', {

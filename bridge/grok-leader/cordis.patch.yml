@@ -88,8 +88,7 @@
 - id: tool-web
   disabled: true
 
-# Keep the released official presets and writable user root. The installed
-# dscode bundle adds an opt-in history preset without changing standard.
+# Host services shared by the declared presets.
 - insert:
     - id: session-reference
       name: '@deepseek-ai/dsh-session-reference'
@@ -113,15 +112,10 @@
       name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
 
 - insert:
-    - id: agent-presets
-      name: '@deepseek-ai/dsh-agent-presets'
+    - id: agent-preset-registry
+      name: '@deepseek-ai/dsh-agent-preset-registry'
       config:
         default: standard
-        roots:
-          - path: !!js dshHomePath('profiles/dscode/node_modules/@hqzhao95/dscode/presets')
-            trust: system
-        includeShippedRoot: true
-        includeUserRoot: true
 
 - insert:
     - id: cordis-host-runner

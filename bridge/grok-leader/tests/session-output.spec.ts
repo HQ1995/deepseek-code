@@ -142,7 +142,7 @@ describe('session output ownership', () => {
   it('serializes hydrated tool output ahead of later text and captures the accepting prompt', async () => {
     const f = fixture(), image = deferred<ProjectedUpdate[]>()
     f.projectImages.mockImplementationOnce(() => image.promise)
-    f.output.live(event(0, 'tool/result', { message: { content: [{ type: 'tool-result', toolCallId: 'image', content: [{ type: 'image', attachment: {} }] }] } }))
+    f.output.live(event(0, 'tool/result', { message: { role: 'tool', toolCallId: 'image', content: [{ type: 'image', attachment: {} }] } }))
     f.output.update(text('after image'))
     expect(f.notes).toEqual([])
     f.setPrompt('next')

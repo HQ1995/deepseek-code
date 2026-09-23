@@ -84,7 +84,7 @@ it('keeps failed sub-calls errors and gives nested edits their diff block', () =
 it('ignores incomplete tool IDs and invalid todo snapshots in both projection paths', () => {
   const invalid = [
     { type: 'tool/call', data: { name: 'bash', arguments: '{}' } },
-    { type: 'tool/result', data: { message: { content: [{ type: 'tool-result', content: [] }] } } },
+    { type: 'tool/result', data: { message: { role: 'tool', content: [] } } },
     { type: 'tool/ptc-dispatch-start', data: { subCallId: '', arguments: {} } },
     { type: 'tool/ptc-dispatch', data: { subCallId: 42, content: [] } },
     { type: 'todo/write', data: { todos: null } },
@@ -99,7 +99,7 @@ it('uses generic tool text when HTTP status or file length is unknown', () => {
     { name: 'read', arguments: { path: '/workspace/a' }, meta: { path: '/workspace/a', lines: [{ number: 10, text: 'page' }] } },
   ]
   for (const prior of cases) for (const replay of [false, true]) {
-    const event = { type: 'tool/result', data: { meta: prior.meta, message: { content: [{ type: 'tool-result', toolCallId: 'call', content: [{ type: 'text', text: 'page' }] }] } } } as unknown as SessionEvent
+    const event = { type: 'tool/result', data: { meta: prior.meta, message: { role: 'tool', toolCallId: 'call', content: [{ type: 'text', text: 'page' }] } } } as unknown as SessionEvent
     const update = sessionEventToUpdates(event, { replay, toolCall: () => prior })[0]
     expect(update).toMatchObject({ toolCallId: 'call', content: [{ content: { text: 'page' } }] })
     expect(update).not.toHaveProperty('rawOutput')

@@ -255,11 +255,18 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
   ): Promise<BundleInspection> => {
     const pkgDir = join(dir, 'node_modules', ...name.split('/'))
     try {
-      const manifest = JSON.parse(await readFile(join(pkgDir, 'package.json'), 'utf8')) as { dsh?: { bundle?: { patch?: string } } }
+      const manifest = JSON.parse(await readFile(join(pkgDir, 'package.json'), 'utf8')) as { dsh?: { bundle?: { patch?: string | string[] } } }
       const patchRel = manifest.dsh?.bundle?.patch
       if (patchRel === undefined) return { kind: 'plain' }
-      const patchText = await readFile(join(pkgDir, patchRel), 'utf8')
-      return { kind: 'bundle', analysis: analyzeBundlePatch(patchText) }
+      const files = typeof patchRel === 'string' ? [patchRel] : patchRel
+      if (!Array.isArray(files) || !files.every(file => typeof file === 'string')) throw new Error('dsh.bundle.patch must be a file path or a list of file paths')
+      const analysis: BundlePatchAnalysis = { insertedRows: [], overriddenRows: [], disabledRows: [], sensitiveRows: [], jsExprCount: 0 }
+      for (const file of files) {
+        const next = analyzeBundlePatch(await readFile(join(pkgDir, file), 'utf8'))
+        for (const key of ['insertedRows', 'overriddenRows', 'disabledRows', 'sensitiveRows'] as const) analysis[key].push(...next[key])
+        analysis.jsExprCount += next.jsExprCount
+      }
+      return { kind: 'bundle', analysis }
     } catch (error) {
       return { kind: 'broken', error: errorChain(error) }
     }

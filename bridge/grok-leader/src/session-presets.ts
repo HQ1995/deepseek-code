@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams, paramRecord } from './acp.ts'
 import type { SettingsLike } from './model-catalog.ts'
@@ -157,9 +157,9 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
   const remember = async (preset: string): Promise<void> => {
     const service = host.settings()
     if (service === undefined) throw internalError('the settings service is not configured')
-    const user = service.describe?.().find(entry => entry.ns === 'agent-presets')?.user
-    if (user !== null && typeof user === 'object' && (user as Record<string, unknown>).default === preset) return
-    try { await service.mutate('agent-presets', [{ op: 'set', path: ['default'], value: preset }]) }
+    const user = service.describe?.().find(entry => entry.ns === 'agent-preset-registry')?.user
+    if (user !== null && typeof user === 'object' && (user as Record<string, unknown>).selectedDefault === preset) return
+    try { await service.mutate('agent-preset-registry', [{ op: 'set', path: ['selectedDefault'], value: preset }]) }
     catch (error) { throw internalError('failed to remember preset "' + preset + '": ' + (error instanceof Error ? error.message : String(error))) }
   }
   const resolveReal = async (roster: AgentPresetsLike | undefined, request: string) => {
@@ -296,7 +296,7 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
       hasCache: presets.length > 0, personas: presets.map(preset => preset.id),
       ...defaultPersona === undefined ? {} : { defaultPersona }, roles: [], agents: [], skills: [],
       personaDetails: presets.map(preset => {
-        const shipped = preset.trust === 'system' ? SHIPPED_PRESET_DISPLAY[preset.id] : undefined
+        const shipped = preset.name === undefined ? SHIPPED_PRESET_DISPLAY[preset.id] : undefined
         const description = shipped?.description ?? preset.description
         return { name: shipped?.name ?? preset.name ?? preset.id, ...description === undefined ? {} : { description }, hasInputs: false, hasOutputs: false }
       }), roleDetails: [],

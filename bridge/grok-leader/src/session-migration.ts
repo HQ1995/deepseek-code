@@ -18,22 +18,23 @@ export function normalizeLegacyModelSelection(row: unknown): unknown {
 export function installLegacySessionMigration(service: unknown): () => void {
   let owner = service as Record<PropertyKey, unknown>
   while (owner?.[symbols.original] !== undefined) owner = owner[symbols.original] as Record<PropertyKey, unknown>
-  // ponytail: pinned JSONL provider adapter is private; replace this seam when DSH exposes format adapters.
-  const format = owner?.['generationFormat'] as {
-    createRestore(header: Record<string, unknown>): { decodeRow(row: unknown): void }
-  } | undefined
-  // Memory/custom persistence providers have no historical JSONL generations.
-  if (format === undefined) return () => {}
-  if (typeof format.createRestore !== 'function') throw new Error('unsupported DSH historical format adapter')
-  const original = format.createRestore
-  const wrapped: typeof original = header => {
-    const restore = original.call(format, header)
+  // Pinned JSONL provider adapter; child catalog facts and every native validation
+  // stay in its decoder. The source patch extracts this instance-local method.
+  const provider = owner as {
+    generationFormat?: object
+    createHistoricalRestore?: (header: Record<string, unknown>, children: unknown) => { decodeRow(row: unknown): void }
+  }
+  if (provider.generationFormat === undefined) return () => {}
+  const original = provider.createHistoricalRestore
+  if (typeof original !== 'function') throw new Error('unsupported DSH historical format adapter; rebuild the pinned source runtime')
+  const wrapped: typeof original = (header, children) => {
+    const restore = original.call(provider, header, children)
     if (typeof header.version === 'number' && header.version < 3) {
       const decode = restore.decodeRow.bind(restore)
       restore.decodeRow = row => decode(normalizeLegacyModelSelection(row))
     }
     return restore
   }
-  format.createRestore = wrapped
-  return () => { if (format.createRestore === wrapped) format.createRestore = original }
+  provider.createHistoricalRestore = wrapped
+  return () => { if (provider.createHistoricalRestore === wrapped) provider.createHistoricalRestore = original }
 }

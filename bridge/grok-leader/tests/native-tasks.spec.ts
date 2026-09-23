@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { symbols } from '@deepseek-ai/cordis'
+import type { JobEvent, JobEventFilter } from '@deepseek-ai/dsh-jobs'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId, type SessionEvent, type SessionLogOffset } from '@deepseek-ai/dsh-session'
 import { createAfterScheduleRecord, createEveryScheduleRecord, ScheduleId } from '@deepseek-ai/dsh-schedule'
@@ -9,7 +10,7 @@ import { createSessionDiscovery } from '../src/session-discovery.ts'
 import { createNativeTasks } from '../src/native-tasks.ts'
 import { createSessionWork } from '../src/session-work.ts'
 
-type Job = { id: string; kind: string; label: string; ownerSession: string; status: 'running' | 'stopping' | 'completed' | 'killed'; startedAt: number; finishedAt?: number }
+type Job = { id: string; kind: string; label: string; owner: string; status: 'running' | 'stopping' | 'completed' | 'killed'; startedAt: number; finishedAt?: number }
 function deferred<T>() {
   let resolve!: (value: T) => void
   const promise = new Promise<T>(yes => { resolve = yes })
@@ -33,21 +34,21 @@ function fixture() {
   const owner = add('owner'), other = add('other', 2)
   const rows: Job[] = []
   const outputs = new Map<string, string>()
-  const listeners = new Set<(owner?: Agent) => void>()
+  const listeners = new Set<(event: JobEvent) => void>()
   const unsubscribe = vi.fn()
   const jobs = {
-    list: vi.fn((agent: Agent) => rows.filter(row => row.ownerSession === agent.session.id)),
-    get: vi.fn((id: string, agent: Agent) => {
-      const job = rows.find(row => row.id === id && row.ownerSession === agent.session.id)
+    list: vi.fn((agent: SessionId) => rows.filter(row => row.owner === agent)),
+    get: vi.fn((id: string, agent: SessionId) => {
+      const job = rows.find(row => row.id === id && row.owner === agent)
       if (job === undefined) throw new Error('unknown native job')
       return job
     }),
-    kill: vi.fn((id: string, agent: Agent, _reason?: string): 'requested' | 'already-finished' => { jobs.get(id, agent).status = 'stopping'; return 'requested' }),
-    wait: vi.fn(async (id: string, _timeout: number, agent: Agent) => jobs.get(id, agent)),
-    onJobsChanged: vi.fn((listener: (owner?: Agent) => void) => {
+    kill: vi.fn((id: string, agent: SessionId, _reason?: string): 'requested' | 'already-finished' => { jobs.get(id, agent).status = 'stopping'; return 'requested' }),
+    wait: vi.fn(async (id: string, _timeout: number, agent: SessionId) => jobs.get(id, agent)),
+    events: { subscribe: vi.fn((_filter: JobEventFilter, listener: (event: JobEvent) => void) => {
       listeners.add(listener)
       return () => { listeners.delete(listener); unsubscribe() }
-    }),
+    }) },
     read: vi.fn(() => { throw new Error('must not consume the model cursor') }),
   }
   const names = new Set(['schedule_list', 'schedule_create', 'schedule_delete'])
@@ -65,10 +66,10 @@ function fixture() {
   discovery: { select }, flush, output, logger: { warn } }
   const tasks = createNativeTasks(host)
   const job = (id: string, record = owner, status: Job['status'] = 'running') => {
-    const row: Job = { id, kind: 'bash', label: 'build ' + id, ownerSession: record.agent.session.id, status, startedAt: 1234 }
+    const row: Job = { id, kind: 'bash', label: 'build ' + id, owner: record.agent.session.id, status, startedAt: 1234 }
     rows.push(row); return row
   }
-  const change = (record = owner) => { for (const listener of listeners) listener(record.agent) }
+  const change = (record = owner) => { for (const listener of listeners) listener({ type: 'output', owner: record.agent.session.id, id: 'changed' as never, total: 0 }) }
   const request = (taskId: string, record = owner) => ({ sessionId: record.agent.session.id, taskId, source: 'clientUi' })
   const append = (data: unknown, record = owner) => {
     const event = { seq: record.events.length, time: 1000, type: 'schedule/change', data } as SessionEvent
@@ -133,7 +134,7 @@ describe('native task ownership', () => {
     const f = fixture()
     f.job('one'); f.job('two', f.other)
     f.tasks.snapshot(f.owner); f.tasks.snapshot(f.other); f.tasks.poll()
-    expect(f.jobs.onJobsChanged).toHaveBeenCalledTimes(1)
+    expect(f.jobs.events.subscribe).toHaveBeenCalledTimes(1)
     expect(f.owner.output.notify).toHaveBeenCalledTimes(1)
     expect(f.other.output.notify).toHaveBeenCalledTimes(1)
     f.job('three'); f.change()
@@ -189,10 +190,10 @@ describe('native task ownership', () => {
     const finish = deferred<Job>()
     f.jobs.wait.mockImplementationOnce(() => finish.promise)
     const cancelled = f.tasks.kill(1, f.request('one'))
-    expect(f.jobs.wait).toHaveBeenLastCalledWith('one', 5000, f.owner.agent)
+    expect(f.jobs.wait).toHaveBeenLastCalledWith('one', 5000, f.owner.agent.session.id)
     row.status = 'killed'; finish.resolve(row)
     await expect(cancelled).resolves.toMatchObject({ result: { outcome: 'killed' } })
-    expect(f.jobs.kill).toHaveBeenCalledWith('one', f.owner.agent, 'clientUi')
+    expect(f.jobs.kill).toHaveBeenCalledWith('one', f.owner.agent.session.id, 'clientUi')
     await f.tasks.dispose()
   })
 
@@ -212,14 +213,14 @@ describe('native task ownership', () => {
     f.tasks.snapshot(f.owner)
     const stale = [...f.listeners][0]!
     const secondUnsubscribe = vi.fn()
-    const second = { ...f.jobs, onJobsChanged: vi.fn(() => secondUnsubscribe) }
+    const second = { ...f.jobs, events: { subscribe: vi.fn(() => secondUnsubscribe) } }
     f.host.jobs.mockImplementation(record => record === f.other ? second : f.jobs)
     f.tasks.snapshot(f.other)
     f.unsubscribe.mockImplementation(() => { throw new Error('native unsubscribe failed') })
     const disposal = f.tasks.dispose()
     await expect(disposal).rejects.toThrow('subscription disposal failed')
     expect(secondUnsubscribe).toHaveBeenCalledTimes(1)
-    f.job('late'); stale(f.owner.agent); f.tasks.poll(); f.tasks.snapshot(f.owner)
+    f.job('late'); stale({ type: 'output', owner: f.owner.agent.session.id, id: 'late' as never, total: 0 }); f.tasks.poll(); f.tasks.snapshot(f.owner)
     expect(f.owner.output.notify).not.toHaveBeenCalled()
     expect(() => f.tasks.output(1, f.request('late'))).toThrow('unknown session')
     expect(f.tasks.dispose()).toBe(disposal)
@@ -228,11 +229,11 @@ describe('native task ownership', () => {
 
   it('retries failed registration and contains one broken registry on the shared heartbeat', async () => {
     const f = fixture(); f.job('one')
-    f.jobs.onJobsChanged.mockImplementationOnce(() => { throw new Error('not ready') })
+    f.jobs.events.subscribe.mockImplementationOnce(() => { throw new Error('not ready') })
     f.tasks.poll()
     expect(f.warn).toHaveBeenCalledWith(expect.stringContaining('not ready'))
     f.tasks.poll()
-    expect(f.jobs.onJobsChanged).toHaveBeenCalledTimes(2)
+    expect(f.jobs.events.subscribe).toHaveBeenCalledTimes(2)
     expect(f.owner.output.notify).toHaveBeenCalledTimes(1)
     await f.tasks.dispose()
   })
@@ -240,13 +241,13 @@ describe('native task ownership', () => {
   it('contains synchronous subscription reentry and disposal before registration returns', async () => {
     const f = fixture(); f.job('one')
     const stop = vi.fn()
-    f.jobs.onJobsChanged.mockImplementationOnce(listener => {
-      listener(f.owner.agent)
+    f.jobs.events.subscribe.mockImplementationOnce((_filter, listener) => {
+      listener({ type: 'output', owner: f.owner.agent.session.id, id: 'one' as never, total: 0 })
       void f.tasks.dispose()
       return stop
     })
     f.tasks.snapshot(f.owner)
-    expect(f.jobs.onJobsChanged).toHaveBeenCalledOnce()
+    expect(f.jobs.events.subscribe).toHaveBeenCalledOnce()
     expect(f.jobs.list).toHaveBeenCalledOnce()
     expect(f.owner.output.notify).toHaveBeenCalledOnce()
     expect(stop).toHaveBeenCalledOnce()

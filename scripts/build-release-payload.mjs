@@ -84,10 +84,16 @@ export function consumerTreeDigest(modules) {
   walk(root);
   return hash.digest('hex');
 }
+function consumerDependencyInputs(manifest) {
+  return createHash('sha256').update(JSON.stringify(['dependencies', 'devDependencies'].map(section =>
+    Object.entries(manifest[section] || {}).filter(([name]) => !name.startsWith('@deepseek-ai/'))
+      .sort(([left], [right]) => left.localeCompare(right))))).digest('hex');
+}
 export function recordConsumerProvenance(consumer, manifest) {
   save(join(consumer, 'dscode-consumer.json'), { schema: 1, sourceCommit: manifest.dsh.sourceCommit,
     sourcePatchSha256: manifest.dsh.sourcePatchSha256,
     dshVersion: manifest.dsh.testedVersion, platform: process.platform, arch: process.arch,
+    dependencyInputs: consumerDependencyInputs(manifest),
     tree: consumerTreeDigest(join(consumer, 'node_modules')) });
 }
 export function validateConsumer(consumer, manifest, modules = join(consumer, 'node_modules')) {
@@ -96,6 +102,7 @@ export function validateConsumer(consumer, manifest, modules = join(consumer, 'n
   const record = json(path);
   if (record.schema !== 1 || record.sourceCommit !== manifest.dsh.sourceCommit || record.dshVersion !== manifest.dsh.testedVersion
     || record.sourcePatchSha256 !== manifest.dsh.sourcePatchSha256
+    || record.dependencyInputs !== consumerDependencyInputs(manifest)
     || record.platform !== process.platform || record.arch !== process.arch || record.tree !== consumerTreeDigest(modules)) {
     throw new Error('Consumer provenance/content mismatch; rebuild from the pinned source');
   }

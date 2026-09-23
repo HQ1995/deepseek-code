@@ -9,6 +9,7 @@ import { createSessionCommands, type NativeCommands, type NativeSkills } from '.
 import { createSessionDiscovery, type SessionProjectionCacheLike, type SessionQueryLike } from './session-discovery.ts'
 import { createNativeInteractions } from './native-interactions.ts'
 import { createSessionLifecycle, type SessionRecord } from './session-lifecycle.ts'
+import { createPresetCatalog } from './preset-catalog.ts'
 import { createSessionPresets, type AgentPresetsLike } from './session-presets.ts'
 import { presetHistoryProjection } from './preset-history.ts'
 import { workflowProjection } from './workflows.ts'
@@ -51,7 +52,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { installLegacySessionMigration } from './session-migration.ts'
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import {
   type AttachmentStore,
 } from '@deepseek-ai/dsh-attachment'
@@ -59,7 +60,7 @@ import { errorChain } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm-retry'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { RpcError } from './protocol.ts'
-import { observeJobOutputs } from './job-output.ts'
+import { jobOutputSnapshot } from './job-output.ts'
 import { createImageOutputProjector } from './image-output.ts'
 import { exportSessionArchive } from './session-export.ts'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
@@ -143,7 +144,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   ctx.sessionProjections.register(presetHistoryProjection)
   ctx.sessionProjections.register(workflowProjection)
   protectTerminalSignals(ctx)
-  const jobOutput = observeJobOutputs(ctx)
+  const jobOutput = jobOutputSnapshot
   const projectImages = createImageOutputProjector(ctx)
   ctx.effect(() => installLegacySessionMigration(ctx.get('sessionPersistence')))
   const logger = ctx.logger
@@ -167,7 +168,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   // silently skip saveSelection (and /effort would not persist).
   const agentDefaultModel = (): AgentDefaultModelLike | undefined => ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
   /** Read the preset roster on demand: it mounts asynchronously after apply. */
-  const agentPresets = (): AgentPresetsLike | undefined => ctx.get('agentPresets') as AgentPresetsLike | undefined
+  const agentPresets = createPresetCatalog(ctx)
   const registry = createSessionRegistry<SessionRecord>({
     clientIsLive: id => connections.get(id)?.closed === false,
     flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),

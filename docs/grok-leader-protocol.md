@@ -142,7 +142,7 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
   the default for new sessions and as session-local durable events.
 - Fresh profiles resolve new sessions to `standard`. A TUI picker selection
   stamped with `_meta.rememberAgentPreset: true`, or raw `/preset`, writes
-  `agent-presets.default` for later new sessions. Unmarked per-session/headless
+  `agent-preset-registry.selectedDefault` for later new sessions. Unmarked per-session/headless
   overrides remain session-local. Resume and fork retain their durable session
   preset unless a still-blank session receives another manual selection.
 - An explicit wire model id with no explicit provider resolves through the live

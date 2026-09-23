@@ -225,6 +225,8 @@ export interface CredentialsLike {
 
 /** Structural write path of the official settings seam (ctx.settings.mutate). */
 export interface SettingsLike {
+  /** Source-runtime startup/import completion; absent on older test adapters. */
+  readonly ready?: Promise<void>
   mutate(ns: string, ops: unknown, expectedRevision?: number): Promise<void>
   /** Read the raw user sections (ctx.settings.describe); optional for harnesses without it. */
   describe?(): Array<{ ns: string; user?: unknown }>
@@ -774,16 +776,15 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
   }
 
   /**
-   * Wait (bounded) for the settings service, then one extra macrotask so a
-   * freshly published document's namespace owners (llm-pi-ai) can register
-   * their routes. The first catalog snapshot must not race the settings boot:
-   * an early initialize otherwise serves a roster missing every profile route.
+   * Wait for the native settings import before taking the first catalog
+   * snapshot. Service publication precedes legacy route/default migration.
    */
   const settingsReady = async (): Promise<void> => {
     const deadline = Date.now() + 5000
     while (!closed && settings() === undefined && Date.now() < deadline) {
       await new Promise<void>((resolveWait) => { setTimeout(resolveWait, 10) })
     }
+    await settings()?.ready
     await new Promise<void>((resolveTick) => { setTimeout(resolveTick, 0) })
   }
 

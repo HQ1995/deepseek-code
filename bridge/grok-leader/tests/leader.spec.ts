@@ -5,6 +5,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { createConnection, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
@@ -18,7 +19,7 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import { SessionId, SessionLogOffset, SessionSeq, type SessionEvent, type UserMessage } from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { SessionFormatUnsupportedError, SessionPersistenceRevision, sessionFormatVersionRefusal, type SessionAccess, type SessionHandle, type SessionPersistenceSnapshot } from '@deepseek-ai/dsh-session-persistence'
 import { encodeJsonFrame, FrameDecoder } from '../src/codec.ts'
 import * as GrokLeader from '../src/index.ts'
@@ -298,10 +299,10 @@ function makeMockPresets() {
     recomposed,
     serviceFor: vi.fn((agent: Agent, name: string) => agent.ctx.get(name)),
     list: async () => [
-      { id: 'standard', trust: 'system', name: '标准模式', description: 'standard desc' },
-      { id: 'ptc', trust: 'system', name: 'PTC 模式', description: 'ptc desc' },
-      { id: 'minimal', trust: 'system', name: '极简模式', description: 'minimal desc' },
-      { id: 'cordis', trust: 'system', name: '创造模式', description: 'cordis desc' },
+      { id: 'standard' },
+      { id: 'ptc' },
+      { id: 'minimal' },
+      { id: 'cordis' },
     ],
     resolve: async (id?: string) => {
       resolved.push(id)
@@ -1697,7 +1698,7 @@ describe('grok leader over a unix socket', () => {
       turn: 0, step: 0, callId: 'image', name: 'read_image', arguments: '{}',
     } } as never)
     pluginCtx.emit('session/event', agent.session, { type: 'tool/result', seq: 1, time: 2, data: {
-      message: { content: [{ type: 'tool-result', toolCallId: 'image', content: [{ type: 'image', attachment: { attachmentId: 'stored' } }] }] },
+      message: { role: 'tool', toolCallId: 'image', content: [{ type: 'image', attachment: { attachmentId: 'stored' } }] },
     } } as never)
     pluginCtx.emit('session/event', agent.session, { type: 'assistant/message', seq: 2, time: 3, data: {
       turn: 0, step: 0, stream: [], message: createAssistantMessage({ content: [{ type: 'text', text: 'final image answer' }], source: { provider: 'deepseek', model: 'chat' } }),
@@ -1946,21 +1947,19 @@ describe('grok leader over a unix socket', () => {
   })
 
   it('streams traced native jobs once per owner and authorizes controls until terminal notification', async () => {
-    type Job = { id: string; kind: string; label: string; ownerSession?: string; status: 'running' | 'stopping' | 'killed' | 'completed'; startedAt: number; finishedAt?: number; detail?: string }
+    type Job = { id: string; kind: string; label: string; owner?: string; status: 'running' | 'stopping' | 'killed' | 'completed'; startedAt: number; finishedAt?: number; detail?: string }
     const rows: Job[] = []
-    let changed!: (owner: Agent) => void
+    let changed!: (event: { type: string; owner: string; id: string; total: number }) => void
     let finish!: (job: Job) => void
-    const list = vi.fn((owner: Agent) => rows.filter(job => job.ownerSession === owner.session.id))
-    const get = vi.fn((id: string, owner: Agent) => list(owner).find(job => job.id === id)!)
-    const kill = vi.fn((id: string, owner: Agent) => { get(id, owner).status = 'stopping'; changed(owner); return 'requested' })
+    const list = vi.fn((owner: string) => rows.filter(job => job.owner === owner))
+    const get = vi.fn((id: string, owner: string) => list(owner).find(job => job.id === id)!)
+    const kill = vi.fn((id: string, owner: string) => { get(id, owner).status = 'stopping'; changed({ type: 'output', owner: typeof owner === 'string' ? owner : owner.session.id, id: 'bash-1', total: 0 }); return 'requested' })
     const wait = vi.fn(() => new Promise<Job>(resolve => { finish = resolve }))
-    const subscriptionContexts: Context[] = []
-    const onJobsChanged = vi.fn(function (this: { ctx: Context }, fn: typeof changed) {
-      subscriptionContexts.push(this.ctx)
+    const subscribe = vi.fn(function (_filter: unknown, fn: typeof changed) {
       changed = fn
       return () => {}
     })
-    const { registry, presets, client: c } = await start({ presets: true, jobs: { list, get, kill, wait, onJobsChanged } })
+    const { registry, presets, client: c } = await start({ presets: true, jobs: { list, get, kill, wait, events: { subscribe } } })
     register(c); await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
@@ -1978,20 +1977,20 @@ describe('grok leader over a unix socket', () => {
     for (const id of [sessionId, secondSessionId, sessionId]) {
       expect((await c.request(11, 'x.ai/session/info', { sessionId: id })).error).toBeUndefined()
     }
-    expect(onJobsChanged).toHaveBeenCalledTimes(1)
-    expect(subscriptionContexts[0]).toBe(owner.ctx)
-    const row: Job = { id: 'bash-1', kind: 'bash', label: 'sleep 30', ownerSession: sessionId, status: 'running', startedAt: 1000 }
-    rows.push(row, { ...row, id: 'bash-foreign', ownerSession: 'other-session' }, { ...row, id: 'bash-done', status: 'completed', finishedAt: 2000 })
-    rows.push({ ...row, id: 'bash-2', ownerSession: secondSessionId })
-    changed(owner)
-    changed(secondOwner)
+    expect(subscribe).toHaveBeenCalledTimes(1)
+    expect(subscribe.mock.calls[0]![0]).toEqual({ owners: 'all' })
+    const row: Job = { id: 'bash-1', kind: 'bash', label: 'sleep 30', owner: sessionId, status: 'running', startedAt: 1000 }
+    rows.push(row, { ...row, id: 'bash-foreign', owner: 'other-session' }, { ...row, id: 'bash-done', status: 'completed', finishedAt: 2000 })
+    rows.push({ ...row, id: 'bash-2', owner: secondSessionId })
+    changed({ type: 'output', owner: typeof owner === 'string' ? owner : owner.session.id, id: 'bash-1', total: 0 })
+    changed({ type: 'output', owner: secondOwner.session.id, id: 'bash-2', total: 0 })
     // Observe the push before any kill or query can incidentally refresh Tasks.
     await waitFor(() => c.all.filter(msg => msg.method === 'x.ai/task_backgrounded').length >= 2)
     expect(c.all.filter(msg => msg.method === 'x.ai/task_backgrounded').map(msg => msg.params)).toEqual([
       expect.objectContaining({ sessionId, update: expect.objectContaining({ task_id: row.id, command: row.label }) }),
       expect.objectContaining({ sessionId: secondSessionId, update: expect.objectContaining({ task_id: 'bash-2', command: row.label }) }),
     ])
-    expect(onJobsChanged).toHaveBeenCalledTimes(1)
+    expect(subscribe).toHaveBeenCalledTimes(1)
     for (const taskId of ['missing', 'bash-foreign', 'bash-2']) expect((await c.request(2, 'x.ai/task/kill', { sessionId, taskId, source: 'clientUi' })).result).toEqual({ result: { taskId, outcome: 'not_found' } })
     expect((await c.request(3, 'x.ai/task/kill', { sessionId, taskId: 'bash-done', source: 'teardown' })).result).toEqual({ result: { taskId: 'bash-done', outcome: 'already_exited' } })
     expect(kill).not.toHaveBeenCalled()
@@ -1999,20 +1998,20 @@ describe('grok leader over a unix socket', () => {
     sendRequest(c, 5, 'x.ai/task/kill', { sessionId, taskId: row.id, source: 'clientUi' })
     await waitFor(() => wait.mock.calls.length === 1)
     expect(c.all.some(msg => msg.id === 5)).toBe(false)
-    expect(kill).toHaveBeenCalledWith(row.id, owner, 'clientUi')
-    expect(wait).toHaveBeenCalledWith(row.id, 5000, owner)
+    expect(kill).toHaveBeenCalledWith(row.id, owner.session.id, 'clientUi')
+    expect(wait).toHaveBeenCalledWith(row.id, 5000, owner.session.id)
     Object.assign(row, { status: 'killed', finishedAt: 3000, detail: 'terminated by producer' })
-    changed(owner); finish(row)
+    changed({ type: 'output', owner: typeof owner === 'string' ? owner : owner.session.id, id: 'bash-1', total: 0 }); finish(row)
     expect((await waitForId(c, 5)).result).toEqual({ result: { taskId: row.id, outcome: 'killed' } })
     expect(c.all).toContainEqual(expect.objectContaining({ method: 'x.ai/task_completed', params: expect.objectContaining({ update: { sessionUpdate: 'task_completed', task_snapshot: expect.objectContaining({ task_id: row.id, completed: true, exit_code: null, signal: null }) }, _meta: expect.objectContaining({ nativeTask: { status: 'killed', kind: 'bash', detail: 'terminated by producer', outputAvailable: false } }) }) }))
     expect(c.all.filter(msg => msg.method === 'x.ai/task_backgrounded')).toHaveLength(2)
-    expect(onJobsChanged).toHaveBeenCalledTimes(1)
+    expect(subscribe).toHaveBeenCalledTimes(1)
   })
 
   it('does not report a requested but unsettled job cancellation as killed', async () => {
     const row = { id: 'bash-1', kind: 'bash', label: 'slow producer', status: 'running', startedAt: 1 }
     const kill = vi.fn(() => { row.status = 'stopping'; return 'requested' })
-    const { client: c } = await start({ jobs: { list: () => [row], get: () => row, kill, wait: async () => row, onJobsChanged: () => () => {} } })
+    const { client: c } = await start({ jobs: { list: () => [row], get: () => row, kill, wait: async () => row, events: { subscribe: () => () => {} } } })
     register(c); await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
@@ -2316,7 +2315,7 @@ describe('grok leader over a unix socket', () => {
 
   it('reports a natural job completion racing cancellation as already_exited', async () => {
     const row = { id: 'bash-1', kind: 'bash', label: 'finishing', status: 'running', startedAt: 1 }
-    const { client: c } = await start({ jobs: { list: () => [row], get: () => row, kill: () => 'requested', wait: async () => { row.status = 'completed'; return row }, onJobsChanged: () => () => {} } })
+    const { client: c } = await start({ jobs: { list: () => [row], get: () => row, kill: () => 'requested', wait: async () => { row.status = 'completed'; return row }, events: { subscribe: () => () => {} } } })
     register(c); await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
@@ -3075,7 +3074,7 @@ describe('grok leader over a unix socket', () => {
   it('remembers every successfully applied manual preset for future sessions', async () => {
     const mutations: Array<{ ns: string; ops: unknown }> = []
     const settings = {
-      describe: () => [{ ns: 'agent-presets', user: {} }],
+      describe: () => [{ ns: 'agent-preset-registry', user: {} }],
       mutate: async (ns: string, ops: unknown) => { mutations.push({ ns, ops }) },
     }
     const { client: c } = await start({ presets: true, settings })
@@ -3099,9 +3098,9 @@ describe('grok leader over a unix socket', () => {
     })
 
     expect(mutations).toEqual([
-      { ns: 'agent-presets', ops: [{ op: 'set', path: ['default'], value: 'ptc' }] },
-      { ns: 'agent-presets', ops: [{ op: 'set', path: ['default'], value: 'minimal' }] },
-      { ns: 'agent-presets', ops: [{ op: 'set', path: ['default'], value: 'cordis' }] },
+      { ns: 'agent-preset-registry', ops: [{ op: 'set', path: ['selectedDefault'], value: 'ptc' }] },
+      { ns: 'agent-preset-registry', ops: [{ op: 'set', path: ['selectedDefault'], value: 'minimal' }] },
+      { ns: 'agent-preset-registry', ops: [{ op: 'set', path: ['selectedDefault'], value: 'cordis' }] },
     ])
   })
 
@@ -3730,14 +3729,19 @@ describe('grok leader over a unix socket', () => {
     } finally { release() }
   })
 
-  it('uses native preset authoring APIs and refuses unowned or shipped edit requests', async () => {
+  it('creates editable declaration bundles and refuses unowned or shipped edit requests', async () => {
     const { ctx, client: c, registry } = await start({ presets: true })
-    const copies: string[][] = []
+    const directory = await mkdtemp(resolve(tmpdir(), 'dscode-preset-copy-'))
+    ctx.effect(() => () => rm(directory, { recursive: true, force: true }))
+    ctx.provide('profileContext', { dir: directory, home: directory } as never)
+    const definition = { id: 'standard', plugins: [{ name: '@deepseek-ai/dsh-tool-bash' }] }
+    ctx.provide('configEditor', { entries: () => [{ options: { name: '@deepseek-ai/dsh-agent-preset', config: definition }, parent: { tree: { ctx: {} } } }] } as never)
     const roster = ctx.get('agentPresets') as unknown as Record<string, unknown>
+    const rows = new Map([['standard', definition]])
     Object.assign(roster, {
-      resolve: async (id = 'standard') => ({ id, trust: id === 'custom' ? 'user' : 'system', path: '/presets/' + id + '/agent.cordis.yml' }),
-      read: async () => '- id: native-composition\n',
-      copy: async (from: string, id: string) => { copies.push([from, id]) },
+      list: async () => [...rows.keys()].map(id => ({ id })),
+      resolve: async (id = 'standard') => { if (!rows.has(id)) throw new Error('Unknown preset'); return { id } },
+      register: async (row: typeof definition) => { rows.set(row.id, row); return () => { rows.delete(row.id) } },
     })
     register(c)
     await c.next()
@@ -3746,12 +3750,13 @@ describe('grok leader over a unix socket', () => {
     const original = registry.byId.get(sessionId)
     expect((await c.request(2, 'x.ai/presets', { action: 'copy', from: 'standard', id: 'custom' })).error?.code).toBe(-32602)
     expect((await c.request(3, 'x.ai/presets', { sessionId, action: 'copy', from: 'standard', id: '../escape' })).error?.code).toBe(-32602)
-    expect(copies).toEqual([])
+    expect(rows.size).toBe(1)
     expect((await c.request(4, 'x.ai/presets', { sessionId, action: 'copy', from: 'standard', id: 'custom' })).error).toBeUndefined()
-    expect(copies).toEqual([['standard', 'custom']])
+    expect(rows.get('custom')).toMatchObject({ id: 'custom', plugins: definition.plugins })
     expect((await c.request(5, 'x.ai/presets', { sessionId, action: 'edit', id: 'standard' })).error?.code).toBe(-32602)
-    expect((await c.request(6, 'x.ai/presets', { sessionId, action: 'read', id: 'standard' })).result).toMatchObject({ document: { id: 'standard', content: '- id: native-composition\n' } })
-    expect((await c.request(7, 'x.ai/presets', { sessionId, action: 'edit', id: 'custom' })).result).toMatchObject({ document: { id: 'custom', editPath: '/presets/custom/agent.cordis.yml' } })
+    expect((await c.request(6, 'x.ai/presets', { sessionId, action: 'read', id: 'standard' })).result).toMatchObject({ document: { id: 'standard', content: expect.stringContaining('@deepseek-ai/dsh-tool-bash') } })
+    expect((await c.request(7, 'x.ai/presets', { sessionId, action: 'edit', id: 'custom' })).result).toMatchObject({ document: { id: 'custom', editPath: resolve(directory, 'preset-bundles/custom/cordis.patch.yml') } })
+    expect(JSON.parse(readFileSync(resolve(directory, 'preset-bundles/custom/package.json'), 'utf8')).dsh.bundle.patch).toBe('./cordis.patch.yml')
     expect(registry.byId.get(sessionId)).toBe(original)
   })
 
@@ -6831,7 +6836,7 @@ describe('sessionEventToUpdates tool-result diff fallback', () => {
   const toolResult = (opts: { text?: string; meta?: unknown; error?: { name: string; code: string } } = {}) => ({
     type: 'tool/result',
     data: {
-      message: { content: [{ type: 'tool-result', toolCallId: 'call-1', content: opts.text === undefined ? [] : [{ type: 'text', text: opts.text }] }] },
+      message: { role: 'tool', toolCallId: 'call-1', content: opts.text === undefined ? [] : [{ type: 'text', text: opts.text }] },
       ...opts.meta === undefined ? {} : { meta: opts.meta },
       ...opts.error === undefined ? {} : { error: opts.error },
     },
@@ -6971,7 +6976,7 @@ describe('shipped composition', () => {
   it('mounts native session services before the preset catalog', () => {
     const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
     const analysis = analyze(patch)
-    expect(analysis.insertedRows).toEqual(['session-reference', 'schedule', 'terminals', 'terminal-bash', 'subagent-model-selection-settings', 'agent-presets', 'cordis-host-runner', 'grok-leader'])
+    expect(analysis.insertedRows).toEqual(['session-reference', 'schedule', 'terminals', 'terminal-bash', 'subagent-model-selection-settings', 'agent-preset-registry', 'cordis-host-runner', 'grok-leader'])
   })
 })
 

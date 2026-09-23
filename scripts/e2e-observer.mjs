@@ -31,14 +31,13 @@ export function apply(ctx) {
           deliveries: agent.session.snapshotEvents().filter(event => event.type === 'deliverables/presented'),
           feedback: agent.session.ownEvents().filter(event => event.type === 'feedback/record'),
           images: agent.session.snapshotEvents().flatMap(event => event.type !== 'tool/result' ? [] :
-            event.data.message.content.flatMap(result => result.type !== 'tool-result' ? [] :
-              result.content.filter(block => block.type === 'image').map(block => ({
-                callId: result.toolCallId, attachment: block.attachment,
+            event.data.message.content.filter(block => block.type === 'image').map(block => ({
+                callId: event.data.message.toolCallId, attachment: block.attachment,
                 path: ctx.get('attachments')?.imageHostPath(block.attachment),
-              })))),
+              }))),
           projections: ctx.sessionProjections.snapshot(agent.session,
             ['contextPressure', 'tokenUsage', 'contextBreakdown', 'goal', 'permissions', 'schedule', 'subagentCatalog']),
-          jobs: ctx.jobs.list(agent),
+          jobs: ctx.jobs.list(agent.session.id),
           terminals: ctx.get('terminals')?.list(agent) ?? [],
           descendants: descendants.map(child => ({ ...child,
             status: ctx.agents.get(child.id)?.status ?? null })),

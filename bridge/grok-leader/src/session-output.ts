@@ -243,8 +243,7 @@ export function createSessionOutput(host: SessionOutputHost) {
       })
     }
     if (event.type === 'tool/result') {
-      const block = event.data.message.content[0] as { toolCallId?: unknown } | undefined
-      if (block !== undefined) state.pendingToolCalls.delete(String(block.toolCallId))
+      state.pendingToolCalls.delete(String(event.data.message.toolCallId))
     }
     if (event.type === 'tool/ptc-dispatch') {
       state.pendingToolCalls.delete(String(event.data.subCallId))

@@ -339,21 +339,22 @@ export function sessionEventToUpdates(
       }]
     }
     case 'tool/result': {
-      const block = event.data.message.content[0] as { type?: string; toolCallId?: unknown; content?: unknown } | undefined
-      const callId = block?.toolCallId
+      const message = event.data.message
+      const callId = message.toolCallId
+      const failed = message.isError === true || event.data.error !== undefined
       if (typeof callId !== 'string' || callId === '') return []
       const prior = options.toolCall?.(callId)
       const metaDiffs = diffBlocksFromMeta(event.data.meta)
       const contents: ToolResultContentBlock[] = [
-        ...textBlocks(block?.content).map(block => ({ type: 'content' as const, content: block })),
+        ...textBlocks(message.content).map(block => ({ type: 'content' as const, content: block })),
         ...metaDiffs,
-        ...(metaDiffs.length === 0 && event.data.error === undefined ? diffBlocksFromCall(prior) : []),
+        ...(metaDiffs.length === 0 && !failed ? diffBlocksFromCall(prior) : []),
       ]
-      const rawOutput = typedRawOutput(prior, event.data.meta, contents, event.data.error !== undefined)
+      const rawOutput = typedRawOutput(prior, event.data.meta, contents, failed)
       return [{
         sessionUpdate: 'tool_call_update',
         toolCallId: callId,
-        status: event.data.error === undefined ? 'completed' : 'failed',
+        status: failed ? 'failed' : 'completed',
         ...contents.length > 0 ? { content: contents } : {},
         ...rawOutput === undefined ? {} : { rawOutput },
         ...event.data.error === undefined ? {} : { error: { name: event.data.error.name, code: event.data.error.code } },

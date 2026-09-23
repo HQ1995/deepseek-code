@@ -13,7 +13,7 @@ for (const mode of ['direct', 'ptc'] as const) {
     for (const replay of [false, true]) it(`${mode} preserves ${name} (replay=${replay})`, () => {
       const content = [{ type: 'text', text }]
       const event = (mode === 'direct'
-        ? { type: 'tool/result', data: { message: { content: [{ type: 'tool-result', toolCallId: 'call-1', content }] } } }
+        ? { type: 'tool/result', data: { message: { role: 'tool', toolCallId: 'call-1', content: content } } }
         : { type: 'tool/ptc-dispatch', data: { rootCallId: 'root', parentCallId: 'root', subCallId: 'call-1', name: 'bash', arguments: {}, isError: false, content } }
       ) as unknown as SessionEvent
       const updates = sessionEventToUpdates(event, { replay, toolCall: () => ({ name: 'bash', arguments: { command: 'fixture' } }) })

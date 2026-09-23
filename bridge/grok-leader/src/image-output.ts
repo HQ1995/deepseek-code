@@ -14,9 +14,7 @@ import type { ProjectedUpdate } from './projection.ts'
  */
 function imageBlocksOf(event: SessionEvent): Array<{ attachment?: unknown }> {
   if (event.type === 'tool/result') {
-    const content = event.data.message.content[0]
-    if (content?.type !== 'tool-result') return []
-    return content.content.filter(block => block.type === 'image') as Array<{ attachment?: unknown }>
+    return event.data.message.content.filter(block => block.type === 'image') as Array<{ attachment?: unknown }>
   }
   if (event.type === 'tool/ptc-dispatch') {
     return event.data.content.filter(block => block.type === 'image') as Array<{ attachment?: unknown }>

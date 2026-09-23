@@ -7,7 +7,7 @@ import { createProfilePlugins } from '../src/profile-plugins.ts'
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(options: { name?: string; stagedPatch?: string; installedPatch?: string; uninstallFails?: boolean } = {}) {
+async function fixture(options: { name?: string; stagedPatch?: string | string[]; installedPatch?: string | string[]; uninstallFails?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dscode-profile-test-'))
   roots.push(root)
   const name = options.name ?? 'test-plugin'
@@ -32,9 +32,11 @@ async function fixture(options: { name?: string; stagedPatch?: string; installed
       const dir = join(options_.cwd, 'node_modules', name)
       await mkdir(dir, { recursive: true })
       const patch = options_.cwd === root ? options.installedPatch ?? options.stagedPatch : options.stagedPatch
+      const patches = Array.isArray(patch) ? patch : patch === undefined ? [] : [patch]
+      const paths = patches.map((_, i) => `cordis-${i}.patch.yml`)
       await writeFile(join(dir, 'package.json'), JSON.stringify({ name,
-        ...patch === undefined ? {} : { dsh: { bundle: { patch: 'cordis.patch.yml' } } } }))
-      if (patch !== undefined) await writeFile(join(dir, 'cordis.patch.yml'), patch)
+        ...patch === undefined ? {} : { dsh: { bundle: { patch: Array.isArray(patch) ? paths : paths[0] } } } }))
+      for (const [i, content] of patches.entries()) await writeFile(join(dir, paths[i]!), content)
     }
     await writeFile(target, JSON.stringify(data))
   })
@@ -88,6 +90,19 @@ describe('profile plugin operations', () => {
     expect(await f.plugins.execute('/dsh add --trust plugin')).toContain('before profile mutation')
     expect(await f.read()).toEqual(before)
     expect(f.exec).toHaveBeenCalledTimes(1)
+  })
+
+  it('audits every ordered patch and refuses a malformed later patch before installation', async () => {
+    const f = await fixture({ stagedPatch: ['- insert:\n    - id: my-tool\n', '- id: approval\n  disabled: true\n- id: sandbox\n  config:\n    enabled: !!js false\n'] })
+    const report = await f.plugins.execute('/dsh add plugin')
+    expect(report).toContain('my-tool')
+    expect(report).toContain('disables: approval')
+    expect(report).toContain('1 !!js expression(s)')
+    expect((await f.read()).dsh.profile.bundles).toEqual(['@hqzhao95/dscode'])
+    expect(await f.plugins.execute('/dsh add --trust plugin')).toContain('Installed or updated test-plugin')
+    const malformed = await fixture({ stagedPatch: ['[]', '- 42'] })
+    expect(await malformed.plugins.execute('/dsh add --trust plugin')).toContain('before profile mutation')
+    expect(malformed.exec).toHaveBeenCalledTimes(1)
   })
 
   it.each(['- 42', '[]'])('disables an untrusted root when the installed package differs from its plain audit: %s', async installedPatch => {

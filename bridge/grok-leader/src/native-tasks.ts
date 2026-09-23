@@ -1,6 +1,7 @@
 import type { SessionWork } from './session-work.ts'
 import type { SessionDiscovery } from './session-discovery.ts'
 import { randomUUID } from 'node:crypto'
+import type { JobEvent, JobEvents } from '@deepseek-ai/dsh-jobs'
 import { symbols } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId, errorChain } from '@deepseek-ai/dsh-llm'
@@ -163,16 +164,16 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
   }
 
   type JobSnapshotLike = {
-    id: string; kind: string; label: string; ownerSession?: string
+    id: string; kind: string; label: string; owner?: string
     status: 'running' | 'stopping' | 'completed' | 'killed' | 'failed'
     detail?: string; startedAt: number; finishedAt?: number
   }
   type JobsLike = {
-    list(caller: Agent): JobSnapshotLike[]
-    get(id: string, caller: Agent): JobSnapshotLike
-    kill(id: string, caller: Agent, reason?: string): 'requested' | 'already-finished'
-    wait(id: string, timeoutMs: number, caller: Agent): Promise<JobSnapshotLike>
-    onJobsChanged(listener: (owner: Agent | undefined) => void): () => void
+    list(caller: SessionId): JobSnapshotLike[]
+    get(id: string, caller: SessionId): JobSnapshotLike
+    kill(id: string, caller: SessionId, reason?: string): 'requested' | 'already-finished'
+    wait(id: string, timeoutMs: number, caller: SessionId): Promise<JobSnapshotLike>
+    events: JobEvents
   }
   const jobsService = (record: T): JobsLike | undefined => {
     let service = host.jobs(record) as JobsLike | undefined
@@ -185,7 +186,7 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
     }
     return typeof service?.list === 'function' && typeof service.get === 'function'
       && typeof service.kill === 'function' && typeof service.wait === 'function'
-      && typeof service.onJobsChanged === 'function' ? service : undefined
+      && typeof service.events?.subscribe === 'function' ? service : undefined
   }
   const jobSubscriptions = new Map<JobsLike, () => void>()
   const jobSnapshots = new WeakMap<T, Map<string, string>>()
@@ -200,10 +201,11 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
       // identity before installing the listener, and roll it back on failure.
       jobSubscriptions.set(jobs, () => {})
       try {
-        const unsubscribe = jobs.onJobsChanged(owner => {
+        const unsubscribe = jobs.events.subscribe({ owners: 'all' }, (event: JobEvent) => {
+          const owner = event.type === 'output' ? event.owner : event.job.owner
           if (closed) return
           for (const record of host.sessions.values()) {
-            if ((owner === undefined || record.agent === owner) && jobsService(record) === jobs) emitJobsForRecord(record)
+            if ((owner === undefined || record.agent.session.id === owner) && jobsService(record) === jobs) emitJobsForRecord(record)
           }
         })
         if (closed) unsubscribe()
@@ -217,7 +219,7 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
     let previous = jobSnapshots.get(record)
     if (previous === undefined) { previous = new Map(); jobSnapshots.set(record, previous) }
     const systemTime = (ms: number): unknown => ({ secs_since_epoch: Math.floor(ms / 1000), nanos_since_epoch: (ms % 1000) * 1_000_000 })
-    for (const job of jobs.list(record.agent)) {
+    for (const job of jobs.list(record.agent.session.id)) {
       // Settled producers are immutable; do not rescan their output every tick.
       // A settled producer's final passive output can arrive after settlement.
       // Stop rescanning only after that final output has actually been observed.
@@ -269,13 +271,13 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
     const taskId = p.taskId, source = p.source
     return record.work.run(async scope => {
       const jobs = jobsService(record)
-      if (jobs === undefined || !jobs.list(record.agent).some(job => job.id === taskId)) return { result: { taskId, outcome: 'not_found' } }
-      const before = jobs.get(taskId, record.agent)
+      if (jobs === undefined || !jobs.list(record.agent.session.id).some(job => job.id === taskId)) return { result: { taskId, outcome: 'not_found' } }
+      const before = jobs.get(taskId, record.agent.session.id)
       if (!jobIsRunning(before)) { emitJobsForRecord(record); return { result: { taskId, outcome: 'already_exited' } } }
       scope.assertActive()
       if (!isLive(record)) throw invalidParams('session closed')
-      const requested = jobs.kill(taskId, record.agent, source)
-      const settled = requested === 'already-finished' ? jobs.get(taskId, record.agent) : await jobs.wait(taskId, 5000, record.agent)
+      const requested = jobs.kill(taskId, record.agent.session.id, source)
+      const settled = requested === 'already-finished' ? jobs.get(taskId, record.agent.session.id) : await jobs.wait(taskId, 5000, record.agent.session.id)
       if (!isLive(record)) throw invalidParams('session closed')
       emitJobsForRecord(record)
       if (jobIsRunning(settled)) throw internalError('task cancellation requested; producer has not settled yet')
@@ -290,7 +292,7 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
     if (record === undefined) throw invalidParams('unknown session')
     const jobs = jobsService(record)
     if (jobs === undefined) throw invalidParams('jobs unavailable')
-    const job = jobs.get(p.taskId, record.agent)
+    const job = jobs.get(p.taskId, record.agent.session.id)
     const output = host.output(jobs, record.agent, job.id)
     return { taskId: job.id, status: job.status, available: output !== undefined, output: output ?? '' }
   }

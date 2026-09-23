@@ -133,7 +133,7 @@ export async function nativeControlsAcceptance(ui) {
   await send('DSCODE_CONTROLS_JOB_START'); await wait(/DSCODE_CONTROLS_JOB_HELD/)
   const jobs = await waitState(value => value.jobs.some(job => job.label.includes('DSCODE_LOG_')), 'passive-log-native-job')
   const job = jobs.jobs.find(job => job.label.includes('DSCODE_LOG_'))
-  assert.equal(job.reported, false)
+  assert.equal(job.output.earliest, 0)
   const openTask = async (label, fresh = false) => {
     await key('C-g')
     if (fresh) { await key('h'); await wait(/h:hide done/) }
@@ -146,7 +146,7 @@ export async function nativeControlsAcceptance(ui) {
   await artifact('controls-job-streaming', { state: streaming, screen: await capture() })
   await wait(/DSCODE_LOG_SECOND/)
   const finished = await waitState(value => value.jobs.some(row => row.id === job.id && row.status === 'completed'), 'passive-log-native-completed')
-  assert.equal(finished.jobs.find(row => row.id === job.id).reported, job.reported, 'Viewing output must not acknowledge the model job')
+  assert.equal(finished.jobs.find(row => row.id === job.id).output.earliest, job.output.earliest, 'Passive viewing must retain the output head')
   await artifact('controls-job-completed', { state: finished, screen: await capture() })
   await key('q')
   await waitFor(capture, screen => !screen.includes('f:filter'), 'passive-log-viewer-closed')

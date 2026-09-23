@@ -16,13 +16,16 @@ interface Row {
 const flatten = (rows: readonly Row[], acc: Row[] = []): Row[] => {
   for (const row of rows) {
     acc.push(row)
+    if (row.insert) flatten(row.insert, acc)
     if (Array.isArray(row.config)) flatten(row.config as Row[], acc)
+    const plugins = (row.config as { plugins?: Row[] } | undefined)?.plugins
+    if (plugins) flatten(plugins, acc)
   }
   return acc
 }
 const rows = (path: string): Row[] => flatten(load(readFileSync(new URL(path, import.meta.url), 'utf8').replace(/!!js\b/g, '')) as Row[])
 
-describe('0.1.6 runtime composition', () => {
+describe('0.1.7 runtime composition', () => {
   it('inherits the base PTC provider and keeps workflow execution preset-owned', () => {
     const patch = rows('../cordis.patch.yml')
     const inserted = patch.flatMap(row => row.insert ?? [])
@@ -39,7 +42,7 @@ describe('0.1.6 runtime composition', () => {
   })
 
   it.each(['history', 'lsp', 'terminal'])('keeps %s workflows inside their own realm', preset => {
-    const delegation = rows(`../presets/${preset}/agent.cordis.yml`).find(row => row.id === 'delegation')!
+    const delegation = rows(`../presets/${preset}.patch.yml`).find(row => row.id === 'delegation')!
     expect(delegation.isolate).toMatchObject({ workflowEngine: true })
     const entries = delegation.config as Row[]
     expect(entries.find(row => row.id === 'workflow-ptc')).toMatchObject({
@@ -49,7 +52,7 @@ describe('0.1.6 runtime composition', () => {
   })
 
   it.each(['history', 'lsp', 'terminal'])('keeps %s ahead of the shipped roster rows', preset => {
-    const owned = rows(`../presets/${preset}/agent.cordis.yml`)
+    const owned = rows(`../presets/${preset}.patch.yml`)
     // 0.1.6 ships `tool-ralph` disabled in every preset it owns. These three are
     // dscode copies of `standard`, which upstream tells a deployment to fork
     // when it wants the tool back; `ralph` therefore stays in the owned roster.

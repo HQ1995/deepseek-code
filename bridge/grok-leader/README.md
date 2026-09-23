@@ -22,7 +22,8 @@ profile. Open `/provider --add` to configure a provider.
 The Cordis plugin maps the TUI's Unix-socket leader protocol onto native DSH
 agents, tools, sessions, and services. Rendering belongs to the Rust TUI;
 model execution and durable storage belong to DSH. `cordis.patch.yml` composes
-the profile with a provider-neutral default and the shipped preset roster.
+the profile with a provider-neutral default. The ordered bundle patch array
+adds the seven shipped preset declarations to the native registry.
 
 The DSH base owns the PTC runtime; shipped workflow presets mount their own
 isolated `workflow-ptc` engine. Native DeepSeek session-log contribution is
@@ -52,7 +53,12 @@ dscode --agent lsp
 ```
 
 Use `/preset manage` to copy the preset and edit its `servers` mapping for other
-installed language servers. Copies are snapshots; restart after editing.
+installed language servers. Copies are snapshots stored at
+`$DSH_HOME/profiles/dscode/preset-bundles/<id>/cordis.patch.yml`; restart after
+editing. Historical `$DSH_HOME/.agent-presets/<id>` directories are imported
+without rewriting their files. Invalid local declarations retain diagnostics
+without blocking valid presets. The legacy default is imported once per profile
+when no new default has been selected.
 
 ## License
 

@@ -147,7 +147,7 @@ printf '\033[?1004l\033[?2004l\033[?1000l\033[?1002l\033[?1003l\033[?1006l' >/de
 printf '\033]777;dscode-child-end\007' >/dev/tty
 [ ! -f "$0.fail" ] || exit 7
 case "$1" in
-  */agent.cordis.yml) printf '\n# SIX_PRESET_EDITED\n' >>"$1" ;;
+  */agent.cordis.yml|*/preset-bundles/*/cordis.patch.yml) printf '\n# SIX_PRESET_EDITED\n' >>"$1" ;;
   *) printf 'E2E_EDITOR_DRAFT\nsecond line' >"$1" ;;
 esac
 EOF
@@ -197,14 +197,18 @@ if [[ -n "${DSCODE_E2E_PNPM_CONFIG:-}" ]]; then
   cp "$DSCODE_E2E_PNPM_CONFIG" "$SCRATCH/profiles/dscode/pnpm-workspace.yaml"
 fi
 
-SHIPPED_MINIMAL="$("$NODE_BIN" -e '
-  const { createRequire } = require("node:module")
-  const { realpathSync } = require("node:fs")
-  const { dirname, join } = require("node:path")
-  const runtime = createRequire(realpathSync(process.argv[1]))
-  console.log(join(dirname(runtime.resolve("@deepseek-ai/dsh-agent-presets/package.json")), "presets/minimal/agent.cordis.yml"))
-' "$DSH_BIN")" || fail "could not resolve the released dsh preset package"
-[[ -f "$SHIPPED_MINIMAL" ]] || fail "could not locate the pinned dsh minimal preset"
+# Exercise compatibility with user directory presets using the new shipped
+# declaration's exact minimal composition.
+SHIPPED_MINIMAL="$SCRATCH/minimal-agent.cordis.yml"
+"$NODE_BIN" --input-type=module - "$ROOT/bridge/grok-leader" "$SHIPPED_MINIMAL" "$DSH_BIN" <<'JS'
+import { createRequire } from 'node:module'
+import { readFileSync, writeFileSync } from 'node:fs'
+const root = process.argv[2], require = createRequire(process.argv[4])
+const { load, dump } = require('js-yaml')
+const { entryListSchema } = require('@deepseek-ai/cordis-plugin-include')
+const [{ insert: [row] }] = load(readFileSync(root + '/presets/minimal.patch.yml', 'utf8'), { schema: entryListSchema })
+writeFileSync(process.argv[3], dump(row.config.plugins, { schema: entryListSchema, noRefs: true, lineWidth: -1 }))
+JS
 
 install_fixture_custom_preset() {
 CUSTOM_PRESET="$SCRATCH/.agent-presets/fixture-custom"
@@ -670,39 +674,34 @@ audit_responses_preset() {
 audit_all_responses_presets() {
   echo "[headless] shipped + custom presets through the Responses API"
   install_fixture_custom_preset
-  "$NODE_BIN" -e '
-  const fs = require("node:fs")
-  const path = process.argv[1]
-  const gateway = process.argv[2]
-  const source = fs.readFileSync(path, "utf8")
-  const current = "agent-default-model:\n  provider: fake\n  model: fake-model\n"
-  const provider = [
-    "    fake-responses:",
-    "      displayName: Fake Responses Gateway",
-    "      apiKeyEnv: FAKE_KEY",
-    "      api: openai-responses",
-    `      baseURL: ${gateway}/responses-api`,
-    "      models:",
-    "        - id: fake-responses-model",
-    "",
-  ].join("\n")
-  const replacement = provider + "agent-default-model:\n  provider: fake-responses\n  model: fake-responses-model\n"
-  if (!source.includes(current)) throw new Error("fake default model block was not found")
-  fs.writeFileSync(path, source.replace(current, replacement))
-  ' "$SCRATCH/settings.yaml" "$GATEWAY" || fail "could not switch the isolated profile to the Responses API provider"
+  "$NODE_BIN" --input-type=module - "$ROOT/bridge/grok-leader" "$SCRATCH/profiles/dscode/cordis.patch.yml" "$GATEWAY" <<'JS'
+import { createRequire } from 'node:module'
+import { readFileSync, writeFileSync } from 'node:fs'
+const require = createRequire(process.argv[2] + '/package.json')
+const { load, dump } = require('js-yaml')
+const { entryListSchema } = require('@deepseek-ai/cordis-plugin-include')
+const path = process.argv[3], options = { schema: entryListSchema, noRefs: true, lineWidth: -1 }
+const rows = load(readFileSync(path, 'utf8'), options)
+rows.push({ id: 'llm-pi-ai', config: { providers: { 'fake-responses': { displayName: 'Fake Responses Gateway', apiKeyEnv: 'FAKE_KEY', api: 'openai-responses', baseURL: process.argv[4] + '/responses-api', models: [{ id: 'fake-responses-model' }] } } } })
+rows.push({ id: 'agent-default-model', config: { provider: 'fake-responses', model: 'fake-responses-model' } })
+writeFileSync(path, dump(rows, options))
+JS
   for preset in minimal standard history lsp terminal ptc cordis fixture-custom; do
     audit_responses_preset "$preset"
   done
   cat "$PRESET_ROSTER_LOG"
-  "$NODE_BIN" -e '
-  const fs = require("node:fs")
-  const path = process.argv[1]
-  const source = fs.readFileSync(path, "utf8")
-  const current = /    fake-responses:\n(?:      .*\n|        .*\n)+agent-default-model:\n  provider: fake-responses\n  model: fake-responses-model\n/
-  const replacement = "agent-default-model:\n  provider: fake\n  model: fake-model\n"
-  if (!current.test(source)) throw new Error("fake Responses provider block was not found")
-  fs.writeFileSync(path, source.replace(current, replacement))
-  ' "$SCRATCH/settings.yaml" || fail "could not restore the isolated completion provider"
+  "$NODE_BIN" --input-type=module - "$ROOT/bridge/grok-leader" "$SCRATCH/profiles/dscode/cordis.patch.yml" <<'JS'
+import { createRequire } from 'node:module'
+import { readFileSync, writeFileSync } from 'node:fs'
+const require = createRequire(process.argv[2] + '/package.json')
+const { load, dump } = require('js-yaml')
+const { entryListSchema } = require('@deepseek-ai/cordis-plugin-include')
+const path = process.argv[3], options = { schema: entryListSchema, noRefs: true, lineWidth: -1 }
+const rows = load(readFileSync(path, 'utf8'), options)
+rows.pop(); rows.pop()
+writeFileSync(path, dump(rows, options))
+JS
+
 }
 
 echo "[headless] durable resume through a fresh leader"
