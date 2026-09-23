@@ -132,7 +132,7 @@ forward.
 | LSP navigation | Opt-in `lsp` preset; installed language server required |
 | Session search and long references | `/resume`, `/reference`, `history` tools and native on-demand event reads |
 | Long-session performance and projection hydration | Native runtime fixes; bridge keeps its bounded session index and paginated child history |
-| New DeepSeek-V41-Flash model | Official native adapter is packaged, including text/image and in-history system-prompt capabilities; enable it explicitly as described below |
+| New DeepSeek-V41-Flash model | Official native adapter is packaged, including text/image and in-history system-prompt capabilities; add it from `/provider` as described below |
 | Existing DeepSeek V4 models | Retained by upstream; saved provider/model selections are preserved |
 | Dynamic system prompts | Native request reconstruction follows the selected adapter/model's declared capability |
 | Model discovery and reasoning/image metadata | `/provider` and `/model`; native discovery plus the existing bounded endpoint capability reader |
@@ -156,14 +156,16 @@ forward.
 | First-install npm registry probing (alpha.2) | Web plugin-manager service only; `dsh plugin add` and the launcher's npm install keep their existing registry selection |
 | Windows UI, persistent PowerShell and Python SDK fixes | Included upstream; dscode's supported targets remain Linux x86-64 and macOS ARM64 |
 
-To use the official DeepSeek adapter, add this override to the existing
-`~/.dsh/profiles/dscode/cordis.patch.yml`, provide `DEEPSEEK_API_KEY`, restart,
-then choose `deepseek-official` / `deepseek-flash` in `/model`:
-
-```yaml
-- id: llm-deepseek
-  disabled: false
-```
+To use the official DeepSeek adapter, open `/provider`, add the
+**DeepSeek (native Messages API)** template, and paste a key or name its
+environment variable (`DEEPSEEK_API_KEY` by default). The bridge stores a pasted
+key in the DSH credentials store and enables the `llm-deepseek` row through the
+plugin manager. It then reconciles the live leader, so `deepseek-official` models
+appear in `/model` without a restart. The enabled row persists in the profile's
+`cordis.patch.yml`. Removing that provider disables the row again; it is refused
+while the provider is in use. A signed-in DeepSeek account sends its own token
+for the endpoint it covers. `scripts/e2e-native-provider.mjs` exercises the whole
+path against a loopback Messages fixture.
 
 The default profile remains provider-neutral. OpenAI-compatible gateway routes
 use their own discovered metadata; they do not inherit the native adapter's

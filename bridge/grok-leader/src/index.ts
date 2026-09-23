@@ -28,6 +28,7 @@ export { analyzeBundlePatch, parseCommandLine, inspectPluginRuntime, type Bundle
 import { protectTerminalSignals } from './terminal-signal.ts'
 import { JSONRPC_METHOD_NOT_FOUND, internalError, paramRecord } from './acp.ts'
 import { createModelCatalog } from './model-catalog.ts'
+import { createNativeProviders, type PluginManagerLike } from './native-provider.ts'
 import type { LlmLike, SettingsLike, CredentialsLike, AgentDefaultModelLike } from './native-seams.ts'
 export { providerUserSection, providerUserProfile, hasUserProviderRoute, knownRouteBaseUrls } from './provider-profile.ts'
 /**
@@ -60,7 +61,7 @@ import {
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm-retry'
 import type {} from '@deepseek-ai/dsh-settings'
-import type {} from '@deepseek-ai/dsh-app-boot'
+import { readProfilePatches, reconcileProfilePatches, type ProfileContext } from '@deepseek-ai/dsh-app-boot'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { RpcError } from './protocol.ts'
 import { jobOutputSnapshot } from './job-output.ts'
@@ -208,6 +209,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     llm: () => ctx.get('llm') as LlmLike | undefined,
     settings,
     getCredentials: () => ctx.get('credentials') as CredentialsLike | undefined,
+    native: createNativeProviders({
+      pluginManager: () => ctx.get('pluginManager') as PluginManagerLike | undefined,
+      reload: async requiredIds => {
+        const profile = ctx.get('profileContext') as ProfileContext | undefined
+        if (profile === undefined) throw new Error('no profile context: restart dscode to apply the change')
+        await reconcileProfilePatches(ctx.root, readProfilePatches('dsh', profile), 'dsh', requiredIds)
+      },
+      credentials: () => ctx.get('credentials') as CredentialsLike | undefined,
+      settings,
+    }),
     getDefaultModel: agentDefaultModel,
     isProviderInUse: id => sessionModels.isProviderInUse(id),
     onChanged: (current, reason) => sessionModels.changed(current, reason),

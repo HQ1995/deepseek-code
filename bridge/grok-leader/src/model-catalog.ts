@@ -7,6 +7,7 @@ import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { RpcError } from './protocol.ts'
 import { JSONRPC_INVALID_PARAMS, internalError, paramRecord } from './acp.ts'
 import { discoverEndpointModelCapabilities, type EndpointCapabilities } from './model-endpoint.ts'
+import { nativeProviderForm, type NativeProviders } from './native-provider.ts'
 import { nativeInstance, type AgentDefaultModelLike, type CredentialInfo, type CredentialsLike, type LlmLike, type ModelInfo, type SettingsLike } from './native-seams.ts'
 import {
   NO_MODELS_MARKER, PROVIDER_SETTINGS_NS, discoveredModelUpdate, editableProfile, hasUserProviderRoute, isDiscoverableApi,
@@ -29,6 +30,9 @@ export interface ModelCatalogDependencies {
   logger: { warn(message: string): void }
   fetch?: typeof fetch
   environment?: Readonly<NodeJS.ProcessEnv>
+  /** Native adapter routes (the official DeepSeek Messages adapter) that are
+   * enabled plugin rows, not pi-ai settings entries. */
+  native?: NativeProviders
 }
 
 type Profile = Record<string, unknown>
@@ -157,7 +161,8 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     note: string | undefined,
   ): Promise<CatalogProvider> => track(async () => {
     assertOpen()
-    const profile = providerUserProfile(userSection, row.id)
+    const profile: Record<string, unknown> = dependencies.native?.owns(row.id) === true
+      ? dependencies.native.describe() : providerUserProfile(userSection, row.id)
     const apiKeyEnv = typeof profile.apiKeyEnv === 'string' ? profile.apiKeyEnv : undefined
     const credential = await describeCredential(apiKeyEnv)
     return {
@@ -411,6 +416,14 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
   const addProvider = async (params: unknown): Promise<ProviderRoster> => {
     assertOpen()
     const request = paramRecord(params, 'x.ai/providers/add')
+    if (dependencies.native?.owns(request.id, request.api) === true) {
+      const form = nativeProviderForm(request)
+      if ((await refreshCatalog()).providers.some(provider => dependencies.native!.owns(provider.id))) {
+        throw new RpcError(JSONRPC_INVALID_PARAMS, 'the native DeepSeek provider is already enabled')
+      }
+      await dependencies.native.enable(form)
+      return publishMutation(true)
+    }
     const id = requireProviderId(request.id, 'provider id')
     const normalized = normalizeProviderForm(request)
     const providerService = requireSettings()
@@ -432,6 +445,10 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
   const updateProvider = async (params: unknown): Promise<ProviderRoster> => {
     assertOpen()
     const request = paramRecord(params, 'x.ai/providers/update')
+    if (dependencies.native?.owns(request.providerId) === true) {
+      await dependencies.native.enable(nativeProviderForm(request))
+      return publishMutation(true)
+    }
     const providerId = requireProviderId(request.providerId, 'providerId')
     const normalized = normalizeProviderForm(request)
     const providerService = requireSettings()
@@ -457,6 +474,14 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
   const removeProvider = async (params: unknown): Promise<ProviderRoster> => {
     assertOpen()
     const id = requireProviderId(paramRecord(params, 'x.ai/providers/remove').id, 'provider id')
+    if (dependencies.native?.owns(id) === true) {
+      const current = await refreshCatalog()
+      if (current.currentProviderId === id || isProviderInUse(id)) {
+        throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" is in use; switch to another provider first')
+      }
+      await dependencies.native.disable()
+      return publishMutation(false)
+    }
     const providerService = requireSettings()
     if (!providerExists(providerService, id)) throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" does not exist')
     const profile = providerUserProfile(providerUserSection(providerService), id)

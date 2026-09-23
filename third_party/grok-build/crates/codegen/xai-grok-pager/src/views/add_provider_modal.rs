@@ -25,12 +25,18 @@ use crate::views::modal_window::{
 pub const MODAL_TITLE: &str = "Add provider";
 pub const EDIT_MODAL_TITLE: &str = "Edit provider";
 
-/// Wire protocols the official dsh seam accepts (llm-pi-ai supportedProtocols).
-pub const APIS: [&str; 3] = [
+/// Wire protocols the official dsh seam accepts (llm-pi-ai supportedProtocols),
+/// plus dscode's marker for the official DeepSeek Messages adapter: the bridge
+/// enables that native plugin instead of writing a pi-ai route.
+pub const APIS: [&str; 4] = [
     "openai-completions",
     "openai-responses",
     "anthropic-messages",
+    NATIVE_DEEPSEEK_API,
 ];
+
+/// The bridge's `NATIVE_DEEPSEEK_API` (bridge/grok-leader/src/native-provider.ts).
+pub const NATIVE_DEEPSEEK_API: &str = "deepseek-native";
 
 /// One pre-fill template. `base_url` is persisted; `default_base_url` is a
 /// display-only catalog default used when the persisted value stays empty.
@@ -91,6 +97,17 @@ pub const PRESETS: &[ProviderPreset] = &[
         api: "",
         base_url: "",
         default_base_url: "https://openrouter.ai/api/v1",
+    },
+    // The official DeepSeek adapter: Messages API, Files API image reuse and
+    // native reasoning. Its models appear under provider deepseek-official.
+    ProviderPreset {
+        label: "DeepSeek (native Messages API)",
+        id: "deepseek-official",
+        display_name: "DeepSeek",
+        api_key_env: "DEEPSEEK_API_KEY",
+        api: NATIVE_DEEPSEEK_API,
+        base_url: "",
+        default_base_url: "https://api.deepseek.com/anthropic",
     },
 ];
 
@@ -944,12 +961,38 @@ mod tests {
     }
 
     #[test]
+    fn native_deepseek_template_selects_the_native_adapter_marker() {
+        let mut state = AddProviderModalState::new();
+        let index = PRESETS
+            .iter()
+            .position(|preset| preset.id == "deepseek-official")
+            .expect("native DeepSeek template");
+        state.apply_preset(index);
+        let form = state.form();
+        assert_eq!(form.api, NATIVE_DEEPSEEK_API);
+        assert_eq!(form.api_key_env, "DEEPSEEK_API_KEY");
+        assert_eq!(form.base_url, "");
+        // Once enabled, the route is not offered again, and editing it keeps the marker.
+        let offered = AddProviderModalState::new_for_existing(&["deepseek-official".to_string()]);
+        assert!(!offered.templates.contains(&index));
+        let editing = AddProviderModalState::prefilled(
+            "deepseek-official",
+            "DeepSeek",
+            "DEEPSEEK_API_KEY",
+            Some(NATIVE_DEEPSEEK_API),
+            "",
+            None,
+        );
+        assert_eq!(editing.form().api, NATIVE_DEEPSEEK_API);
+    }
+
+    #[test]
     fn existing_provider_templates_are_not_offered_again() {
         let state = AddProviderModalState::new_for_existing(&[
             "deepseek".to_string(),
             "openai".to_string(),
         ]);
-        assert_eq!(state.templates, vec![1, 3, 4, PRESETS.len()]);
+        assert_eq!(state.templates, vec![1, 3, 4, 5, PRESETS.len()]);
         assert_eq!(state.preset, 1);
         assert_eq!(state.form().id, "ocx");
     }
