@@ -31,7 +31,27 @@ pub(crate) struct HistoryEntry {
     update: Option<acp::SessionUpdate>,
     meta: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
+    image_notes: Vec<String>,
+    #[serde(default)]
     turn_ended: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HistoryEntry;
+
+    #[test]
+    fn image_offload_notice_is_optional_and_not_an_assistant_update() {
+        let old: HistoryEntry =
+            serde_json::from_value(serde_json::json!({"turnEnded": true})).unwrap();
+        assert!(old.image_notes.is_empty());
+        let notice: HistoryEntry =
+            serde_json::from_value(serde_json::json!({"imageNotes": ["Older image omitted"]}))
+                .unwrap();
+        assert_eq!(notice.image_notes, ["Older image omitted"]);
+        assert!(notice.update.is_none());
+        assert!(!notice.turn_ended);
+    }
 }
 
 pub(crate) fn request_history(parent: &mut AgentView, child_id: &str) {
@@ -149,6 +169,13 @@ pub(crate) fn apply_history(
         }
         child.scrollback.begin_batch();
         for entry in batch.entries {
+            if !entry.image_notes.is_empty() {
+                child
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(
+                        entry.image_notes.join("\n"),
+                    ));
+            }
             if let Some(update) = entry.update {
                 if let acp::SessionUpdate::Plan(plan) = update {
                     child.todo.update_todos(

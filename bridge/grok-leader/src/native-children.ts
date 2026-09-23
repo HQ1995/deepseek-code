@@ -10,7 +10,7 @@ import { invalidParams, internalError, paramRecord } from './acp.ts'
 import { ChildHistoryIndex, CHILD_HISTORY_PAGE_SIZE, type ChildEventReader } from './child-history.ts'
 import { workflowUpdates, type WorkflowHistory, type LiveWorkflow } from './workflows.ts'
 import { parsePrompt } from './prompt-content.ts'
-import { sessionEventToUpdates, textBlocks, type GrokSessionUpdate, type ProjectedUpdate } from './projection.ts'
+import { imageOffloadCount, imageOffloadNotes, sessionEventToUpdates, textBlocks, type GrokSessionUpdate, type ProjectedUpdate } from './projection.ts'
 import type { SessionOutput } from './session-output.ts'
 
 interface ChildSession {
@@ -346,7 +346,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
         if (owned(clientId, sessionId) !== record) throw invalidParams('unknown session')
         if (after > index.nextSeq) throw invalidParams('child history cursor is ahead of the stored transcript')
         const nextSeq = Math.min(after + CHILD_HISTORY_PAGE_SIZE, index.nextSeq)
-        const entries: Array<{ update?: GrokSessionUpdate; meta?: Record<string, unknown>; turnEnded?: boolean }> = []
+        const entries: Array<{ update?: GrokSessionUpdate; meta?: Record<string, unknown>; imageNotes?: string[]; turnEnded?: boolean }> = []
         let turnStartMs = index.turnStartAt(after)
         for (const event of await read(after, nextSeq - after)) {
           if (!isLive(record)) throw invalidParams('unknown session')
@@ -356,6 +356,8 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
           const updates = hasToolImages(event) ? await host.projectImages(event, mapped) : mapped
           scope.assertActive()
           for (const update of updates) entries.push({ update, meta: { isReplay: true, agentTimestampMs: event.time, turnStartMs, streamStartMs: turnStartMs } })
+          const offloadCount = imageOffloadCount(event)
+          if (offloadCount !== undefined) entries.push({ imageNotes: imageOffloadNotes(offloadCount) })
           if (event.type === 'turn/end') entries.push({ turnEnded: true })
         }
         if (!isLive(record)) throw invalidParams('unknown session')

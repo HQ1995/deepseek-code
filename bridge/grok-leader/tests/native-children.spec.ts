@@ -144,6 +144,15 @@ describe('native child/workflow ownership', () => {
     await f.children.dispose()
   })
 
+  it('preserves image offload as a system notice in paged child history', async () => {
+    const f = fixture(), child = f.add('child')
+    f.append(child, 'image/offload', { targets: [{ imageIndexes: [0, 2] }] })
+    const result = await f.children.history(1, { sessionId: 'root', childSessionId: 'child' })
+    expect(result).toMatchObject({ nextSeq: 1, entries: [{ imageNotes: [expect.stringContaining('2 older image occurrence(s)')] }] })
+    await expect(f.children.history(1, { sessionId: 'root', childSessionId: 'child', after: 1 })).resolves.toMatchObject({ entries: [] })
+    await f.children.dispose()
+  })
+
   it('session cancellation prevents a delayed descendant lookup from mutating the same live owner', async () => {
     const f = fixture(), child = f.add('child'), lookup = deferred<Row[]>()
     f.service.listDescendants.mockReturnValueOnce(lookup.promise)

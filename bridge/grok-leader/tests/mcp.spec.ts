@@ -27,6 +27,13 @@ describe('ACP MCP adapter', () => {
       ])
       expect(listed.servers).toHaveLength(2)
       expect(JSON.stringify(listed)).not.toContain('secret')
+      expect(listed.servers[1]).toMatchObject({ _meta: { resourceToolsAvailable: false, resourceCapabilitiesAvailable: false } })
+      vi.spyOn(ctx.tools, 'schemas').mockReturnValue([
+        { name: 'list_mcp_resources' }, { name: 'list_mcp_resource_templates' }, { name: 'read_mcp_resource' },
+      ] as never)
+      const resources = await listMcpServers(ctx, { ctx: a.ctx } as Agent)
+      expect(resources.servers[1]).toMatchObject({ session: { tools: [], status: 'unknown' },
+        _meta: { toolCount: 0, resourceToolsAvailable: true, resourceCapabilitiesAvailable: false } })
     } finally { spy.mockRestore(); await ctx.fiber.dispose() }
   })
 

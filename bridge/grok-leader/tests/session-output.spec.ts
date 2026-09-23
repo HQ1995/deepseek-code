@@ -68,6 +68,26 @@ describe('session output ownership', () => {
     expect(f.notes.map(note => note.params._meta.eventSeq)).toEqual(Array.from({ length: 2501 }, (_, index) => index + 1))
   })
 
+  it('renders durable image offload as a replayable system notice, once, without changing message counters', async () => {
+    const f = fixture()
+    const offload = event(0, 'image/offload', { targets: [{ seq: 0, imageIndexes: [0, 2] }, { seq: 1, imageIndexes: [1] }] })
+    f.output.live(offload)
+    await f.output.restore([offload])
+    expect(f.notes).toHaveLength(1)
+    expect(f.notes[0]).toMatchObject({ method: 'x.ai/session_notification', params: {
+      sessionId: 'session', update: { sessionUpdate: 'image_dropped', notes: [expect.stringContaining('3 older image occurrence(s)')] }, _meta: { eventSeq: 1 },
+    } })
+    expect(f.output.stats).toMatchObject({ messageCount: 0, compactionCount: 0 })
+    const restored = fixture()
+    await restored.output.restore([offload])
+    expect(restored.notes[0]?.params._meta.isReplay).toBe(true)
+    const silent = fixture()
+    await silent.output.restore([offload], false)
+    expect(silent.notes).toEqual([])
+    f.output.live(event(1, 'image/offload', null))
+    expect(f.notes).toHaveLength(1)
+  })
+
   it('admits each event once while preserving all blocks and live/replay meter dedup', async () => {
     const f = fixture()
     const prompt = event(0, 'user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: 'one' }, { type: 'text', text: 'two' }] })

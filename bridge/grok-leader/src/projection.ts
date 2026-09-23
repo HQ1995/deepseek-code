@@ -31,6 +31,25 @@ export type ProjectedUpdate = GrokSessionUpdate & {
   tokensPerSecond?: string
 }
 
+/** A native durable decision, not assistant text or summary compaction. */
+export function imageOffloadCount(event: SessionEvent): number | undefined {
+  if (String(event.type) !== 'image/offload') return undefined
+  const data = event.data as { targets?: Array<{ imageIndexes?: unknown[] }> }
+  if (!Array.isArray(data?.targets) || data.targets.length === 0) return undefined
+  let count = 0
+  for (const target of data.targets) {
+    if (!Array.isArray(target?.imageIndexes) || target.imageIndexes.length === 0
+      || target.imageIndexes.some(index => !Number.isSafeInteger(index) || Number(index) < 0)) return undefined
+    count += target.imageIndexes.length
+  }
+  return count
+}
+
+/** Shared system notice for the parent stream and paged child history. */
+export const imageOffloadNotes = (count: number): string[] => [
+  `Image context: ${count} older image occurrence(s) omitted from future model requests. Originals remain in history. Switching models or resuming will not restore them; attach or read the image again if needed.`,
+]
+
 /** Released token-meter values: usage is cumulative; pressure is next-request occupancy. */
 export interface ContextProjectionValues {
   tokenUsage?: { uncachedInputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }

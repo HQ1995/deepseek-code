@@ -2,7 +2,7 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { errorChain, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { hasToolImages } from './image-output.ts'
-import { assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, parseJsonObject, sessionEventToUpdates, contextInfoFromProjection, type ContextProjectionValues, type DecodeSpeed, type ProjectedUpdate } from './projection.ts'
+import { assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, imageOffloadCount, imageOffloadNotes, noteDecodeSpeed, parseJsonObject, sessionEventToUpdates, contextInfoFromProjection, type ContextProjectionValues, type DecodeSpeed, type ProjectedUpdate } from './projection.ts'
 
 export interface SessionOutputHost {
   sessionId: string
@@ -38,6 +38,9 @@ interface OutputState {
   /** Pending tool-call facts keyed by callId, used to attach rawInput/rawOutput. */
   pendingToolCalls: Map<string, { name: string; arguments: unknown }>
 }
+type ImageOffloadUpdate = { sessionUpdate: 'image_dropped'; notes: string[]; totalTokens?: never; cacheHitPercent?: never; tokensPerSecond?: never }
+type OutputUpdate = ProjectedUpdate | ImageOffloadUpdate
+const offloadUpdate = (count: number): ImageOffloadUpdate => ({ sessionUpdate: 'image_dropped', notes: imageOffloadNotes(count) })
 
 /** Per-attached-agent output ownership: revision/replay dedup, meter folding,
  * wire sequence stamps and asynchronous image hydration share one lifetime. */
@@ -117,17 +120,17 @@ export function createSessionOutput(host: SessionOutputHost) {
    * Event-to-wire admission is `admitEvent` — this only serializes.
    */
   const update = (
-    item: ProjectedUpdate | Promise<ProjectedUpdate>,
+    item: OutputUpdate | Promise<OutputUpdate>,
     isReplay = false,
     agentTimestampMs?: number,
   ): void => {
     if (closed || !host.isLive()) return
     const promptId = host.promptId()
     const turnStartMs = state.turnStartMs
-    const send = (item: ProjectedUpdate): Promise<void> | undefined => {
+    const send = (item: OutputUpdate): Promise<void> | undefined => {
       const eventSeq = state.eventSeq++
       const { totalTokens, cacheHitPercent, tokensPerSecond, ...update } = item
-      host.notify('session/update', {
+      host.notify(item.sessionUpdate === 'image_dropped' ? 'x.ai/session_notification' : 'session/update', {
         sessionId: host.sessionId,
         update,
         _meta: {
@@ -302,6 +305,8 @@ export function createSessionOutput(host: SessionOutputHost) {
       return
     }
     const updates = mapEvent(event, false)
+    const offloaded = imageOffloadCount(event)
+    if (offloaded !== undefined) update(offloadUpdate(offloaded), false, event.time)
     const projected = hasToolImages(event) ? host.projectImages(event, updates) : undefined
     updates.forEach((item, index) => update(
       projected === undefined ? item : projected.then(items => items[index]!), false, event.time))
@@ -329,7 +334,10 @@ export function createSessionOutput(host: SessionOutputHost) {
         if (!admitEvent(event.seq)) continue
         if (event.type === 'turn/start') state.turnStartMs = event.time
         const items = mapEvent(event, true)
-        if (!send || items.length === 0) continue
+        if (!send) continue
+        const offloaded = imageOffloadCount(event)
+        if (offloaded !== undefined) update(offloadUpdate(offloaded), true, event.time)
+        if (items.length === 0) continue
         // Reserve the complete replay prefix and its wire positions before
         // yielding. Otherwise a live successor raises lastSeq while an image
         // is loading and causes the remaining history to be dropped. Keep

@@ -3209,7 +3209,7 @@ pub fn render_extensions_modal(
                             // Summary line: tools count + enabled count.
                             if server.tools.is_empty() {
                                 entry_desc_lines.push(vec![
-                                    "no tools (server may not be connected)".to_string(),
+                                    "0 tools; resource-only servers may still be usable".to_string(),
                                 ]);
                             } else {
                                 let enabled_count =

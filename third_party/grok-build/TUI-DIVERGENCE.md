@@ -41,6 +41,11 @@ after entering the namespace to handle older util-linux launchers.
 
 ## Feature
 
+- DSH alpha capability projection: a zero-tool MCP server is not labelled as
+  disconnected (it may expose only resources). Durable image offload uses an
+  existing system-notice block, not assistant text; paged native child history
+  accepts optional `imageNotes` beside ACP updates. Older pages remain valid and
+  history cursors still count native events, not rendered blocks.
 - Prompt acknowledgment recovery (adapted from upstream `37949780c1`): shared
   first-receipt rules for TUI/headless, with a 120s default hard deadline and
   a 10s TUI notice. `DSCODE_PROMPT_ACK_TIMEOUT_SECS` is bounded to 5–3600s;

@@ -93,7 +93,10 @@ export async function listMcpServers(ctx: Context, agent?: Agent): Promise<{ ser
     servers.set(config.serverName, { transport: config.transport, tools: [] })
   }
   const tools = activeCtx.get('tools') as { schemas(owner?: Agent): Array<{ name: string; description?: string }> } | undefined
-  for (const tool of tools?.schemas(agent) ?? []) {
+  const schemas = tools?.schemas(agent) ?? []
+  const resourceToolsAvailable = ['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource']
+    .every(name => schemas.some(tool => tool.name === name))
+  for (const tool of schemas) {
     if (!tool.name.startsWith('mcp__')) continue
     const rest = tool.name.slice('mcp__'.length)
     let matched: string | undefined, toolName: string | undefined
@@ -114,7 +117,10 @@ export async function listMcpServers(ctx: Context, agent?: Agent): Promise<{ ser
     name, displayName: name, source: 'plugin', sourceLabel: 'plugin: dsh',
     ...server.transport === undefined ? {} : { type: server.transport },
     session: { enabled: true, status: 'unknown', tools: server.tools },
-    _meta: { toolCount: server.tools.length, connectionStatusAvailable: false },
+    // The shared tools are scoped by DSH. Their presence is not evidence that
+    // this remote server advertises resources, nor a live connection probe.
+    _meta: { toolCount: server.tools.length, connectionStatusAvailable: false,
+      resourceToolsAvailable, resourceCapabilitiesAvailable: false },
   })) }
 }
 
