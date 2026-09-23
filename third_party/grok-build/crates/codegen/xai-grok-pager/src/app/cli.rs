@@ -7,7 +7,11 @@ use std::path::PathBuf;
 /// Top-level commands for the pager binary.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
-    /// Run Dscode without the interactive UI
+    /// Upstream embedded-agent entry point. dscode rejects it in
+    /// `unsupported_dscode_cli`: it bypasses the dsh backend entirely.
+    /// Hidden so `--help` does not advertise a refused command; headless
+    /// dscode is the top-level `-p` flag.
+    #[command(hide = true)]
     Agent(Box<AgentArgs>),
     /// Show the configuration Dscode discovers for this directory
     Inspect {
@@ -150,14 +154,16 @@ Examples:
     ///
     /// Disabled by default and enabled server-side per account; set
     /// `GROK_WORKSPACE_COMMAND=1` to enable it locally for testing.
+    /// dscode strips `GROK_*` at startup, so the env override only reaches
+    /// tests that set it in-process; production gating is remote settings.
     #[command(hide = true)]
     Workspace(WorkspaceMgmtArgs),
     /// Open the Agent Dashboard view at startup.
     ///
     /// Centralised, agent-native overview of every session (top-level and
-    /// subagents). Disabled when `[dashboard].enabled = false` in
-    /// `~/.grok/config.toml` or when the `GROK_AGENT_DASHBOARD=0` env
-    /// var is set.
+    /// subagents). Disabled when `[dashboard].enabled = false` in the
+    /// profile `config.toml` or when the `DSCODE_AGENT_DASHBOARD=0` env
+    /// var is set (mapped to the internal `GROK_AGENT_DASHBOARD`).
     #[command(hide = true)]
     Dashboard,
 }

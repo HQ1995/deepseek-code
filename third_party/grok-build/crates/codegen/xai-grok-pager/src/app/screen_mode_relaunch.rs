@@ -20,7 +20,11 @@ use std::sync::OnceLock;
 /// keep a `/fullscreen` relaunch stuck in minimal, and vice-versa. Consumed
 /// (read **and removed**) exactly once at startup by
 /// [`take_screen_mode_env_override`]; not a public user interface.
-pub(crate) const GROK_SCREEN_MODE_ENV: &str = "GROK_SCREEN_MODE";
+///
+/// dscode: the name must live in the `DSCODE_` namespace — `main` strips every
+/// `GROK_*` variable before startup, so a `GROK_` handoff would never reach the
+/// relaunched child.
+pub(crate) const GROK_SCREEN_MODE_ENV: &str = "DSCODE_SCREEN_MODE";
 
 /// Argv tokens (`--long`, `-s`, and their aliases) of [`super::cli::PagerArgs`]
 /// flags that consume a following value token when not written as
@@ -184,7 +188,7 @@ pub(crate) fn build_screen_mode_relaunch_args(
 
     out.push(OsString::from("--resume"));
     out.push(OsString::from(session_id));
-    // Keep a CLI mode flag for hand-pasted resume hints that omit GROK_SCREEN_MODE.
+    // Keep a CLI mode flag for hand-pasted resume hints that omit the env.
     if want_minimal {
         out.push(OsString::from("--minimal"));
     } else {
@@ -193,8 +197,9 @@ pub(crate) fn build_screen_mode_relaunch_args(
     out
 }
 
-/// `GROK_SCREEN_MODE_SWITCH=exec` forces the legacy re-exec switch.
-pub(crate) const SCREEN_MODE_SWITCH_ENV: &str = "GROK_SCREEN_MODE_SWITCH";
+/// `DSCODE_SCREEN_MODE_SWITCH=exec` forces the legacy re-exec switch.
+/// `DSCODE_` namespace for the same reason as [`GROK_SCREEN_MODE_ENV`].
+pub(crate) const SCREEN_MODE_SWITCH_ENV: &str = "DSCODE_SCREEN_MODE_SWITCH";
 
 pub(crate) fn exec_switch_forced() -> bool {
     std::env::var(SCREEN_MODE_SWITCH_ENV).is_ok_and(|v| v.trim().eq_ignore_ascii_case("exec"))
@@ -217,7 +222,7 @@ pub(crate) fn screen_mode_relaunch_resume_hint(session_id: &str, want_minimal: b
     } else {
         "--fullscreen"
     };
-    format!("{GROK_SCREEN_MODE_ENV}={mode} grok {flag} --resume {session_id}")
+    format!("{GROK_SCREEN_MODE_ENV}={mode} dscode {flag} --resume {session_id}")
 }
 
 /// Replace the current process with a relaunch into the requested screen mode.
@@ -836,16 +841,16 @@ mod tests {
 
     #[test]
     fn failed_relaunch_hint_includes_screen_mode_env() {
-        // Recovery command must carry GROK_SCREEN_MODE so following the
+        // Recovery command must carry the override env so following the
         // hint after a failed `/fullscreen` does not reopen minimal/inline. The
         // explicit flag keeps the resume in the right mode if the env is dropped.
         assert_eq!(
             screen_mode_relaunch_resume_hint("abc-sid", false),
-            "GROK_SCREEN_MODE=fullscreen grok --fullscreen --resume abc-sid"
+            "DSCODE_SCREEN_MODE=fullscreen dscode --fullscreen --resume abc-sid"
         );
         assert_eq!(
             screen_mode_relaunch_resume_hint("abc-sid", true),
-            "GROK_SCREEN_MODE=minimal grok --minimal --resume abc-sid"
+            "DSCODE_SCREEN_MODE=minimal dscode --minimal --resume abc-sid"
         );
     }
 

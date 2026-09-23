@@ -1987,10 +1987,24 @@ fn unsupported_dscode_cli(args: &PagerArgs) -> Option<&'static str> {
         "--restore-code is not supported by dscode because dsh does not persist repository \
          snapshots; use --worktree to copy the current checkout state",
     )
+    .or_else(|| {
+        // The embedded agent runtime predates the dsh backend: it loads x.ai
+        // auth and its own leader, so a session started here would bypass the
+        // bridge, presets, and the dsh permission stack entirely. Headless
+        // dscode is the top-level `-p` path, which configure_dsh_launch routes
+        // through the dsh leader.
+        matches!(args.command, Some(Command::Agent(_))).then_some(
+            "`agent` is not supported by dscode because its embedded runtime bypasses dsh; \
+            use `dscode -p <prompt>` for headless runs against the dsh leader",
+        )
+    })
 }
-const DSCODE_ENV_ALIASES: [(&str, &str); 5] = [
+const DSCODE_ENV_ALIASES: [(&str, &str); 6] = [
     ("DSCODE_CONFIG", "GROK_CONFIG"),
     ("DSCODE_CONFIG_PATH", "GROK_CONFIG_PATH"),
+    // The dashboard off-switch stays reachable under the product namespace;
+    // the internal reader still keys on the upstream name.
+    ("DSCODE_AGENT_DASHBOARD", "GROK_AGENT_DASHBOARD"),
     (
         "DSCODE_CONNECT_UI_TIMEOUT_SECS",
         "GROK_CONNECT_UI_TIMEOUT_SECS",
@@ -2488,7 +2502,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                     };
                     anyhow::bail!(
                         "top-level {flag} applies to the pager TUI, not the agent subcommand. \
-                         Use `grok-pager agent {flag}` instead."
+                         Use `dscode agent {flag}` instead."
                     );
                 }
                 enforce_version_policy_or_exit();
@@ -3365,6 +3379,20 @@ mod tests {
 
         let worktree = PagerArgs::try_parse_from(["dscode", "--worktree=feature"]).unwrap();
         assert!(unsupported_dscode_cli(&worktree).is_none());
+    }
+    #[test]
+    fn agent_subcommand_is_rejected() {
+        for argv in [
+            vec!["dscode", "agent"],
+            vec!["dscode", "agent", "stdio"],
+            vec!["dscode", "agent", "headless"],
+        ] {
+            let parsed = PagerArgs::try_parse_from(argv).unwrap();
+            assert!(unsupported_dscode_cli(&parsed).is_some());
+        }
+        // Top-level headless stays supported: it routes through the dsh leader.
+        let headless = PagerArgs::try_parse_from(["dscode", "-p", "hi"]).unwrap();
+        assert!(unsupported_dscode_cli(&headless).is_none());
     }
     #[cfg(all(feature = "jemalloc", unix))]
     struct TempHeapDump(std::path::PathBuf);

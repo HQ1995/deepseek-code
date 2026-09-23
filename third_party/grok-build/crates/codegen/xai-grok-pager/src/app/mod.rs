@@ -644,7 +644,7 @@ pub async fn run(
     let screen_mode_override = screen_mode_relaunch::take_screen_mode_env_override();
     let cancel = CancellationToken::new();
     let startup_start = std::time::Instant::now();
-    // dscode: leader mode is a pure TUI over the bridge   no ~/.grok config
+    // dscode: leader mode is a pure TUI over the bridge  — no ~/.grok config
     // layers, no campaigns, no remote cache. Empty config keeps every
     // downstream resolver at its defaults; dsh owns all real configuration.
     let raw_config = if args.leader {
@@ -662,7 +662,7 @@ pub async fn run(
             xai_grok_shell::auth::GrokComConfig::default()
         }
     };
-    // dscode: leader mode never touches x.ai   skip auth refresh and the
+    // dscode: leader mode never touches x.ai  — skip auth refresh and the
     // remote-settings prefetch entirely. The bridge owns settings/catalog.
     let refreshed_auth = if args.leader {
         None
