@@ -124,6 +124,28 @@ describe('owned prompt queue', () => {
     f.finish(1); await first; await second
   })
 
+  it('settles a cancelled prompt when its own activity ends, not after a turn woken during the unwind', async () => {
+    const f = fixture(), first = f.submit('first')
+    await tick()
+    expect(f.queue.cancelPrompt('first')).toBe('cancelled')
+    let settled = false
+    void first.then(() => { settled = true })
+    await tick()
+    expect(settled).toBe(false)
+    // A subagent completion woke a new native turn: whenIdle keeps waiting,
+    // but the aborted activity already reported idle.
+    f.queue.agentIdle()
+    await expect(first).resolves.toMatchObject({ stopReason: 'cancelled' })
+    expect(f.snapshot().runningPromptId).toBeUndefined()
+  })
+
+  it('does not hold disposal behind the native drain of a cancelled prompt', async () => {
+    const f = fixture(), first = f.submit('first')
+    await tick()
+    await f.queue.dispose()
+    await expect(first).resolves.toMatchObject({ stopReason: 'cancelled' })
+  })
+
   it('reports a failed native cancellation drain instead of publishing successful completion', async () => {
     const f = fixture(), drain = deferred<void>(), error = new Error('native drain failed')
     vi.mocked(f.agent.whenIdle).mockImplementationOnce(() => drain.promise)

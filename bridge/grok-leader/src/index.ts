@@ -270,6 +270,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   ctx.on('agent/assistant-stream', ({ agent, frame }) => {
     ownedAgentRecord(agent)?.output.assistant(frame)
   })
+  ctx.on('agent/status', ({ agent, status }) => {
+    if (status === 'idle') ownedAgentRecord(agent)?.queue.agentIdle()
+  })
 
   // Translate the session firehose into grok streaming deltas. Committed text,
   // reasoning deltas, tool calls, tool results, and Todo plans stream; titles

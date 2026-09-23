@@ -80,6 +80,9 @@ export interface PromptQueue {
   claimed(messageId: string, turn: number): void
   failed(turn: number, error: unknown): void
   cancel(): void
+  /** The native agent just became idle (`agent/status`). Ends a cancelled
+   * prompt's drain at its own aborted activity, not a later wake-driven turn. */
+  agentIdle(): void
   /** Retire only this prompt; never fall back to whole-session cancellation. */
   cancelPrompt(promptId: string): PromptCancelResult
   dispose(): Promise<void>
@@ -113,6 +116,15 @@ export function createPromptQueues(options: {
 function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof createPromptQueues>[0], nextSequence: () => number): PromptQueue {
   const { combineQueued, followUpSteer, logger } = options
   let disposed = false
+  /** Resolved when disposal starts: record disposal owns native cleanup from then on. */
+  let startDisposal!: () => void
+  const disposalStarted = new Promise<void>(resolve => { startDisposal = resolve })
+  const idleTransitions: Array<() => void> = []
+  /** The end of the activity running now. `whenIdle` would also wait for a
+   * turn woken during the unwind, such as a subagent completion. */
+  const activityEnded = (): Promise<void> => host.agent.status === 'idle'
+    ? Promise.resolve()
+    : new Promise(resolve => { idleTransitions.push(resolve) })
   let disposal: Promise<void> | undefined
   let admissionEpoch = 0, admissions = 0
   const runs = new Set<Promise<PromptSettleResult>>()
@@ -224,9 +236,10 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
       })
       // cancel() acknowledges the request synchronously, but native tool
       // cleanup may still be running. Keep the running slot and terminal wire
-      // behind the already-captured drain; ordinary turns still settle at
-      // their correlated turn/end, not whole-agent idle.
-      if (stopReason === 'cancelled') await nativeIdle
+      // until the aborted activity ends; ordinary turns still settle at their
+      // correlated turn/end. Disposal never waits here: the record's disposal
+      // cancels as 'disposed', which drains without replaying latched wakes.
+      if (stopReason === 'cancelled') await Promise.race([nativeIdle, activityEnded(), disposalStarted])
     } catch (error: unknown) {
       failures.push(error)
       // A throw from the echo/broadcast above rejects the promise with the
@@ -700,10 +713,14 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
       inflight.reject(internalError('turn failed: ' + errorChain(error)))
     },
     cancel,
+    agentIdle() {
+      for (const resolve of idleTransitions.splice(0)) resolve()
+    },
     cancelPrompt,
     dispose() {
       if (disposal !== undefined) return disposal
       disposed = true
+      startDisposal()
       const failures: unknown[] = []
       // Publish before cancellation callbacks reenter disposal, then drain
       // even if a hook failed. Native run errors belong to their prompt RPCs.
