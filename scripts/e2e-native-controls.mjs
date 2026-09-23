@@ -4,14 +4,31 @@ import { basename, join } from 'node:path'
 
 const messageText = message => typeof message.content === 'string' ? message.content :
   (message.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')
+const latestPrompt = messages => {
+  const start = messages.findLastIndex(message => message.role === 'user' && messageText(message) !== 'Attached image(s) from tool result:')
+  return { start, prompt: messages[start] && messageText(messages[start]) }
+}
+
+// Each job outlives the reply that started it, so its completion reaches an idle owner.
+const WAKE_CHAIN_STEPS = 4
+const wakeChainJob = step => ({ name: 'bash', arguments: {
+  command: `: DSCODE_WAKE_STEP_${step}; sleep 2`, description: `DSCODE wake chain ${step}`, run_in_background: true,
+} })
+const wakeNoticeStep = prompt => prompt?.includes('background job') ? Number(prompt.match(/DSCODE_WAKE_STEP_(\d+)/)?.[1] ?? 0) : 0
 
 export function nativeControlsReply(body) {
   const messages = body.messages ?? []
-  const start = messages.findLastIndex(message => message.role === 'user' && messageText(message) !== 'Attached image(s) from tool result:')
-  const prompt = messages[start] && messageText(messages[start])
+  const { start, prompt } = latestPrompt(messages)
   if (prompt?.includes('DSCODE_LOG_') && prompt.includes('background job')) return { text: 'DSCODE_CONTROLS_JOB_NOTICE' }
-  if (!prompt?.includes('DSCODE_CONTROLS_')) return
   const results = messages.slice(start + 1).filter(message => message.role === 'tool')
+  // A completion notice names its job's command; the turn it opens starts the next step.
+  const woke = wakeNoticeStep(prompt)
+  if (woke > 0 || prompt?.includes('DSCODE_CONTROLS_WAKE_CHAIN')) {
+    if (woke === WAKE_CHAIN_STEPS) return { text: 'DSCODE_CONTROLS_WAKE_CHAIN_DONE' }
+    if (!results.length) return wakeChainJob(woke + 1)
+    return { text: `DSCODE_CONTROLS_WAKE_STARTED_${woke + 1}` }
+  }
+  if (!prompt?.includes('DSCODE_CONTROLS_')) return
   if (prompt.includes('DSCODE_CONTROLS_PRESENT')) {
     if (!results.length) return { name: 'present', arguments: { files: [{ path: 'delivered report.md', description: 'DSCODE delivered artifact' }] } }
     return { text: 'DSCODE_CONTROLS_PRESENT_DONE' }
@@ -158,6 +175,22 @@ export async function nativeControlsAcceptance(ui) {
   await wait(/DSCODE_CONTROLS_JOB_CURSOR_INTACT/)
   await waitState(value => value.status === 'idle', 'passive-log-read-idle')
 
+  // DSH 0.1.7-alpha.2 no longer caps completion wakeups by default. Under the
+  // old cap of three, the fourth idle completion was queued silently and the
+  // chain stalled until the next user input; here each one opens its own turn.
+  const chainStart = (await readRequests()).length
+  await send('DSCODE_CONTROLS_WAKE_CHAIN')
+  await wait(/DSCODE_CONTROLS_WAKE_CHAIN_DONE/)
+  const chained = await waitState(value => value.status === 'idle'
+    && value.jobs.filter(row => row.label.includes('DSCODE_WAKE_STEP_') && row.status === 'completed').length === WAKE_CHAIN_STEPS, 'wake-chain-idle')
+  const wakePrompts = (await readRequests()).slice(chainStart).map(body => latestPrompt(body.messages ?? []).prompt)
+  for (let step = 1; step <= WAKE_CHAIN_STEPS; step++) {
+    assert.ok(wakePrompts.some(prompt => wakeNoticeStep(prompt) === step), `Idle completion ${step} must open a model turn`)
+  }
+  assert.ok(wakePrompts.filter(prompt => wakeNoticeStep(prompt) === 0).every(prompt => prompt?.includes('DSCODE_CONTROLS_WAKE_CHAIN')),
+    'The chain must need no further user input')
+  await artifact('controls-wake-chain', { state: chained, prompts: wakePrompts, screen: await capture() })
+
   const delivered = join(cwd, 'delivered report.md')
   await writeFile(delivered, '# Native DSH delivery\n')
   const openedBefore = await readFile(mediaOpenerLog, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error })
@@ -210,5 +243,5 @@ export async function nativeControlsAcceptance(ui) {
   await wait(new RegExp(basename(stored.path).replaceAll('.', '\\.')))
   await artifact('controls-image-child-history', { screen: await capture() })
   await key('Escape'); await key('C-g')
-  return { childId, jobId: job.id, dueReminderId: dueId, image: stored.attachment, deliveries: true, parentCatalog: true, feedbackWithoutTurn: true }
+  return { childId, jobId: job.id, dueReminderId: dueId, image: stored.attachment, deliveries: true, parentCatalog: true, feedbackWithoutTurn: true, idleCompletionWakes: WAKE_CHAIN_STEPS }
 }
