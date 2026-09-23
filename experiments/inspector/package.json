@@ -1,0 +1,14 @@
+{
+  "name": "@hqzhao95/dscode-experimental-inspector",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./index.mjs",
+  "files": ["index.mjs", "cordis.patch.yml", "README.md"],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/schemastery": "3.18.4"
+  },
+  "dependencies": { "@deepseek-ai/dsh-experimental-inspector": "0.1.7-alpha.2" },
+  "dsh": { "testedVersion": "0.1.7-alpha.2", "supportedRange": "0.1.7-alpha.2", "bundle": { "patch": "./cordis.patch.yml" } }
+}

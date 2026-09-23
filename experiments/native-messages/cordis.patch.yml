@@ -1,0 +1,16 @@
+# Explicit native-route opt-in. Apply after the dscode bundle in an isolated DSH_HOME.
+# This registers a route; it does not change the selected/default model.
+# DSH 0.1.7 speaks only Messages here and rejects a `protocol` key.
+- id: llm-deepseek
+  disabled: false
+  config:
+    apiKeyEnv: DSCODE_NATIVE_DEEPSEEK_API_KEY
+    # Pin the Messages root so an inherited DEEPSEEK_BASE_URL Chat endpoint
+    # cannot silently receive Messages requests. Override explicitly for gateways.
+    baseURL: !!js process.env.DSCODE_NATIVE_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com/anthropic'
+- id: session-log-deepseek
+  config:
+    enabled: false
+- id: plugin-package-inventory-deepseek
+  config:
+    enabled: false

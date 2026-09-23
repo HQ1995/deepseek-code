@@ -1,0 +1,6 @@
+# Loopback test only: avoid a second model request for a session title.
+- id: session-title-llm
+  disabled: true
+- id: tools
+  config:
+    mode: native

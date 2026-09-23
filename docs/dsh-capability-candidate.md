@@ -1,4 +1,77 @@
-# DSH capability candidate — 2026-09-15
+# DSH capability candidate
+
+## Port to DSH 0.1.7-alpha.2 — 2026-09-23
+
+Branch **`dsh-capabilities-alpha.2`**, based on main `e6173390` (source-built
+alpha.2, commit `00102833`, patch `f3fe5695…`). The 0.1.6 candidate
+`candidate/dsh-capabilities` remains the historical record (below).
+
+Bridge changes, active in every dscode profile:
+
+| Commit | Behavior | Candidate origin |
+| --- | --- | --- |
+| `378109d4` | Resource-only MCP servers are no longer labelled disconnected; durable `image/offload` shows a system notice live, on replay and in paged child history | `a28655b` |
+| `86809ff0` | A cancelled prompt settles only after the native owner drains (for example, MCP browser cleanup); a failed drain rejects instead of reporting success | `7310a64` (bridge half) |
+| `8ad9dc5c` | `/doctor` reports an explicitly mounted Inspector with its DevTools URL and a full-debugger warning | `2160060` (bridge half) |
+
+Opt-in bundles and keyless acceptance scripts under `experiments/`, referenced
+by no dscode bundle, preset, launcher or release builder: `native-messages/`,
+`teams/`, `ssh/`, `inspector/`, `playwright/` and `capabilities/`. Candidate
+commits `fa1b5b9` and `5aa44f1` needed no port: main's alpha.2 adoption already
+carries `workflow-ptc`, `agent/created`, the session-log opt-out and Ralph in
+the owned presets.
+
+### What alpha.2 changed
+
+- `llm-deepseek` speaks only Messages and rejects a `protocol` key; the native
+  overlay and Messages smoke no longer set one.
+- `dsh-agent-presets` roots are gone. Teams is now a `preset-teams`
+  `@deepseek-ai/dsh-agent-preset` row derived from dscode's history preset
+  without delegation. Its bundle makes `teams` the registry default and disables
+  the seven dscode preset rows. That is required, not cosmetic:
+  `tool-subagent-control` registers the same `send_message`, `list_agents` and
+  `interrupt_agent` names as the Team tools. The Team rows keep the ids of
+  upstream's `dsh-experimental-agent-team-profile`; never install both.
+- Team member views expose `target` (the name) and no session id; the policy
+  prompt wording changed.
+- Permission presets refuse to activate when the composed sandbox and approval
+  defaults match no preset. The loopback fixture patch declares a fixture-only
+  `workspace-write` + `never` preset. Installed smokes now fail on any
+  `did not activate` warning.
+- Session format V4 stores tool results flat; the Playwright smoke's projected
+  screenshot event follows it.
+- The alpha.2 SSH helper imports new subprocess modules, so the remote closure
+  must be redeployed and both digests recomputed.
+- Profile plugin installation needs `pnpm` (the smokes use corepack).
+
+### Verification (macOS arm64)
+
+Evidence root `/Users/hqzhao/AI/dsh-alpha172/run-20260922`, logs `logs/cap-*`.
+
+- Bridge suites against the source-built alpha.2 SDK, Node 24.19.0 and
+  22.19.0: 66 files, 1,040 tests each. Ported queue tests fail without the
+  drain fix (8 failures). `scripts/check-rust.sh` passes.
+- Full installed TUI E2E with plugin and TUI rebuilt from this branch
+  (`payload-cap`): run **88800** PASS.
+- Node 22.19.0 and 24.19.0, every keyless smoke against the extracted runtime
+  (`control/cap-node22.sh`, `cap-node24.sh`):
+  - MCP resource-only via native and PTC calls.
+  - Native Teams: tools, task CAS, isolation, Lead authority, messaging and resume.
+  - Native Messages/Files: reuse, durable offload, resume and inline fallback.
+  - Inspector: Host tree/CDP, no default fetch capture, teardown restoration.
+  - Playwright: unit tests, and real Chromium approvals, screenshot, sibling
+    isolation, cancel/timeout cleanup, PTC cancellation and unload.
+  - Installed Teams: nine unique tools, `teams` as the only preset, one
+    loopback Messages turn.
+  - Installed browser + Inspector: disabled by default, approvals,
+    rejection/cancel without late page effects, resume with fresh storage.
+
+**Not run for this port:** SSH (requires redeploying the alpha.2 helper on the
+approved swoop directories), Linux, physical TUI presentation of browser or
+Teams flows, child inheritance, and external real-model acceptance. These, with
+the gates below, keep the bundles experimental.
+
+## 0.1.6-alpha.1 candidate — 2026-09-15
 
 Implemented and locally preserved on **`candidate/dsh-capabilities`**:
 

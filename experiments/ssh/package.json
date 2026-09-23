@@ -1,0 +1,20 @@
+{
+  "name": "@hqzhao95/dscode-experimental-ssh",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./index.mjs",
+  "files": ["index.mjs", "cordis.patch.yml", "README.md"],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/dsh-ptc-runtime-node": "0.1.7-alpha.2"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-ssh": "0.1.7-alpha.2",
+    "@deepseek-ai/dsh-fs-ssh": "0.1.7-alpha.2",
+    "@deepseek-ai/dsh-subprocess-ssh": "0.1.7-alpha.2",
+    "@deepseek-ai/dsh-sandbox-ssh": "0.1.7-alpha.2"
+  },
+  "dsh": { "testedVersion": "0.1.7-alpha.2", "supportedRange": "0.1.7-alpha.2",
+    "bundle": { "patch": "./cordis.patch.yml" } }
+}

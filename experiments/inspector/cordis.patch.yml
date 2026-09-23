@@ -1,0 +1,7 @@
+# Install once, activate for one launch with DSCODE_INSPECTOR=1.
+- insert:
+    - id: dscode-inspector
+      name: '@hqzhao95/dscode-experimental-inspector'
+      disabled: !!js process.env.DSCODE_INSPECTOR !== '1'
+      config:
+        unsafeCaptureFetch: !!js process.env.DSCODE_INSPECTOR_UNSAFE_CAPTURE_FETCH === '1'

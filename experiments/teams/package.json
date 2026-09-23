@@ -1,0 +1,19 @@
+{
+  "name": "@hqzhao95/dscode-experimental-teams",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "files": ["presets/", "cordis.patch.yml", "README.md"],
+  "peerDependencies": {
+    "@hqzhao95/dscode": "0.0.14-alpha.12"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-experimental-agent-team": "0.1.7-alpha.2",
+    "@deepseek-ai/dsh-experimental-tool-agent-team": "0.1.7-alpha.2"
+  },
+  "dsh": {
+    "testedVersion": "0.1.7-alpha.2",
+    "supportedRange": "0.1.7-alpha.2",
+    "bundle": { "patch": ["./cordis.patch.yml", "./presets/teams.patch.yml"] }
+  }
+}
