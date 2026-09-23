@@ -59,6 +59,8 @@ import {
 } from '@deepseek-ai/dsh-attachment'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm-retry'
+import type {} from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-app-boot'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { RpcError } from './protocol.ts'
 import { jobOutputSnapshot } from './job-output.ts'
@@ -211,6 +213,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     onChanged: (current, reason) => sessionModels.changed(current, reason),
     logger,
   })
+  // The settings service announces recomposed namespaces and profile reloads;
+  // the catalog keeps its provider-section snapshot until one of them lands.
+  ctx.on('settings/document-updated', ns => { models.settingsChanged(ns) })
+  ctx.on('app-boot/config-reload', () => { models.settingsChanged() })
   const sessionModels = createSessionModels({
     sessions, owned: (clientId, id) => lifecycle.writable(clientId, id), config, catalog: models, defaults: agentDefaultModel,
     clients: () => connections.keys(),

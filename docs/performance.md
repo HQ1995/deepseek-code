@@ -6,6 +6,89 @@ Changes must preserve cancellation, ownership checks, stream ordering,
 durable history and the full product loop. A fast isolated benchmark alone
 does not establish overall application performance.
 
+## 2026-09-23: a settings read no longer recomposes the profile once per plugin
+
+A CPU profile of the full installed TUI/headless E2E on the DSH 0.1.7-alpha.2
+tuple ranked two runtime functions above module compilation, the previous top
+item: `inherited` in `dsh-config-editor` (15.3s, 11.8% of leader non-idle
+samples) and `structuredClone` beneath it (11.0s, 8.5%). Both sit under
+`settings.describe()`. For every active plugin entry, the config editor
+recomposed all bundle layers and profile patches to find that entry's
+inherited configuration, and cloned the result. Across every profiled process,
+`describe()` was 33.8s, 21.8% of all non-idle CPU in the run; `inherited()` was
+29.4s of it.
+
+The bridge called `describe()` for the `llm-pi-ai` provider section on every
+catalog refresh, discovery check and discovery write. An instrumented plugin
+recorded 327 such calls across the run's 52 leader processes, each blocking the
+leader's event loop for a median of 43.9ms (p90 60.4ms): 14.9s in total, about
+287ms per leader, much of it during startup and model listing.
+
+Two changes remove it:
+
+- **Runtime backport** (`dsh-config-editor`, in
+  `patches/dsh-00102833….patch`): every entry without its own profile
+  configuration shares one composition, and only entries with a profile
+  override compose separately. Stripping a config key an entry's patches do not
+  carry leaves the patch list unchanged, so the values are identical. On a real
+  108-entry dscode profile with three overrides, inheritance for all entries
+  took 39.6ms upstream and 1.4ms shared, with no mismatch across the 108
+  entries (`perf/inherited-bench.mjs`). A settings test pins one shared
+  composition plus one per override. The existing inheritance, reset, group
+  and inherited-secret tests pass unchanged.
+- **Bridge**: the model catalog keeps one snapshot of the provider section
+  for display reads (`refreshCatalog`, `scheduleDynamicCatalogRefresh`). It is
+  keyed on the settings instance beneath the Cordis lookup wrappers and dropped
+  on `settings/document-updated` for `llm-pi-ai`, on `app-boot/config-reload`,
+  and after every write of its own. Writes, unshared-credential cleanup and the
+  guard that forwards a resolved secret only to an already persisted endpoint
+  still read fresh. An absent section is never kept.
+
+| Full E2E, 52 leaders | Bridge `describe()` calls | Median per call | Total blocked | Per leader |
+| --- | ---: | ---: | ---: | ---: |
+| Before | 327 | 43.9ms | 14.9s | 287ms |
+| Bridge snapshot only | 160 | 55.5ms | 9.9s | 190ms |
+| Snapshot and runtime backport | 160 | 5.5ms | 0.96s | 18ms |
+
+Profiled whole runs, before and after: non-idle samples across all Node
+processes fell from 154.6s to 96.2s, and in leader processes from 129.4s to
+77.1s. `describe()` fell from 33.8s (21.8%) to 3.1s (3.2%). The leader's top
+frames are now module compilation, GC and Cordis service lookups. File writes
+in the profile come from the test-only E2E observer. These figures are sampled
+CPU from one host (macOS arm64, Node 24.19.0) running a mock model, not a
+general daily-use percentage or wall-clock speedup.
+
+Evidence is under `/Users/hqzhao/AI/dsh-alpha172/run-20260922/perf`: the
+profiles `profiles-base/` and `profiles-v2/` with their summaries, the
+instrumented call logs `describe-calls{,-after,-v2}.jsonl`, and the caller and
+inclusive-time scripts. The instrumented plugins were scratch builds and were
+never installed or committed. Verification results are recorded below.
+
+### Verification for this section
+
+- Source backport: settings suites 5 files, 42 passed (including the new
+  composition-count test, which failed with 5 compositions before the change);
+  the app-boot, settings-controller and speech-to-text suites that use the
+  editor, 18 files, 5463 passed, 1 skipped; 20 documentation gates passed. The
+  runtime was rebuilt from the pinned source with the new patch digest
+  `f3fe5695ed2260428f2fe45108650144ba583d62b6371545838af765d10b71b0`
+  (`payload-v2/`, consumer `consumer-v2/`); the official `build:official`
+  typecheck passed.
+- Bridge: four catalog interface tests (shared display reads and every
+  invalidation signal, keying through stacked lookup wrappers and a replaced
+  instance, fresh write paths, no cached absence) and one socket test of the
+  event wiring. The socket test fails without the wiring. Full suites on the
+  patched runtime: Node 24.19.0 and 22.19.0, 66 files, 1034 passed each.
+- Installed product on payload v2 (macOS): managed update, provider UI (run
+  12602), 15 update-channel cases and the full TUI/headless E2E (run 15211)
+  passed. The profiled run (79319) also passed. The payload audit
+  (`payload-v2-audit.json`) matched sidecars, the runtime descriptor and 61
+  packed bridge files. Consumer provenance, `scripts/check.sh` and
+  `git diff --check` passed.
+- The changed runtime has not been through Linux acceptance. Its backport
+  touches only platform-independent configuration code, but the project repeats
+  acceptance for every runtime payload change, and swoop needs its own approval.
+
 ## 2026-09-20: both spellings of the profile in the update lane, and a launcher that outwaits a hidden one
 
 A review pass over this checkout's working tree, before it was committed, found

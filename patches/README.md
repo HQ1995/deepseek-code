@@ -29,6 +29,16 @@ outside plugin activation. Import document I/O failures reject the promise;
 individual rejected settings sections retain native diagnostics and archival
 behavior. This prevents a first-launch catalog from racing imported providers.
 
+The config-editor change composes inherited form bases once per settings
+`describe()`: every entry without its own profile configuration shares one
+composition of the profile layers and patches, and only entries with a profile
+override compose separately. Upstream composed once per active entry, which
+dominated `describe()` (about 40ms of each 44ms call on a 108-entry dscode
+profile) and blocked the leader for every catalog, preset and settings read.
+The results are identical: removing a config key an entry's patches do not
+carry leaves the patch list unchanged. A settings test pins the composition
+count; the existing inheritance, reset, group and secret tests cover values.
+
 The Linux scope-settlement correction that earlier revisions of this patch
 carried is now upstream: `0.1.6-alpha.2` owns `TasksCurrent` scope accounting in
 `subprocess-local/src/linux-scope.ts`, the early-bootstrap test fixture and the

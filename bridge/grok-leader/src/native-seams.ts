@@ -64,3 +64,19 @@ export interface AgentDefaultModelLike {
   saveSelection(next: { provider: string; model: string; reasoningEffort?: string }): Promise<unknown>
 }
 
+/** Cordis registers the wrapper-to-instance symbol globally; it is read
+ * structurally so modules keep no framework dependency of their own. */
+const TRACEABLE_ORIGINAL = Symbol.for('cordis.original')
+
+/** The live service instance beneath cordis lookup wrappers. Every
+ * `ctx.get(name)` returns a fresh traceable proxy over the same instance, so a
+ * cache keyed on the lookup result would miss on every call; a remount still
+ * brings a different instance. */
+export function nativeInstance<T extends object>(service: T): T {
+  let owner = service as T & Record<symbol, unknown>
+  for (;;) {
+    const next = owner[TRACEABLE_ORIGINAL] as (T & Record<symbol, unknown>) | undefined
+    if (next === undefined) return owner
+    owner = next
+  }
+}

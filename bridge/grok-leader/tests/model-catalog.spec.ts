@@ -363,4 +363,62 @@ describe('model catalog module', () => {
     expect(f.catalog.peek()).toBeUndefined()
   })
 
+  it('shares one settings composition across display reads until the provider section may have changed', async () => {
+    const f = fixture()
+    const describe = vi.spyOn(f.settings, 'describe')
+    await f.catalog.refresh(); await f.catalog.list(); await f.catalog.refresh()
+    expect(describe).toHaveBeenCalledTimes(1)
+    f.catalog.settingsChanged('agent-preset-registry')
+    await f.catalog.refresh()
+    expect(describe).toHaveBeenCalledTimes(1)
+    f.catalog.settingsChanged('llm-pi-ai')
+    await f.catalog.refresh()
+    expect(describe).toHaveBeenCalledTimes(2)
+    f.catalog.settingsChanged()
+    await f.catalog.refresh()
+    expect(describe).toHaveBeenCalledTimes(3)
+  })
+
+  it('keys the shared composition on the settings instance behind cordis lookup wrappers', async () => {
+    const f = fixture()
+    const original = Symbol.for('cordis.original')
+    const wrap = (service: SettingsLike): SettingsLike => new Proxy(service, {
+      get: (target, key) => key === original ? target : Reflect.get(target, key),
+    })
+    let service: SettingsLike = f.settings
+    const catalog = createModelCatalog({ ...f.deps, settings: () => wrap(wrap(service)) })
+    const describe = vi.spyOn(f.settings, 'describe')
+    await catalog.refresh(); await catalog.refresh()
+    expect(describe).toHaveBeenCalledTimes(1)
+    const replacement: SettingsLike = { mutate: f.settings.mutate, describe: vi.fn(() => [{ ns: 'llm-pi-ai', user: { providers: { alpha: { displayName: 'Remounted' } } } }]) }
+    service = replacement
+    const current = await catalog.refresh()
+    expect(replacement.describe).toHaveBeenCalledTimes(1)
+    expect(current.providers.find(provider => provider.id === 'alpha')?.displayName).toBe('Remounted')
+  })
+
+  it('reads fresh for writes and publishes the route it just wrote', async () => {
+    const f = fixture()
+    await f.catalog.refresh()
+    const describe = vi.spyOn(f.settings, 'describe')
+    const added = await f.catalog.add({ id: 'gw', displayName: 'Gateway', api: 'anthropic-messages' }) as { providers: Array<{ id: string; displayName?: string }> }
+    expect(describe).toHaveBeenCalled()
+    expect(added.providers.find(provider => provider.id === 'gw')?.displayName).toBe('Gateway')
+    expect((await f.catalog.current()).providers.find(provider => provider.id === 'gw')?.displayName).toBe('Gateway')
+  })
+
+  it('never caches an absent provider section, so a late provider plugin is still read', async () => {
+    const f = fixture()
+    let active = false
+    const service: SettingsLike = {
+      mutate: f.settings.mutate,
+      describe: vi.fn(() => active ? [{ ns: 'llm-pi-ai', user: { providers: { alpha: { displayName: 'Alpha gateway' } } } }] : []),
+    }
+    const catalog = createModelCatalog({ ...f.deps, settings: () => service })
+    expect((await catalog.refresh()).providers.find(provider => provider.id === 'alpha')?.displayName).toBeUndefined()
+    active = true
+    expect((await catalog.refresh()).providers.find(provider => provider.id === 'alpha')?.displayName).toBe('Alpha gateway')
+    await catalog.refresh()
+    expect(service.describe).toHaveBeenCalledTimes(2)
+  })
 })

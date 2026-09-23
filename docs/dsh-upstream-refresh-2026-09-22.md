@@ -18,6 +18,13 @@ failed gate is a pre-existing session-list benchmark fixture defect (below),
 which makes no product claim. The candidate remains an unpublished worktree.
 Upstream master and npm still named alpha.2 at 2026-09-23T00:58Z.
 
+Follow-up, 2026-09-23: the source backport gained a `dsh-config-editor`
+performance change (see [performance](performance.md)). Its digest is now
+`f3fe5695ed2260428f2fe45108650144ba583d62b6371545838af765d10b71b0`; the
+`d18c9d03…` artifacts below remain the accepted record. The revised macOS
+payload passed the bridge suites and every installed-product gate. Its Linux
+acceptance has not been run.
+
 ## Changes from the alpha.1 candidate
 
 - The whole `@deepseek-ai/dsh-*` family moves to `0.1.7-alpha.2`, with Cordis

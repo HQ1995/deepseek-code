@@ -522,4 +522,25 @@ describe('x.ai/providers/add', () => {
     expect(settings.calls).toHaveLength(0)
   })
 
+  it('recomposes provider settings for model lists only after the settings service announces a change', async () => {
+    const settings = makeSettings(true)
+    const { client } = await startWithSettings(settings)
+    const listIds = async (id: number) => {
+      const listed = await client.request(id, 'x.ai/models/list', {})
+      expect(listed.error).toBeUndefined()
+    }
+    await listIds(1)
+    const describe = vi.spyOn(settings as Required<typeof settings>, 'describe')
+    await listIds(2); await listIds(3)
+    expect(describe).toHaveBeenCalledTimes(0)
+    harness!.ctx.emit('settings/document-updated', 'agent-preset-registry', 1)
+    await listIds(4)
+    expect(describe).toHaveBeenCalledTimes(0)
+    harness!.ctx.emit('settings/document-updated', 'llm-pi-ai', 1)
+    await listIds(5); await listIds(6)
+    expect(describe).toHaveBeenCalledTimes(1)
+    harness!.ctx.emit('app-boot/config-reload')
+    await listIds(7)
+    expect(describe).toHaveBeenCalledTimes(2)
+  })
 })

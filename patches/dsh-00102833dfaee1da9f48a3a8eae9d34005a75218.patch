@@ -154,6 +154,81 @@ index 0000000000..291a5f2d19
 +进程检查不创建子进程，不新增依赖、异步工作或生命周期所有者。全表读取仍使用新观察。身份编码从区域格式的日期改为 epoch 秒数，仅在内部使用，并保持秒级精度；省略会话信息、仅判断存在性的存活检查和观察式 containment 均保持不变。
 +
 +定向测试拒绝无效或截断的结果及失败的查询，跨用户身份将真实进程行与 `ps` 比较，并验证带身份检查的信号发送。SDK 校验程序验证 x64 布局，但不是 x64 运行时测试。原生运行时证据来自 macOS arm64；其他操作系统路径保留原有实现。
+diff --git a/packages/boot/config-editor/src/index.ts b/packages/boot/config-editor/src/index.ts
+index 8caad69562..b7ce31e905 100644
+--- a/packages/boot/config-editor/src/index.ts
++++ b/packages/boot/config-editor/src/index.ts
+@@ -22,6 +22,43 @@ function flatten(rows: EntryOptions[]): EntryOptions[] {
+   return rows.flatMap(row => [row, ...row.group && Array.isArray(row.config) ? flatten(row.config as EntryOptions[]) : []])
+ }
+ 
++type LoadedProfile = ReturnType<typeof loadProfileDirectory>
++
++/** Whether a profile patch supplies this entry's own configuration. */
++const ownsConfig = (patch: PatchOptions, id: string): boolean =>
++  patch.id === id && patch.insert === undefined && Object.hasOwn(patch, 'config')
++
++/**
++ * Inherited configuration per entry id: every layer and profile patch except
++ * the entry's own profile configuration. Removing a config key the entry's
++ * patches do not carry leaves the patch list unchanged, so every entry without
++ * its own profile configuration shares one composition; only entries with one
++ * compose separately. Returned values are detached.
++ * @param loaded Profile layers and patches read for one configuration pass.
++ * @returns Resolver from entry id to its inherited configuration.
++ */
++function inheritedConfigs(loaded: LoadedProfile): (id: string) => Record<string, unknown> {
++  const layers = loaded.layers.map(layer => layer.patches)
++  const compose = (patches: PatchOptions[]): Map<string, EntryOptions> => {
++    const rows = new Map<string, EntryOptions>()
++    for (const row of flatten(composeEntries([...layers, patches]))) {
++      if (row.id !== undefined && !rows.has(row.id)) rows.set(row.id, row)
++    }
++    return rows
++  }
++  let shared: Map<string, EntryOptions> | undefined
++  return (id) => {
++    const rows = loaded.patches.some(patch => ownsConfig(patch, id))
++      ? compose(loaded.patches.map((patch) => {
++        if (!ownsConfig(patch, id)) return patch
++        const rest = { ...patch }; Reflect.deleteProperty(rest, 'config')
++        return rest
++      }))
++      : shared ??= compose(loaded.patches)
++    return structuredClone((rows.get(id)?.config ?? {}) as Record<string, unknown>)
++  }
++}
++
+ /** Persist complete raw configs and apply them through the normal Loader path. */
+ export class ConfigEditor extends Service {
+   static inject = ['loader', 'profileContext']
+@@ -49,22 +86,17 @@ export class ConfigEditor extends Service {
+   configuration(): Array<{ entry: Entry; inherited: Record<string, unknown>; override: Record<string, unknown> }> {
+     const profile = this.ownerContext.profileContext
+     const loaded = loadProfileDirectory('dsh', profile.dir, profile.installAnchor)
++    const inherited = inheritedConfigs(loaded)
+     return this.entries().map(entry => ({
+-      entry, inherited: this.inherited(entry, loaded),
++      entry, inherited: inherited(entry.options.id),
+       override: structuredClone((loaded.patches.findLast(
+         row => row.id === entry.options.id && row.config !== undefined,
+       )?.config ?? {}) as Record<string, unknown>),
+     }))
+   }
+ 
+-  private inherited(entry: Entry, loaded: ReturnType<typeof loadProfileDirectory>): Record<string, unknown> {
+-    const patches = loaded.patches.map((patch) => {
+-      if (patch.id !== entry.options.id || patch.insert !== undefined) return patch
+-      const rest = { ...patch }; Reflect.deleteProperty(rest, 'config')
+-      return rest
+-    })
+-    const row = flatten(composeEntries([...loaded.layers.map(layer => layer.patches), patches])).find(row => row.id === entry.options.id)
+-    return structuredClone((row?.config ?? {}) as Record<string, unknown>)
++  private inherited(entry: Entry, loaded: LoadedProfile): Record<string, unknown> {
++    return inheritedConfigs(loaded)(entry.options.id)
+   }
+ 
+   /** Validate, persist, and reconcile a plugin's next config; ordinary fields keep normal lifecycle rules.
 diff --git a/packages/session/session-persistence-jsonl/src/index.ts b/packages/session/session-persistence-jsonl/src/index.ts
 index 1a89b76d29..10ffa0f720 100644
 --- a/packages/session/session-persistence-jsonl/src/index.ts
@@ -248,6 +323,35 @@ index e0586ecb24..4b9c7d2186 100644
    }
  
    /** Move the sections of the removed `settings.yaml` into the active profile once the Loader has settled every entry.
+diff --git a/packages/settings/settings/tests/configuration-composition.spec.ts b/packages/settings/settings/tests/configuration-composition.spec.ts
+new file mode 100644
+index 0000000000..c48784b9a8
+--- /dev/null
++++ b/packages/settings/settings/tests/configuration-composition.spec.ts
+@@ -0,0 +1,23 @@
++/** Inherited form bases share one profile composition per describe. */
++import { expect, it, vi } from 'vitest'
++import * as AppBoot from '@deepseek-ai/dsh-app-boot'
++import { configurationFixture as fixture } from './configuration-fixture.ts'
++
++vi.mock('@deepseek-ai/dsh-app-boot', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('@deepseek-ai/dsh-app-boot')>()
++  return { ...actual, composeEntries: vi.fn(actual.composeEntries) }
++})
++
++it('composes inherited bases once, plus once per entry with its own profile config', async () => {
++  const { ctx } = await fixture()
++  await ctx.settings.update('first', { count: 5 })
++  const compose = vi.mocked(AppBoot.composeEntries)
++  compose.mockClear()
++  const forms = ctx.settings.describe({ redactSecrets: true })
++  expect(compose).toHaveBeenCalledTimes(2)
++  const first = forms.find(form => form.ns === 'first')!
++  expect(first.base).toEqual({ count: 2, list: [] })
++  expect(first.value).toEqual({ count: 5, list: [] })
++  expect(forms.find(form => form.ns === 'second')!.base).toEqual({ count: 2, list: [] })
++  expect(forms.find(form => form.ns === 'default-model')!.base).toEqual({ provider: 'test', model: 'original' })
++})
 diff --git a/packages/settings/settings/tests/configuration.spec.ts b/packages/settings/settings/tests/configuration.spec.ts
 index 5bafea1e5b..c9e6b93ed0 100644
 --- a/packages/settings/settings/tests/configuration.spec.ts

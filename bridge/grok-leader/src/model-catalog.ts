@@ -7,7 +7,7 @@ import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { RpcError } from './protocol.ts'
 import { JSONRPC_INVALID_PARAMS, internalError, paramRecord } from './acp.ts'
 import { discoverEndpointModelCapabilities, type EndpointCapabilities } from './model-endpoint.ts'
-import type { AgentDefaultModelLike, CredentialInfo, CredentialsLike, LlmLike, ModelInfo, SettingsLike } from './native-seams.ts'
+import { nativeInstance, type AgentDefaultModelLike, type CredentialInfo, type CredentialsLike, type LlmLike, type ModelInfo, type SettingsLike } from './native-seams.ts'
 import {
   NO_MODELS_MARKER, PROVIDER_SETTINGS_NS, discoveredModelUpdate, editableProfile, hasUserProviderRoute, isDiscoverableApi,
   knownRouteBaseUrls, mergeEditable, nonEmpty, normalizeProviderForm, pastedApiKey, pastedKeyRef, providerUserProfile,
@@ -75,6 +75,31 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     const providerService = settings()
     if (providerService === undefined) throw internalError('the settings service is not configured')
     return providerService
+  }
+
+  // settings.describe() recomposes the whole profile for every active entry
+  // (tens of milliseconds, blocking the leader). Display reads share one
+  // snapshot of the provider section per settings instance until the service
+  // reports a change or a write of ours lands. Writes, credential cleanup and
+  // the resolved-secret endpoint guard keep reading fresh. An absent section
+  // is never kept, so a provider plugin that activates later is still read.
+  let sectionSnapshot: { service: SettingsLike; section: Profile } | undefined
+  const displaySection = (providerService = settings()): Profile | undefined => {
+    if (providerService === undefined) return undefined
+    const service = nativeInstance(providerService)
+    if (sectionSnapshot?.service === service) return sectionSnapshot.section
+    const section = providerUserSection(providerService)
+    sectionSnapshot = section === undefined ? undefined : { service, section }
+    return section
+  }
+  /** Write provider routes through the official seam; the snapshot never outlives a write. */
+  const writeProviderSettings = async (providerService: SettingsLike, ops: unknown): Promise<void> => {
+    sectionSnapshot = undefined
+    try {
+      await providerService.mutate(PROVIDER_SETTINGS_NS, ops)
+    } finally {
+      sectionSnapshot = undefined
+    }
   }
 
   /** Resolve a credential per operation, matching dsh's credential seam. */
@@ -153,7 +178,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
   const refreshCatalog = async (): Promise<ModelCatalog> => {
     assertOpen()
     const llmService = llm()
-    const userSection = providerUserSection(settings())
+    const userSection = displaySection()
     const activeProviders = llmService?.listProviders() ?? []
     const configured = new Map((llmService?.listConfigurableProviders?.() ?? []).map(row => [row.provider, row]))
     // A configurable provider whose configuration failed stays visible with its diagnostic.
@@ -256,7 +281,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     const latest = providerUserProfile(providerUserSection(providerService), id)
     const models = discoveredModelUpdate(latest, signature, discovered)
     if (models === undefined || closed) return
-    await providerService.mutate(PROVIDER_SETTINGS_NS, [{ op: 'set', path: ['providers', id], value: { ...latest, models } }])
+    await writeProviderSettings(providerService, [{ op: 'set', path: ['providers', id], value: { ...latest, models } }])
   }
 
   /** Discover, persist and publish one dynamic route unless it changed meanwhile. */
@@ -278,7 +303,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     const llmService = llm()
     const providerService = settings()
     if (closed || llmService?.discoverModels === undefined || providerService === undefined) return
-    const userSection = providerUserSection(providerService)
+    const userSection = displaySection(providerService)
     for (const provider of llmService.listProviders()) {
       if (closed) break
       const profile = providerUserProfile(userSection, provider.id)
@@ -349,14 +374,14 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     providerService: SettingsLike, id: string, profile: Profile, draft: Profile, verb: 'add' | 'update',
   ): Promise<void> => {
     try {
-      await providerService.mutate(PROVIDER_SETTINGS_NS, [{ op: 'set', path: ['providers', id], value: profile }])
+      await writeProviderSettings(providerService, [{ op: 'set', path: ['providers', id], value: profile }])
       return
     } catch (error: unknown) {
       if (!message(error).includes(NO_MODELS_MARKER)) throw internalError('failed to ' + verb + ' provider "' + id + '": ' + message(error))
     }
     const models = await discoverProviderModels(id, draft)
     try {
-      await providerService.mutate(PROVIDER_SETTINGS_NS, [{ op: 'set', path: ['providers', id], value: { ...profile, models } }])
+      await writeProviderSettings(providerService, [{ op: 'set', path: ['providers', id], value: { ...profile, models } }])
       if (!closed) discoveredModels.set(id, models)
     } catch (retryError: unknown) {
       throw internalError('failed to ' + verb + ' provider "' + id + '": ' + message(retryError))
@@ -444,7 +469,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     if (!hasUserProviderRoute(providerService, id)) throw new RpcError(JSONRPC_INVALID_PARAMS, 'provider "' + id + '" has no removable user route')
     assertOpen()
     try {
-      await providerService.mutate(PROVIDER_SETTINGS_NS, [{ op: 'unset', path: ['providers', id] }])
+      await writeProviderSettings(providerService, [{ op: 'unset', path: ['providers', id] }])
     } catch (error: unknown) {
       throw internalError('failed to remove provider "' + id + '": ' + message(error))
     }
@@ -466,6 +491,11 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
 
   return {
     peek: () => catalog,
+    /** A settings namespace was recomposed (`ns`), or the profile reloaded
+     * (no `ns`): the next display read recomposes the provider section. */
+    settingsChanged(ns?: string): void {
+      if (ns === undefined || ns === PROVIDER_SETTINGS_NS) sectionSnapshot = undefined
+    },
     /** Publish an acknowledged default choice without repeating discovery.
      * Resolve against the latest catalog: a concurrent refresh may change wire
      * IDs. Updates the cached snapshot in place, as holders of it observe. */
@@ -495,7 +525,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
       if (disposal !== undefined) return disposal
       closed = true
       disposal = Promise.resolve().then(async () => { while (pending.size > 0) await Promise.allSettled([...pending]) })
-      discoveredModels.clear(); discoveredRoutes.clear(); catalog = undefined
+      discoveredModels.clear(); discoveredRoutes.clear(); catalog = undefined; sectionSnapshot = undefined
       return disposal
     },
   }

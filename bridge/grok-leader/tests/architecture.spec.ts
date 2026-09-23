@@ -68,7 +68,7 @@ const declaredDependencies = [
     ['prompt-queue', ['acp', 'projection', 'prompt-content']],
     ['prompt-content', ['acp', 'projection']],
     ['session-work', ['acp']],
-    ['session-discovery', ['acp', 'session-list']],
+    ['session-discovery', ['acp', 'native-seams', 'session-list']],
     ['session-commands', ['acp', 'session-presets', 'session-work', 'session-output', 'prompt-content', 'prompt-queue']],
     ['session-artifacts', ['acp', 'projection', 'session-output', 'session-work']],
     ['session-input', ['acp', 'model-catalog', 'wire-catalog', 'prompt-content', 'prompt-queue', 'session-models', 'projection']],
