@@ -3,7 +3,7 @@
 ## Port to DSH 0.1.7 — 2026-09-23
 
 Branch **`dsh-capabilities-rc.1`**, rebased without conflicts onto the
-`dsh-0.1.7-rc.1` adoption `b362cbc9` (source-built rc.1, commit `46a7f68b`,
+`dsh-0.1.7-rc.1` tip `411b30eb` (source-built rc.1, commit `46a7f68b`,
 patch `f3fe5695…`). It was first ported and accepted on alpha.2; the
 verification below covers both runtimes. The 0.1.6 candidate
 `candidate/dsh-capabilities` remains the historical record (below).
@@ -12,9 +12,9 @@ Bridge changes, active in every dscode profile:
 
 | Commit | Behavior | Candidate origin |
 | --- | --- | --- |
-| `6399f3f8` | Resource-only MCP servers are no longer labelled disconnected; durable `image/offload` shows a system notice live, on replay and in paged child history | `a28655b` |
-| `9a09f76b` | A cancelled prompt settles only after the native owner drains (for example, MCP browser cleanup); a failed drain rejects instead of reporting success | `7310a64` (bridge half) |
-| `eafc3aa3` | `/doctor` reports an explicitly mounted Inspector with its DevTools URL and a full-debugger warning | `2160060` (bridge half) |
+| `9378a964` | Resource-only MCP servers are no longer labelled disconnected; durable `image/offload` shows a system notice live, on replay and in paged child history | `a28655b` |
+| `a9891362`, `77614bd0` | A cancelled prompt settles only after its aborted native activity ends (for example, MCP browser cleanup); a failed drain rejects instead of reporting success. The wait ends at that activity's idle transition, not at a turn woken during the unwind, and disposal never waits | `7310a64` (bridge half); `77614bd0` is a review fix |
+| `beb0548e` | `/doctor` reports an explicitly mounted Inspector with its DevTools URL and a full-debugger warning | `2160060` (bridge half) |
 
 Opt-in bundles and keyless acceptance scripts under `experiments/`, referenced
 by no dscode bundle, preset, launcher or release builder: `native-messages/`,
@@ -55,13 +55,16 @@ rc.1 evidence root `/Users/hqzhao/AI/dsh-rc171/run-20260923`, logs `logs/cap-*`;
 alpha.2 evidence root `/Users/hqzhao/AI/dsh-alpha172/run-20260922`.
 
 - Bridge suites against the source-built SDK, Node 24.19.0 and 22.19.0: rc.1
-  66 files, 1,044 tests each; alpha.2 1,040 each. Ported queue tests fail
+  66 files, 1,050 tests each after the review fix (1,044 before it); alpha.2
+  1,040 each. Ported queue tests fail
   without the drain fix (8 failures). `scripts/check-rust.sh` passes.
 - Full installed TUI E2E with plugin and TUI rebuilt from this branch
-  (`payload-cap`): rc.1 run **36271**, alpha.2 run **88800**, both PASS.
+  (`payload-cap`): rc.1 run **54701** after the review fix (**36271** before it),
+  alpha.2 run **88800**, all PASS.
 - Node 22.19.0 and 24.19.0, every keyless smoke on both runtimes
   (`control/cap-node22.sh`, `cap-node24.sh`). The Playwright smoke imports the
-  compiled bridge, so build `bridge/grok-leader/lib/` first (`cap-playwright-*.log`):
+  compiled bridge, so build `bridge/grok-leader/lib/` first. After the review
+  fix all eight pass on both Node versions (`rv-cap-smokes-node*.log`):
   - MCP resource-only via native and PTC calls.
   - Native Teams: tools, task CAS, isolation, Lead authority, messaging and resume.
   - Native Messages/Files: reuse, durable offload, resume and inline fallback.
