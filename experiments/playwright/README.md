@@ -1,6 +1,6 @@
 # Playwright opt-in candidate
 
-Private, macOS-only validation candidate for DSH `0.1.7-alpha.2` and Playwright MCP `0.0.80`. Not referenced by the dscode bundle, presets, launcher, or release builder. Install only into a dedicated matching candidate profile, not a daily profile. See [the candidate summary](../../docs/dsh-capability-candidate.md).
+Private, macOS-only validation candidate for DSH `0.1.7-rc.1` and Playwright MCP `0.0.80`. Not referenced by the dscode bundle, presets, launcher, or release builder. Install only into a dedicated matching candidate profile, not a daily profile. See [the candidate summary](../../docs/dsh-capability-candidate.md).
 
 ## Interface and ownership
 

@@ -1,6 +1,6 @@
 # Inspector for dscode development
 
-Host-only integration for the matching DSH 0.1.7-alpha.2 candidate. It provides
+Host-only integration for the matching DSH 0.1.7-rc.1 candidate. It provides
 the real Cordis tree, Host Console/Sources/debugger and optional fetch inspection.
 It does not start the DSH Web app, attach a browser Client or add model tools.
 
