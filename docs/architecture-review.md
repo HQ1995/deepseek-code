@@ -91,6 +91,91 @@ The platform coverage gaps and intermittent observation below remain explicit;
 successful source verification does not establish an installed or released build.
 No commit, push, published release or daily-profile installation was performed.
 
+## Module-depth pass — 2026-09-22
+
+Scope: the bridge after the DSH 0.1.7-alpha.2 adoption. Since the integrated
+review above, new features had accumulated in a few owners and the gate had
+stopped tracking them:
+
+- `model-catalog.ts` had grown to 1,108 lines mixing four concerns: the
+  outbound capability probe, pure llm-pi-ai profile and form rules, wire-catalog
+  identity, and the stateful owner. Its `refreshCatalog` was 183 lines.
+- `tests/leader.spec.ts` had grown to 7,332 lines, 5,300 of them one describe.
+- The dependency gate declared 24 of 42 modules; 18, including `projection`,
+  `preset-catalog`, `mcp` and `workflows`, had no dependency budget. Nothing
+  bounded module size.
+
+### Changes
+
+| Module | Owns | Seam |
+| --- | --- | --- |
+| `model-catalog` (1,108 → 502 lines) | Cached snapshots, accepted native reads, discovery scheduling, route writes and disposal | Unchanged `createModelCatalog` interface |
+| `wire-catalog` (new, pure) | Wire ids, catalog assembly, selection resolution, effort acceptance | `assembleCatalog`, `resolveSelection` |
+| `provider-profile` (new, pure) | llm-pi-ai section reads, form validation and normalization, profile merge, discovered-model persistence decision | Plain functions over settings data |
+| `model-endpoint` (new) | The only outbound HTTP the catalog performs: bounded `/models` read and effort parsing | Injected `fetch` |
+| `native-seams` (new, types) | Structural contracts for native llm, settings, credentials and default-model services | Shared by catalog, presets and composition |
+
+The rewrite removes three copies of route-id validation, two copies of the
+derived credential name and pasted-key handling, and in-place mutation of the
+request form. `refreshCatalog` is now native gathering (`readProviderModels`,
+`describeProvider`) followed by the pure `assembleCatalog`. Importers now use
+the owning module directly; there are no re-export shims.
+`sessionEventToUpdates` builds native and PTC tool cards through one pair of
+constructors (`toolCallStarted`, `toolCallSettled`), making the shared card
+vocabulary a single definition (134 → 85 lines).
+
+`tests/leader.spec.ts` became `tests/support/leader-harness.ts` plus 14 socket
+specs (handshake, models, prompts, queue, goals, native, sessions,
+permissions, presets, commands, plugins, providers, provider-edits, host) and
+`projection.spec.ts` beside `src/projection.ts`. `useLeaderHarness()` replaces
+the per-describe setup; test bodies moved verbatim, except one test that read
+the describe-scoped harness and now uses the `registry` returned by `start()`.
+
+The gate now requires every module except the composition root to declare its
+local dependencies, fails on a declaration that names no module, states
+per module whether Cordis may appear as a type or a runtime dependency, and
+bounds every source, launcher and test file at 800 lines.
+
+### Evidence
+
+Evidence root: `/Users/hqzhao/AI/dsh-alpha172/run-20260922`.
+
+- Bridge suites against the source-built alpha.2 SDK, Node 24.19.0 and
+  22.19.0: 66 files, 1,028 tests each (`logs/arch-final-bridge-node24.log`,
+  `logs/arch-final-bridge-node22.log`). Added: 27 direct tests for the new pure
+  modules and 23 gate checks.
+- Test split: the 275 former `leader.spec.ts` tests keep an identical title
+  multiset, all passing (`arch/leader-before.json`, `arch/leader-after.json`;
+  generator `arch/split-leader-spec.py`).
+- Differential checks of committed against refactored code:
+  `endpointReasoningEfforts`, `endpointModelCapabilities` and
+  `modelSelectionFromRequest` over 20,000 generated inputs each (13,036
+  non-trivial effort maps); `createModelCatalog` refresh plus selection over
+  1,500 randomized provider/metadata/default scenarios, 1,137 with qualified
+  wire ids and 554 selection errors (`arch/catalog-differential-stats.json`);
+  `sessionEventToUpdates` over 20,000 generated tool, PTC, delivery and todo
+  events (`arch/projection-differential-stats.json`). All byte-identical,
+  including warnings and error messages.
+- The new gate checks were confirmed to fail on an undeclared module, an
+  801-line file and a Cordis import in a pure module.
+- A plugin repackaged from the refactored bridge passed the macOS provider UI
+  E2E (run 47668) and the full installed TUI/headless E2E (run 48228, including
+  the idle-wakeup chain). `scripts/check.sh` and `git diff --check` pass.
+
+Linux was not rerun for this pass: it changes only platform-independent
+TypeScript, and every gate above passed on macOS.
+
+### Remaining candidates
+
+Long functions outside this pass: prompt-queue `control` (180 lines), transport
+`accept` (153), preset-catalog `nativeCatalog` (139), profile-plugins
+`executeCommand` (124) and entry `dispatchRequest` (111). They own delicate
+ordering (queue settlement, socket admission, plugin trust), so each should get
+its own interface-first change with differential evidence.
+`endpointReasoningEfforts` treats an explicit `wire_value: null` as absent, as
+before; whether `off` should then map to `null` is an open behavior question,
+not part of this structural pass.
+
 ## Coverage limits
 
 Mac acceptance uses the real TUI and pinned runtime against a local model

@@ -69,7 +69,8 @@ fixtures, and external DSH/provider capabilities through narrow test adapters.
 The six requirements above remain the acceptance contract. Completed module
 ownership and dependency checks are recorded in [architecture-review.md](architecture-review.md);
 remote integration and later repairs are in [upstream-integration.md](upstream-integration.md)
-and [bugfix-review.md](bugfix-review.md).
+and [bugfix-review.md](bugfix-review.md). The 2026-09-22 module-depth pass (model
+catalog split, socket-spec split and exhaustive gate) is recorded in the same review.
 
 Superseded candidate and intermediate checkpoint notes were removed from this
 working document; their full history remains in Git at `16cadde:docs/architecture-refactor.md`.

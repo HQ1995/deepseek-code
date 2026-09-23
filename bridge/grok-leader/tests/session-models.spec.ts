@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import { KNOWN_SESSION_EVENT_TYPES, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { acceptedReasoningEffort, modelEffortKey, modelSelectionFromRequest, type AgentDefaultModelLike, type ModelCatalog } from '../src/model-catalog.ts'
+import type { AgentDefaultModelLike } from '../src/native-seams.ts'
+import { acceptedReasoningEffort, modelEffortKey, modelSelectionFromRequest, type ModelCatalog } from '../src/wire-catalog.ts'
 import { createSessionModels, type SessionModel } from '../src/session-models.ts'
 
 function deferred<T>() {

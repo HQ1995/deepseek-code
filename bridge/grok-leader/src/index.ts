@@ -27,8 +27,9 @@ import { createProfilePlugins, inspectPluginRuntime } from './profile-plugins.ts
 export { analyzeBundlePatch, parseCommandLine, inspectPluginRuntime, type BundlePatchAnalysis } from './profile-plugins.ts'
 import { protectTerminalSignals } from './terminal-signal.ts'
 import { JSONRPC_METHOD_NOT_FOUND, internalError, paramRecord } from './acp.ts'
-import { createModelCatalog, type LlmLike, type SettingsLike, type CredentialsLike, type AgentDefaultModelLike } from './model-catalog.ts'
-export { providerUserSection, providerUserProfile, hasUserProviderRoute, knownRouteBaseUrls } from './model-catalog.ts'
+import { createModelCatalog } from './model-catalog.ts'
+import type { LlmLike, SettingsLike, CredentialsLike, AgentDefaultModelLike } from './native-seams.ts'
+export { providerUserSection, providerUserProfile, hasUserProviderRoute, knownRouteBaseUrls } from './provider-profile.ts'
 /**
  * Grok leader-protocol unix-socket server driving harness agents.
  *

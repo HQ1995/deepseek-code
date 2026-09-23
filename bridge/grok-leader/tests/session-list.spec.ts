@@ -4,7 +4,7 @@
  * the live session firehose. These cover the pure folds and the LRU/eviction/
  * dedup bookkeeping without spinning up the leader socket.
  *
- * Wire behavior is covered end-to-end in leader.spec.ts; this file pins the
+ * Wire behavior is covered end-to-end in leader-sessions.spec.ts; this file pins the
  * index's own semantics.
  */
 import { describe, expect, it } from 'vitest'

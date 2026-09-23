@@ -3,7 +3,9 @@ import { installModelSelection, type Agent, type AgentOptions, type ModelSelecti
 import { ReasoningEffortId, errorChain } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams, paramRecord } from './acp.ts'
-import { acceptedReasoningEffort, modelEffortKey, modelSelectionFromRequest, type AgentDefaultModelLike, type ModelCatalog, type createModelCatalog } from './model-catalog.ts'
+import type { createModelCatalog } from './model-catalog.ts'
+import type { AgentDefaultModelLike } from './native-seams.ts'
+import { acceptedReasoningEffort, modelEffortKey, modelSelectionFromRequest, type ModelCatalog } from './wire-catalog.ts'
 import { LEGACY_MODEL_SELECTION_EVENTS } from './session-migration.ts'
 
 interface DscodeModelSelectionEvent { provider: string; model: string; reasoningEffort?: string }

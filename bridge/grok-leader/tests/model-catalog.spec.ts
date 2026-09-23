@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createModelCatalog, modelEffortKey, type ModelCatalogDependencies, type LlmLike, type SettingsLike } from '../src/model-catalog.ts'
+import { createModelCatalog, type ModelCatalogDependencies } from '../src/model-catalog.ts'
+import type { LlmLike, SettingsLike } from '../src/native-seams.ts'
+import { modelEffortKey } from '../src/wire-catalog.ts'
 
 const deferred = <T>() => {
   let resolve!: (value: T) => void
@@ -360,4 +362,5 @@ describe('model catalog module', () => {
     await expect(pending).rejects.toThrow('disposed')
     expect(f.catalog.peek()).toBeUndefined()
   })
+
 })

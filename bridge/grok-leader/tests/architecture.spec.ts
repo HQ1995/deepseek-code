@@ -55,6 +55,64 @@ for (const [path, source] of sources) {
 allEdges.get('src/package-location.ts')!.add('bin/update.mjs')
 runtimeEdges.get('src/package-location.ts')!.add('bin/update.mjs')
 
+// Every bridge module except the composition root declares the local modules
+// it may import (type-only edges included). A path entry names a launcher file.
+const declaredDependencies = [
+    ['model-catalog', ['acp', 'protocol', 'model-endpoint', 'native-seams', 'provider-profile', 'wire-catalog']],
+    ['model-endpoint', []],
+    ['native-seams', []],
+    ['provider-profile', ['acp', 'model-endpoint', 'native-seams']],
+    ['wire-catalog', ['acp', 'native-seams']],
+    ['leader-transport', ['acp', 'codec', 'protocol']],
+    ['leader-lifecycle', []],
+    ['prompt-queue', ['acp', 'projection', 'prompt-content']],
+    ['prompt-content', ['acp', 'projection']],
+    ['session-work', ['acp']],
+    ['session-discovery', ['acp', 'session-list']],
+    ['session-commands', ['acp', 'session-presets', 'session-work', 'session-output', 'prompt-content', 'prompt-queue']],
+    ['session-artifacts', ['acp', 'projection', 'session-output', 'session-work']],
+    ['session-input', ['acp', 'model-catalog', 'wire-catalog', 'prompt-content', 'prompt-queue', 'session-models', 'projection']],
+    ['session-registry', ['acp', 'session-work']],
+    ['session-lifecycle', ['acp', 'mcp', 'prompt-queue', 'session-output', 'session-models', 'session-presets', 'session-registry', 'native-interactions', 'session-work', 'session-discovery', 'projection']],
+    ['session-models', ['acp', 'model-catalog', 'native-seams', 'wire-catalog', 'session-migration']],
+    ['session-presets', ['acp', 'native-seams', 'preset-history']],
+    ['preset-history', []],
+    ['session-output', ['projection', 'image-output']],
+    ['native-tasks', ['acp', 'reminders', 'session-output', 'session-work', 'session-discovery', 'job-output']],
+    ['native-children', ['acp', 'child-history', 'workflows', 'prompt-content', 'projection', 'session-output', 'session-work', 'image-output']],
+    ['native-session-status', ['acp', 'prompt-content', 'projection', 'session-output', 'session-work']],
+    ['native-interactions', ['acp', 'leader-transport']],
+    ['native-execution', ['acp', 'package-location', 'session-work']],
+    ['native-asides', ['acp', 'projection', 'session-work']],
+    ['native-capabilities', []],
+    ['profile-plugins', ['package-location', 'acp']],
+    ['acp', ['protocol']],
+    ['protocol', ['codec']],
+    ['codec', []],
+    ['invariant', []],
+    ['projection', []],
+    ['child-history', ['projection']],
+    ['image-output', ['projection']],
+    ['job-output', []],
+    ['mcp', []],
+    ['reminders', []],
+    ['workflows', []],
+    ['session-list', []],
+    ['session-export', []],
+    ['session-migration', []],
+    ['terminal-signal', []],
+    ['preset-catalog', ['native-seams', 'session-presets']],
+    ['package-location', ['bin/update.mjs']],
+] as const
+
+// How a module may depend on Cordis: 'type' names the native mount Context in
+// its interface without using the runtime; 'runtime' marks a native adapter.
+const cordisUse = {
+  'session-models': 'type', 'session-presets': 'type', 'profile-plugins': 'type', invariant: 'type',
+  'image-output': 'type', mcp: 'type', 'session-export': 'type',
+  'native-tasks': 'runtime', 'session-migration': 'runtime', 'terminal-signal': 'runtime', 'preset-catalog': 'runtime',
+} as const
+
 describe('architecture ownership and dependency gate', () => {
   it('reuses the host projection/schema packages instead of bundling duplicate runtime copies', () => {
     const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
@@ -119,38 +177,30 @@ describe('architecture ownership and dependency gate', () => {
     expect([...allEdges].filter(([, targets]) => targets.has('src/index.ts')).map(([path]) => path)).toEqual([])
   })
 
-  it.each([
-    ['model-catalog', ['acp', 'protocol']],
-    ['leader-transport', ['acp', 'codec', 'protocol']],
-    ['leader-lifecycle', []],
-    ['prompt-queue', ['acp', 'projection', 'prompt-content']],
-    ['prompt-content', ['acp', 'projection']],
-    ['session-work', ['acp']],
-    ['session-discovery', ['acp', 'session-list']],
-    ['session-commands', ['acp', 'session-presets', 'session-work', 'session-output', 'prompt-content', 'prompt-queue']],
-    ['session-artifacts', ['acp', 'projection', 'session-output', 'session-work']],
-    ['session-input', ['acp', 'model-catalog', 'prompt-content', 'prompt-queue', 'session-models', 'projection']],
-    ['session-registry', ['acp', 'session-work']],
-    ['session-lifecycle', ['acp', 'mcp', 'prompt-queue', 'session-output', 'session-models', 'session-presets', 'session-registry', 'native-interactions', 'session-work', 'session-discovery', 'projection']],
-    ['session-models', ['acp', 'model-catalog', 'session-migration']],
-    ['session-presets', ['acp', 'model-catalog', 'preset-history']],
-    ['preset-history', []],
-    ['session-output', ['projection', 'image-output']],
-    ['native-tasks', ['acp', 'reminders', 'session-output', 'session-work', 'session-discovery', 'job-output']],
-    ['native-children', ['acp', 'child-history', 'workflows', 'prompt-content', 'projection', 'session-output', 'session-work', 'image-output']],
-    ['native-session-status', ['acp', 'prompt-content', 'projection', 'session-output', 'session-work']],
-    ['native-interactions', ['acp', 'leader-transport']],
-    ['native-execution', ['acp', 'package-location', 'session-work']],
-    ['native-asides', ['acp', 'projection', 'session-work']],
-    ['native-capabilities', []],
-    ['profile-plugins', ['package-location', 'acp']],
-  ] as const)('keeps the %s implementation behind its declared dependencies', (name, allowed) => {
+  it.each(declaredDependencies)('keeps the %s implementation behind its declared dependencies', (name, allowed) => {
     const actual = [...allEdges.get('src/' + name + '.ts')!]
-    expect(actual.filter(target => !allowed.some(dependency => target === 'src/' + dependency + '.ts'))).toEqual([])
-    // Session models name the native mount context in their interface, but do
-    // not use a Cordis runtime or receive the host context as a dependency bag.
-    if (name === 'session-models' || name === 'session-presets') expect([...runtimeExternals.get('src/' + name + '.ts')!]).not.toContain('@deepseek-ai/cordis')
-    else if (!['profile-plugins', 'native-tasks'].includes(name)) expect([...externals.get('src/' + name + '.ts')!]).not.toContain('@deepseek-ai/cordis')
+    expect(actual.filter(target => !allowed.some(dependency => target === (dependency.includes('/') ? dependency : 'src/' + dependency + '.ts')))).toEqual([])
+    // Cordis stays out of ownership modules. Native integration points may
+    // name its Context type; only the listed adapters use its runtime.
+    const cordis = cordisUse[name as keyof typeof cordisUse] as 'type' | 'runtime' | undefined
+    if (cordis === 'type') expect([...runtimeExternals.get('src/' + name + '.ts')!]).not.toContain('@deepseek-ai/cordis')
+    else if (cordis === undefined) expect([...externals.get('src/' + name + '.ts')!]).not.toContain('@deepseek-ai/cordis')
+  })
+
+  it('declares every bridge module except the composition root, and nothing that no longer exists', () => {
+    const modules = [...sources.keys()].filter(path => path.startsWith('src/') && path !== 'src/index.ts').map(path => path.slice('src/'.length, -'.ts'.length))
+    expect(declaredDependencies.map(([name]) => name).sort()).toEqual(modules.sort())
+    const named = declaredDependencies.flatMap(([, allowed]) => allowed.map(dependency => dependency.includes('/') ? dependency : 'src/' + dependency + '.ts'))
+    expect(named.filter(path => !sources.has(path))).toEqual([])
+  })
+
+  it('keeps every source, launcher and test module within the 800-line file budget', () => {
+    const files = [...sources.keys()]
+    for (const entry of readdirSync(join(root, 'tests'), { recursive: true, withFileTypes: true })) {
+      if (entry.isFile() && /\.(?:ts|mjs)$/.test(entry.name)) files.push(relative(root, join(entry.parentPath, entry.name)))
+    }
+    const oversized = files.map(path => [path, readFileSync(join(root, path), 'utf8').split('\n').length] as const).filter(([, lines]) => lines > 800)
+    expect(oversized).toEqual([])
   })
 
   it('keeps deprecated synchronous Session readers out of production', () => {

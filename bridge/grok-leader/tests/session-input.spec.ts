@@ -4,7 +4,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createSessionInput } from '../src/session-input.ts'
 import { createPromptQueues, type PromptQueue, type PromptSettleResult } from '../src/prompt-queue.ts'
-import { modelEffortKey, type ModelCatalog } from '../src/model-catalog.ts'
+import { modelEffortKey, type ModelCatalog } from '../src/wire-catalog.ts'
 import type { ParsedPrompt } from '../src/prompt-content.ts'
 import type { SessionModel } from '../src/session-models.ts'
 

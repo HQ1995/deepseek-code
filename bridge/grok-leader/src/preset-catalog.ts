@@ -10,7 +10,7 @@ import { entryListProblem, type AgentPresetRegistry, type PresetDefinition } fro
 import type {} from '@deepseek-ai/dsh-config-editor'
 import type {} from '@deepseek-ai/dsh-app-boot'
 import type { AgentPresetsLike } from './session-presets.ts'
-import type { SettingsLike } from './model-catalog.ts'
+import type { SettingsLike } from './native-seams.ts'
 
 const yamlOptions = { schema: entryListSchema, noRefs: true, lineWidth: -1 }
 const readYaml = async (path: string): Promise<unknown> => load(await readFile(path, 'utf8'), yamlOptions)

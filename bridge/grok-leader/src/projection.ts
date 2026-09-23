@@ -261,6 +261,52 @@ export function decodeTokensPerSecond(speed: DecodeSpeed): string | undefined {
   return value >= 10 ? String(Math.round(value)) : String(Math.round(value * 10) / 10)
 }
 
+/** The native todos projection as an ACP plan. ACP requires a priority; DSH
+ * todos have none, so each entry uses its neutral value. */
+function todoPlan(data: unknown): Array<GrokSessionUpdate> {
+  const todos = (data as { todos?: unknown } | undefined)?.todos
+  if (!Array.isArray(todos) || !todos.every(todo => todo !== null && typeof todo === 'object'
+    && typeof todo.content === 'string' && ['pending', 'in_progress', 'completed'].includes(todo.status))) return []
+  return [{ sessionUpdate: 'plan', entries: todos.map(todo => ({ content: todo.content, priority: 'medium', status: todo.status })) }]
+}
+
+/** Render presented declarations only: opening a link remains an explicit
+ * user action. The viewed session's cwd also gives forked and child history
+ * their own paths. */
+function deliveredFiles(files: ReadonlyArray<{ path: string; description?: string }>, cwd: string | undefined): Array<GrokSessionUpdate> {
+  const literal = (value: string): string => value.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/[\\`*_[\]<>]/g, '\\$&')
+  const lines = files.map(file => {
+    const label = literal(file.path)
+    const path = cwd !== undefined || isAbsolute(file.path) ? resolve(cwd ?? '/', file.path) : undefined
+    const link = path === undefined ? label : `[${label}](<${pathToFileURL(path).href}>)`
+    return `- ${link}${file.description === undefined ? '' : ': ' + literal(file.description)}`
+  })
+  return [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `\n\n**Delivered files**\n${lines.join('\n')}\n\n` } }]
+}
+
+/** One tool card opening. Native calls and PTC sub-calls share this vocabulary. */
+function toolCallStarted(toolCallId: string, name: string, args: unknown): GrokSessionUpdate {
+  return { sessionUpdate: 'tool_call', toolCallId, title: name, kind: toolKindForName(name, args), status: 'in_progress', rawInput: rawInputForTool(name, args) }
+}
+
+/** One tool card settlement: rendered content, typed raw output and the native error identity. */
+function toolCallSettled(
+  toolCallId: string,
+  failed: boolean,
+  contents: Array<ToolResultContentBlock>,
+  rawOutput: Record<string, unknown> | undefined,
+  error?: { name: string; code: string },
+): GrokSessionUpdate {
+  return {
+    sessionUpdate: 'tool_call_update',
+    toolCallId,
+    status: failed ? 'failed' : 'completed',
+    ...contents.length > 0 ? { content: contents } : {},
+    ...rawOutput === undefined ? {} : { rawOutput },
+    ...error === undefined ? {} : { error },
+  }
+}
+
 /**
  * Map native durable settlements to TUI deltas. The embedded stream preserves
  * reasoning and failed-attempt content; dense positions already delivered live
@@ -280,30 +326,10 @@ export function sessionEventToUpdates(
   // The native todos projection resets at turn/start and retains turn/end.
   // All consumers (live, resume and child history) must see the same state.
   if (event.type === 'turn/start') return [{ sessionUpdate: 'plan', entries: [] }]
-  if (String(event.type) === 'todo/write') {
-    const data = event.data as { todos?: unknown }
-    if (!Array.isArray(data?.todos) || !data.todos.every(todo => todo !== null && typeof todo === 'object'
-      && typeof todo.content === 'string' && ['pending', 'in_progress', 'completed'].includes(todo.status))) return []
-    return [{ sessionUpdate: 'plan', entries: data.todos.map(todo => ({
-      content: todo.content,
-      // ACP requires a priority; DSH todos have none, so use its neutral value.
-      priority: 'medium',
-      status: todo.status,
-    })) }]
-  }
+  if (String(event.type) === 'todo/write') return todoPlan(event.data)
   switch (event.type) {
-    case 'deliverables/presented': {
-      // Render declarations only: opening a link remains an explicit user action.
-      // The viewed session's cwd also gives forked and child history its own paths.
-      const literal = (value: string): string => value.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/[\\`*_[\]<>]/g, '\\$&')
-      const files = event.data.files.map(file => {
-        const label = literal(file.path)
-        const path = options.cwd !== undefined || isAbsolute(file.path) ? resolve(options.cwd ?? '/', file.path) : undefined
-        const link = path === undefined ? label : `[${label}](<${pathToFileURL(path).href}>)`
-        return `- ${link}${file.description === undefined ? '' : ': ' + literal(file.description)}`
-      })
-      return [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `\n\n**Delivered files**\n${files.join('\n')}\n\n` } }]
-    }
+    case 'deliverables/presented':
+      return deliveredFiles(event.data.files, options.cwd)
     case 'user/message': {
       const source = event.data.source as { kind?: unknown }
       if (source.kind !== 'user') return []
@@ -329,14 +355,7 @@ export function sessionEventToUpdates(
       if (typeof event.data.callId !== 'string' || event.data.callId === '') return []
       const prior = options.toolCall?.(event.data.callId)
       const args = prior === undefined ? parseJsonObject(event.data.arguments) : prior.arguments
-      return [{
-        sessionUpdate: 'tool_call',
-        toolCallId: String(event.data.callId),
-        title: event.data.name,
-        kind: toolKindForName(event.data.name, args),
-        status: 'in_progress',
-        rawInput: rawInputForTool(event.data.name, args),
-      }]
+      return [toolCallStarted(event.data.callId, event.data.name, args)]
     }
     case 'tool/result': {
       const message = event.data.message
@@ -350,15 +369,8 @@ export function sessionEventToUpdates(
         ...metaDiffs,
         ...(metaDiffs.length === 0 && !failed ? diffBlocksFromCall(prior) : []),
       ]
-      const rawOutput = typedRawOutput(prior, event.data.meta, contents, failed)
-      return [{
-        sessionUpdate: 'tool_call_update',
-        toolCallId: callId,
-        status: failed ? 'failed' : 'completed',
-        ...contents.length > 0 ? { content: contents } : {},
-        ...rawOutput === undefined ? {} : { rawOutput },
-        ...event.data.error === undefined ? {} : { error: { name: event.data.error.name, code: event.data.error.code } },
-      }]
+      const error = event.data.error === undefined ? undefined : { name: event.data.error.name, code: event.data.error.code }
+      return [toolCallSettled(callId, failed, contents, typedRawOutput(prior, event.data.meta, contents, failed), error)]
     }
     // PTC mode runs tools inside a `run_code` program. These two durable events
     // are the only carrier of those nested calls (log-only: `deriveMessages()`
@@ -367,15 +379,7 @@ export function sessionEventToUpdates(
     // the native call/result path keeps one card vocabulary for both planes.
     case 'tool/ptc-dispatch-start': {
       if (typeof event.data.subCallId !== 'string' || event.data.subCallId === '') return []
-      const args = event.data.arguments
-      return [{
-        sessionUpdate: 'tool_call',
-        toolCallId: String(event.data.subCallId),
-        title: event.data.name,
-        kind: toolKindForName(event.data.name, args),
-        status: 'in_progress',
-        rawInput: rawInputForTool(event.data.name, args),
-      }]
+      return [toolCallStarted(event.data.subCallId, event.data.name, event.data.arguments)]
     }
     case 'tool/ptc-dispatch': {
       const callId = event.data.subCallId
@@ -387,14 +391,7 @@ export function sessionEventToUpdates(
       ]
       // Sub-calls carry no tool-private presentation meta, so only the
       // argument-derived raw shapes (execute/edit) can be reconstructed.
-      const rawOutput = typedRawOutput(prior, undefined, contents, event.data.isError)
-      return [{
-        sessionUpdate: 'tool_call_update',
-        toolCallId: callId,
-        status: event.data.isError ? 'failed' : 'completed',
-        ...contents.length > 0 ? { content: contents } : {},
-        ...rawOutput === undefined ? {} : { rawOutput },
-      }]
+      return [toolCallSettled(callId, event.data.isError, contents, typedRawOutput(prior, undefined, contents, event.data.isError))]
     }
     default:
       // Other durable events belong to native state projections or diagnostics.

@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams, paramRecord } from './acp.ts'
-import type { SettingsLike } from './model-catalog.ts'
+import type { SettingsLike } from './native-seams.ts'
 import { presetHistory, type PresetHistory } from './preset-history.ts'
 
 /**
