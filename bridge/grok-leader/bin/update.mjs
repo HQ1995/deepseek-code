@@ -527,6 +527,10 @@ export const installRelease = async ({ profile, packageName, version, channel, a
   } finally {
     // A failed rollback can leave the only good copy here. The next lock owner
     // recovers it; ordinary preparation failures and completed commits are disposable.
-    if (json(join(stage, 'transaction.json')).state !== 'pending') rmSync(stage, { recursive: true, force: true })
+    // An unreadable journal keeps the stage: recovery cannot identify it, but
+    // deleting it here would also mask the original failure with a JSON error.
+    let pending = true
+    try { pending = json(join(stage, 'transaction.json')).state === 'pending' } catch { /* keep the stage */ }
+    if (!pending) rmSync(stage, { recursive: true, force: true })
   }
 }

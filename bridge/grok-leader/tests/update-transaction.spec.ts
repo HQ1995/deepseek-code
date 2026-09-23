@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readlinkSync, symlinkSync, lstatSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, writeFileSync, readFileSync, readlinkSync, symlinkSync, lstatSync, rmSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import { fixtureEnvironment } from './fixtures/environment.ts'
 import { installationReport } from '../bin/doctor.mjs'
-import { commitInstallation, saveUpdateChannel, validateRuntime, withProfileLock } from '../bin/update.mjs'
+import { commitInstallation, installRelease, saveUpdateChannel, validateRuntime, withProfileLock } from '../bin/update.mjs'
 
 it.each(['success', 'failure'])('bounds staged flushes and preserves commit ordering on %s', mode => {
   const root = mkdtempSync(join(tmpdir(), 'dscode-staged-sync-'))
@@ -90,6 +90,22 @@ it('retains the only backup when rollback fails and retries recovery at the next
     await withProfileLock(profile, () => {})
     for (const entry of ['node_modules', 'runtime', 'bin/dscode', 'config.toml']) expect(readFileSync(join(profile, entry), 'utf8')).toBe(profile)
     expect(existsSync(stage)).toBe(false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+it.each(['readable', 'unreadable'])('reports the preparation failure and settles the stage with a %s journal', async journal => {
+  const root = mkdtempSync(join(tmpdir(), 'dscode-prepare-failure-'))
+  const stages = () => readdirSync(root).filter(name => name.startsWith('.dscode-update-'))
+  const failure = new Error('network down fixture')
+  const fetcher = async () => {
+    if (journal === 'unreadable') for (const name of stages()) writeFileSync(join(root, name, 'transaction.json'), '{ torn')
+    throw failure
+  }
+  try {
+    await expect(installRelease({ profile: join(root, 'active'), packageName: '@deepseek-ai/dscode', version: '1.0.0', channel: 'stable', asset: 'dscode-fixture', fetcher, base: 'https://fixture.invalid' }))
+      .rejects.toBe(failure)
+    // A preparation failure is disposable; a stage recovery cannot identify is kept.
+    expect(stages()).toHaveLength(journal === 'unreadable' ? 1 : 0)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
