@@ -4,10 +4,11 @@ import { once } from 'node:events'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { expect, it } from 'vitest'
 import { fixtureEnvironment } from './fixtures/environment.ts'
-import { installationReport } from '../bin/doctor.mjs'
+import { installationReport, profileBundleFindings } from '../bin/doctor.mjs'
+import { createRequire } from 'node:module'
 import { commitInstallation, installRelease, saveUpdateChannel, validateRuntime, withProfileLock } from '../bin/update.mjs'
 
 it.each(['success', 'failure'])('bounds staged flushes and preserves commit ordering on %s', mode => {
@@ -290,4 +291,34 @@ it.each(['host', 'darwin-arm64'])('reports a matching %s runtime and detects a m
     Object.defineProperty(process, 'arch', arch)
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+it('reports profile bundles the runtime would skip, using its own peer rule and exemptions', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dscode-bundle-compat-'))
+  try {
+    const runtime = join(root, 'runtime'), profile = join(root, 'profile')
+    const appBoot = dirname(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-app-boot/package.json'))
+    const runtimeVersion = JSON.parse(readFileSync(join(appBoot, 'package.json'), 'utf8')).version as string
+    mkdirSync(join(runtime, 'node_modules/@deepseek-ai'), { recursive: true })
+    symlinkSync(appBoot, join(runtime, 'node_modules/@deepseek-ai/dsh-app-boot'))
+    const bundles = { good: '>=0.1.0-0', stale: '0.1.0', allowed: '0.1.0' }
+    for (const [name, range] of Object.entries(bundles)) {
+      mkdirSync(join(profile, 'node_modules', name), { recursive: true })
+      writeFileSync(join(profile, 'node_modules', name, 'package.json'), JSON.stringify({ name, version: '1.0.0', peerDependencies: { '@deepseek-ai/dsh-agent': range } }))
+    }
+    writeFileSync(join(profile, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', ...Object.keys(bundles)] } } }))
+    writeFileSync(join(profile, 'compatibility.json'), JSON.stringify({ 'allowed@1.0.0': [runtimeVersion] }))
+    const findings = profileBundleFindings({ runtime, profile })
+    expect(findings.map(f => [f.status, f.name])).toEqual([['ERROR', 'Profile bundle stale'], ['WARN', 'Profile bundle allowed']])
+    expect(findings[0]!.detail).toContain(`stale@1.0.0 is incompatible with dsh ${runtimeVersion}`)
+    expect(findings[0]!.detail).toContain(`dsh plugin --profile dscode allow-version stale@1.0.0 --dsh-version ${runtimeVersion} --accept-risk`)
+    expect(findings[1]!.detail).toContain('Exact-version exemption: active')
+    writeFileSync(join(profile, 'compatibility.json'), '{ torn')
+    expect(profileBundleFindings({ runtime, profile }).map(f => f.status)).toEqual(['ERROR', 'ERROR', 'WARN'])
+    writeFileSync(join(profile, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['good'] } } }))
+    rmSync(join(profile, 'compatibility.json'))
+    expect(profileBundleFindings({ runtime, profile })).toEqual([{ status: 'OK', name: 'Profile bundles', detail: `1 bundle(s) satisfy dsh ${runtimeVersion} peer requirements` }])
+    // A runtime without the 0.1.7 compatibility API is not judged.
+    expect(profileBundleFindings({ runtime: join(root, 'missing'), profile })).toEqual([])
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })

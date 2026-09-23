@@ -142,7 +142,7 @@ async function packaging() {
   }
   const manifest = JSON.parse(await readFile(join(packageDir, 'package.json'), 'utf8'))
   const expected = manifest.dsh.testedVersion
-  assert.equal(expected, '0.1.7-alpha.2', 'Acceptance targets the requested upstream runtime');
+  assert.equal(expected, '0.1.7-rc.1', 'Acceptance targets the requested upstream runtime');
   const cli = await execute(env.DSH_BIN, ['--version'], { env: baseEnv, timeout: 10000 })
   assert.equal(cli.stdout.trim().split('\n')[0], expected)
   let runtimeModules

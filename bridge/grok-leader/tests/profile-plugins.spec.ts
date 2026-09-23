@@ -2,12 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import { getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
 import { createProfilePlugins } from '../src/profile-plugins.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(options: { name?: string; stagedPatch?: string | string[]; installedPatch?: string | string[]; uninstallFails?: boolean } = {}) {
+async function fixture(options: { name?: string; stagedPatch?: string | string[]; installedPatch?: string | string[]; uninstallFails?: boolean; peers?: Record<string, string> } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dscode-profile-test-'))
   roots.push(root)
   const name = options.name ?? 'test-plugin'
@@ -34,7 +35,8 @@ async function fixture(options: { name?: string; stagedPatch?: string | string[]
       const patch = options_.cwd === root ? options.installedPatch ?? options.stagedPatch : options.stagedPatch
       const patches = Array.isArray(patch) ? patch : patch === undefined ? [] : [patch]
       const paths = patches.map((_, i) => `cordis-${i}.patch.yml`)
-      await writeFile(join(dir, 'package.json'), JSON.stringify({ name,
+      await writeFile(join(dir, 'package.json'), JSON.stringify({ name, version: '1.0.0',
+        ...options.peers === undefined ? {} : { peerDependencies: options.peers },
         ...patch === undefined ? {} : { dsh: { bundle: { patch: Array.isArray(patch) ? paths : paths[0] } } } }))
       for (const [i, content] of patches.entries()) await writeFile(join(dir, paths[i]!), content)
     }
@@ -82,6 +84,34 @@ describe('profile plugin operations', () => {
     expect(f.exec).toHaveBeenCalledTimes(1)
     expect(await f.plugins.execute('/dsh add --trust plugin')).toContain('Installed or updated test-plugin')
     expect((await f.read()).dsh.profile.bundles).toEqual(['@hqzhao95/dscode', 'test-plugin'])
+  })
+
+  it('refuses a package whose dsh peers the runtime does not satisfy before profile mutation', async () => {
+    const f = await fixture({ stagedPatch: '- insert:\n    - id: my-tool\n', peers: { '@deepseek-ai/dsh-agent': '0.1.0', react: '19' } })
+    const before = await f.read()
+    const runtime = getDshRuntimeVersion()
+    const report = await f.plugins.execute('/dsh add --trust plugin')
+    expect(report).toContain('Refused test-plugin@1.0.0 before profile mutation')
+    expect(report).toContain(`is incompatible with dsh ${runtime}: peerDependencies {"@deepseek-ai/dsh-agent":"0.1.0"}`)
+    expect(report).toContain(`dsh plugin --profile dscode allow-version test-plugin@1.0.0 --dsh-version ${runtime} --accept-risk`)
+    expect(await f.read()).toEqual(before)
+    expect(f.exec).toHaveBeenCalledTimes(1)
+  })
+
+  it('installs an incompatible package only under its exact-version exemption and says so', async () => {
+    const f = await fixture({ stagedPatch: '- insert:\n    - id: my-tool\n', peers: { '@deepseek-ai/dsh-agent': '0.1.0' } })
+    await writeFile(join(f.root, 'compatibility.json'), JSON.stringify({ 'test-plugin@1.0.0': [getDshRuntimeVersion()] }))
+    const report = await f.plugins.execute('/dsh add --trust plugin')
+    expect(report).toContain('Installed or updated test-plugin')
+    expect(report).toContain('Exact-version exemption: active')
+    expect((await f.read()).dsh.profile.bundles).toEqual(['@hqzhao95/dscode', 'test-plugin'])
+  })
+
+  it('installs a package whose dsh peer range includes the running prerelease', async () => {
+    const f = await fixture({ stagedPatch: '- insert:\n    - id: my-tool\n', peers: { '@deepseek-ai/dsh-agent': '>=0.1.0-0' } })
+    const report = await f.plugins.execute('/dsh add --trust plugin')
+    expect(report).toContain('Installed or updated test-plugin')
+    expect(report).not.toContain('incompatible')
   })
 
   it.each(['just a scalar', '- 42', '{ not: [valid'])('refuses a malformed bundle before mutation: %s', async stagedPatch => {

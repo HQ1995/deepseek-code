@@ -7,6 +7,7 @@ import { isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
+import { evaluatePluginCompatibility, pluginCompatibilityWarning, readProfileVersionExemptions, type PluginCompatibility } from '@deepseek-ai/dsh-app-boot'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import { load as loadYaml } from 'js-yaml'
 import { withProfileLock } from './package-location.ts'
@@ -194,6 +195,10 @@ export interface ProfilePluginDependencies {
   /** External npm process; tests supply an installer confined to their fixture. */
   exec?: (file: string, args: string[], options: { cwd: string; timeout: number }) => Promise<unknown>
   directory?: () => string | undefined
+  /** DSH peer check for one installed manifest. Defaults to the runtime's own
+   * boot rule (dsh 0.1.7-rc.1 skips an incompatible bundle whole) and the
+   * profile's exact-version exemptions. */
+  compatibility?: (manifest: object, profileDir: string) => PluginCompatibility | undefined
 }
 
 /** Owns profile inspection and locked package mutations, independent of sessions
@@ -217,6 +222,8 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
   })
 
   const execFileAsync = dependencies.exec ?? promisify(execFile)
+  const compatibilityOf = dependencies.compatibility
+    ?? ((manifest: object, profileDir: string) => evaluatePluginCompatibility(manifest, readProfileVersionExemptions(profileDir)))
 
   const readProfileManifest = async (dir: string): Promise<{ dependencies: Record<string, string>; bundles: string[]; raw: Record<string, unknown> }> => {
     const raw = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8')) as Record<string, unknown>
@@ -241,9 +248,13 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
   }
 
   type BundleInspection =
-    | { kind: 'plain' }
-    | { kind: 'bundle'; analysis: BundlePatchAnalysis }
+    | { kind: 'plain'; compatibility?: PluginCompatibility }
+    | { kind: 'bundle'; analysis: BundlePatchAnalysis; compatibility?: PluginCompatibility }
     | { kind: 'broken'; error: string }
+
+  /** An incompatible package the profile has not exempted: the runtime would skip or disable it. */
+  const refusedCompatibility = (info: BundleInspection): PluginCompatibility | undefined =>
+    info.kind !== 'broken' && info.compatibility?.exempted === false ? info.compatibility : undefined
 
   const CORE_PLUGIN_NAMES = new Set(['@deepseek-ai/dsh-base', '@hqzhao95/dscode', 'dscode', '@deepseek-ai/dsh-grok-leader'])
 
@@ -252,12 +263,14 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
   const inspectInstalledBundle = async (
     dir: string,
     name: string,
+    profileDir: string,
   ): Promise<BundleInspection> => {
     const pkgDir = join(dir, 'node_modules', ...name.split('/'))
     try {
       const manifest = JSON.parse(await readFile(join(pkgDir, 'package.json'), 'utf8')) as { dsh?: { bundle?: { patch?: string | string[] } } }
+      const compatibility = compatibilityOf(manifest, profileDir)
       const patchRel = manifest.dsh?.bundle?.patch
-      if (patchRel === undefined) return { kind: 'plain' }
+      if (patchRel === undefined) return { kind: 'plain', ...compatibility === undefined ? {} : { compatibility } }
       const files = typeof patchRel === 'string' ? [patchRel] : patchRel
       if (!Array.isArray(files) || !files.every(file => typeof file === 'string')) throw new Error('dsh.bundle.patch must be a file path or a list of file paths')
       const analysis: BundlePatchAnalysis = { insertedRows: [], overriddenRows: [], disabledRows: [], sensitiveRows: [], jsExprCount: 0 }
@@ -266,7 +279,7 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
         for (const key of ['insertedRows', 'overriddenRows', 'disabledRows', 'sensitiveRows'] as const) analysis[key].push(...next[key])
         analysis.jsExprCount += next.jsExprCount
       }
-      return { kind: 'bundle', analysis }
+      return { kind: 'bundle', analysis, ...compatibility === undefined ? {} : { compatibility } }
     } catch (error) {
       return { kind: 'broken', error: errorChain(error) }
     }
@@ -316,7 +329,7 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
       const manifest = await readProfileManifest(stage)
       const names = Object.keys(manifest.dependencies)
       if (names.length === 0) throw new Error('npm installed no root package for: ' + specs.join(', '))
-      return await Promise.all(names.map(async name => ({ name, info: await inspectInstalledBundle(stage, name) })))
+      return await Promise.all(names.map(async name => ({ name, info: await inspectInstalledBundle(stage, name, profileDir) })))
     } finally {
       await rm(stage, { recursive: true, force: true })
     }
@@ -376,6 +389,13 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
           if (broken !== undefined && broken.info.kind === 'broken') {
             return 'Refused ' + broken.name + ' before profile mutation: its bundle cannot be inspected.\n' + broken.info.error
           }
+          const incompatible = staged.map(entry => refusedCompatibility(entry.info)).find(issue => issue !== undefined)
+          if (incompatible !== undefined) {
+            const key = incompatible.name + '@' + incompatible.version
+            return 'Refused ' + key + ' before profile mutation: the dsh runtime would not load it.\n'
+              + pluginCompatibilityWarning(incompatible)
+              + '\nTo accept the risk: dsh plugin --profile dscode allow-version ' + key + ' --dsh-version ' + incompatible.runtimeVersion + ' --accept-risk'
+          }
           const stagedReport = staged.map(({ name, info }) => info.kind === 'plain'
             ? name + ': declares no dsh.bundle — it will remain a plain dependency.'
             : info.kind === 'bundle'
@@ -391,15 +411,19 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
           await npmInstall(dir, specs)
           const manifest = await readProfileManifest(dir)
           const names = staged.map(entry => entry.name)
-          const actual = await Promise.all(names.map(async name => ({ name, info: await inspectInstalledBundle(dir, name) })))
-          const invalid = actual.find(entry => entry.info.kind === 'broken' || (!trusted && bundleRequiresTrust(entry.info)))
+          const actual = await Promise.all(names.map(async name => ({ name, info: await inspectInstalledBundle(dir, name, dir) })))
+          const invalid = actual.find(entry => entry.info.kind === 'broken' || refusedCompatibility(entry.info) !== undefined
+            || (!trusted && bundleRequiresTrust(entry.info)))
           if (invalid !== undefined) {
             // The staged and real package differed. Disable every touched root
             // before returning so an existing bundle cannot brick the next boot.
             await writeProfileBundles(dir, manifest.raw, manifest.bundles.filter(bundle => !names.includes(bundle)))
+            const incompatible = refusedCompatibility(invalid.info)
             const reason = invalid.info.kind === 'broken'
               ? invalid.info.error
-              : 'the installed package introduced an executable bundle after staging'
+              : incompatible !== undefined
+                ? pluginCompatibilityWarning(incompatible)
+                : 'the installed package introduced an executable bundle after staging'
             return 'Installed dependency was left disabled because post-install verification failed for ' + invalid.name + ':\n' + reason
           }
           const bundles = new Set(manifest.bundles)
@@ -413,6 +437,7 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
             if (info.kind === 'broken') continue
             bundles.add(name)
             report.push(describeAnalysis(name, info.analysis))
+            if (info.compatibility !== undefined) report.push('  ⚠ ' + pluginCompatibilityWarning(info.compatibility))
           }
           await writeProfileBundles(dir, manifest.raw, [...bundles])
           return 'Installed or updated ' + names.join(', ') + '.\n\n' + report.join('\n\n') + '\n\nRestart dscode to load it (the leader exits with its last client).'

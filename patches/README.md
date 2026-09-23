@@ -11,7 +11,7 @@ installed-package matching. Unpatched and differently patched consumers are not
 reusable, even if their DSH versions and upstream commits match. To regenerate
 a consumer, select a new `--consumer` directory; do not relabel an old one.
 
-The current `00102833...` backport reads macOS kernel process observations
+The current `46a7f68b...` backport reads macOS kernel process observations
 through the existing Koffi dependency instead of spawning `ps`. Full tree scans
 remain fresh; identity and foreground queries select one PID. Failed/partial
 reads throw, and pre-signal checks retain second-precision identities without a
@@ -52,6 +52,12 @@ Rebasing this backport from `c36a83ff...` (`0.1.7-alpha.1`) to `00102833...`
 (`0.1.7-alpha.2`) changed only the `subprocess-local` README context, where
 upstream documented best-effort spill collection, and that README pair's
 translation hashes. The source, test and decision-note hunks are unchanged.
+
+Moving it from `00102833...` (`0.1.7-alpha.2`) to `46a7f68b...` (`0.1.7-rc.1`)
+needed no rebase: upstream touched none of the patched files in between, and
+the patch regenerated on rc.1 is byte-identical, so `sourcePatchSha256` is
+unchanged. Settings readiness, the macOS kernel process table, the JSONL helper
+extraction and the shared config-editor composition are still not upstream.
 
 When upgrading the upstream source, review whether the change is already
 included. Remove the patch digest if it is; otherwise rebase the source change,

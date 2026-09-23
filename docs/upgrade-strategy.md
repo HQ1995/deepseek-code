@@ -41,8 +41,8 @@ To upgrade dsh:
    metadata, but never install or switch the user's Node runtime;
 4. rebuild the bridge and run the complete E2E suite;
 
-The current source pin is `0.1.7-alpha.2` at
-`00102833dfaee1da9f48a3a8eae9d34005a75218`. The builder uses the official upstream
+The current source pin is `0.1.7-rc.1` at
+`46a7f68b0922371ce7144b668b90e377d8e799f4`. The builder uses the official upstream
 package build, compiles the bridge against that installed SDK, bundles ordinary
 plugin dependencies without duplicating host peers, and packages the private
 runtime including native helpers. Users install those artifacts as a complete
@@ -83,8 +83,28 @@ the exact tuple is ready, restoring moved entries after ordinary commit errors.
 
 The [alpha.1](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.7-alpha.1)
 and [alpha.2](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.7-alpha.2)
-releases describe the target. Runtime features use official implementations. Browser
-presentation does not automatically become a TUI feature.
+releases describe the target; the
+[rc.1](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.7-rc.1)
+notes summarize the series since 0.1.5-rc.3. Runtime features use official
+implementations. Browser presentation does not automatically become a TUI feature.
+
+rc.1 enforces plugin compatibility: every `@deepseek-ai/dsh` and
+`@deepseek-ai/dsh-*` peer of a profile bundle or preset row must be satisfied by
+the running DSH version, prereleases included. At startup, DSH skips an
+incompatible bundle whole, or mounts the row disabled, and says so only in the
+leader log. dscode therefore pins its peers exactly and applies the same rule
+earlier:
+
+- `/dsh add` refuses an incompatible package before the profile changes and
+  prints the exact `dsh plugin --profile dscode allow-version … --accept-risk`
+  exemption command. An exempted package installs with its warning in the report.
+- `dscode doctor --runtime` and `/doctor` evaluate every profile bundle with the
+  runtime's own rule. They report skipped bundles as errors, exempted bundles as
+  warnings, and an unreadable `compatibility.json` as a warning.
+
+Exemptions are exact package and DSH versions, stored in the profile's
+`compatibility.json`; a dscode update to a new DSH version does not carry them
+forward.
 
 | Upstream capability | dscode integration |
 |---|---|
