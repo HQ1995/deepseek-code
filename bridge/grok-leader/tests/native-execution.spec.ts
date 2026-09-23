@@ -34,6 +34,7 @@ function fixture() {
     subprocess: vi.fn((_record: typeof record) => subprocess),
     toolNames: vi.fn((_record: typeof record) => new Set(['lsp', 'terminal_open'])),
     profileDirectory: vi.fn(() => '/profile'),
+    inspector: vi.fn<() => { url: string; captureFetch: boolean } | undefined>(() => undefined),
   }
   const installation = vi.fn(async (_version: string, _directory: string | undefined, _signal: AbortSignal) => JSON.stringify([{ status: 'OK', name: 'Runtime', detail: 'pinned' }]))
   const execution = createNativeExecution(host, installation)
@@ -45,6 +46,14 @@ function fixture() {
 }
 
 describe('native execution ownership', () => {
+  it('advertises only an explicitly mounted Inspector and warns about raw capture', async () => {
+    const f = fixture()
+    expect((await f.doctor()).text).not.toContain('Developer Inspector')
+    f.host.inspector.mockReturnValue({ url: 'devtools://fixture', captureFetch: false })
+    expect((await f.doctor()).text).toContain('Fetch capture off. Open in Chrome: devtools://fixture')
+    f.host.inspector.mockReturnValue({ url: 'devtools://fixture', captureFetch: true })
+    expect((await f.doctor()).text).toContain('ON (raw secrets may be retained)')
+  })
   it('reads installation and execution-host diagnostics without starting a model, shell or language server', async () => {
     const f = fixture(), result = await f.doctor()
     expect(result.text).toContain('[OK] Runtime: pinned')

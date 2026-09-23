@@ -20,6 +20,7 @@ interface ExecutionHost<S extends ExecutionSession> {
   subprocess(record: S): NativeExecutionHost | undefined
   toolNames(record: S): ReadonlySet<string>
   profileDirectory(): string | undefined
+  inspector?(): { url: string; captureFetch: boolean } | undefined
 }
 type InstallationReader = (version: string, directory: string | undefined, signal: AbortSignal) => Promise<string>
 const execute = promisify(execFile)
@@ -111,6 +112,10 @@ export function createNativeExecution<S extends ExecutionSession>(host: Executio
         findings.push({ status: available ? 'OK' : 'WARN', name: 'PTY backend', detail: available
           ? `shell backend registered; ${count} terminals owned by this session. Shell startup and sandbox permissions are checked when opening a terminal.`
           : 'Shell backend or subprocess PTY support is unavailable. Restore the terminal services in the dscode profile and restart; run dscode update --force-reinstall if runtime files are missing.' })
+        const inspector = host.inspector?.()
+        active(record, scope)
+        if (inspector !== undefined) findings.push({ status: 'WARN', name: 'Developer Inspector', detail:
+          `Full host debugger access on loopback; do not forward its port. Fetch capture ${inspector.captureFetch ? 'ON (raw secrets may be retained)' : 'off'}. Open in Chrome: ${inspector.url}` })
         return { text: ['Dscode runtime diagnostics', ...findings.map(f => `[${f.status}] ${f.name}: ${f.detail}`)].join('\n\n') }
       })
     },

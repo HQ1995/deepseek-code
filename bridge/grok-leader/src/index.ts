@@ -374,6 +374,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   const execution = createNativeExecution<SessionRecord>({
     owned: ownedRecord, profileDirectory: profilePlugins.directory,
+    inspector: () => ctx.get('dscodeInspector') as { url: string; captureFetch: boolean } | undefined,
     terminals: record => presetServiceFor(record, 'terminals') as NativeTerminals | undefined,
     subprocess: record => presetServiceFor(record, 'subprocess') as NativeExecutionHost | undefined,
     toolNames: nativeCapabilities.toolNames,
