@@ -8,7 +8,8 @@ import { createProfilePlugins } from '../src/profile-plugins.ts'
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(options: { name?: string; stagedPatch?: string | string[]; installedPatch?: string | string[]; uninstallFails?: boolean; peers?: Record<string, string> } = {}) {
+async function fixture(options: { name?: string; stagedPatch?: string | string[]; installedPatch?: string | string[]; uninstallFails?: boolean
+  peers?: Record<string, string>; installedPeers?: Record<string, string>; components?: Record<string, Record<string, string>> } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dscode-profile-test-'))
   roots.push(root)
   const name = options.name ?? 'test-plugin'
@@ -28,15 +29,24 @@ async function fixture(options: { name?: string; stagedPatch?: string | string[]
       expect((await read()).dsh.profile.bundles).not.toContain(name)
       if (options.uninstallFails) throw new Error('simulated npm cleanup failure')
       delete data.dependencies[name]
+    } else if (args.length === 5) {
+      // A spec-less install resynchronizes node_modules with a restored manifest.
+      await rm(join(options_.cwd, 'node_modules', name), { recursive: true, force: true })
+      return
     } else {
       data.dependencies[name] = 'file:fixture'
       const dir = join(options_.cwd, 'node_modules', name)
       await mkdir(dir, { recursive: true })
       const patch = options_.cwd === root ? options.installedPatch ?? options.stagedPatch : options.stagedPatch
+      const peers = options_.cwd === root ? options.installedPeers ?? options.peers : options.peers
+      for (const [component, componentPeers] of Object.entries(options.components ?? {})) {
+        await mkdir(join(options_.cwd, 'node_modules', component), { recursive: true })
+        await writeFile(join(options_.cwd, 'node_modules', component, 'package.json'), JSON.stringify({ name: component, version: '2.0.0', peerDependencies: componentPeers }))
+      }
       const patches = Array.isArray(patch) ? patch : patch === undefined ? [] : [patch]
       const paths = patches.map((_, i) => `cordis-${i}.patch.yml`)
       await writeFile(join(dir, 'package.json'), JSON.stringify({ name, version: '1.0.0',
-        ...options.peers === undefined ? {} : { peerDependencies: options.peers },
+        ...peers === undefined ? {} : { peerDependencies: peers },
         ...patch === undefined ? {} : { dsh: { bundle: { patch: Array.isArray(patch) ? paths : paths[0] } } } }))
       for (const [i, content] of patches.entries()) await writeFile(join(dir, paths[i]!), content)
     }
@@ -93,7 +103,7 @@ describe('profile plugin operations', () => {
     const report = await f.plugins.execute('/dsh add --trust plugin')
     expect(report).toContain('Refused test-plugin@1.0.0 before profile mutation')
     expect(report).toContain(`is incompatible with dsh ${runtime}: peerDependencies {"@deepseek-ai/dsh-agent":"0.1.0"}`)
-    expect(report).toContain(`dsh plugin --profile dscode allow-version test-plugin@1.0.0 --dsh-version ${runtime} --accept-risk`)
+    expect(report).toContain('/dsh allow-version test-plugin@1.0.0 --accept-risk, then rerun /dsh add')
     expect(await f.read()).toEqual(before)
     expect(f.exec).toHaveBeenCalledTimes(1)
   })
@@ -105,6 +115,45 @@ describe('profile plugin operations', () => {
     expect(report).toContain('Installed or updated test-plugin')
     expect(report).toContain('Exact-version exemption: active')
     expect((await f.read()).dsh.profile.bundles).toEqual(['@hqzhao95/dscode', 'test-plugin'])
+  })
+
+  it('refuses a bundle whose inserted row loads a package the runtime would disable', async () => {
+    const f = await fixture({ stagedPatch: '- insert:\n    - id: team\n      name: component-pkg\n', components: { 'component-pkg': { '@deepseek-ai/dsh-agent': '0.1.0' } } })
+    const before = await f.read()
+    const report = await f.plugins.execute('/dsh add --trust plugin')
+    expect(report).toContain('Refused component-pkg@2.0.0 before profile mutation')
+    expect(report).toContain('/dsh allow-version component-pkg@2.0.0 --accept-risk')
+    expect(await f.read()).toEqual(before)
+  })
+
+  it('names an unreadable compatibility file instead of implying no exemption was granted', async () => {
+    const f = await fixture({ stagedPatch: '[]', peers: { '@deepseek-ai/dsh-agent': '0.1.0' } })
+    await writeFile(join(f.root, 'compatibility.json'), '{ torn')
+    const report = await f.plugins.execute('/dsh add --trust plugin')
+    expect(report).toContain('compatibility file has problems')
+    expect(report).toContain('is not valid JSON')
+  })
+
+  it('grants and revokes an exact-version exemption only with explicit risk acceptance', async () => {
+    const f = await fixture({ stagedPatch: '[]', peers: { '@deepseek-ai/dsh-agent': '0.1.0' } })
+    const runtime = getDshRuntimeVersion()
+    expect(await f.plugins.execute('/dsh allow-version test-plugin@1.0.0')).toContain('Rerun with --accept-risk')
+    expect(await f.plugins.execute('/dsh revoke-version test-plugin@1.0.0 --accept-risk')).toContain('Usage:')
+    await expect(readFile(join(f.root, 'compatibility.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await f.plugins.execute('/dsh allow-version test-plugin@1.0.0 --accept-risk')).toBe(`Allowed test-plugin@1.0.0 for DSH ${runtime}. Restart dscode to apply it.`)
+    expect(JSON.parse(await readFile(join(f.root, 'compatibility.json'), 'utf8'))).toEqual({ 'test-plugin@1.0.0': [runtime] })
+    expect(await f.plugins.execute('/dsh add --trust plugin')).toContain('Exact-version exemption: active')
+    expect(await f.plugins.execute('/dsh revoke-version test-plugin@1.0.0')).toContain('Revoked test-plugin@1.0.0')
+    expect(f.exec).toHaveBeenCalledTimes(2)
+  })
+
+  it('rolls back a package that passed staging but installs incompatible', async () => {
+    const f = await fixture({ stagedPatch: '[]', peers: { '@deepseek-ai/dsh-agent': '>=0.1.0-0' }, installedPeers: { '@deepseek-ai/dsh-agent': '0.1.0' } })
+    const before = await readFile(join(f.root, 'package.json'), 'utf8')
+    const report = await f.plugins.execute('/dsh add --trust plugin')
+    expect(report).toContain('Rolled back test-plugin because post-install verification failed')
+    expect(report).toContain('is incompatible with dsh')
+    expect(await readFile(join(f.root, 'package.json'), 'utf8')).toBe(before)
   })
 
   it('installs a package whose dsh peer range includes the running prerelease', async () => {
@@ -137,9 +186,10 @@ describe('profile plugin operations', () => {
 
   it.each(['- 42', '[]'])('disables an untrusted root when the installed package differs from its plain audit: %s', async installedPatch => {
     const f = await fixture({ installedPatch })
-    expect(await f.plugins.execute('/dsh add plugin')).toContain('left disabled because post-install verification failed')
-    expect((await f.read()).dependencies['test-plugin']).toBeDefined()
-    expect((await f.read()).dsh.profile.bundles).not.toContain('test-plugin')
+    const before = await readFile(join(f.root, 'package.json'), 'utf8')
+    expect(await f.plugins.execute('/dsh add plugin')).toContain('Rolled back test-plugin because post-install verification failed')
+    expect(await readFile(join(f.root, 'package.json'), 'utf8')).toBe(before)
+    expect(f.exec.mock.calls.at(-1)![1]).toHaveLength(5)
   })
 
   it.each([false, true])('unregisters before npm cleanup even if removal fails: %s', async uninstallFails => {

@@ -293,32 +293,53 @@ it.each(['host', 'darwin-arm64'])('reports a matching %s runtime and detects a m
   }
 })
 
-it('reports profile bundles the runtime would skip, using its own peer rule and exemptions', () => {
+it('reports profile bundles and inserted rows the runtime would skip, using its own rules and exemptions', () => {
   const root = mkdtempSync(join(tmpdir(), 'dscode-bundle-compat-'))
   try {
-    const runtime = join(root, 'runtime'), profile = join(root, 'profile')
+    const install = join(root, 'runtime/node_modules/@deepseek-ai'), profile = join(root, 'profile')
+    const anchor = join(install, 'dsh/package.json')
     const appBoot = dirname(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-app-boot/package.json'))
     const runtimeVersion = JSON.parse(readFileSync(join(appBoot, 'package.json'), 'utf8')).version as string
-    mkdirSync(join(runtime, 'node_modules/@deepseek-ai'), { recursive: true })
-    symlinkSync(appBoot, join(runtime, 'node_modules/@deepseek-ai/dsh-app-boot'))
-    const bundles = { good: '>=0.1.0-0', stale: '0.1.0', allowed: '0.1.0' }
-    for (const [name, range] of Object.entries(bundles)) {
+    mkdirSync(join(install, 'dsh'), { recursive: true })
+    writeFileSync(anchor, JSON.stringify({ name: '@deepseek-ai/dsh', version: runtimeVersion }))
+    symlinkSync(appBoot, join(install, 'dsh-app-boot'))
+    const write = (name: string, manifest: Record<string, unknown>, patch?: string) => {
       mkdirSync(join(profile, 'node_modules', name), { recursive: true })
-      writeFileSync(join(profile, 'node_modules', name, 'package.json'), JSON.stringify({ name, version: '1.0.0', peerDependencies: { '@deepseek-ai/dsh-agent': range } }))
+      writeFileSync(join(profile, 'node_modules', name, 'package.json'), JSON.stringify({ name, version: '1.0.0', ...manifest }))
+      if (patch !== undefined) writeFileSync(join(profile, 'node_modules', name, 'cordis.patch.yml'), patch)
     }
-    writeFileSync(join(profile, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', ...Object.keys(bundles)] } } }))
+    const bundle = { dsh: { bundle: { patch: './cordis.patch.yml' } } }
+    write('good', { ...bundle, peerDependencies: { '@deepseek-ai/dsh-agent': '>=0.1.0-0' } }, '[]\n')
+    // Its own row loads the bundle package again; the issue is reported once.
+    write('stale', { ...bundle, peerDependencies: { '@deepseek-ai/dsh-agent': '0.1.0' } }, "- insert:\n    - id: stale\n      name: stale\n")
+    write('allowed', { ...bundle, peerDependencies: { '@deepseek-ai/dsh-agent': '0.1.0' } }, '[]\n')
+    // A root with no dsh peers still inserts a row whose package pins an old runtime.
+    write('rows', bundle, "- insert:\n    - id: team\n      name: component\n")
+    write('component', { peerDependencies: { '@deepseek-ai/dsh-agent': '0.1.0' } })
+    writeFileSync(join(profile, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'good', 'stale', 'allowed', 'rows'] } } }))
     writeFileSync(join(profile, 'compatibility.json'), JSON.stringify({ 'allowed@1.0.0': [runtimeVersion] }))
-    const findings = profileBundleFindings({ runtime, profile })
-    expect(findings.map(f => [f.status, f.name])).toEqual([['ERROR', 'Profile bundle stale'], ['WARN', 'Profile bundle allowed']])
+    const findings = profileBundleFindings({ anchor, profile })
+    expect(findings.map(f => [f.status, f.name])).toEqual([['ERROR', 'Profile bundle stale'], ['WARN', 'Profile bundle allowed'], ['ERROR', 'Profile bundle rows']])
     expect(findings[0]!.detail).toContain(`stale@1.0.0 is incompatible with dsh ${runtimeVersion}`)
-    expect(findings[0]!.detail).toContain(`dsh plugin --profile dscode allow-version stale@1.0.0 --dsh-version ${runtimeVersion} --accept-risk`)
+    expect(findings[0]!.detail).toContain('skips this bundle at startup')
+    expect(findings[0]!.detail).toContain('/dsh allow-version stale@1.0.0 --accept-risk')
     expect(findings[1]!.detail).toContain('Exact-version exemption: active')
+    expect(findings[2]!.detail).toContain('component@1.0.0 is incompatible')
+    expect(findings[2]!.detail).toContain('disables the rows of this bundle')
     writeFileSync(join(profile, 'compatibility.json'), '{ torn')
-    expect(profileBundleFindings({ runtime, profile }).map(f => f.status)).toEqual(['ERROR', 'ERROR', 'WARN'])
+    expect(profileBundleFindings({ anchor, profile }).map(f => f.status)).toEqual(['ERROR', 'ERROR', 'ERROR', 'WARN'])
     writeFileSync(join(profile, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['good'] } } }))
     rmSync(join(profile, 'compatibility.json'))
-    expect(profileBundleFindings({ runtime, profile })).toEqual([{ status: 'OK', name: 'Profile bundles', detail: `1 bundle(s) satisfy dsh ${runtimeVersion} peer requirements` }])
+    expect(profileBundleFindings({ anchor, profile })).toEqual([{ status: 'OK', name: 'Profile bundles', detail: `1 bundle(s) satisfy dsh ${runtimeVersion} peer requirements` }])
     // A runtime without the 0.1.7 compatibility API is not judged.
-    expect(profileBundleFindings({ runtime: join(root, 'missing'), profile })).toEqual([])
+    expect(profileBundleFindings({ anchor: join(root, 'missing/package.json'), profile })).toEqual([])
+    // A probe that fails reports the error line, not Node's trailing banner.
+    const broken = join(root, 'broken/node_modules/@deepseek-ai')
+    mkdirSync(join(broken, 'dsh-app-boot'), { recursive: true })
+    writeFileSync(join(broken, 'dsh-app-boot/package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', type: 'module', exports: './index.js' }))
+    writeFileSync(join(broken, 'dsh-app-boot/index.js'), "console.log('noise'); throw new Error('app-boot fixture failure')\n")
+    expect(profileBundleFindings({ anchor: join(broken, 'dsh/package.json'), profile })).toEqual([
+      { status: 'WARN', name: 'Profile bundles', detail: 'Could not evaluate bundle compatibility: Error: app-boot fixture failure' },
+    ])
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

@@ -1,5 +1,6 @@
 // Read-only installation checks, shared by /doctor and the pre-startup CLI.
 import { spawnSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { homedir, release } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
@@ -21,50 +22,101 @@ const version = bin => {
   return value
 }
 
-// Runs the runtime's own app-boot rule, so doctor and startup agree on which
-// profile bundles DSH 0.1.7 skips for incompatible dsh peers.
+// Runs the runtime's own app-boot rules, so doctor and startup agree on which
+// profile bundles (and which rows they insert) DSH 0.1.7 skips or disables for
+// incompatible dsh peers. Resolution matches boot: the DSH installation first.
+const COMPATIBILITY_MARKER = 'DSCODE_BUNDLE_COMPATIBILITY '
 const COMPATIBILITY_PROBE = `
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-const [runtime, profile] = process.argv.slice(1)
-const anchor = join(runtime, 'node_modules/@deepseek-ai/dsh-app-boot/package.json')
+const [anchor, profile] = process.argv.slice(1)
 const boot = await import(pathToFileURL(createRequire(anchor).resolve('@deepseek-ai/dsh-app-boot')).href)
-if (typeof boot.evaluatePluginCompatibility !== 'function') { console.log('null'); process.exit(0) }
-const manifest = path => { try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return undefined } }
+const emit = value => console.log(${JSON.stringify(COMPATIBILITY_MARKER)} + JSON.stringify(value))
+if (typeof boot.evaluatePluginCompatibility !== 'function' || typeof boot.resolveBundleDir !== 'function') { emit(null); process.exit(0) }
+const packageOf = name => name.split('/').slice(0, name.startsWith('@') ? 2 : 1).join('/')
+const components = (manifest, dir) => {
+  const bundle = manifest.dsh?.bundle
+  if (bundle === undefined) return []
+  const patches = boot.bundlePatchPaths(dir, bundle).flatMap(file => boot.loadOverlayPatches('dscode', file))
+  const names = new Set()
+  const visit = rows => {
+    for (const row of rows) {
+      if (row.group && Array.isArray(row.config)) visit(row.config)
+      if (typeof row.name !== 'string' || row.name.startsWith('.') || row.name.startsWith('/') || row.name.includes(':')) continue
+      names.add(packageOf(row.name))
+    }
+  }
+  visit(boot.composeEntries([patches.filter(patch => patch.insert !== undefined)]))
+  return [...names].flatMap(name => {
+    try { return [boot.readProfileManifest('dscode', boot.resolveBundleDir('dscode', name, anchor, dir))] } catch { return [] }
+  })
+}
+let bundles = []
+try { bundles = JSON.parse(readFileSync(profile + '/package.json', 'utf8')).dsh?.profile?.bundles ?? [] } catch {}
 const compatibility = boot.readProfileCompatibility(profile)
 const issues = []
 let checked = 0
-for (const name of manifest(join(profile, 'package.json'))?.dsh?.profile?.bundles ?? []) {
-  const parts = name.split('/')
-  const pkg = manifest(join(profile, 'node_modules', ...parts, 'package.json')) ?? manifest(join(runtime, 'node_modules', ...parts, 'package.json'))
-  if (pkg === undefined) continue
+for (const bundle of bundles) {
+  let dir
+  try { dir = boot.resolveBundleDir('dscode', bundle, anchor, profile) } catch { continue }
   checked++
   try {
-    const issue = boot.evaluatePluginCompatibility(pkg, compatibility.exemptions)
-    if (issue !== undefined) issues.push({ ...issue, warning: boot.pluginCompatibilityWarning(issue) })
-  } catch (error) { issues.push({ name, error: error.message }) }
+    const manifest = boot.readProfileManifest('dscode', dir)
+    const seen = new Set()
+    for (const [index, candidate] of [manifest, ...components(manifest, dir)].entries()) {
+      const issue = boot.evaluatePluginCompatibility(candidate, compatibility.exemptions)
+      // A bundle whose rows load its own package reports that package once.
+      if (issue === undefined || seen.has(issue.name + '@' + issue.version)) continue
+      seen.add(issue.name + '@' + issue.version)
+      issues.push({ ...issue, bundle, component: index > 0, warning: boot.pluginCompatibilityWarning(issue) })
+    }
+  } catch (error) { issues.push({ bundle, error: String(error?.message ?? error) }) }
 }
-console.log(JSON.stringify({ runtimeVersion: boot.getDshRuntimeVersion(), checked, issues, warnings: compatibility.warnings }))
+emit({ runtimeVersion: boot.getDshRuntimeVersion(), checked, issues, warnings: compatibility.warnings })
 `
 
-/** Profile bundles the runtime would skip or run only under an exact-version
- * exemption. Runtimes without the 0.1.7 compatibility API are not judged. */
-export const profileBundleFindings = ({ runtime, profile }) => {
-  if (!existsSync(join(runtime, 'node_modules/@deepseek-ai/dsh-app-boot/package.json'))) return []
-  const probe = spawnSync(process.execPath, ['--input-type=module', '-e', COMPATIBILITY_PROBE, runtime, profile],
+/** The DSH installation (package.json of `@deepseek-ai/dsh`) behind an executable. */
+export const dshInstallAnchor = bin => {
+  let dir
+  try { dir = dirname(realpathSync(bin)) } catch { return undefined }
+  for (;;) {
+    const manifest = join(dir, 'package.json')
+    try { if (json(manifest).name === '@deepseek-ai/dsh') return manifest } catch {}
+    const parent = dirname(dir)
+    if (parent === dir) return undefined
+    dir = parent
+  }
+}
+
+const failureReason = text => {
+  const lines = text.split('\n').map(line => line.trim()).filter(Boolean)
+  return lines.find(line => /^[A-Za-z]*Error\b/.test(line)) ?? lines[0] ?? 'no diagnostics'
+}
+
+/** Profile bundles the runtime would skip, rows it would disable, and exempted
+ * ones. Runtimes without the 0.1.7 compatibility API are not judged. */
+export const profileBundleFindings = ({ anchor, profile }) => {
+  let appBoot
+  try { appBoot = createRequire(anchor).resolve('@deepseek-ai/dsh-app-boot') } catch { return [] }
+  if (!appBoot) return []
+  const probe = spawnSync(process.execPath, ['--input-type=module', '-e', COMPATIBILITY_PROBE, anchor, profile],
     { encoding: 'utf8', timeout: 15000, maxBuffer: 1 << 20 })
-  if (probe.error || probe.status !== 0) {
-    const reason = (probe.error?.message ?? probe.stderr ?? '').trim().split('\n').at(-1)
+  const line = (probe.stdout ?? '').split('\n').find(text => text.startsWith(COMPATIBILITY_MARKER))
+  let result
+  try { result = line === undefined ? undefined : JSON.parse(line.slice(COMPATIBILITY_MARKER.length)) } catch {}
+  if (probe.error || probe.status !== 0 || result === undefined) {
+    const reason = probe.error?.message ?? failureReason(`${probe.stderr ?? ''}\n${probe.stdout ?? ''}`)
     return [{ status: 'WARN', name: 'Profile bundles', detail: `Could not evaluate bundle compatibility: ${reason}` }]
   }
-  const result = JSON.parse(probe.stdout)
   if (result === null) return []
-  const findings = result.issues.map(issue => issue.error !== undefined
-    ? { status: 'ERROR', name: `Profile bundle ${issue.name}`, detail: `Cannot evaluate its dsh peers: ${issue.error}` }
-    : { status: issue.exempted ? 'WARN' : 'ERROR', name: `Profile bundle ${issue.name}`, detail: issue.exempted ? issue.warning
-      : `${issue.warning} The runtime skips this bundle at startup. Update or remove it, or run: dsh plugin --profile dscode allow-version ${issue.name}@${issue.version} --dsh-version ${issue.runtimeVersion} --accept-risk` })
+  const findings = result.issues.map(issue => {
+    const name = `Profile bundle ${issue.bundle}`
+    if (issue.error !== undefined) return { status: 'ERROR', name, detail: `Cannot evaluate its dsh peers: ${issue.error}` }
+    if (issue.exempted) return { status: 'WARN', name, detail: issue.warning }
+    const effect = issue.component ? 'The runtime disables the rows of this bundle that load it.' : 'The runtime skips this bundle at startup.'
+    return { status: 'ERROR', name, detail: `${issue.warning} ${effect} Update or remove it, or run /dsh allow-version ${issue.name}@${issue.version} --accept-risk inside dscode.` }
+  })
   findings.push(...result.warnings.map(detail => ({ status: 'WARN', name: 'Profile compatibility file', detail })))
   return findings.length > 0 ? findings
     : [{ status: 'OK', name: 'Profile bundles', detail: `${result.checked} bundle(s) satisfy dsh ${result.runtimeVersion} peer requirements` }]
@@ -118,7 +170,11 @@ export const installationReport = ({
         return `${pkg.dsh.sourceCommit} · ${process.platform}/${process.arch} · declared native files present (not a load/PTY smoke test)`
       }, repair)
     }
-    findings.push(...profileBundleFindings({ runtime, profile }))
+  }
+  if (resolved) {
+    const anchor = dshInstallAnchor(resolved)
+    if (anchor) findings.push(...profileBundleFindings({ anchor, profile }))
+    else add('INFO', 'Profile bundles', 'Not evaluated: the DSH executable is not inside an @deepseek-ai/dsh installation.')
   }
   if (optional) {
     const missing = ['typescript-language-server', 'tsc'].filter(command => !executable(command))

@@ -95,12 +95,19 @@ incompatible bundle whole, or mounts the row disabled, and says so only in the
 leader log. dscode therefore pins its peers exactly and applies the same rule
 earlier:
 
-- `/dsh add` refuses an incompatible package before the profile changes and
-  prints the exact `dsh plugin --profile dscode allow-version … --accept-risk`
-  exemption command. An exempted package installs with its warning in the report.
-- `dscode doctor --runtime` and `/doctor` evaluate every profile bundle with the
-  runtime's own rule. They report skipped bundles as errors, exempted bundles as
-  warnings, and an unreadable `compatibility.json` as a warning.
+- `/dsh add` checks the package and every package its bundle rows insert,
+  resolved as boot resolves them (the DSH installation first). It refuses an
+  incompatible one before the profile changes. A package that passes staging but
+  installs incompatible rolls back the manifest, lockfile and modules. An
+  exempted package installs with its warning in the report.
+- `/dsh allow-version <package@version> --accept-risk` and `/dsh revoke-version`
+  write the exemption into this exact profile for the running DSH version, so no
+  PATH `dsh` or profile name can target the wrong one.
+- `dscode doctor --runtime` and `/doctor` evaluate every profile bundle and its
+  inserted rows with the runtime's own app-boot. They report skipped bundles and
+  disabled rows as errors, and exempted ones as warnings. An unreadable
+  `compatibility.json`, or a DSH executable outside an `@deepseek-ai/dsh`
+  installation, is reported rather than silently passed.
 
 Exemptions are exact package and DSH versions, stored in the profile's
 `compatibility.json`; a dscode update to a new DSH version does not carry them

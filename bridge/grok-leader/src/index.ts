@@ -349,7 +349,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   /** The dsh plugin command registry, when the composition mounts it. */
   const dshCommands = (): NativeCommands | undefined => ctx.get('commands') as NativeCommands | undefined
 
-  const profilePlugins = createProfilePlugins({ inspectRuntime: name => inspectPluginRuntime(ctx, name) })
+  const profilePlugins = createProfilePlugins({
+    inspectRuntime: name => inspectPluginRuntime(ctx, name),
+    installAnchor: () => (ctx.get('profileContext') as { installAnchor?: string } | undefined)?.installAnchor,
+  })
   const sessionCommands = createSessionCommands<SessionRecord>({
     sessions, owned: ownedRecord, client: id => connections.get(id),
     registry: dshCommands, roster: agentPresets,

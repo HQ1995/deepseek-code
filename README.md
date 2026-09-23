@@ -105,6 +105,13 @@ dscode doctor --runtime            # diagnose even when normal startup fails
 dscode uninstall
 ```
 
+DSH checks every profile bundle's `@deepseek-ai/dsh*` peers against the running
+runtime and skips an incompatible one at startup, so an update to a new DSH can
+turn off a third-party bundle that pins the old one. `dscode doctor --runtime`
+and `/doctor` list such bundles. Inside dscode, `/dsh add` refuses them before
+changing the profile, and `/dsh allow-version <package@version> --accept-risk`
+grants an exact-version exemption.
+
 Uninstall removes the product binaries and keeps profile sessions, settings and shared DSH data. Use `dscode uninstall --remove-dsh` to also remove the global DSH package.
 
 Updates install the matching bridge, TUI, and runtime together and save the

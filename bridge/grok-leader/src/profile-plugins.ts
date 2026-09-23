@@ -7,7 +7,10 @@ import { isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
-import { evaluatePluginCompatibility, pluginCompatibilityWarning, readProfileVersionExemptions, type PluginCompatibility } from '@deepseek-ai/dsh-app-boot'
+import {
+  evaluatePluginCompatibility, getDshRuntimeVersion, pluginCompatibilityWarning, readProfileCompatibility, readProfileManifest as readPackageManifest,
+  resolveBundleDir, setProfileVersionExemption, type PluginCompatibility,
+} from '@deepseek-ai/dsh-app-boot'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import { load as loadYaml } from 'js-yaml'
 import { withProfileLock } from './package-location.ts'
@@ -25,7 +28,26 @@ export interface BundlePatchAnalysis {
   overriddenRows: string[]
   disabledRows: string[]
   sensitiveRows: string[]
+  /** Packages named by inserted rows, group members included: DSH checks their
+   * peers too and disables an incompatible row at boot. */
+  insertedPackages: string[]
   jsExprCount: number
+}
+
+/** The package a row's plugin name loads, or undefined for local and builtin rows. */
+function rowPackage(name: unknown): string | undefined {
+  if (typeof name !== 'string' || name.startsWith('.') || name.startsWith('/') || name.includes(':')) return undefined
+  return name.split('/').slice(0, name.startsWith('@') ? 2 : 1).join('/')
+}
+
+function collectRowPackages(rows: unknown[], into: Set<string>): void {
+  for (const row of rows) {
+    if (row === null || typeof row !== 'object') continue
+    const r = row as { name?: unknown; group?: unknown; config?: unknown }
+    if (r.group === true && Array.isArray(r.config)) collectRowPackages(r.config, into)
+    const pkg = rowPackage(r.name)
+    if (pkg !== undefined) into.add(pkg)
+  }
 }
 
 /** Statically analyze a bundle patch. Throws on anything loadProfile would
@@ -37,13 +59,15 @@ export function analyzeBundlePatch(patchText: string): BundlePatchAnalysis {
   const jsExprCount = (patchText.match(/!!js\b/g) ?? []).length
   const doc = loadYaml(patchText.replace(/!!js\b/g, ''))
   if (!Array.isArray(doc)) throw new Error('the patch is not a YAML array (loadProfile would refuse to boot this profile)')
-  const analysis: BundlePatchAnalysis = { insertedRows: [], overriddenRows: [], disabledRows: [], sensitiveRows: [], jsExprCount }
+  const analysis: BundlePatchAnalysis = { insertedRows: [], overriddenRows: [], disabledRows: [], sensitiveRows: [], insertedPackages: [], jsExprCount }
+  const packages = new Set<string>()
   for (const entry of doc) {
     if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
       throw new Error('a patch entry is not a mapping (loadProfile would refuse to boot this profile)')
     }
     const patch = entry as Record<string, unknown>
     if (Array.isArray(patch.insert)) {
+      collectRowPackages(patch.insert, packages)
       for (const row of patch.insert) {
         const r = row as { id?: unknown; name?: unknown } | null
         const id = String(r?.id ?? r?.name ?? '?')
@@ -58,6 +82,7 @@ export function analyzeBundlePatch(patchText: string): BundlePatchAnalysis {
       if (SENSITIVE_ROW_IDS.has(patch.id)) analysis.sensitiveRows.push(patch.id)
     }
   }
+  analysis.insertedPackages = [...packages]
   return analysis
 }
 
@@ -199,6 +224,9 @@ export interface ProfilePluginDependencies {
    * boot rule (dsh 0.1.7-rc.1 skips an incompatible bundle whole) and the
    * profile's exact-version exemptions. */
   compatibility?: (manifest: object, profileDir: string) => PluginCompatibility | undefined
+  /** The running DSH installation's package.json (profileContext.installAnchor).
+   * Rows resolve there before the bundle's own dependencies, as at boot. */
+  installAnchor?: () => string | undefined
 }
 
 /** Owns profile inspection and locked package mutations, independent of sessions
@@ -223,13 +251,50 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
 
   const execFileAsync = dependencies.exec ?? promisify(execFile)
   const compatibilityOf = dependencies.compatibility
-    ?? ((manifest: object, profileDir: string) => evaluatePluginCompatibility(manifest, readProfileVersionExemptions(profileDir)))
+    ?? ((manifest: object, profileDir: string) => evaluatePluginCompatibility(manifest, readProfileCompatibility(profileDir).exemptions))
+  /** Every package a bundle inserts, resolved as boot resolves it (the DSH
+   * installation first, then the bundle's own dependencies). A row this
+   * profile cannot resolve is the loader's failure to report, not a refusal. */
+  const componentIssues = (pkgDir: string, names: readonly string[], profileDir: string): PluginCompatibility[] => {
+    const anchor = dependencies.installAnchor?.() ?? join(pkgDir, 'package.json')
+    const issues: PluginCompatibility[] = []
+    for (const name of names) {
+      let dir: string
+      try { dir = resolveBundleDir('dscode', name, anchor, pkgDir) } catch { continue }
+      const issue = compatibilityOf(readPackageManifest('dscode', dir), profileDir)
+      if (issue !== undefined) issues.push(issue)
+    }
+    return issues
+  }
 
   const readProfileManifest = async (dir: string): Promise<{ dependencies: Record<string, string>; bundles: string[]; raw: Record<string, unknown> }> => {
     const raw = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8')) as Record<string, unknown>
     const dependencies = (raw.dependencies ?? {}) as Record<string, string>
     const dsh = (raw.dsh ?? {}) as { profile?: { bundles?: string[] } }
     return { dependencies, bundles: dsh.profile?.bundles ?? [], raw }
+  }
+
+  /** The files a failed install must restore: npm rewrites both. */
+  const MANIFEST_FILES = ['package.json', 'package-lock.json'] as const
+  const snapshotManifest = async (dir: string): Promise<Array<[string, Buffer | undefined]>> => Promise.all(MANIFEST_FILES.map(async file => {
+    try { return [file, await readFile(join(dir, file))] as [string, Buffer] } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [file, undefined] as [string, undefined]
+      throw error
+    }
+  }))
+  const restoreManifest = async (dir: string, snapshot: Array<[string, Buffer | undefined]>): Promise<void> => {
+    for (const [file, bytes] of snapshot) {
+      const target = join(dir, file)
+      if (bytes === undefined) { await rm(target, { force: true }); continue }
+      const temporary = join(dir, '.' + file + '.' + String(process.pid) + '.' + randomUUID() + '.tmp')
+      try {
+        await writeFile(temporary, bytes)
+        await rename(temporary, target)
+      } catch (error) {
+        await rm(temporary, { force: true }).catch(() => undefined)
+        throw error
+      }
+    }
   }
 
   const writeProfileBundles = async (dir: string, raw: Record<string, unknown>, bundles: string[]): Promise<void> => {
@@ -248,13 +313,13 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
   }
 
   type BundleInspection =
-    | { kind: 'plain'; compatibility?: PluginCompatibility }
-    | { kind: 'bundle'; analysis: BundlePatchAnalysis; compatibility?: PluginCompatibility }
+    | { kind: 'plain'; compatibility: PluginCompatibility[] }
+    | { kind: 'bundle'; analysis: BundlePatchAnalysis; compatibility: PluginCompatibility[] }
     | { kind: 'broken'; error: string }
 
   /** An incompatible package the profile has not exempted: the runtime would skip or disable it. */
   const refusedCompatibility = (info: BundleInspection): PluginCompatibility | undefined =>
-    info.kind !== 'broken' && info.compatibility?.exempted === false ? info.compatibility : undefined
+    info.kind === 'broken' ? undefined : info.compatibility.find(issue => !issue.exempted)
 
   const CORE_PLUGIN_NAMES = new Set(['@deepseek-ai/dsh-base', '@hqzhao95/dscode', 'dscode', '@deepseek-ai/dsh-grok-leader'])
 
@@ -268,18 +333,23 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
     const pkgDir = join(dir, 'node_modules', ...name.split('/'))
     try {
       const manifest = JSON.parse(await readFile(join(pkgDir, 'package.json'), 'utf8')) as { dsh?: { bundle?: { patch?: string | string[] } } }
-      const compatibility = compatibilityOf(manifest, profileDir)
+      const own = compatibilityOf(manifest, profileDir)
+      const compatibility = own === undefined ? [] : [own]
       const patchRel = manifest.dsh?.bundle?.patch
-      if (patchRel === undefined) return { kind: 'plain', ...compatibility === undefined ? {} : { compatibility } }
+      if (patchRel === undefined) return { kind: 'plain', compatibility }
       const files = typeof patchRel === 'string' ? [patchRel] : patchRel
       if (!Array.isArray(files) || !files.every(file => typeof file === 'string')) throw new Error('dsh.bundle.patch must be a file path or a list of file paths')
-      const analysis: BundlePatchAnalysis = { insertedRows: [], overriddenRows: [], disabledRows: [], sensitiveRows: [], jsExprCount: 0 }
+      const analysis: BundlePatchAnalysis = { insertedRows: [], overriddenRows: [], disabledRows: [], sensitiveRows: [], insertedPackages: [], jsExprCount: 0 }
       for (const file of files) {
         const next = analyzeBundlePatch(await readFile(join(pkgDir, file), 'utf8'))
-        for (const key of ['insertedRows', 'overriddenRows', 'disabledRows', 'sensitiveRows'] as const) analysis[key].push(...next[key])
+        for (const key of ['insertedRows', 'overriddenRows', 'disabledRows', 'sensitiveRows', 'insertedPackages'] as const) analysis[key].push(...next[key])
         analysis.jsExprCount += next.jsExprCount
       }
-      return { kind: 'bundle', analysis, ...compatibility === undefined ? {} : { compatibility } }
+      for (const issue of componentIssues(pkgDir, [...new Set(analysis.insertedPackages)], profileDir)) {
+        // A bundle whose rows load its own package reports that package once.
+        if (!compatibility.some(known => known.name === issue.name && known.version === issue.version)) compatibility.push(issue)
+      }
+      return { kind: 'bundle', analysis, compatibility }
     } catch (error) {
       return { kind: 'broken', error: errorChain(error) }
     }
@@ -351,6 +421,7 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
 
   const executeCommand = async (text: string, notify: (message: string) => void = () => {}): Promise<string> => {
     const usage = 'Usage: /dsh plugins | /dsh add [--trust] <package|git-url|file:path> | /dsh remove <name> | /dsh inspect <name>'
+      + ' | /dsh allow-version <package@version> --accept-risk | /dsh revoke-version <package@version>'
     let words: string[]
     try {
       words = parseCommandLine(text).slice(1)
@@ -392,9 +463,11 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
           const incompatible = staged.map(entry => refusedCompatibility(entry.info)).find(issue => issue !== undefined)
           if (incompatible !== undefined) {
             const key = incompatible.name + '@' + incompatible.version
+            const problems = readProfileCompatibility(dir).warnings
             return 'Refused ' + key + ' before profile mutation: the dsh runtime would not load it.\n'
               + pluginCompatibilityWarning(incompatible)
-              + '\nTo accept the risk: dsh plugin --profile dscode allow-version ' + key + ' --dsh-version ' + incompatible.runtimeVersion + ' --accept-risk'
+              + (problems.length > 0 ? '\nThe profile compatibility file has problems, so no exemption applies:\n' + problems.join('\n') : '')
+              + '\nTo accept the risk for this exact version: /dsh allow-version ' + key + ' --accept-risk, then rerun /dsh add.'
           }
           const stagedReport = staged.map(({ name, info }) => info.kind === 'plain'
             ? name + ': declares no dsh.bundle — it will remain a plain dependency.'
@@ -408,6 +481,7 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
               + '\n\nIf you trust this code, rerun: /dsh add --trust ' + specs.map(spec => JSON.stringify(spec)).join(' ')
           }
           notify('Installing audited package(s) into the leader profile with npm (lifecycle scripts disabled)...')
+          const snapshot = await snapshotManifest(dir)
           await npmInstall(dir, specs)
           const manifest = await readProfileManifest(dir)
           const names = staged.map(entry => entry.name)
@@ -415,16 +489,25 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
           const invalid = actual.find(entry => entry.info.kind === 'broken' || refusedCompatibility(entry.info) !== undefined
             || (!trusted && bundleRequiresTrust(entry.info)))
           if (invalid !== undefined) {
-            // The staged and real package differed. Disable every touched root
-            // before returning so an existing bundle cannot brick the next boot.
-            await writeProfileBundles(dir, manifest.raw, manifest.bundles.filter(bundle => !names.includes(bundle)))
             const incompatible = refusedCompatibility(invalid.info)
             const reason = invalid.info.kind === 'broken'
               ? invalid.info.error
               : incompatible !== undefined
                 ? pluginCompatibilityWarning(incompatible)
                 : 'the installed package introduced an executable bundle after staging'
-            return 'Installed dependency was left disabled because post-install verification failed for ' + invalid.name + ':\n' + reason
+            // The staged and real package differed. Restore the previous
+            // manifest and modules; if that fails, disable every touched root
+            // so an existing bundle cannot brick the next boot.
+            try {
+              await restoreManifest(dir, snapshot)
+              await npmInstall(dir, [])
+              return 'Rolled back ' + names.join(', ') + ' because post-install verification failed for ' + invalid.name + ':\n' + reason
+            } catch (error) {
+              const current = await readProfileManifest(dir)
+              await writeProfileBundles(dir, current.raw, current.bundles.filter(bundle => !names.includes(bundle)))
+              return 'Installed dependency was left disabled because post-install verification failed for ' + invalid.name
+                + ' and the rollback did not complete (' + errorChain(error) + '):\n' + reason
+            }
           }
           const bundles = new Set(manifest.bundles)
           const report: string[] = []
@@ -437,7 +520,7 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
             if (info.kind === 'broken') continue
             bundles.add(name)
             report.push(describeAnalysis(name, info.analysis))
-            if (info.compatibility !== undefined) report.push('  ⚠ ' + pluginCompatibilityWarning(info.compatibility))
+            for (const issue of info.compatibility) report.push('  ⚠ ' + pluginCompatibilityWarning(issue))
           }
           await writeProfileBundles(dir, manifest.raw, [...bundles])
           return 'Installed or updated ' + names.join(', ') + '.\n\n' + report.join('\n\n') + '\n\nRestart dscode to load it (the leader exits with its last client).'
@@ -452,6 +535,20 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
             return name + ' is installed but has no live plugin instance in this leader (restart dscode to load it, or it is a plain dependency / composition-only bundle).'
           }
           return name + ' is not installed. Installed: ' + Object.keys(manifest.dependencies).join(', ')
+        }
+        case 'allow-version':
+        case 'revoke-version': {
+          const allow = verb === 'allow-version'
+          const acceptRisk = rest.includes('--accept-risk')
+          const keys = rest.filter(part => part !== '--accept-risk')
+          if (keys.length !== 1 || (!allow && acceptRisk)) return 'Usage: /dsh allow-version <package@version> --accept-risk | /dsh revoke-version <package@version>'
+          if (allow && !acceptRisk) {
+            return 'Running a plugin whose dsh peers this runtime does not satisfy can crash dscode or corrupt data. '
+              + 'The exemption covers only ' + keys[0] + ' on this exact DSH version. Rerun with --accept-risk to grant it.'
+          }
+          const runtimeVersion = getDshRuntimeVersion()
+          await setProfileVersionExemption(dir, keys[0]!, runtimeVersion, allow, acceptRisk)
+          return (allow ? 'Allowed ' : 'Revoked ') + keys[0] + ' for DSH ' + runtimeVersion + '. Restart dscode to apply it.'
         }
         case 'remove': {
           const name = rest[0]
@@ -480,7 +577,8 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
       }
     }
     try {
-      return verb === 'add' || verb === 'remove' ? await withProfileLock(dir, execute) : await execute()
+      const mutates = verb === 'add' || verb === 'remove' || verb === 'allow-version' || verb === 'revoke-version'
+      return mutates ? await withProfileLock(dir, execute) : await execute()
     } catch (error: unknown) {
       throw invalidParams('/dsh ' + String(verb) + ' failed: ' + (error instanceof Error ? error.message : String(error)))
     }
