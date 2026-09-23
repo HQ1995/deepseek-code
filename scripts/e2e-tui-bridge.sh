@@ -987,6 +987,23 @@ if grep -q 'dscode-e2e-plugin' "$SCRATCH/profiles/dscode/package.json"; then
   fail "plugin remove left the dependency in the profile manifest"
 fi
 
+echo "[tui] browser row toggles live without a browser in the running session"
+clear_prompt
+send_line "/browser"
+wait_frame "browser off" 'Browser: off\. Turn it on'
+clear_prompt
+# A missing executable still enables the row; the report explains it.
+send_line "/browser on --executable /nonexistent/dscode-e2e-chrome --origin http://127.0.0.1:9"
+wait_frame "browser on" 'Browser turned on' 300
+wait_frame "browser origins" 'allowed origins: http://127\.0\.0\.1:9'
+grep -q 'executable: none' "$FRAME" || fail "/browser on did not report the unusable executable"
+clear_prompt
+send_line "/browser status"
+wait_frame "browser status" 'Browser: on \(0 open\)'
+clear_prompt
+send_line "/browser off"
+wait_frame "browser off again" 'Browser turned off' 300
+
 echo "[tui] preset selection preserves the active turn"
 clear_prompt
 send_line "exercise active preset selection"

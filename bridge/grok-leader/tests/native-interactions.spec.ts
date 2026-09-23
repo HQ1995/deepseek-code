@@ -51,6 +51,17 @@ function fixture() {
 }
 
 describe('native interaction ownership', () => {
+  it('always asks for browser actions, even in always-approve mode', async () => {
+    const f = fixture()
+    Object.assign(f.root, { yolo: true })
+    expect(await f.approve()).toBe('allowed-once')
+    expect(f.request).not.toHaveBeenCalled()
+    const browser = f.emit<string>('approval/request', { agent: f.root.agent, callId: 'call', toolName: 'mcp__playwright-mcp__browser_navigate' }, async () => 'fallback')
+    await expect(browser).resolves.toBe('allowed-once')
+    expect(f.request).toHaveBeenCalledOnce()
+    expect(f.request.mock.calls[0]![1]).toMatchObject({ toolCall: { displayName: 'mcp__playwright-mcp__browser_navigate' } })
+  })
+
   it('routes one-shot approvals to the exact owner and preserves unbounded human waits', async () => {
     const f = fixture(), gate = deferred()
     f.replies.mockReturnValue(gate.promise)

@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { describeBrowser, type BrowserStatus } from './browser-control.ts'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -21,6 +22,8 @@ interface ExecutionHost<S extends ExecutionSession> {
   toolNames(record: S): ReadonlySet<string>
   profileDirectory(): string | undefined
   inspector?(): { url: string; captureFetch: boolean } | undefined
+  /** Live browser facts while the opt-in browser row is active. */
+  browser?(): BrowserStatus | undefined
 }
 type InstallationReader = (version: string, directory: string | undefined, signal: AbortSignal) => Promise<string>
 const execute = promisify(execFile)
@@ -114,6 +117,9 @@ export function createNativeExecution<S extends ExecutionSession>(host: Executio
           : 'Shell backend or subprocess PTY support is unavailable. Restore the terminal services in the dscode profile and restart; run dscode update --force-reinstall if runtime files are missing.' })
         const inspector = host.inspector?.()
         active(record, scope)
+        const browser = host.browser?.()
+        if (browser !== undefined) findings.push({ status: browser.executable === undefined || !browser.sandbox ? 'WARN' : 'OK', name: 'Browser',
+          detail: describeBrowser(browser).replace(/^Browser: /, '').split('\n').map(line => line.trim().replace(/\.$/, '')).join('; ') + '. Browser state is isolated; network and host access are not confined.' })
         if (inspector !== undefined) findings.push({ status: 'WARN', name: 'Developer Inspector', detail:
           `Full host debugger access on loopback; do not forward its port. Fetch capture ${inspector.captureFetch ? 'ON (raw secrets may be retained)' : 'off'}. Open in Chrome: ${inspector.url}` })
         return { text: ['Dscode runtime diagnostics', ...findings.map(f => `[${f.status}] ${f.name}: ${f.detail}`)].join('\n\n') }

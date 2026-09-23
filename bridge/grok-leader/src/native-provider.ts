@@ -5,6 +5,7 @@
  * key works exactly like a pi-ai route's. No other route is touched. */
 import { internalError, invalidParams } from './acp.ts'
 import type { CredentialsLike, SettingsLike } from './native-seams.ts'
+import type { PluginRows } from './plugin-rows.ts'
 
 export const NATIVE_DEEPSEEK_PROVIDER = 'deepseek-official'
 /** Wire marker for the add-provider form; never a pi-ai `api` value. */
@@ -13,12 +14,6 @@ const ROW_ID = 'llm-deepseek'
 const MODULE = '@deepseek-ai/dsh-llm-deepseek'
 const DEFAULT_KEY_ENV = 'DEEPSEEK_API_KEY'
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
-
-/** Structural read of the plugin manager's row toggle (dsh 0.1.7). */
-export interface PluginManagerLike {
-  listPlugins(): Promise<Array<{ entryId: string; moduleName: string; enabled: boolean; patchId?: string; readOnlyReason?: string }>>
-  setPluginEnabled(entryId: string, enabled: boolean): Promise<{ application: string; error?: { code?: string }; warnings?: string[] }>
-}
 
 export interface NativeProviderForm {
   apiKeyEnv?: string
@@ -29,12 +24,7 @@ export interface NativeProviderForm {
 }
 
 export interface NativeProviderDependencies {
-  pluginManager(): PluginManagerLike | undefined
-  /** Reconcile the live Loader with the saved profile patches. dscode runs
-   * without `hmr`, so the plugin manager saves the row and reports
-   * `restart-required`; this applies it now, failing if a required row does
-   * not activate. */
-  reload(requiredIds: readonly string[]): Promise<void>
+  rows: PluginRows
   credentials(): CredentialsLike | undefined
   settings(): SettingsLike | undefined
 }
@@ -62,28 +52,7 @@ export function nativeProviderForm(request: Record<string, unknown>): NativeProv
 }
 
 export function createNativeProviders(dependencies: NativeProviderDependencies) {
-  const manager = (): PluginManagerLike => {
-    const service = dependencies.pluginManager()
-    if (service === undefined) throw internalError('the DSH plugin manager is unavailable; restart dscode and retry')
-    return service
-  }
-  const row = async () => {
-    const found = (await manager().listPlugins()).find(item => item.patchId === ROW_ID && item.moduleName === MODULE)
-    if (found === undefined) throw internalError('the installed runtime has no ' + MODULE + ' row to enable')
-    return found
-  }
-  const setEnabled = async (enabled: boolean): Promise<void> => {
-    const target = await row()
-    if (target.enabled === enabled) return
-    const result = await manager().setPluginEnabled(target.entryId, enabled)
-    if (result.application === 'failed' || result.error !== undefined) {
-      throw internalError('could not ' + (enabled ? 'enable' : 'disable') + ' the DeepSeek adapter: ' + (result.error?.code ?? result.application))
-    }
-    if (result.application === 'overridden') {
-      throw internalError('the DeepSeek adapter row is overridden by a home patch or command-line overlay; edit that override instead')
-    }
-    if (result.application === 'restart-required') await dependencies.reload(enabled ? [ROW_ID] : [])
-  }
+  const ROW = { id: ROW_ID, module: MODULE, label: 'DeepSeek adapter' }
   /** The adapter's own settings section, as written by this module. */
   const section = (): Record<string, unknown> => {
     const user = dependencies.settings()?.describe?.().find(row => row.ns === ROW_ID)?.user
@@ -113,7 +82,7 @@ export function createNativeProviders(dependencies: NativeProviderDependencies) 
         if (credentials === undefined) throw internalError('the credentials service is unavailable; cannot store the pasted key')
         await credentials.set(ref, form.apiKey)
       }
-      await setEnabled(true)
+      await dependencies.rows.set(ROW, true)
       const settings = dependencies.settings()
       if (settings === undefined) throw internalError('the settings service is unavailable; cannot configure the DeepSeek adapter')
       const ops = [
@@ -124,7 +93,7 @@ export function createNativeProviders(dependencies: NativeProviderDependencies) 
       await settings.mutate(ROW_ID, ops)
     },
     async disable(): Promise<void> {
-      await setEnabled(false)
+      await dependencies.rows.set(ROW, false)
     },
   }
 }

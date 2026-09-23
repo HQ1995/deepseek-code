@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createModelCatalog } from '../src/model-catalog.ts'
-import { createNativeProviders, nativeProviderForm, NATIVE_DEEPSEEK_API, NATIVE_DEEPSEEK_PROVIDER, type PluginManagerLike } from '../src/native-provider.ts'
+import { createNativeProviders, nativeProviderForm, NATIVE_DEEPSEEK_API, NATIVE_DEEPSEEK_PROVIDER } from '../src/native-provider.ts'
+import { createPluginRows, type PluginManagerLike } from '../src/plugin-rows.ts'
 import type { LlmLike, SettingsLike } from '../src/native-seams.ts'
 
 function fixture(options: { enabled?: boolean; application?: string; errorCode?: string; noManager?: boolean; noCredentials?: boolean; hmr?: boolean } = {}) {
@@ -38,8 +39,7 @@ function fixture(options: { enabled?: boolean; application?: string; errorCode?:
   const credentials = { set: vi.fn(async (ref: string, value: string) => { stored.set(ref, value) }),
     describe: async (ref: string) => ({ configured: stored.has(ref), source: 'file', writable: true }) }
   const native = createNativeProviders({
-    pluginManager: () => options.noManager === true ? undefined : manager,
-    reload,
+    rows: createPluginRows({ pluginManager: () => options.noManager === true ? undefined : manager, reload }),
     credentials: () => options.noCredentials === true ? undefined : credentials,
     settings: () => settings,
   })

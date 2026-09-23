@@ -59,6 +59,7 @@ unless `--force` is explicit. Headless formats are `plain`, `json`,
 | `/skills`, `/mcps` | Browse session skills and MCP servers; `u` inserts a selected skill |
 | `/rewind`, `/undo` | Continue from an earlier prompt in a new session |
 | `/export [filename]` | Copy/save Markdown; `.zip` exports logs, descendants, and attachments |
+| `/browser` | Turn the isolated headless browser on or off and edit its allowed origins |
 | `/doctor` | Check terminal, installation, and optional LSP/PTY dependencies |
 | `Ctrl+P` | Open commands while keeping the current draft |
 | `Ctrl+S`, `Alt+S` | Stash or restore one prompt draft |
@@ -76,8 +77,15 @@ Optional presets: `history` adds workspace-scoped session search tools;
 `terminal` adds persistent shell/REPL tools; `lsp` adds code navigation and needs
 `typescript-language-server` and `typescript` on `PATH`.
 Minimal follows DSH's shell-only configuration. See the
-[DSH feature coverage](docs/upgrade-strategy.md#dsh-015-feature-coverage) for
+[DSH feature coverage](docs/upgrade-strategy.md#dsh-017-feature-coverage) for
 native DeepSeek-V41-Flash setup and platform/UI limits.
+
+The browser is off by default. `/browser on --origin https://example.com` gives
+new sessions a private headless Chrome or Chromium that may open only the listed
+origins; `/browser origins add <origin>` extends the list. Every browser action
+asks for approval, also in always-approve mode. It is not an OS network or host
+sandbox; see the [browser notes](docs/upgrade-strategy.md#browser) for browser
+discovery, the Chromium sandbox and origin filtering.
 
 ## Per-run configuration
 

@@ -126,3 +126,11 @@
       name: '@hqzhao95/dscode'
       config:
         socketPath: !!js process.env.DSCODE_SOCKET
+
+# Opt-in browser, turned on with /browser on: an isolated headless Chromium per
+# top-level Session with a reviewed operation allowlist and native approval.
+# Browser state is isolated; network and host access are not confined.
+- insert:
+    - id: dscode-browser
+      name: '@hqzhao95/dscode/browser'
+      disabled: true

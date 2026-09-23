@@ -28,7 +28,9 @@ export { analyzeBundlePatch, parseCommandLine, inspectPluginRuntime, type Bundle
 import { protectTerminalSignals } from './terminal-signal.ts'
 import { JSONRPC_METHOD_NOT_FOUND, internalError, paramRecord } from './acp.ts'
 import { createModelCatalog } from './model-catalog.ts'
-import { createNativeProviders, type PluginManagerLike } from './native-provider.ts'
+import { createNativeProviders } from './native-provider.ts'
+import { createPluginRows, type PluginManagerLike } from './plugin-rows.ts'
+import { createBrowserControl, type BrowserStatus } from './browser-control.ts'
 import type { LlmLike, SettingsLike, CredentialsLike, AgentDefaultModelLike } from './native-seams.ts'
 export { providerUserSection, providerUserProfile, hasUserProviderRoute, knownRouteBaseUrls } from './provider-profile.ts'
 /**
@@ -204,18 +206,23 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     logger,
   })
   const connections = transport.clients
+  // Shipped-disabled rows (native DeepSeek adapter, browser) toggle through the
+  // plugin manager and are applied to the live Loader without hmr.
+  const pluginRows = createPluginRows({
+    pluginManager: () => ctx.get('pluginManager') as PluginManagerLike | undefined,
+    reload: async requiredIds => {
+      const profile = ctx.get('profileContext') as ProfileContext | undefined
+      if (profile === undefined) throw new Error('no profile context: restart dscode to apply the change')
+      await reconcileProfilePatches(ctx.root, readProfilePatches('dsh', profile), 'dsh', requiredIds)
+    },
+  })
   const models = createModelCatalog({
     config,
     llm: () => ctx.get('llm') as LlmLike | undefined,
     settings,
     getCredentials: () => ctx.get('credentials') as CredentialsLike | undefined,
     native: createNativeProviders({
-      pluginManager: () => ctx.get('pluginManager') as PluginManagerLike | undefined,
-      reload: async requiredIds => {
-        const profile = ctx.get('profileContext') as ProfileContext | undefined
-        if (profile === undefined) throw new Error('no profile context: restart dscode to apply the change')
-        await reconcileProfilePatches(ctx.root, readProfilePatches('dsh', profile), 'dsh', requiredIds)
-      },
+      rows: pluginRows,
       credentials: () => ctx.get('credentials') as CredentialsLike | undefined,
       settings,
     }),
@@ -372,6 +379,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     registry: dshCommands, roster: agentPresets,
     skills: record => presetServiceFor(record, 'skills') as NativeSkills | undefined,
     capabilities: nativeCapabilities.capabilities, profile: profilePlugins, preset: sessionPresets.command,
+    browser: createBrowserControl({
+      rows: pluginRows, settings,
+      status: () => (ctx.get('dscodeBrowser') as { status(): BrowserStatus } | undefined)?.status(),
+    }),
     children: { command: (clientId, params) => children.command(clientId, params) },
     goals: { goal: (clientId, params) => nativeStatus.goal(clientId, params) },
     on: (name, listener) => ctx.on(name as never, listener as never), logger,
@@ -389,6 +400,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const execution = createNativeExecution<SessionRecord>({
     owned: ownedRecord, profileDirectory: profilePlugins.directory,
     inspector: () => ctx.get('dscodeInspector') as { url: string; captureFetch: boolean } | undefined,
+    browser: () => (ctx.get('dscodeBrowser') as { status(): BrowserStatus } | undefined)?.status(),
     terminals: record => presetServiceFor(record, 'terminals') as NativeTerminals | undefined,
     subprocess: record => presetServiceFor(record, 'subprocess') as NativeExecutionHost | undefined,
     toolNames: nativeCapabilities.toolNames,

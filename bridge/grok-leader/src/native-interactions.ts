@@ -85,7 +85,8 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
     if (client === undefined) return next()
     return accepted(record, request.signal, async signal => {
       if (signal.aborted || !live(record)) return 'cancelled'
-      if (record.yolo) return 'allowed-once'
+      // Browser actions reach arbitrary hosts; always-approve never covers them.
+      if (record.yolo && request.toolName?.startsWith('mcp__playwright-mcp__') !== true) return 'allowed-once'
       try {
         const response = await client.request<unknown>('session/request_permission', {
           sessionId: record.agent.session.id,

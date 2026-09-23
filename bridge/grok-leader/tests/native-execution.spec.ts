@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { TerminalSessionId } from '@deepseek-ai/dsh-terminal'
+import type { BrowserStatus } from '../src/browser-control.ts'
 import { createNativeExecution, type NativeTerminals } from '../src/native-execution.ts'
 import { createSessionWork } from '../src/session-work.ts'
 
@@ -35,6 +36,7 @@ function fixture() {
     toolNames: vi.fn((_record: typeof record) => new Set(['lsp', 'terminal_open'])),
     profileDirectory: vi.fn(() => '/profile'),
     inspector: vi.fn<() => { url: string; captureFetch: boolean } | undefined>(() => undefined),
+    browser: vi.fn<() => BrowserStatus | undefined>(() => undefined),
   }
   const installation = vi.fn(async (_version: string, _directory: string | undefined, _signal: AbortSignal) => JSON.stringify([{ status: 'OK', name: 'Runtime', detail: 'pinned' }]))
   const execution = createNativeExecution(host, installation)
@@ -53,6 +55,17 @@ describe('native execution ownership', () => {
     expect((await f.doctor()).text).toContain('Fetch capture off. Open in Chrome: devtools://fixture')
     f.host.inspector.mockReturnValue({ url: 'devtools://fixture', captureFetch: true })
     expect((await f.doctor()).text).toContain('ON (raw secrets may be retained)')
+  })
+  it('reports the browser only while its row is on, and warns without an executable or sandbox', async () => {
+    const f = fixture()
+    expect((await f.doctor()).text).not.toContain('] Browser:')
+    const on: BrowserStatus = { executable: '/opt/chrome', executableSource: 'discovered', sandbox: true, anyOrigin: false, origins: ['https://example.com'], sessions: 1 }
+    f.host.browser.mockReturnValue(on)
+    expect((await f.doctor()).text).toContain('[OK] Browser: on (1 open); executable: /opt/chrome (discovered); sandbox: on; allowed origins: https://example.com. Browser state')
+    f.host.browser.mockReturnValue({ ...on, sandbox: false })
+    expect((await f.doctor()).text).toContain('[WARN] Browser: on (1 open)')
+    f.host.browser.mockReturnValue({ ...on, executable: undefined, executableError: 'No Chrome or Chromium was found.' })
+    expect((await f.doctor()).text).toContain('[WARN] Browser: on (1 open); executable: none. No Chrome or Chromium was found; sandbox: on')
   })
   it('reads installation and execution-host diagnostics without starting a model, shell or language server', async () => {
     const f = fixture(), result = await f.doctor()

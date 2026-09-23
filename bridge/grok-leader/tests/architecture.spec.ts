@@ -59,7 +59,9 @@ runtimeEdges.get('src/package-location.ts')!.add('bin/update.mjs')
 // it may import (type-only edges included). A path entry names a launcher file.
 const declaredDependencies = [
     ['model-catalog', ['acp', 'protocol', 'model-endpoint', 'native-provider', 'native-seams', 'provider-profile', 'wire-catalog']],
-    ['native-provider', ['acp', 'native-seams']],
+    ['native-provider', ['acp', 'native-seams', 'plugin-rows']],
+    ['plugin-rows', ['acp']],
+    ['browser-control', ['acp', 'native-seams', 'plugin-rows', 'profile-plugins']],
     ['model-endpoint', []],
     ['native-seams', []],
     ['provider-profile', ['acp', 'model-endpoint', 'native-seams']],
@@ -83,7 +85,7 @@ const declaredDependencies = [
     ['native-children', ['acp', 'child-history', 'workflows', 'prompt-content', 'projection', 'session-output', 'session-work', 'image-output']],
     ['native-session-status', ['acp', 'prompt-content', 'projection', 'session-output', 'session-work']],
     ['native-interactions', ['acp', 'leader-transport']],
-    ['native-execution', ['acp', 'package-location', 'session-work']],
+    ['native-execution', ['acp', 'browser-control', 'package-location', 'session-work']],
     ['native-asides', ['acp', 'projection', 'session-work']],
     ['native-capabilities', []],
     ['profile-plugins', ['package-location', 'acp']],

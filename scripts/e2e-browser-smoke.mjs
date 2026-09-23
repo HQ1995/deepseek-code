@@ -1,15 +1,20 @@
-/** Keyless, real Chromium + extracted SDK check. Never attach an existing browser. */
+#!/usr/bin/env node
+/** Keyless, real Chromium + extracted SDK check of dscode's browser plugin
+ * (bridge/grok-leader/browser). Never attaches an existing browser.
+ * Usage: e2e-browser-smoke.mjs <extracted-runtime> <absolute Chromium executable>
+ * Link bridge/grok-leader/node_modules to the runtime's node_modules first. */
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import * as Browser from './index.mjs'
-import { prefix } from './policy.mjs'
+import * as Browser from '../bridge/grok-leader/browser/index.mjs'
+import { allowedTools, prefix } from '../bridge/grok-leader/browser/policy.mjs'
 
 const runtime = resolve(process.argv[2])
 const executablePath = process.argv[3]
@@ -28,6 +33,9 @@ const ptcReady = Promise.withResolvers()
 let slowResponse
 let timeoutResponse
 let ptcResponse
+// A second origin the page references but the allowlist omits.
+const outsideHits = []
+const outside = createServer((request, response) => { outsideHits.push(request.url); response.writeHead(204); response.end() })
 const server = createServer((request, response) => {
   requests.push(request.url)
   if (request.url === '/slow') { slowResponse = response; slow.resolve(); return }
@@ -36,7 +44,8 @@ const server = createServer((request, response) => {
   response.writeHead(200, { 'Content-Type': 'text/html' })
   response.end(`<!doctype html><title>Private browser fixture</title>
     <label>Name<input aria-label="Name"></label><button onclick="document.querySelector('output').textContent='Hello '+document.querySelector('input').value;localStorage.setItem('marker','first')">Greet</button>
-    <output>Fresh</output><p>Saved: <script>document.write(localStorage.getItem('marker') || 'empty')</script></p>`)
+    <output>Fresh</output><p>Saved: <script>document.write(localStorage.getItem('marker') || 'empty')</script></p>
+    <img alt="outside" src="http://127.0.0.1:${outside.address().port}/probe.png">`)
 })
 const owners = []
 const evidence = { node: process.version, runtime, checks: [] }
@@ -58,6 +67,8 @@ const children = () => {
 try {
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
+  outside.listen(0, '127.0.0.1')
+  await once(outside, 'listening')
   const origin = `http://127.0.0.1:${server.address().port}`
   const modules = new Map()
   for (const name of ['system-prompt', 'tools', 'llm', 'session', 'agent', 'agent-loop', 'session-projection', 'user-approval', 'attachment-local', 'fs-local', 'subprocess-local', 'sandbox-local', 'sandbox-policy', 'ptc-runtime-node']) {
@@ -73,7 +84,9 @@ try {
   const config = [...modules.keys()].map(name => ({ id: name, name, config:
     name === 'agent-loop' ? { agents: [] } : name === 'attachment-local' ? { dshHome: root } :
       name === 'sandbox-policy' ? { mode: 'read-only', workspaceRoot: workspace } :
-      name === 'browser' ? { executablePath, navigationOrigins: [origin], toolCallTimeoutMs: 5000 } : {} }))
+      name === 'browser' ? { executablePath, navigationOrigins: [origin], toolCallTimeoutMs: 5000,
+        // Negative control only: without the allowlist the outside request must happen.
+        ...process.env.DSCODE_BROWSER_SMOKE_ANY_ORIGIN === '1' ? { anyOrigin: true } : {} } : {} }))
   const configPath = join(root, 'cordis.yml')
   await writeFile(configPath, JSON.stringify(config))
   const { default: Loader } = await sdk('@deepseek-ai/cordis-plugin-loader')
@@ -96,10 +109,14 @@ try {
   }
   const first = await create('browser-first')
   const agent = first.agent
+  if (process.env.DSCODE_BROWSER_SMOKE_DEBUG) console.log('STATUS', JSON.stringify(ctx.dscodeBrowser.status()))
   const catalog = ctx.tools.schemas(agent)
   evidence.catalog = catalog.map(tool => tool.name)
   await writeFile(join(root, 'catalog.json'), JSON.stringify(catalog, null, 2))
-  assert.equal(catalog.length, 24)
+  // The pinned catalog is advertised whole; operations outside the reviewed
+  // allowlist are refused by the guard below.
+  assert.equal(catalog.filter(tool => tool.name.startsWith(prefix)).length, 24)
+  assert.ok([...allowedTools].every(tool => catalog.some(entry => entry.name === prefix + tool)))
   check('Loader composition discovers the pinned 24-tool catalog')
   const denied = await call(agent, 'browser_run_code_unsafe', { code: 'async () => { throw new Error("must not execute") }' })
   assert.equal(denied.isError, true)
@@ -127,6 +144,8 @@ try {
   const navigated = success(await call(agent, 'browser_navigate', { url: origin }))
   assert.match(text(navigated), /Private browser fixture/)
   check('approved navigation reads the controlled page')
+  assert.deepEqual(outsideHits, [], 'page requests to an origin outside the allowlist are blocked')
+  check('page requests outside the allowed origins are blocked by Playwright routing')
   await writeFile(join(root, 'navigation.txt'), text(navigated))
   // Use upstream's advertised target selectors rather than injecting page JavaScript.
   success(await call(agent, 'browser_fill_form', { fields: [{ name: 'Name', type: 'textbox', target: 'getByRole("textbox", { name: "Name" })', value: 'dscode' }] }))
@@ -141,13 +160,18 @@ try {
   assert.ok(stored.data.byteLength > 100)
   evidence.image = { bytes: stored.data.byteLength, mediaType: stored.ref.mediaType }
   await writeFile(join(root, 'screenshot.png'), stored.data)
-  const { createImageOutputProjector } = await import('../../bridge/grok-leader/lib/types/image-output.js')
+  const { createImageOutputProjector } = await import('../bridge/grok-leader/lib/types/image-output.js')
   // Session format V4 (DSH 0.1.7): a tool message carries its result blocks directly.
   const event = { type: 'tool/result', data: { message: { role: 'tool', toolCallId: 'screenshot', content: screenshot.content } } }
   const projected = await createImageOutputProjector(ctx)(event, [{ sessionUpdate: 'tool_call_update' }])
   assert.deepEqual(projected[0].rawOutput.dscodeImageErrors, [])
   assert.deepEqual(await readFile(projected[0].rawOutput.dscodeImages[0]), Buffer.from(stored.data))
   check('MCP screenshot reaches the attachment authority and dscode viewer path')
+  assert.equal(existsSync(join(workspace, '.playwright-mcp')), false, 'browser artifacts stay out of the workspace')
+  assert.deepEqual({ ...ctx.dscodeBrowser.status(), executable: undefined }, {
+    executable: undefined, executableSource: 'configured', executableError: undefined, sandbox: true, anyOrigin: false, origins: [origin], sessions: 1,
+  })
+  check('artifacts stay in a private directory and the status service reports the sandboxed Session')
   const firstOwnedProcesses = children().map(row => Number(row[1]))
   const second = await create('browser-second', 'text-only')
   success(await call(second.agent, 'browser_navigate', { url: origin }))
@@ -250,6 +274,8 @@ try {
   await ctx.fiber.dispose()
   server.closeAllConnections()
   await new Promise(resolve => server.close(resolve))
+  outside.closeAllConnections()
+  await new Promise(resolve => outside.close(resolve))
   await writeFile(join(root, 'result.json'), JSON.stringify(evidence, null, 2))
   console.log('EVIDENCE', root)
 }

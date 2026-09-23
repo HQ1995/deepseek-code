@@ -99,7 +99,7 @@ describe('shipped composition', () => {
   it('mounts native session services before the preset catalog', () => {
     const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
     const analysis = analyze(patch)
-    expect(analysis.insertedRows).toEqual(['session-reference', 'schedule', 'terminals', 'terminal-bash', 'subagent-model-selection-settings', 'agent-preset-registry', 'cordis-host-runner', 'grok-leader'])
+    expect(analysis.insertedRows).toEqual(['session-reference', 'schedule', 'terminals', 'terminal-bash', 'subagent-model-selection-settings', 'agent-preset-registry', 'cordis-host-runner', 'grok-leader', 'dscode-browser'])
   })
 })
 

@@ -1,8 +1,0 @@
-# Explicit profile opt-in only; not referenced by dscode's default bundle.
-- insert:
-    - id: dscode-experimental-playwright
-      name: '@hqzhao95/dscode-experimental-playwright'
-      disabled: !!js process.env.DSCODE_BROWSER !== '1'
-      config:
-        executablePath: !!js process.env.DSCODE_BROWSER_EXECUTABLE
-        navigationOrigins: !!js JSON.parse(process.env.DSCODE_BROWSER_ORIGINS || '[]')

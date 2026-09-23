@@ -32,6 +32,7 @@ function fixture(disposalError?: string) {
     roster: vi.fn(() => rosterAvailable.value ? { list: roster } : undefined),
     skills: vi.fn((_record: TestSession) => ({ list: skills })), capabilities: vi.fn(() => ['skills', 'subagents']),
     profile: { execute: vi.fn(async (_text: string, _notify: (message: string) => void) => 'profile done') },
+    browser: { execute: vi.fn(async (_text: string) => 'browser done') },
     preset: vi.fn(async (_record: TestSession, _text: string) => 'preset done'),
     children: { command: vi.fn(async (_clientId: number, _params: unknown) => ({ result: { kind: 'success', text: 'children done' } })) },
     goals: { goal: vi.fn(async (_clientId: number, _params: unknown) => ({ result: { kind: 'success', text: 'goal done' } })) },
@@ -87,7 +88,7 @@ describe('owned session commands', () => {
       { name: 'review', description: 'review code', provider: 'plugin', source: 'project-local', resourceBase: { kind: 'file', path: '/repo/skill' }, invocation: { modelInvocable: false } },
     ])
     const result = await f.commands.catalog(1, { session_id: 'one' })
-    expect(result.commands.map(command => command.name)).toEqual(['dsh', 'subagents', 'preset', 'build', 'review'])
+    expect(result.commands.map(command => command.name)).toEqual(['dsh', 'browser', 'subagents', 'preset', 'build', 'review'])
     expect(result.commands.at(-1)).toEqual({ name: 'review', description: 'User only · review code', input: { hint: 'Instructions for this skill' },
       _meta: { scope: 'repo', path: '/repo/skill', pluginName: 'plugin' } })
     expect(f.skills).toHaveBeenCalledWith({ cwd: '/work', scope: f.record.agent })
@@ -146,7 +147,7 @@ describe('owned session commands', () => {
     expect(notify).toHaveBeenCalledOnce()
     const [method, params] = notify.mock.calls[0]!
     expect(method).toBe('session/update')
-    expect(params.update.availableCommands.map((command: { name: string }) => command.name)).toEqual(['dsh', 'subagents', 'preset', 'fresh'])
+    expect(params.update.availableCommands.map((command: { name: string }) => command.name)).toEqual(['dsh', 'browser', 'subagents', 'preset', 'fresh'])
     expect(params.update.meta).toEqual({ capabilities: ['skills', 'subagents'] })
     expect(params).not.toHaveProperty('promptId'); expect(params).not.toHaveProperty('eventSeq')
     expect(f.record.output.update).not.toHaveBeenCalled(); expect(f.skills).toHaveBeenCalledTimes(2)
@@ -233,6 +234,9 @@ describe('owned session commands', () => {
     expect(f.clients.get(1)!.notify.mock.calls.map(call => call[1].update.sessionUpdate)).toEqual(['available_commands_update'])
     expect(f.execute).not.toHaveBeenCalled()
     await expect(f.request('/dsh plugins', f.record, true)).rejects.toThrow('image attachments')
+    await f.request('/browser on --origin https://example.com')
+    expect(f.host.browser.execute).toHaveBeenCalledWith('/browser on --origin https://example.com')
+    await expect(f.request('/browser', f.record, true)).rejects.toThrow('image attachments')
     await expect(f.request('/preset minimal', f.record, true)).rejects.toThrow('image attachments')
   })
 

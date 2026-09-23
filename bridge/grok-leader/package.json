@@ -23,6 +23,7 @@
       "default": "./lib/types/invariant.js"
     },
     "./src/*": "./src/*",
+    "./browser": "./browser/index.mjs",
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
@@ -36,6 +37,7 @@
   "files": [
     "lib/",
     "bin/",
+    "browser/",
     "src/",
     "presets/",
     "cordis.patch.yml"

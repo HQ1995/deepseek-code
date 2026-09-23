@@ -212,7 +212,7 @@ test('local bridge runner preserves absent, linked, and installed dependencies o
   try {
     for (const path of ['scripts', 'tmp', 'existing', 'payload/package', 'runtime/bin',
       'runtime/node_modules/typescript/bin', 'runtime/node_modules/vitest',
-      ...['src', 'bin', 'tests', 'presets'].map(name => `bridge/grok-leader/${name}`)]) mkdirSync(join(work, path), { recursive: true });
+      ...['src', 'bin', 'browser', 'tests', 'presets'].map(name => `bridge/grok-leader/${name}`)]) mkdirSync(join(work, path), { recursive: true });
     for (const name of ['dev-bridge-tests.sh', 'platform.sh']) cpSync(fileURLToPath(new URL(name, import.meta.url)), join(work, 'scripts', name));
     writeFileSync(join(work, 'VERSION'), manifest.version);
     writeFileSync(join(bridge, 'package.json'), JSON.stringify(manifest));

@@ -150,6 +150,7 @@ forward.
 | Markdown/ZIP export | `/export`; ZIP includes logs and attachments, while `present` stores source-file references rather than copies |
 | Independent text feedback | Native `/feedback <text>` appends feedback without a model turn; upstream telemetry policy may include session context |
 | Feedback rating/category dialogs | Web-only controls; no new TUI rating or category dialog |
+| Experimental browser use (Playwright MCP) | `/browser`, off by default: a per-Session isolated headless browser with origin limits and approvals; see [Browser](#browser) |
 | Sidebar tabs, splits, PDF/HTML previews, file icons | Browser UI is not ported; TUI uses transcript links, existing viewers and explicit external opening |
 | Workspace editor/file-manager actions | Existing TUI links/editor handoff; no browser desktop toolbar |
 | Web layout, localization, scrolling and reconnect fixes; alpha.2 code blocks, Excel previews, speech input, queued-message editing and discovered-model labels | Browser-only changes; TUI keeps its own tested rendering and reconnect paths |
@@ -178,6 +179,50 @@ still mounts those controls in its preset scope. A safe future integration
 needs a Team-aware preset plus a Team roster/task-board adapter, rather than
 mounting both sets of overlapping tools. No Team-specific TUI board, task claims
 or membership controls are claimed here.
+
+### Browser
+
+`/browser on` enables the shipped-disabled `dscode-browser` row
+(`@hqzhao95/dscode/browser`) through the plugin manager and reconciles the live
+leader, as `/provider` does for the native adapter. `/browser off` disables it
+and closes open browsers. The choice persists in the profile's
+`cordis.patch.yml` and applies to Sessions created or resumed afterwards; a
+running Session keeps its tool list. Only top-level Sessions get a browser,
+subagents do not. `/doctor` reports the executable, and warns when none is found
+or the sandbox is off.
+
+Each Session starts its own Playwright MCP 0.0.80 through DSH's browser-use
+provider, which the plugin loads from the runtime closure rather than declaring
+as peers. It runs `--isolated --headless` with a private output directory
+removed when the Session closes, and always requests the Chromium sandbox.
+`--no-sandbox` requires `--accept-risk`. The browser is `--executable <path>`
+when given. Otherwise it is the first usable system Chrome or Chromium (the
+macOS app bundles; `/opt/google/chrome/chrome`, `/usr/bin/google-chrome[-stable]`
+or `/usr/bin/chromium` on Linux). Failing that, it is the newest Playwright
+Chromium under `PLAYWRIGHT_BROWSERS_PATH` or the default cache. Snap wrappers are
+refused, and dscode never downloads a browser.
+
+`browser_navigate` must target an allowed origin (exact HTTP(S), a plain host
+name or IP address, no credentials) unless `--any-origin` was chosen. Origin
+edits apply to the next call. Unless any origin is allowed, Playwright also
+refuses page requests outside the allowed origins and blocks service workers.
+That filter is fixed when a Session starts: a Session started with no origins
+loads nothing until it is resumed after adding one. It is request routing
+inside the browser, not an OS network sandbox. DSH cannot restrict per-Session
+MCP tools, so the whole 24-tool catalog is advertised. A guard refuses
+everything outside 13 reviewed operations: no code evaluation, uploads, tab
+management, MCP resource reads, or `filename`, `paths` and `_meta` arguments.
+Every call asks for approval, also in always-approve mode. Cancelling a running call closes that
+Session's browser and waits for cleanup; resume the Session for a fresh one.
+
+`scripts/e2e-browser-smoke.mjs <runtime> <chrome>` drives real Chromium through
+the SDK: catalog, approvals, origin filtering, cancellation cleanup and unload.
+`DSCODE_BROWSER_SMOKE_ANY_ORIGIN=1` is its negative control and must fail. It
+needs the compiled bridge `lib/` and a bridge `node_modules` that resolves to
+the runtime's closure. `scripts/e2e-browser-installed.mjs <runtime> <home> <chrome>`
+checks an installed leader over ACP: off by default, `/browser on` for new
+Sessions only, approvals, rejection and cancel without late page requests,
+resume with fresh storage, then `/browser off`.
 
 ## Bridge changes
 

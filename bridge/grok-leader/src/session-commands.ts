@@ -40,6 +40,7 @@ interface CommandHost<S extends CommandSession> {
   skills(record: S): NativeSkills | undefined
   capabilities(record: S): string[]
   profile: { execute(text: string, notify: (message: string) => void): Promise<string> }
+  browser: { execute(text: string): Promise<string> }
   preset(record: S, text: string): Promise<string>
   children: { command(clientId: number, params: unknown): Promise<CommandResult> }
   goals: { goal(clientId: number, params: unknown): Promise<CommandResult> }
@@ -97,6 +98,8 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
     check()
     const commands: AdvertisedCommand[] = [{ name: 'dsh', description: 'Manage dsh plugins',
       input: { hint: 'plugins | add [--trust] <package> | remove <name> | inspect <name>' } },
+    { name: 'browser', description: 'Turn the isolated browser on or off',
+      input: { hint: 'status | on [--executable <path>] [--origin <origin>]... [--any-origin] | off | origins add|remove <origin>' } },
     { name: 'subagents', description: 'Inspect and control child conversations',
       input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' } }]
     if (presets.length > 0) commands.push({ name: 'preset', description: 'Switch the active agent preset', input: { hint: presets.map(preset => preset.id).join(' | ') } })
@@ -175,10 +178,10 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
     // would move their admission behind a same-tick cancel or a later prompt.
     if (!text.startsWith('/')) return undefined
     const name = /^\/([^\s]+)/.exec(text)?.[1]?.toLowerCase()
-    const dsh = /^\/dsh(\s|$)/.test(text), preset = /^\/preset(\s|$)/.test(text)
+    const dsh = /^\/dsh(\s|$)/.test(text), preset = /^\/preset(\s|$)/.test(text), browser = /^\/browser(\s|$)/.test(text)
     const children = /^\/subagents(?:\s|$)/i.test(text)
     const refusal = name === undefined || !Object.hasOwn(unsupported, name) ? undefined : unsupported[name]
-    const reserved = dsh || preset || children || refusal !== undefined || name === 'goal'
+    const reserved = dsh || preset || browser || children || refusal !== undefined || name === 'goal'
     const registry = reserved ? undefined : host.registry()
     assertOpen()
     if (!reserved && registry === undefined && name !== 'compact') return undefined
@@ -197,6 +200,11 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
           try { active(record, scope) } catch { return }
           notify(record, message)
         })
+        return settle(record, params, message, scope)
+      }
+      if (browser) {
+        textOnly('/browser')
+        const message = await host.browser.execute(text)
         return settle(record, params, message, scope)
       }
       if (preset) {
