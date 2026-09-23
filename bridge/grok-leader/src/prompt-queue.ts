@@ -191,6 +191,7 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
     state.runningText = combinedTexts === undefined || combinedTexts[0] === undefined ? text : combinedTexts[0]
     state.runningCombinedTexts = combinedTexts
     let stopReason: StopReasonWire | undefined
+    let nativeIdle: Promise<void> | undefined
     const failures: unknown[] = []
     try {
       stopReason = await new Promise<StopReasonWire>((resolve, reject) => {
@@ -210,7 +211,8 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
       // turnless slot (admission discarded the prompt) settles cancelled at idle.
       broadcastQueueChanged()
       host.echo(text)
-      void host.agent.whenIdle().then(() => {
+      nativeIdle = host.agent.whenIdle()
+      void nativeIdle.then(() => {
         if (state.inflight !== inflight) return
         state.inflight = undefined
         inflight.resolve('cancelled')
@@ -220,6 +222,11 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
         inflight.reject(internalError('agent idle wait failed: ' + errorChain(error)))
       })
       })
+      // cancel() acknowledges the request synchronously, but native tool
+      // cleanup may still be running. Keep the running slot and terminal wire
+      // behind the already-captured drain; ordinary turns still settle at
+      // their correlated turn/end, not whole-agent idle.
+      if (stopReason === 'cancelled') await nativeIdle
     } catch (error: unknown) {
       failures.push(error)
       // A throw from the echo/broadcast above rejects the promise with the

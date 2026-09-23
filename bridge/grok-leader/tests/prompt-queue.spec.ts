@@ -101,9 +101,15 @@ describe('owned prompt queue', () => {
     const f = fixture(), first = f.submit('first'), second = f.submit('second')
     await tick(); await tick()
     expect(f.queue.cancelPrompt('first')).toBe('cancelled')
+    let settled = false
+    void first.then(() => { settled = true })
+    await tick()
+    expect(settled).toBe(false)
+    expect(f.notes.filter(note => note.method === 'x.ai/session/prompt_complete')).toEqual([])
+    expect(f.snapshot().runningPromptId).toBe('first')
+    f.idle()
     await expect(first).resolves.toMatchObject({ stopReason: 'cancelled' })
-    expect(f.echoes).toEqual(['first'])
-    f.idle(); await tick()
+    await tick()
     expect(f.echoes).toEqual(['first', 'second'])
     expect(f.queue.cancelPrompt('first')).toBe('not_found')
     expect(f.agent.cancel).toHaveBeenCalledTimes(1)
@@ -116,6 +122,16 @@ describe('owned prompt queue', () => {
     expect(f.queue.cancelPrompt('second')).toBe('already_submitted')
     expect(f.agent.cancel).not.toHaveBeenCalled()
     f.finish(1); await first; await second
+  })
+
+  it('reports a failed native cancellation drain instead of publishing successful completion', async () => {
+    const f = fixture(), drain = deferred<void>(), error = new Error('native drain failed')
+    vi.mocked(f.agent.whenIdle).mockImplementationOnce(() => drain.promise)
+    const first = f.submit('first'), rejected = expect(first).rejects.toBe(error)
+    await tick(); f.queue.cancel(); drain.reject(error); f.idle()
+    await rejected
+    expect(f.notes.filter(note => note.method === 'x.ai/session/prompt_complete')).toEqual([])
+    expect(f.queue.busy).toBe(false)
   })
 
   it('honors cancellation reentered from a steering acknowledgment without dropping other queued rows', async () => {
@@ -150,6 +166,7 @@ describe('owned prompt queue', () => {
     const f = fixture(), first = f.submit('same')
     await expect(f.submit('same')).rejects.toThrow('duplicate active prompt')
     expect(f.queue.cancelPrompt('same')).toBe('cancelled')
+    f.idle()
     await first
   })
 
@@ -161,14 +178,14 @@ describe('owned prompt queue', () => {
     expect(f.messages).toEqual([])
   })
 
-  it('still settles the targeted running RPC if native cancellation throws, preserving queued input', async () => {
+  it('drains the targeted running RPC even if native cancellation throws, preserving queued input', async () => {
     const f = fixture(), first = f.submit('first'), second = f.submit('second')
     await tick(); await tick()
     vi.mocked(f.agent.cancel).mockImplementationOnce(() => { throw new Error('native cancellation failed') })
     expect(() => f.queue.cancelPrompt('first')).toThrow('native cancellation failed')
-    await expect(first).resolves.toMatchObject({ stopReason: 'cancelled' })
     expect(f.snapshot().entries.map(row => row.id)).toEqual(['second'])
-    f.idle(); await tick(); f.finish(2); await second
+    f.idle(); await expect(first).resolves.toMatchObject({ stopReason: 'cancelled' })
+    await tick(); f.finish(2); await second
   })
 
   it('lets accepted preparation stop before its next write when its queue generation is cancelled', async () => {
@@ -291,7 +308,7 @@ describe('owned prompt queue', () => {
     await expect(first).resolves.toMatchObject({ stopReason: 'cancelled' })
     await expect(queued).resolves.toMatchObject({ stopReason: 'cancelled' })
     expect(afterCancel.entries).toEqual([])
-    expect(afterCancel.runningPromptId).toBeUndefined()
+    expect(afterCancel.runningPromptId).toBe('first')
     expect(messages).toHaveLength(1)
   })
 
@@ -454,9 +471,13 @@ describe('owned prompt queue', () => {
     const first = f.submit('first'), a = f.submit('a'), b = f.submit('b')
     await tick()
     f.control('interject', { id: 'b', expectedVersion: 0 })
+    await tick()
+    expect(f.echoes).toEqual(['first'])
+    expect(f.notes.filter(note => note.method === 'x.ai/session/prompt_complete')).toEqual([])
+    f.idle()
     await expect(first).resolves.toMatchObject({ stopReason: 'cancelled' })
     expect(f.notes.find(note => note.method === 'x.ai/session/prompt_complete')!.params.cancelTrigger).toBe('send_now')
-    f.idle(); await tick(); expect(f.echoes).toEqual(['first', 'b'])
+    await tick(); expect(f.echoes).toEqual(['first', 'b'])
     f.finish(2); await b; await tick(); f.finish(3); await a
   })
 

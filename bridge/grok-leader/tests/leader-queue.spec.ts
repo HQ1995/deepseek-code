@@ -65,6 +65,8 @@ describe('leader prompt queue, steering and interjection', () => {
     const echoIndex = c.all.findIndex(m => m.method === 'session/update' && ((m.params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } }).update?.content?.text) === 'second')
     expect(promoIndex).toBeGreaterThanOrEqual(0)
     expect(echoIndex).toBeGreaterThan(promoIndex)
+    for (const idle of agent.internals.idleWaiters.splice(0)) idle()
+    await waitForId(c, 3)
   })
 
   it('interject cancels the running turn (send-now) and promotes the row next', async () => {
@@ -87,6 +89,10 @@ describe('leader prompt queue, steering and interjection', () => {
 
     c.notify('x.ai/queue/interject', { sessionId, id: secondId, expectedVersion: 0 })
 
+    // Acknowledgment is not completion; release the cancelled native drain.
+    await waitFor(() => agent.internals.cancelCalls >= 1)
+    expect(c.completes).toEqual([])
+    agent.internals.idleWaiters.shift()!()
     // The first turn settles cancelled with the send_now trigger...
     await waitFor(() => c.completes.some(m => (m.params as { cancelTrigger?: string }).cancelTrigger === 'send_now'))
     const complete = c.completes[c.completes.length - 1]!
@@ -100,13 +106,13 @@ describe('leader prompt queue, steering and interjection', () => {
     // ...and the interjected row runs next as its own turn (after the agent idles).
     await waitFor(() => agent.internals.idleWaiters.length >= 1)
     agent.internals.idleWaiters.shift()!()
-    await waitFor(() => agent.internals.idleWaiters.length >= 1)
-    agent.internals.idleWaiters.shift()!()
     await waitFor(() => agent.internals.followups.includes('second') && c.broadcasts.some(b => (b.params as { runningPromptId?: string }).runningPromptId === secondId))
     const promoIndex = c.all.findIndex(m => m.method === 'x.ai/queue/changed' && (m.params as { runningPromptId?: string }).runningPromptId === secondId)
     const echoIndex = c.all.findIndex(m => m.method === 'session/update' && ((m.params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } }).update?.content?.text) === 'second')
     expect(promoIndex).toBeGreaterThanOrEqual(0)
     expect(echoIndex).toBeGreaterThan(promoIndex)
+    for (const idle of agent.internals.idleWaiters.splice(0)) idle()
+    await waitForId(c, 3)
   })
 
   it('queue/steer merges a queued row into the running turn without cancelling it', async () => {
@@ -348,6 +354,10 @@ describe('leader prompt queue, steering and interjection', () => {
     await waitFor(() => c.broadcasts.length > beforeInterject)
     expect(latestRow()).toMatchObject({ text: 'second', version: 0 })
     expect(agent.internals.cancelCalls).toBe(0)
+    c.notify('session/cancel', { sessionId })
+    await waitFor(() => agent.internals.cancelCalls === 1)
+    for (const idle of agent.internals.idleWaiters.splice(0)) idle()
+    await collectIds(c, [2, 3])
   })
 
   it('queues a second prompt behind the in-flight one (FIFO)', async () => {
@@ -557,15 +567,14 @@ describe('leader prompt queue, steering and interjection', () => {
     await waitFor(() => agent.internals.idleWaiters.length === 1)
 
     sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'urgent' }], _meta: { promptId: 'now-1', sendNow: true } })
+    await waitFor(() => agent.internals.cancelCalls >= 1)
+    expect(c.all.some(message => message.id === 2)).toBe(false)
+    agent.internals.idleWaiters.shift()!()
     // The running turn is cancelled with the send_now trigger...
     expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
     await waitFor(() => c.completes.some(m => (m.params as { cancelTrigger?: string }).cancelTrigger === 'send_now'))
     expect(agent.internals.cancelCalls).toBeGreaterThanOrEqual(1)
-    // ...and the send-now prompt runs next. Two waits are pending: the
-    // cancelled turn's stale idle detector (a no-op) and the promotion wait.
-    await waitFor(() => agent.internals.idleWaiters.length >= 2)
-    agent.internals.idleWaiters.shift()!()
-    agent.internals.idleWaiters.shift()!()
+    // ...and the send-now prompt runs after the cancelled owner drains.
     await waitFor(() => agent.internals.followups.includes('urgent'))
     agent.internals.idleWaiters.shift()!()
     expect((await waitForId(c, 3)).result).toMatchObject({ stopReason: 'cancelled', _meta: { promptId: 'now-1' } })
