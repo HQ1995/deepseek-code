@@ -23,7 +23,9 @@ function listedEffort(item: unknown): [string, string | null] | undefined {
   const value = item as Record<string, unknown>
   const id = nonEmpty(value.id) ? value.id : nonEmpty(value.value) ? value.value : undefined
   if (id === undefined || !PI_AI_REASONING_EFFORTS.has(id)) return undefined
-  const explicitWire = value.wire_value ?? value.wireValue
+  // A present snake_case key wins even when null: `??` would drop an explicit
+  // `wire_value: null` (off means "send no reasoning parameter").
+  const explicitWire = 'wire_value' in value ? value.wire_value : value.wireValue
   const wire = explicitWire === undefined && value.id !== undefined ? value.value : explicitWire
   if (wire === null && id === 'off') return [id, null]
   return [id, nonEmpty(wire) ? wire : id]

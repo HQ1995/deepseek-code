@@ -8,6 +8,12 @@ describe('endpoint reasoning extensions', () => {
     expect(endpointReasoningEfforts({ reasoningEfforts: { medium: 'mid', minimal: '', off: null, turbo: 'x' } })).toEqual({ medium: 'mid', off: null })
   })
 
+  it('keeps an explicit null wire value for off in either spelling', () => {
+    expect(endpointReasoningEfforts({ reasoning_efforts: [{ id: 'off', wire_value: null }, { id: 'high', wire_value: 'HIGH' }] })).toEqual({ off: null, high: 'HIGH' })
+    expect(endpointReasoningEfforts({ reasoning_efforts: [{ id: 'off', wireValue: null }] })).toEqual({ off: null })
+    expect(endpointReasoningEfforts({ reasoning_efforts: [{ id: 'low', wire_value: null }] })).toEqual({ low: 'low' })
+  })
+
   it('distinguishes an explicit refusal from an absent extension', () => {
     expect(endpointReasoningEfforts({ supports_reasoning_effort: false, reasoning_efforts: ['low'] })).toBe(false)
     expect(endpointReasoningEfforts({ reasoningEfforts: false })).toBe(false)

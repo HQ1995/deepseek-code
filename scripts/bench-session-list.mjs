@@ -98,9 +98,16 @@ const push = event => {
   event.seq = templateEvents.length
   templateEvents.push(adoptSessionEvent(event))
 }
-const turns = Math.ceil((eventsPerSession - 1) / (4 + TOOL_STEPS * 3))
-for (let turn = 0; turn < turns; turn += 1) {
+// V4 turns are numbered from 1 and every step closes. A tool call is first
+// advertised by its step's assistant message, then run and settled.
+const EVENTS_PER_TURN = 2 + TOOL_STEPS * 5 + 3 + 1
+const turns = Math.ceil(eventsPerSession / EVENTS_PER_TURN)
+const modelSource = { kind: 'model', provider: 'deepseek', model: 'deepseek-v4-flash' }
+// A derived (non-user) title cites the human prompt it summarizes.
+const firstPromptSeq = 1
+for (let turn = 1; turn <= turns; turn += 1) {
   push({ type: 'turn/start', time: 0, data: { turn } })
+  if (turn === 1) assert.equal(templateEvents.length, firstPromptSeq)
   push({
     type: 'user/message', time: 0, surfaceOp: 'append',
     data: {
@@ -110,14 +117,20 @@ for (let turn = 0; turn < turns; turn += 1) {
   })
   for (let step = 1; step <= TOOL_STEPS; step += 1) {
     const callId = `call-${turn}-${step}`
+    const name = step % 2 === 1 ? 'bash' : 'read'
+    const args = JSON.stringify({ command: `sed -n '1,120p' file-${turn}-${step}.ts`, workdir: '/workspace' })
     push({ type: 'step/start', time: 0, data: { turn, step } })
     push({
-      type: 'tool/call', time: 0,
+      type: 'assistant/message', time: 0, surfaceOp: 'append',
       data: {
-        turn, step, callId, name: step % 2 === 1 ? 'bash' : 'read',
-        arguments: JSON.stringify({ command: `sed -n '1,120p' file-${turn}-${step}.ts`, workdir: '/workspace' }),
+        turn, step, stream: [], usage: { inputTokens: 900, outputTokens: 40 },
+        message: {
+          role: 'assistant', content: [{ type: 'tool-call', id: callId, name, arguments: args }],
+          source: modelSource, id: `bench-call-turn-${turn}-step-${step}`,
+        },
       },
     })
+    push({ type: 'tool/call', time: 0, data: { turn, step, callId, name, arguments: args } })
     push({
       type: 'tool/result', time: 0, surfaceOp: 'append',
       data: {
@@ -129,21 +142,25 @@ for (let turn = 0; turn < turns; turn += 1) {
         },
       },
     })
+    push({ type: 'step/end', time: 0, data: { turn, step } })
   }
+  const answerStep = TOOL_STEPS + 1
+  push({ type: 'step/start', time: 0, data: { turn, step: answerStep } })
   push({
     type: 'assistant/message', time: 0, surfaceOp: 'append',
     data: {
-      turn, step: TOOL_STEPS, stream: [], usage: { inputTokens: 900, outputTokens: 120 },
+      turn, step: answerStep, stream: [], usage: { inputTokens: 900, outputTokens: 120 },
       message: {
         role: 'assistant',
         content: [{ type: 'text', text: `Turn ${turn} summary: ${'changed one concern and re-ran its check. '.repeat(16)}` }],
-        source: { kind: 'model', provider: 'deepseek', model: 'deepseek-v4-flash' },
+        source: modelSource,
         id: `bench-answer-turn-${turn}`,
       },
     },
   })
+  push({ type: 'step/end', time: 0, data: { turn, step: answerStep } })
   push({ type: 'turn/end', time: 0, data: { turn, reason: { kind: 'completed' } } })
-  if (turn % 20 === 19) push({ type: 'session/title', time: 0, data: { title: `session covering turns through ${turn}`, messageSeqs: [], source: { kind: 'fallback' } } })
+  if (turn % 20 === 0) push({ type: 'session/title', time: 0, data: { title: `session covering turns through ${turn}`, messageSeqs: [firstPromptSeq], source: { kind: 'fallback' } } })
 }
 const template = templateEvents.slice(0, eventsPerSession)
 assert.equal(template.length, eventsPerSession, 'the template covers the requested event count')
@@ -262,6 +279,8 @@ const heapNow = async () => {
 }
 const listCwd = sessionIds[0].cwd
 const candidates = sessionIds.filter(entry => entry.cwd === listCwd).length
+// Only touched sessions in the listed project can reappear in the picker.
+const visibleTouches = sessionIds.slice(sessionCount - touchCount).filter(entry => entry.cwd === listCwd).length
 const phases = []
 const measure = async (cwd) => {
   const before = { ...counters }
@@ -445,8 +464,8 @@ for (const phase of phases.slice(1)) {
   if (phase.opens !== 0) violations.push(`${phase.label} opened ${phase.opens} logs inside the settled window`)
 }
 for (const phase of windowPhases) {
-  if (phase.opens !== touchCount) {
-    violations.push(`past the window opened ${phase.opens} logs for ${touchCount} changed sessions`)
+  if (phase.opens !== visibleTouches) {
+    violations.push(`past the window opened ${phase.opens} logs for ${visibleTouches} changed sessions`)
   }
 }
 for (const phase of sweepPhases) {
@@ -471,8 +490,8 @@ if (flags.get('reuse') === 'true') {
   }
   for (const phase of windowPhases) {
     if (phase.listings !== 1) violations.push(`past the window took ${phase.listings} listings instead of one`)
-    if (phase.retitles !== touchCount) {
-      violations.push(`past the window carried ${phase.retitles} retitled rows for ${touchCount} changed sessions`)
+    if (phase.retitles !== visibleTouches) {
+      violations.push(`past the window carried ${phase.retitles} retitled rows for ${visibleTouches} changed sessions`)
     }
   }
   rosterPhases.slice(1).forEach((phase, index) => {

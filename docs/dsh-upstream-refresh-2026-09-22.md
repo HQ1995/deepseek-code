@@ -131,6 +131,17 @@ alpha.2 regression. The alpha.1 record below reports different phases for this
 command and cannot be reproduced with the current script. The fixture is left
 unchanged here; making it V4-valid is follow-up work.
 
+Follow-up, 2026-09-23: the fixture now writes V4 turns numbered from 1, with
+closed steps whose assistant message advertises each tool call before it runs,
+a closed answer step, and derived titles citing the first human prompt. With
+it working, one benchmark expectation also proved wrong: the touched-session
+counts assumed every touched session was in the listed project. They now count
+only touched sessions visible there. `logs/fix-bench-list-smoke.log` reruns the
+2-session smoke with no violations; multi-project, `--reuse=true`, two-touch
+and title/roster/concurrency variants also complete without violations. The
+memory benchmark is unchanged. Its fixture never reopens a session, and
+changing its event mix would break comparison with recorded measurements.
+
 ## Linux acceptance
 
 The user approved this isolated `swoop` run again for alpha.2, on the alpha.1

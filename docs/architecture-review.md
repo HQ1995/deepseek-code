@@ -172,9 +172,10 @@ Long functions outside this pass: prompt-queue `control` (180 lines), transport
 `executeCommand` (124) and entry `dispatchRequest` (111). They own delicate
 ordering (queue settlement, socket admission, plugin trust), so each should get
 its own interface-first change with differential evidence.
-`endpointReasoningEfforts` treats an explicit `wire_value: null` as absent, as
-before; whether `off` should then map to `null` is an open behavior question,
-not part of this structural pass.
+This pass kept `endpointReasoningEfforts` behavior, including dropping an
+explicit `wire_value: null` (the camelCase spelling already kept it). A
+2026-09-23 fix makes a present snake_case key win, so `off` keeps its `null`
+wire value, with a regression test in `tests/model-endpoint.spec.ts`.
 
 ## Coverage limits
 
