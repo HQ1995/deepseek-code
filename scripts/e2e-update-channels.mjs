@@ -78,6 +78,7 @@ const origin = `http://127.0.0.1:${address.port}`
 const hook = join(root, 'release-network.mjs')
 await writeFile(hook, `const original = globalThis.fetch;\nglobalThis.fetch = (input, options) => {\n  const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);\n  if (!['api.github.com', 'github.com'].includes(url.hostname)) throw new Error('Unexpected external fetch: ' + url);\n  return original(new URL(url.pathname + url.search, process.env.DSCODE_TEST_RELEASE_ORIGIN), options);\n};\n`)
 const env = { ...process.env, HOME: home, DSH_HOME: join(home, '.dsh'), DSC_HOME: profile, DSCODE_HOME: profile, DSCODE_TEST_RELEASE_ORIGIN: origin, NODE_OPTIONS: `--import=${pathToFileURL(hook).href}`, NPM_CONFIG_OFFLINE: 'true', NPM_CONFIG_CACHE: join(root, 'npm-cache'), NPM_CONFIG_USERCONFIG: join(root, 'npmrc'), DSH_TELEMETRY_DISABLED: '1', NO_COLOR: '1' }
+// DSCODE_PACKAGE_RECONCILED is read only by the 0.0.13 launcher that --legacy-plugin runs.
 for (const key of ['DSH_BIN', 'DSCODE_BIN', 'DSCODE_PACKAGE_RECONCILED', 'DSCODE_MANAGED_LAUNCHER', 'DSCODE_LEGACY_BIN', 'NODE_COMPILE_CACHE']) delete env[key]
 await writeFile(env.NPM_CONFIG_USERCONFIG, '')
 const launcher = () => join(plugin, 'bin/dscode.mjs')
