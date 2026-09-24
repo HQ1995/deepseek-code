@@ -14,6 +14,8 @@ export interface BrowserStatus {
   executableSource?: string
   executableError?: string
   sandbox: boolean
+  /** Why the requested sandbox may not start on this host. */
+  sandboxWarning?: string
   anyOrigin: boolean
   origins: string[]
   originError?: string
@@ -87,6 +89,7 @@ export function describeBrowser(status: BrowserStatus | undefined): string {
     ? '  executable: ' + status.executable + (status.executableSource === 'discovered' ? ' (discovered)' : '')
     : '  executable: none. ' + (status.executableError ?? ''))
   lines.push('  sandbox: ' + (status.sandbox ? 'on' : 'OFF (--no-sandbox accepted)'))
+  if (status.sandboxWarning !== undefined) lines.push('  sandbox may not start: ' + status.sandboxWarning)
   lines.push('  allowed origins: ' + (status.anyOrigin ? 'any HTTP(S) origin (page requests not filtered)' : status.origins.length > 0 ? status.origins.join(', ') : 'none; navigation is denied until you add one'))
   if (status.originError !== undefined) lines.push('  origins are invalid, so navigation is denied: ' + status.originError)
   if (status.lastError !== undefined) lines.push('  last start failure: ' + status.lastError)

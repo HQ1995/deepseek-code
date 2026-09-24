@@ -71,6 +71,8 @@ describe('native execution ownership', () => {
     expect((await f.doctor()).text).toContain('[OK] Browser: on (1 open); executable: /opt/chrome (discovered); sandbox: on; allowed origins: https://example.com. Browser state')
     f.host.browser.mockReturnValue({ ...on, sandbox: false })
     expect((await f.doctor()).text).toContain('[WARN] Browser: on (1 open)')
+    f.host.browser.mockReturnValue({ ...on, sandboxWarning: 'this host restricts unprivileged user namespaces' })
+    expect((await f.doctor()).text).toContain('[WARN] Browser: on (1 open); executable: /opt/chrome (discovered); sandbox: on; sandbox may not start: this host restricts')
     f.host.browser.mockReturnValue({ ...on, executable: undefined, executableError: 'No Chrome or Chromium was found.' })
     expect((await f.doctor()).text).toContain('[WARN] Browser: on (1 open); executable: none. No Chrome or Chromium was found; sandbox: on')
   })

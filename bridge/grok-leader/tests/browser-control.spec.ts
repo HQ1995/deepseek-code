@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createBrowserControl, type BrowserStatus } from '../src/browser-control.ts'
+import { createBrowserControl, describeBrowser, type BrowserStatus } from '../src/browser-control.ts'
 import type { SettingsLike } from '../src/native-seams.ts'
 import type { PluginRows } from '../src/plugin-rows.ts'
 
@@ -40,6 +40,11 @@ describe('/browser', () => {
     expect(report).toContain('allowed origins: https://example.com')
     expect(report).toContain('not an OS network or host sandbox')
     expect(await f.control.execute('/browser status')).toContain('sandbox: on')
+  })
+
+  it('shows why the requested sandbox may not start', () => {
+    const text = describeBrowser({ executable: '/opt/c', sandbox: true, sandboxWarning: 'this host restricts user namespaces', anyOrigin: false, origins: [], sessions: 0 })
+    expect(text).toContain('  sandbox: on\n  sandbox may not start: this host restricts user namespaces')
   })
 
   it('edits origins live and refuses them while the browser is off', async () => {

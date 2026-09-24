@@ -120,7 +120,7 @@ export function createNativeExecution<S extends ExecutionSession>(host: Executio
         const inspector = host.inspector?.()
         active(record, scope)
         const browser = host.browser?.()
-        if (browser !== undefined) findings.push({ status: browser.executable === undefined || !browser.sandbox ? 'WARN' : 'OK', name: 'Browser',
+        if (browser !== undefined) findings.push({ status: browser.executable === undefined || !browser.sandbox || browser.sandboxWarning !== undefined ? 'WARN' : 'OK', name: 'Browser',
           detail: describeBrowser(browser).replace(/^Browser: /, '').split('\n').map(line => line.trim().replace(/\.$/, '')).join('; ') + '. Browser state is isolated; network and host access are not confined.' })
         const hostTeamRows = await host.hostTeamRows?.() ?? []
         active(record, scope)

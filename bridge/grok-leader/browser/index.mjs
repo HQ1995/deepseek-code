@@ -4,7 +4,7 @@
  * `/browser on` enables the row. It does not confine network or host access. */
 import Schema from '@deepseek-ai/schemastery'
 import { importRuntime, playwrightMcpCli } from './runtime-modules.mjs'
-import { browserLaunchArgs, resolveBrowserExecutable } from './executable.mjs'
+import { browserLaunchArgs, resolveBrowserExecutable, sandboxRestriction } from './executable.mjs'
 import { browserDenial, navigationPolicy, prefix } from './policy.mjs'
 import { mountBrowserSessions } from './session-browser.mjs'
 
@@ -47,9 +47,11 @@ export async function apply(ctx, config) {
   ctx.effect(() => ctx.provide('dscodeBrowser', {
     status: () => {
       const current = policy(), found = executable()
+      const warning = config.sandbox.get() === false ? undefined : sandboxRestriction(found.path)
       return {
         executable: found.path, executableSource: found.source, executableError: found.error,
         sandbox: config.sandbox.get() !== false,
+        ...warning === undefined ? {} : { sandboxWarning: warning },
         anyOrigin: config.anyOrigin.get() === true,
         origins: [...config.navigationOrigins.get() ?? []],
         ...current.error === undefined ? {} : { originError: current.error },

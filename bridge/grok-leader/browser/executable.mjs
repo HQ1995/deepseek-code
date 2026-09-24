@@ -1,8 +1,8 @@
 /** Find the Chromium-family browser the Playwright MCP server launches.
  * Never a daily profile: the server always runs isolated and headless. */
-import { accessSync, constants, readdirSync, realpathSync, statSync } from 'node:fs'
+import { accessSync, constants, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 
 const executableFile = path => {
   try { accessSync(path, constants.X_OK); return statSync(path).isFile() } catch { return false }
@@ -51,6 +51,29 @@ export function resolveBrowserExecutable(configured, options = {}) {
   return found === undefined
     ? { error: 'No Chrome or Chromium was found. Install Google Chrome, or set one with /browser on --executable <absolute path>.' }
     : { path: found, source: 'discovered' }
+}
+
+/** Ubuntu 23.10+ restricts unprivileged user namespaces through AppArmor; a
+ * browser without its own AppArmor profile then cannot start Chromium's
+ * namespace sandbox. Best effort: an unreadable setting means no warning.
+ * @returns a warning for the user, or undefined. */
+export function sandboxRestriction(executablePath, options = {}) {
+  const { platform = process.platform, read = path => readFileSync(path, 'utf8'), list = dir => readdirSync(dir), realpath = realpathSync } = options
+  if (platform !== 'linux' || executablePath === undefined) return undefined
+  try { if (read('/proc/sys/kernel/apparmor_restrict_unprivileged_userns').trim() !== '1') return undefined } catch { return undefined }
+  let binary = executablePath
+  try { binary = realpath(executablePath) } catch { /* keep the configured spelling */ }
+  // Google Chrome's launcher script execs the profiled `chrome` beside it.
+  const covered = new Set([binary, join(dirname(binary), 'chrome')])
+  let names = []
+  try { names = list('/etc/apparmor.d') } catch { /* no readable profiles: warn */ }
+  for (const name of names) {
+    let text
+    try { text = read(join('/etc/apparmor.d', name)) } catch { continue }
+    for (const match of text.matchAll(/^\s*profile\s+\S+\s+(\/\S+)/gm)) if (covered.has(match[1])) return undefined
+  }
+  return 'this host restricts unprivileged user namespaces (AppArmor) and no AppArmor profile names ' + binary
+    + '. Use Google Chrome from /opt/google/chrome, or give this browser an AppArmor profile.'
 }
 
 /** Stands in for an empty allowlist: `.invalid` never resolves (RFC 6761). */

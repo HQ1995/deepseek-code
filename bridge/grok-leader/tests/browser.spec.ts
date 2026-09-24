@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setImmediate } from 'node:timers/promises'
 import { describe, expect, it } from 'vitest'
-import { NO_ORIGIN, browserCandidates, browserLaunchArgs, resolveBrowserExecutable } from '../browser/executable.mjs'
+import { NO_ORIGIN, browserCandidates, browserLaunchArgs, resolveBrowserExecutable, sandboxRestriction } from '../browser/executable.mjs'
 import { browserOperation } from '../browser/operation.mjs'
 import { browserDenial, navigationPolicy, prefix } from '../browser/policy.mjs'
 
@@ -115,6 +115,28 @@ describe('browser executable', () => {
       expect(snap).toEqual({ path: join(cache, 'chromium-1243/chrome-linux64/chrome'), source: 'discovered' })
       expect(resolveBrowserExecutable(undefined, { platform: 'linux', home: join(home, 'none'), env: {}, exists: () => false }).error).toContain('No Chrome or Chromium')
     } finally { rmSync(home, { recursive: true, force: true }) }
+  })
+
+  it('warns only where AppArmor restricts user namespaces and no profile covers the browser', () => {
+    const files: Record<string, string> = {
+      '/proc/sys/kernel/apparmor_restrict_unprivileged_userns': '1\n',
+      '/etc/apparmor.d/chrome': 'abi <abi/4.0>,\ninclude <tunables/global>\n\nprofile chrome /opt/google/chrome/chrome flags=(unconfined) {\n  userns,\n}\n',
+      '/etc/apparmor.d/opera': 'profile opera /usr/lib/@{multiarch}/opera/opera flags=(unconfined) {\n}\n',
+    }
+    const read = (path: string) => { if (!(path in files)) throw new Error('EISDIR'); return files[path]! }
+    const options = { platform: 'linux', read, list: () => ['abstractions', 'chrome', 'opera'],
+      realpath: (path: string) => path === '/usr/bin/google-chrome' ? '/opt/google/chrome/google-chrome' : path }
+    // The launcher script execs the profiled binary beside it.
+    expect(sandboxRestriction('/usr/bin/google-chrome', options)).toBeUndefined()
+    expect(sandboxRestriction('/opt/google/chrome/chrome', options)).toBeUndefined()
+    const managed = '/home/u/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome'
+    expect(sandboxRestriction(managed, options)).toContain('no AppArmor profile names ' + managed)
+    expect(sandboxRestriction(managed, { ...options, platform: 'darwin' })).toBeUndefined()
+    expect(sandboxRestriction(undefined, options)).toBeUndefined()
+    files['/proc/sys/kernel/apparmor_restrict_unprivileged_userns'] = '0\n'
+    expect(sandboxRestriction(managed, options)).toBeUndefined()
+    delete files['/proc/sys/kernel/apparmor_restrict_unprivileged_userns']
+    expect(sandboxRestriction(managed, options)).toBeUndefined()
   })
 
   it('always states the sandbox choice and keeps artifacts in a private directory', () => {

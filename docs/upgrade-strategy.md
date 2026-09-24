@@ -230,6 +230,14 @@ or `/usr/bin/chromium` on Linux). Failing that, it is the newest Playwright
 Chromium under `PLAYWRIGHT_BROWSERS_PATH` or the default cache. Snap wrappers are
 refused, and dscode never downloads a browser.
 
+On Linux, Chromium's sandbox needs unprivileged user namespaces. Ubuntu 23.10 and
+later restrict them through AppArmor, except for browsers that have their own
+profile, such as Google Chrome in `/opt/google/chrome`. When the restriction is
+on and no profile names the chosen browser, `/browser status` and `/doctor` warn
+that the sandbox may not start. On Ubuntu 24.04 with the restriction off, a
+Chrome for Testing renderer was measured running in its own user namespace
+under a seccomp-bpf filter.
+
 `browser_navigate` must target an allowed origin (exact HTTP(S), a plain host
 name or IP address, no credentials) unless `--any-origin` was chosen. Origin
 edits apply to the next call. Unless any origin is allowed, Playwright also
