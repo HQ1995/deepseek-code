@@ -33,9 +33,8 @@ after entering the namespace to handle older util-linux launchers.
 - Product name and visible strings changed grok -> dscode / "Deepseek Code"
   across the pager and shell crates (recovered from the squashed history; if
   a string resurfaces after an upstream sync, reapply here).
-- Privacy/telemetry vendor copy: "SpaceXAI" -> "DeepSeek" in
-  crates/codegen/xai-grok-pager/src/views/privacy_banner.rs and
-  .../settings/defs.rs (plus their test expectations).
+- Vendor copy: "SpaceXAI" -> "DeepSeek" in the default model description
+  (crates/codegen/xai-grok-models/default_models.json).
 - Minimal auth rendering's header assertion matches the existing "Dscode"
   branding in .../xai-grok-pager-minimal/src/auth.rs.
 
@@ -268,6 +267,11 @@ after entering the namespace to handle older util-linux launchers.
   /login, /logout, /share, /feedback, /imagine, /imagine_video, /import_claude,
   /gboom, /voice, /release_notes, /announcements, /recap, /timeline. /preset
   remains the only preset picker; /usage is adapted to session stats (above).
+- Coding-data sharing, an x.ai account preference with no dsh counterpart, is
+  removed: no consent banner, `coding_data_sharing` settings row or `/privacy`
+  command. The pager snapshot field, its lock type and its `current_value_for`
+  mapping stay dormant. `tests/settings_e2e.rs` omits the row's tests and
+  asserts that neither the row nor `/privacy` is registered.
 Unavailable built-ins: `/dashboard`, `/cd`, `/recap`, `/voice`, `/auto`, `/hooks`, `/plugins`, `/marketplace`, `/delete`, `/remember`.
 
 These commands remain known to the registry while hidden from completion.
@@ -399,8 +403,12 @@ commands before capability discovery; they do not become model prompts.
 - Upstream pager tests that assert what dscode replaces (branding, Kitty
   placement, `/loop` gating, fail-closed images, ACP-owned `/compact`, the
   pre-session model pick, local refusal of unregistered pager names, finished
-  thinking previews) carry `DIVERGENCE(dscode)` notes; the full pager suite
-  passes.
+  thinking previews, removed coding-data sharing) carry `DIVERGENCE(dscode)`
+  notes; the full pager suite passes, integration targets included. Run it as
+  `scripts/check-rust.sh` runs its gate, with `SSH_CONNECTION`, `SSH_CLIENT`
+  and `SSH_TTY` unset. Upstream reads them once per process and skips local
+  file-drop classification over SSH, so its file-drop paste tests fail in a
+  suite started from an SSH shell.
 Slash commands removed: login, logout, share, feedback, imagine,
 imagine_video, import_claude, gboom, voice, release_notes, announcements,
 recap, timeline.
