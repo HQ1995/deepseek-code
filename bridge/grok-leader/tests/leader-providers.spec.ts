@@ -1,5 +1,4 @@
 /** Leader provider management over the socket: adding routes. */
-import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { makeClient, makeHarness, mockDefaultModel, register, waitFor, type ClientHandle, type LeaderHarness } from './support/leader-harness.ts'

@@ -11,11 +11,6 @@ import type { SessionModel } from '../src/session-models.ts'
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { for (const stop of stops.splice(0)) await stop() })
 const tick = async () => { for (let i = 0; i < 25; i++) await Promise.resolve() }
-function deferred<T>() {
-  let resolve!: (value: T) => void, reject!: (error: unknown) => void
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
-  return { promise, resolve, reject }
-}
 function fixture() {
   const followup = vi.fn(), steer = vi.fn(), cancelAgent = vi.fn(), ready = { value: true }
   const agent = { session: { id: SessionId('one') }, status: 'idle', followup, steer, cancel: cancelAgent,
@@ -69,7 +64,7 @@ describe('session input routing', () => {
   })
 
   it('rejects foreign, malformed and duplicate active prompt ownership', async () => {
-    const f = fixture(), gate = deferred<undefined>()
+    const f = fixture(), gate = Promise.withResolvers<undefined>()
     f.host.commands.execute.mockReturnValueOnce(gate.promise)
     const request = f.prompt('/unknown')
     expect(() => f.input.cancelPrompt(2, { sessionId: 'one', promptId: 'request' })).toThrow('unknown session')
@@ -81,7 +76,7 @@ describe('session input routing', () => {
   })
 
   it('aborts unqueued command dispatch on session cancel before the queue is involved', async () => {
-    const f = fixture(), gate = deferred<undefined>()
+    const f = fixture(), gate = Promise.withResolvers<undefined>()
     f.host.commands.execute.mockReturnValueOnce(gate.promise)
     const request = f.prompt('/unknown')
     const signal = f.host.commands.execute.mock.calls[0]![3]!
@@ -93,7 +88,7 @@ describe('session input routing', () => {
   })
 
   it('cancels asynchronous command dispatch before its unhandled fallback reaches the queue', async () => {
-    const f = fixture(), gate = deferred<undefined>()
+    const f = fixture(), gate = Promise.withResolvers<undefined>()
     f.host.commands.execute.mockReturnValueOnce(gate.promise)
     const request = f.prompt('/unknown')
     const signal = f.host.commands.execute.mock.calls[0]![3]!
@@ -106,7 +101,7 @@ describe('session input routing', () => {
   })
 
   it('keeps cancelled native command work in the input disposal drain and preserves native failures', async () => {
-    const f = fixture(), gate = deferred<undefined>(), failure = new Error('native failure')
+    const f = fixture(), gate = Promise.withResolvers<undefined>(), failure = new Error('native failure')
     f.host.commands.execute.mockReturnValueOnce(gate.promise)
     const request = f.prompt('/command'), rejected = expect(request).rejects.toBe(failure)
     f.input.cancelPrompt(1, { sessionId: 'one', promptId: 'request' })
@@ -117,7 +112,7 @@ describe('session input routing', () => {
   })
 
   it('releases a targeted model lookup so fresh input runs without saving the late image', async () => {
-    const f = fixture(), gate = deferred<ModelCatalog>()
+    const f = fixture(), gate = Promise.withResolvers<ModelCatalog>()
     f.host.models.current.mockReturnValueOnce(gate.promise)
     const request = f.prompt('image', true)
     await tick()
@@ -132,7 +127,7 @@ describe('session input routing', () => {
   })
 
   it('still cancels the running owner human request and pauses its goal when native cancellation fails', async () => {
-    const f = fixture(), gate = deferred<void>(), error = new Error('native cancel failed')
+    const f = fixture(), gate = Promise.withResolvers<void>(), error = new Error('native cancel failed')
     vi.spyOn(f.record.agent, 'whenIdle').mockReturnValue(gate.promise)
     const request = f.prompt(); await tick()
     f.cancelAgent.mockImplementationOnce(() => { throw error })
@@ -186,7 +181,7 @@ describe('session input routing', () => {
   })
 
   it('checks owner and input readiness again after asynchronous unhandled-command dispatch', async () => {
-    const f = fixture(), gate = deferred<undefined>()
+    const f = fixture(), gate = Promise.withResolvers<undefined>()
     f.host.commands.execute.mockReturnValueOnce(gate.promise)
     const request = f.prompt('/unknown'), rejected = expect(request).rejects.toThrow('initializing')
     f.ready.value = false; gate.resolve(undefined); await rejected
@@ -206,7 +201,7 @@ describe('session input routing', () => {
   })
 
   it('does not persist images after a model-capability wait crosses queue cancellation', async () => {
-    const f = fixture(), gate = deferred<ModelCatalog>()
+    const f = fixture(), gate = Promise.withResolvers<ModelCatalog>()
     f.host.models.current.mockReturnValueOnce(gate.promise)
     const request = f.prompt('image', true)
     await tick(); expect(f.host.models.current).toHaveBeenCalledOnce()
@@ -223,7 +218,7 @@ describe('session input routing', () => {
   })
 
   it('drains discovery on module shutdown without saving or admitting a late image', async () => {
-    const f = fixture(), gate = deferred<ModelCatalog>()
+    const f = fixture(), gate = Promise.withResolvers<ModelCatalog>()
     f.host.models.current.mockReturnValueOnce(gate.promise)
     const request = f.prompt('image', true), rejected = expect(request).rejects.toThrow('disposed')
     await tick()
@@ -234,7 +229,7 @@ describe('session input routing', () => {
   })
 
   it('waits for already-started image storage after cancellation without reviving its queue row', async () => {
-    const f = fixture(), gate = deferred<Awaited<ReturnType<typeof f.saveImages>>>()
+    const f = fixture(), gate = Promise.withResolvers<Awaited<ReturnType<typeof f.saveImages>>>()
     f.saveImages.mockReturnValueOnce(gate.promise)
     const request = f.prompt('image', true)
     await tick(); expect(f.saveImages).toHaveBeenCalledOnce()
@@ -283,7 +278,7 @@ describe('session input routing', () => {
   })
 
   it('registers command work before synchronous reentrant disposal and preserves its original failure', async () => {
-    const f = fixture(), gate = deferred<undefined>(), failure = new Error('native command failed')
+    const f = fixture(), gate = Promise.withResolvers<undefined>(), failure = new Error('native command failed')
     let disposal!: Promise<void>, done = false
     f.host.commands.execute.mockImplementationOnce(() => {
       disposal = f.input.dispose(); void disposal.then(() => { done = true }); return gate.promise

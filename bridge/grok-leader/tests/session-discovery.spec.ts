@@ -9,11 +9,6 @@ import { createSessionDiscovery, type SessionProjectionCacheLike, type SessionQu
 
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(stops.splice(0).map(stop => stop())) })
-function deferred<T = void>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>(yes => { resolve = yes })
-  return { promise, resolve }
-}
 const tick = async () => { for (let i = 0; i < 16; i++) await Promise.resolve() }
 /** The wrapper cordis puts in front of a service on every ctx lookup: a fresh
  * proxy per call whose only contract here is that symbols.original names the
@@ -184,7 +179,7 @@ describe('owned session discovery', () => {
   })
 
   it('answers every caller that lands during one durable listing from that listing', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers<void>()
     f.add('a', '/work', [prompt('kept')])
     const list = f.list.getMockImplementation()!
     f.list.mockImplementation(async options => { await gate.promise; return list(options) })
@@ -249,7 +244,7 @@ describe('owned session discovery', () => {
   })
 
   it('never opens the window from a listing that started before an announcement', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers<void>()
     f.add('a', '/work')
     const list = f.list.getMockImplementation()!
     f.list.mockImplementation(async options => { await gate.promise; return list(options) })
@@ -366,7 +361,7 @@ describe('owned session discovery', () => {
   })
 
   it('never serves an in-flight listing to a remounted service', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers<void>()
     f.add('a', '/work')
     const list = f.list.getMockImplementation()!
     f.list.mockImplementation(async options => { await gate.promise; return list(options) })
@@ -381,7 +376,7 @@ describe('owned session discovery', () => {
   })
 
   it('caps rows after activity sorting while concurrent requests share cold loads and two handle lanes', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers<void>()
     for (let i = 0; i < 105; i++) f.add(String(i), '/work', [prompt('prompt ' + i, i)])
     const read = f.read.getMockImplementation()!
     f.read.mockImplementation(async id => { await gate.promise; return read(id) })
@@ -490,7 +485,7 @@ describe('owned session discovery', () => {
   })
 
   it('does not reuse another persistence instance revision or let its late read overwrite the replacement index', async () => {
-    const f = fixture(), gate = deferred(); f.add('a', '/work', [prompt('old'), title('old title')])
+    const f = fixture(), gate = Promise.withResolvers<void>(); f.add('a', '/work', [prompt('old'), title('old title')])
     const oldRead = f.read.getMockImplementation()!
     f.read.mockImplementationOnce(async id => { const result = await oldRead(id); await gate.promise; return result })
     const old = f.picker(); await tick()
@@ -507,7 +502,7 @@ describe('owned session discovery', () => {
   })
 
   it('invalidates old picker titles before direct search after a storage remount without rereading logs', async () => {
-    const f = fixture(), gate = deferred(), header = f.add('a', '/work', [prompt('old'), title('old title')])
+    const f = fixture(), gate = Promise.withResolvers<void>(), header = f.add('a', '/work', [prompt('old'), title('old title')])
     await f.picker()
     f.query.mockImplementationOnce(async () => { await gate.promise; return { items: [{ header, bestMatch: { time: 10, snippet: 'old match', type: 'user/message' } }] } })
     const pending = f.discovery.search({ query: 'old' }); await tick()
@@ -521,7 +516,7 @@ describe('owned session discovery', () => {
   })
 
   it('returns exact inspection metadata only after close and preserves primary plus cleanup errors', async () => {
-    const f = fixture(), gate = deferred(); const header = f.add('a')
+    const f = fixture(), gate = Promise.withResolvers<void>(); const header = f.add('a')
     f.close.mockImplementationOnce(async () => gate.promise)
     let done = false
     const read = f.discovery.inspect(SessionId('a')).then(value => { done = true; return value })
@@ -543,7 +538,7 @@ describe('owned session discovery', () => {
   })
 
   it('honors caller cancellation after a late open, closes its handle, and keeps other inspections usable', async () => {
-    const f = fixture(), gate = deferred(), controller = new AbortController(); f.add('a')
+    const f = fixture(), gate = Promise.withResolvers<void>(), controller = new AbortController(); f.add('a')
     const open = f.open.getMockImplementation()!
     f.open.mockImplementationOnce(async (...args) => { const handle = await open(...args); await gate.promise; return handle })
     const request = f.discovery.inspect(SessionId('a'), { signal: controller.signal }), failed = request.catch(error => error)
@@ -580,7 +575,7 @@ describe('owned session discovery', () => {
   })
 
   it('cancels between pages, waits for an uncooperative read and close, and never projects the cancelled page', async () => {
-    const f = fixture(), gate = deferred(), closeGate = deferred(), controller = new AbortController()
+    const f = fixture(), gate = Promise.withResolvers<void>(), closeGate = Promise.withResolvers<void>(), controller = new AbortController()
     f.add('a', '/work', Array.from({ length: 300 }, (_, seq) => title('value', seq)))
     const read = f.read.getMockImplementation()!
     f.read.mockImplementation(async (...args) => { if (args[1] === 256) await gate.promise; return read(...args) })
@@ -606,7 +601,7 @@ describe('owned session discovery', () => {
     f.close.mockRejectedValueOnce(cleanup)
     await expect(f.discovery.select(SessionId('a'), { end: SessionLogOffset(1) }, () => { throw failure }))
       .rejects.toMatchObject({ errors: [failure, cleanup] })
-    const gate = deferred(), controller = new AbortController()
+    const gate = Promise.withResolvers<void>(), controller = new AbortController()
     f.close.mockImplementationOnce(async () => gate.promise)
     const request = f.discovery.select(SessionId('a'), { end: SessionLogOffset(1), signal: controller.signal }, event => event.seq)
     const failed = request.catch(error => error)
@@ -626,7 +621,7 @@ describe('owned session discovery', () => {
   })
 
   it('cancels listing before any subsequent log open but waits for an uncooperative backend', async () => {
-    const f = fixture(), gate = deferred(); f.add('a')
+    const f = fixture(), gate = Promise.withResolvers<void>(); f.add('a')
     const list = f.list.getMockImplementation()!
     f.list.mockImplementationOnce(async options => { await gate.promise; return list(options) })
     const request = f.picker(), rejected = expect(request).rejects.toThrow('disposed')
@@ -640,7 +635,7 @@ describe('owned session discovery', () => {
   })
 
   it('closes a late open without reading it and waits for its asynchronous close', async () => {
-    const f = fixture(), openGate = deferred(), closeGate = deferred(); f.add('a')
+    const f = fixture(), openGate = Promise.withResolvers<void>(), closeGate = Promise.withResolvers<void>(); f.add('a')
     const open = f.open.getMockImplementation()!
     f.open.mockImplementationOnce(async (...args) => { const handle = await open(...args); await openGate.promise; return handle })
     f.close.mockImplementationOnce(async () => closeGate.promise)
@@ -652,7 +647,7 @@ describe('owned session discovery', () => {
   })
 
   it('drains sibling and queued inspections after the parent list already rejected', async () => {
-    const f = fixture(), gate = deferred(), failure = new Error('first read failed')
+    const f = fixture(), gate = Promise.withResolvers<void>(), failure = new Error('first read failed')
     for (let i = 0; i < 12; i++) f.add(String(i))
     const read = f.read.getMockImplementation()!
     f.read.mockImplementation(async id => { if (id === '0') throw failure; await gate.promise; return read(id) })
@@ -667,7 +662,7 @@ describe('owned session discovery', () => {
   })
 
   it('publishes one disposal before unsubscribe reentry and retains late cleanup errors', async () => {
-    const f = fixture('session discovery cleanup failed'), gate = deferred(); f.add('a')
+    const f = fixture('session discovery cleanup failed'), gate = Promise.withResolvers<void>(); f.add('a')
     const unsubscribe = new Error('unsubscribe failed'), createdFeed = new Error('creation unsubscribe failed'), close = new Error('close failed')
     f.read.mockImplementationOnce(async () => { await gate.promise; return { events: [], eventState: 'owned' } })
     f.close.mockRejectedValueOnce(close)
@@ -686,7 +681,7 @@ describe('owned session discovery', () => {
   })
 
   it('owns pending search and guards reentrant native getters before starting work', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers<void>()
     f.query.mockImplementationOnce(async () => { await gate.promise; return { items: [] } })
     const request = f.discovery.search({ query: 'query' }), rejected = expect(request).rejects.toThrow('disposed')
     await tick(); let done = false; const disposal = f.discovery.dispose().then(() => { done = true })

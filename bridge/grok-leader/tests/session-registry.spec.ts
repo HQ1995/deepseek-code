@@ -4,11 +4,6 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { createSessionRegistry, type OwnedSession } from '../src/session-registry.ts'
 import { createSessionWork } from '../src/session-work.ts'
 
-function deferred<T>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>(yes => { resolve = yes })
-  return { promise, resolve }
-}
 function fixture() {
   const live = new Set([1, 2])
   const flush = vi.fn(async (_session: Agent['session']) => {})
@@ -29,7 +24,7 @@ function fixture() {
 
 describe('owned session registry', () => {
   it('withdraws and aborts immediately but waits for native work before final flush and disposal', async () => {
-    const f = fixture(), record = f.record(), gate = deferred<void>(), entered = vi.fn()
+    const f = fixture(), record = f.record(), gate = Promise.withResolvers<void>(), entered = vi.fn()
     const work = createSessionWork({ isLive: () => f.registry.acceptsInput(record), assertReady: () => f.registry.assertReady(record) })
     record.work = work
     await f.registry.publish(record.agent.session.id, record)
@@ -47,7 +42,7 @@ describe('owned session registry', () => {
   })
 
   it('reload aborts old native work, settles it before capture, and permits new work after failed flush', async () => {
-    const f = fixture(), record = f.record(), gate = deferred<void>(), mutation = vi.fn()
+    const f = fixture(), record = f.record(), gate = Promise.withResolvers<void>(), mutation = vi.fn()
     const work = createSessionWork({ isLive: () => f.registry.acceptsInput(record), assertReady: () => f.registry.assertReady(record) })
     record.work = work
     await f.registry.publish(record.agent.session.id, record)
@@ -66,7 +61,7 @@ describe('owned session registry', () => {
   })
 
   it('does not skip native settlement when a parallel model settlement fails', async () => {
-    const f = fixture(), record = f.record(), gate = deferred<void>(), model = new Error('model settle failed')
+    const f = fixture(), record = f.record(), gate = Promise.withResolvers<void>(), model = new Error('model settle failed')
     const work = createSessionWork({ isLive: () => f.registry.acceptsInput(record), assertReady: () => f.registry.assertReady(record) })
     record.work = work
     await f.registry.publish(record.agent.session.id, record)
@@ -81,7 +76,7 @@ describe('owned session registry', () => {
   })
 
   it.each(['prompt', 'requests', 'work'])('reload attempts every cancellation and drains before reopening after a %s cancellation failure', async failure => {
-    const f = fixture(), record = f.record(), gate = deferred<void>(), modelGate = deferred<void>(), mutation = vi.fn()
+    const f = fixture(), record = f.record(), gate = Promise.withResolvers<void>(), modelGate = Promise.withResolvers<void>(), mutation = vi.fn()
     const error = new Error(failure + ' cancellation failed')
     const work = createSessionWork({ isLive: () => f.registry.acceptsInput(record), assertReady: () => f.registry.assertReady(record) })
     record.work = work
@@ -123,7 +118,7 @@ describe('owned session registry', () => {
   })
 
   it('close waits for an in-flight reload flush before final flush and native disposal', async () => {
-    const f = fixture(), record = f.record(), flushEntered = deferred<void>(), flushGate = deferred<void>(), order: string[] = []
+    const f = fixture(), record = f.record(), flushEntered = Promise.withResolvers<void>(), flushGate = Promise.withResolvers<void>(), order: string[] = []
     await f.registry.publish(record.agent.session.id, record)
     f.flush.mockImplementationOnce(async () => { order.push('reload flush'); flushEntered.resolve(); await flushGate.promise; order.push('reload flushed') })
     f.flush.mockImplementation(async () => { order.push('close flush') })
@@ -162,7 +157,7 @@ describe('owned session registry', () => {
   })
 
   it('publishes the reload borrow before a cancellation callback can reenter close', async () => {
-    const f = fixture(), record = f.record(), modelGate = deferred<void>(), entered = deferred<void>()
+    const f = fixture(), record = f.record(), modelGate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
     await f.registry.publish(record.agent.session.id, record)
     let closing!: Promise<void>
     f.cancelRequests.mockImplementationOnce(() => { closing = f.registry.close(record) })
@@ -191,7 +186,7 @@ describe('owned session registry', () => {
   })
 
   it('keeps async capture borrowed and input closed until capture resolves, then retires', async () => {
-    const f = fixture(), record = f.record(), gate = deferred<string>(), entered = deferred<void>()
+    const f = fixture(), record = f.record(), gate = Promise.withResolvers<string>(), entered = Promise.withResolvers<void>()
     await f.registry.publish(record.agent.session.id, record)
     const reload = f.registry.reload(record, async () => { entered.resolve(); return gate.promise })
     await entered.promise
@@ -213,7 +208,7 @@ describe('owned session registry', () => {
   })
 
   it('releases the reload borrow on flush failure while close retains its own cleanup failure', async () => {
-    const f = fixture(), record = f.record(), entered = deferred<void>(), gate = deferred<void>()
+    const f = fixture(), record = f.record(), entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>()
     const reloadError = new Error('reload storage failure'), closeError = new Error('close storage failure')
     await f.registry.publish(record.agent.session.id, record)
     f.flush.mockImplementationOnce(async () => { entered.resolve(); await gate.promise; throw reloadError })
@@ -232,7 +227,7 @@ describe('owned session registry', () => {
   })
 
   it('drains an accepted operation that synchronously starts shutdown', async () => {
-    const f = fixture(), gate = deferred<void>(), entered = deferred<void>()
+    const f = fixture(), gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
     let shutdown!: Promise<void>, done = false
     const operation = f.registry.operation(1, async () => {
       shutdown = f.registry.dispose()
@@ -261,7 +256,7 @@ describe('owned session registry', () => {
   })
 
   it('clears timers, withdraws ownership immediately and reserves the retiring id until close completes', async () => {
-    const f = fixture(), a = f.record(), gate = deferred<void>()
+    const f = fixture(), a = f.record(), gate = Promise.withResolvers<void>()
     const fired = vi.fn()
     a.mcpInitTimer = setTimeout(fired, 10)
     f.flush.mockImplementationOnce(() => gate.promise)
@@ -284,7 +279,7 @@ describe('owned session registry', () => {
   })
 
   it('drains bridge input and flushes before the owned disposer without taking over its driver', async () => {
-    const f = fixture(), a = f.record(), input = deferred<void>(), order: string[] = []
+    const f = fixture(), a = f.record(), input = Promise.withResolvers<void>(), order: string[] = []
     a.queue.dispose = async () => { order.push('cancel'); await input.promise; order.push('input drained') }
     f.flush.mockImplementation(async () => { order.push('flush') })
     a.dispose = async () => { order.push('dispose agent') }
@@ -297,7 +292,7 @@ describe('owned session registry', () => {
   })
 
   it('waits for agent idle and reads the final log before disposal when replacing a session', async () => {
-    const f = fixture(), a = f.record(), idle = deferred<void>(), order: string[] = []
+    const f = fixture(), a = f.record(), idle = Promise.withResolvers<void>(), order: string[] = []
     a.agent.whenIdle = () => idle.promise
     f.flush.mockImplementation(async () => { order.push('flush') })
     a.dispose = async () => { order.push('dispose agent') }
@@ -322,7 +317,7 @@ describe('owned session registry', () => {
   })
 
   it('registers retirement before queue disposal can reenter shutdown', async () => {
-    const f = fixture(), a = f.record(), gate = deferred<void>()
+    const f = fixture(), a = f.record(), gate = Promise.withResolvers<void>()
     let shutdown!: Promise<void>, reentered!: Promise<void>, done = false
     a.queue.dispose = async () => {
       reentered = f.registry.close(a)
@@ -355,7 +350,7 @@ describe('owned session registry', () => {
   })
 
   it('blocks input while draining reload work, retains read ownership, and reopens admission after failure', async () => {
-    const f = fixture(), a = f.record(), gate = deferred<void>(), order: string[] = []
+    const f = fixture(), a = f.record(), gate = Promise.withResolvers<void>(), order: string[] = []
     await f.registry.publish(a.agent.session.id, a)
     f.flush.mockImplementationOnce(async () => { order.push('flush'); throw new Error('offline') })
     const reload = f.registry.reload(a, () => {}, async () => { order.push('settle'); await gate.promise })
@@ -373,7 +368,7 @@ describe('owned session registry', () => {
   })
 
   it('does not touch the native driver if close wins while reload settles accepted writes', async () => {
-    const f = fixture(), a = f.record(), gate = deferred<void>()
+    const f = fixture(), a = f.record(), gate = Promise.withResolvers<void>()
     await f.registry.publish(a.agent.session.id, a)
     const reload = f.registry.reload(a, () => {}, () => gate.promise)
     const failure = expect(reload).rejects.toThrow('session closed')
@@ -402,7 +397,7 @@ describe('owned session registry', () => {
   })
 
   it('closes admission immediately and waits for a late accepted creator to clean up', async () => {
-    const f = fixture(), gate = deferred<void>(), a = f.record()
+    const f = fixture(), gate = Promise.withResolvers<void>(), a = f.record()
     const creation = f.registry.operation(1, async () => { await gate.promise; await f.registry.publish(a.agent.session.id, a) })
     const rejected = expect(creation).rejects.toThrow('leader closed')
     const shutdown = f.registry.dispose()
@@ -432,7 +427,7 @@ describe('owned session registry', () => {
   })
 
   it('reports a late creator cleanup failure in the shutdown result', async () => {
-    const f = fixture(), gate = deferred<void>(), late = f.record()
+    const f = fixture(), gate = Promise.withResolvers<void>(), late = f.record()
     late.dispose = vi.fn(async () => { throw new Error('late cleanup failure') })
     const operation = f.registry.operation(1, async () => { await gate.promise; await f.registry.publish(late.agent.session.id, late) })
     const failedOperation = expect(operation).rejects.toThrow('late cleanup failure')

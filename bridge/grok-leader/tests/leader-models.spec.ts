@@ -1,5 +1,4 @@
 /** Leader socket spec: leader model catalog and selection. */
-import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { collectIds, collidingLlm, mockDefaultModel, mockSessionsStore, register, sendRequest, useLeaderHarness, waitFor } from './support/leader-harness.ts'

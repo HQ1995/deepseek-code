@@ -5,11 +5,6 @@ import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { createSessionPresets, type AgentPresetsLike } from '../src/session-presets.ts'
 import { presetHistory } from '../src/preset-history.ts'
 
-function deferred<T = void>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>(yes => { resolve = yes })
-  return { promise, resolve }
-}
 const event = (type: string, data: unknown = {}) => ({ type, data, seq: 0, time: 0 }) as SessionEvent
 function fixture() {
   const order: string[] = [], sessions = new Map<string, { clientId: number; agent: Agent; queue: { busy: boolean } }>()
@@ -188,7 +183,7 @@ describe('session preset ownership', () => {
   })
 
   it('reserves a transition before async lookup and isolates simultaneous sessions', async () => {
-    const f = fixture(), a = f.add('a'), b = f.add('b'), lookup = deferred<void>()
+    const f = fixture(), a = f.add('a'), b = f.add('b'), lookup = Promise.withResolvers<void>()
     f.roster.resolve.mockImplementationOnce(async () => { await lookup.promise; return { id: 'minimal', name: 'Minimal', trust: 'system' } })
     const first = f.presets.command(a.record, '/preset minimal')
     expect(() => f.presets.assertReady(a.record)).toThrow('in progress')
@@ -200,7 +195,7 @@ describe('session preset ownership', () => {
   })
 
   it('does not recompose a retired owner after lookup and drains the accepted request', async () => {
-    const f = fixture(), { record } = f.add(), lookup = deferred<void>()
+    const f = fixture(), { record } = f.add(), lookup = Promise.withResolvers<void>()
     f.roster.resolve.mockImplementationOnce(async () => { await lookup.promise; return { id: 'minimal', name: 'Minimal', trust: 'system' } })
     const work = f.presets.command(record, '/preset minimal'), outcome = expect(work).rejects.toThrow('session closed')
     f.sessions.delete('root')
@@ -213,7 +208,7 @@ describe('session preset ownership', () => {
 
   it('rolls back a completed recompose if the owner closes or a native turn starts during it', async () => {
     for (const retire of [true, false]) {
-      const f = fixture(), { record, ctx, events } = f.add(), gate = deferred<void>()
+      const f = fixture(), { record, ctx, events } = f.add(), gate = Promise.withResolvers<void>()
       f.roster.recompose.mockImplementationOnce(async (ctx, id) => { f.choices.set(ctx, id); await gate.promise })
       const work = f.presets.command(record, '/preset minimal')
       const outcome = expect(work).rejects.toThrow(retire ? 'session closed' : 'produced history')
@@ -225,7 +220,7 @@ describe('session preset ownership', () => {
   })
 
   it('drains a default write accepted before reentrant shutdown and emits no late success', async () => {
-    const f = fixture(), { record } = f.add(), gate = deferred<void>()
+    const f = fixture(), { record } = f.add(), gate = Promise.withResolvers<void>()
     let disposal: Promise<void> | undefined, retirement: Promise<void> | undefined, stopped = false
     f.settings.mutate.mockImplementationOnce(async () => {
       f.sessions.delete('root')
@@ -242,7 +237,7 @@ describe('session preset ownership', () => {
   })
 
   it('drains mounting and rejects late preparation after global disposal', async () => {
-    const f = fixture(), lookup = deferred<void>(), mount = deferred<void>()
+    const f = fixture(), lookup = Promise.withResolvers<void>(), mount = Promise.withResolvers<void>()
     const prepared = await f.presets.prepare({ kind: 'new' })
     f.roster.mount.mockImplementationOnce(async () => { await mount.promise })
     const mounting = prepared.mount!(new Context()), mountOutcome = expect(mounting).rejects.toThrow('disposed')
@@ -273,7 +268,7 @@ describe('session preset ownership', () => {
   })
 
   it('drains an accepted copy but skips follow-up roster reads once its owner closes', async () => {
-    const f = fixture(), { record } = f.add(), gate = deferred<void>()
+    const f = fixture(), { record } = f.add(), gate = Promise.withResolvers<void>()
     f.roster.copy.mockImplementationOnce(async () => { await gate.promise })
     const copy = f.presets.controls(1, { sessionId: 'root', action: 'copy', from: 'standard', id: 'mine' })
     const outcome = expect(copy).rejects.toThrow('session closed')

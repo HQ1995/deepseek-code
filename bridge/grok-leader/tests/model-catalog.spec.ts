@@ -3,12 +3,6 @@ import { createModelCatalog, type ModelCatalogDependencies } from '../src/model-
 import type { LlmLike, SettingsLike } from '../src/native-seams.ts'
 import { modelEffortKey } from '../src/wire-catalog.ts'
 
-const deferred = <T>() => {
-  let resolve!: (value: T) => void
-  let reject!: (error: unknown) => void
-  const promise = new Promise<T>((done, failed) => { resolve = done; reject = failed })
-  return { promise, resolve, reject }
-}
 const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
 
 function fixture() {
@@ -94,7 +88,7 @@ describe('model catalog module', () => {
   })
 
   it('owns background discovery before its native callback can reenter shutdown', async () => {
-    const f = fixture(), discovery = deferred<Array<{ id: string }>>()
+    const f = fixture(), discovery = Promise.withResolvers<Array<{ id: string }>>()
     f.routes.beta = { api: 'openai-completions', baseURL: 'https://fixture.invalid/v1', models: [{ id: 'shared' }] }
     let closing!: Promise<void>, finished = false
     f.llm.discoverModels = vi.fn(() => {
@@ -129,8 +123,8 @@ describe('model catalog module', () => {
   })
 
   it('drains the complete accepted credential, fallback route write and cleanup sequence during shutdown', async () => {
-    const f = fixture(), credentials = f.deps.getCredentials()!, discovery = deferred<Array<{ id: string }>>()
-    const persist = deferred<void>(), cleanup = deferred<void>(), mutate = f.settings.mutate
+    const f = fixture(), credentials = f.deps.getCredentials()!, discovery = Promise.withResolvers<Array<{ id: string }>>()
+    const persist = Promise.withResolvers<void>(), cleanup = Promise.withResolvers<void>(), mutate = f.settings.mutate
     f.routes.custom = { apiKeyEnv: 'OLD_KEY' }; f.stored.set('OLD_KEY', 'old-fixture')
     const unset = vi.fn(async (ref: string) => { await cleanup.promise; await credentials.unset!(ref) })
     const catalog = createModelCatalog({ ...f.deps, getCredentials: () => ({ ...credentials, unset }) })
@@ -155,7 +149,7 @@ describe('model catalog module', () => {
   })
 
   it('shares one drain when the first credential write synchronously reenters disposal', async () => {
-    const f = fixture(), gate = deferred<void>(), credentials = f.deps.getCredentials()!
+    const f = fixture(), gate = Promise.withResolvers<void>(), credentials = f.deps.getCredentials()!
     let closing!: Promise<void>, finished = false
     const set = vi.fn(async (ref: string, value: string) => {
       closing = catalog.dispose(); void closing.then(() => { finished = true })
@@ -171,7 +165,7 @@ describe('model catalog module', () => {
   })
 
   it('preserves a native write failure during shutdown without issuing the route write', async () => {
-    const f = fixture(), gate = deferred<void>(), credentials = f.deps.getCredentials()!, primary = new Error('credential storage failure')
+    const f = fixture(), gate = Promise.withResolvers<void>(), credentials = f.deps.getCredentials()!, primary = new Error('credential storage failure')
     const catalog = createModelCatalog({ ...f.deps, getCredentials: () => ({ ...credentials, set: () => gate.promise }) })
     const request = catalog.add({ id: 'held', apiKey: 'fixture-only' }), rejected = expect(request).rejects.toBe(primary)
     const closing = catalog.dispose(); gate.reject(primary)
@@ -181,7 +175,7 @@ describe('model catalog module', () => {
   })
 
   it('keeps parallel native reads owned after a sibling causes a fail-fast refresh rejection', async () => {
-    const f = fixture(), held = deferred<Array<{ id: string; name: string }>>(), primary = new Error('first provider failed')
+    const f = fixture(), held = Promise.withResolvers<Array<{ id: string; name: string }>>(), primary = new Error('first provider failed')
     f.llm.listModels = vi.fn(async provider => { if (provider === 'alpha') throw primary; return held.promise })
     await expect(f.catalog.refresh()).rejects.toBe(primary)
     const closing = f.catalog.dispose(); let finished = false
@@ -191,7 +185,7 @@ describe('model catalog module', () => {
   })
 
   it('drains removal through unshared credential cleanup and does not publish after close', async () => {
-    const f = fixture(), gate = deferred<void>(), credentials = f.deps.getCredentials()!
+    const f = fixture(), gate = Promise.withResolvers<void>(), credentials = f.deps.getCredentials()!
     f.routes.custom = { apiKeyEnv: 'CUSTOM_KEY' }; f.stored.set('CUSTOM_KEY', 'fixture-only')
     const unset = vi.fn(async (ref: string) => { await gate.promise; await credentials.unset!(ref) })
     const catalog = createModelCatalog({ ...f.deps, getCredentials: () => ({ ...credentials, unset }) })
@@ -205,7 +199,7 @@ describe('model catalog module', () => {
   })
 
   it('disposal waits for an already-accepted foreground credential write', async () => {
-    const f = fixture(), gate = deferred<void>(), credentials = f.deps.getCredentials()!
+    const f = fixture(), gate = Promise.withResolvers<void>(), credentials = f.deps.getCredentials()!
     const set = vi.fn(async (ref: string, value: string) => { await gate.promise; await credentials.set(ref, value) })
     const catalog = createModelCatalog({ ...f.deps, getCredentials: () => ({ ...credentials, set }) })
     const request = catalog.add({ id: 'held', apiKey: 'fixture-only' }).catch(error => error)
@@ -219,7 +213,7 @@ describe('model catalog module', () => {
   })
 
   it('disposal waits for an already-accepted background catalog persistence write', async () => {
-    const f = fixture(), gate = deferred<void>(), mutate = f.settings.mutate
+    const f = fixture(), gate = Promise.withResolvers<void>(), mutate = f.settings.mutate
     f.routes.beta = { api: 'openai-completions', baseURL: 'https://fixture.invalid/v1', models: [{ id: 'shared' }] }
     f.llm.discoverModels = vi.fn(async () => [{ id: 'discovered' }])
     f.settings.mutate = vi.fn(async (...args) => { await gate.promise; await mutate(...args) })
@@ -321,7 +315,7 @@ describe('model catalog module', () => {
   })
 
   it('resolves secrets only for persisted endpoints and deduplicates background discovery', async () => {
-    const f = fixture(), discovery = deferred<Array<{ id: string }>>()
+    const f = fixture(), discovery = Promise.withResolvers<Array<{ id: string }>>()
     f.routes.beta = { api: 'openai-completions', baseURL: 'https://fixture.invalid/v1', apiKeyEnv: 'FIXTURE_KEY', models: [{ id: 'shared' }] }
     f.stored.set('FIXTURE_KEY', 'fixture-secret')
     f.llm.discoverModels = vi.fn(() => discovery.promise)
@@ -352,7 +346,7 @@ describe('model catalog module', () => {
   })
 
   it('fences a discovery completing after disposal, without republishing or writing settings', async () => {
-    const f = fixture(), discovery = deferred<Array<{ id: string }>>()
+    const f = fixture(), discovery = Promise.withResolvers<Array<{ id: string }>>()
     f.routes.beta = { api: 'openai-completions', baseURL: 'https://fixture.invalid/v1', models: [{ id: 'shared' }] }
     f.llm.discoverModels = vi.fn(() => discovery.promise)
     await f.catalog.initialize()
@@ -367,7 +361,7 @@ describe('model catalog module', () => {
   })
 
   it('does not resurrect the cached catalog when a foreground refresh completes after disposal', async () => {
-    const f = fixture(), models = deferred<Array<{ id: string; name: string }>>()
+    const f = fixture(), models = Promise.withResolvers<Array<{ id: string; name: string }>>()
     f.llm.listModels = () => models.promise
     const pending = f.catalog.refresh()
     f.catalog.dispose()

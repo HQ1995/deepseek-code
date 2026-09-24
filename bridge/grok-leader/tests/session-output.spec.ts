@@ -12,12 +12,6 @@ const assistantEvent = (seq: number, body: string, usage = { inputTokens: 10, ou
   turn: 0, step: 0, usage, stream: [], message: { role: 'assistant', content: [{ type: 'text', text: body }] },
 })
 const imageEvent = (seq: number) => event(seq, 'tool/ptc-dispatch', { subCallId: 'image-' + seq, name: 'read', content: [{ type: 'image', mimeType: 'image/png', data: 'fixture' }] })
-function deferred<T>() {
-  let resolve!: (value: T) => void
-  let reject!: (error: unknown) => void
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
-  return { promise, resolve, reject }
-}
 function fixture() {
   let live = true, promptId: string | undefined = 'prompt'
   let values: ContextProjectionValues = {}
@@ -57,7 +51,7 @@ describe('session output ownership', () => {
   })
 
   it('retains reentrant successors behind reserved history across slow-reader queue compaction', async () => {
-    const f = fixture(), held = deferred<void>()
+    const f = fixture(), held = Promise.withResolvers<void>()
     f.drain.mockImplementationOnce(() => { f.output.update(text('reentrant')); return held.promise })
     const replay = f.output.restore(Array.from({ length: 2500 }, (_, index) => assistantEvent(index, String(index))))
     await vi.waitFor(() => expect(f.content()).toEqual(['0']))
@@ -160,7 +154,7 @@ describe('session output ownership', () => {
   })
 
   it('serializes hydrated tool output ahead of later text and captures the accepting prompt', async () => {
-    const f = fixture(), image = deferred<ProjectedUpdate[]>()
+    const f = fixture(), image = Promise.withResolvers<ProjectedUpdate[]>()
     f.projectImages.mockImplementationOnce(() => image.promise)
     f.output.live(event(0, 'tool/result', { message: { role: 'tool', toolCallId: 'image', content: [{ type: 'image', attachment: {} }] } }))
     f.output.update(text('after image'))
@@ -173,7 +167,7 @@ describe('session output ownership', () => {
   })
 
   it('keeps delayed output stamped with the turn that accepted it', async () => {
-    const f = fixture(), image = deferred<ProjectedUpdate>()
+    const f = fixture(), image = Promise.withResolvers<ProjectedUpdate>()
     f.output.live(event(0, 'turn/start', { turn: 0 }, 1000))
     f.output.update(image.promise)
     f.output.live(event(1, 'turn/start', { turn: 1 }, 2000))
@@ -184,7 +178,7 @@ describe('session output ownership', () => {
   })
 
   it('keeps an asynchronous replay event ahead of a live successor', async () => {
-    const f = fixture(), image = deferred<ProjectedUpdate[]>()
+    const f = fixture(), image = Promise.withResolvers<ProjectedUpdate[]>()
     f.projectImages.mockImplementationOnce(() => image.promise)
     const replay = f.output.restore([imageEvent(0)])
     f.output.live(assistantEvent(1, 'new'))
@@ -196,7 +190,7 @@ describe('session output ownership', () => {
   })
 
   it('reserves the whole replay prefix before live events while hydrating one event at a time', async () => {
-    const f = fixture(), first = deferred<ProjectedUpdate[]>()
+    const f = fixture(), first = Promise.withResolvers<ProjectedUpdate[]>()
     f.projectImages.mockImplementationOnce(() => first.promise)
     f.projectImages.mockImplementationOnce(async () => [text('old two')])
     const replay = f.output.restore([imageEvent(0), imageEvent(1)])
@@ -210,7 +204,7 @@ describe('session output ownership', () => {
   })
 
   it('waits for replay socket drain without losing reserved history or overtaking a live successor', async () => {
-    const f = fixture(), held = deferred<void>()
+    const f = fixture(), held = Promise.withResolvers<void>()
     f.drain.mockImplementationOnce(() => held.promise)
     const replay = f.output.restore([assistantEvent(0, 'first'), assistantEvent(1, 'second')])
     f.output.live(assistantEvent(2, 'live'))
@@ -223,7 +217,7 @@ describe('session output ownership', () => {
   })
 
   it.each(['dispose', 'unpublish'])('drops late hydration after %s and cannot resurrect output', async action => {
-    const f = fixture(), pending = deferred<ProjectedUpdate>()
+    const f = fixture(), pending = Promise.withResolvers<ProjectedUpdate>()
     f.output.update(pending.promise)
     const drain = action === 'dispose' ? f.output.dispose() : (f.unpublish(), f.output.flush())
     pending.resolve(text('late')); await drain
@@ -232,7 +226,7 @@ describe('session output ownership', () => {
   })
 
   it('logs a failed projection and drains later output rather than stranding the queue', async () => {
-    const f = fixture(), pending = deferred<ProjectedUpdate>()
+    const f = fixture(), pending = Promise.withResolvers<ProjectedUpdate>()
     f.output.update(pending.promise); f.output.update(text('after failure'))
     pending.reject(new Error('preview unavailable'))
     await f.output.flush()
@@ -241,7 +235,7 @@ describe('session output ownership', () => {
   })
 
   it('observes a queued projection rejection immediately without overtaking the preceding output', async () => {
-    const f = fixture(), first = deferred<ProjectedUpdate>(), second = deferred<ProjectedUpdate>()
+    const f = fixture(), first = Promise.withResolvers<ProjectedUpdate>(), second = Promise.withResolvers<ProjectedUpdate>()
     f.output.update(first.promise); f.output.update(second.promise); f.output.update(text('last'))
     second.reject(new Error('second preview failed early'))
     // Give the runtime an unhandled-rejection checkpoint while the first

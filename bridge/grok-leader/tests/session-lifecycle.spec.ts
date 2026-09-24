@@ -11,11 +11,6 @@ import type { SessionModel } from '../src/session-models.ts'
 
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(stops.splice(0).map(stop => stop())) })
-function deferred<T = void>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>(yes => { resolve = yes })
-  return { promise, resolve }
-}
 const event = (type: string, data: unknown = {}, seq = 0) => ({ type, data, seq, time: 1 }) as SessionEvent
 function fixture() {
   const order: string[] = [], notify = vi.fn(), client = { closed: false, notify }
@@ -168,7 +163,7 @@ describe('session lifecycle ownership', () => {
   })
 
   it('reserves pinned ids across asynchronous native construction without blocking unrelated sessions', async () => {
-    const f = fixture(), gate = deferred(), create = f.agents.create.getMockImplementation()!
+    const f = fixture(), gate = Promise.withResolvers<void>(), create = f.agents.create.getMockImplementation()!
     f.agents.create.mockImplementationOnce(async options => { await gate.promise; return create(options) })
     const first = f.add()
     await vi.waitFor(() => expect(f.agents.create).toHaveBeenCalledTimes(1))
@@ -211,7 +206,7 @@ describe('session lifecycle ownership', () => {
   })
 
   it.each(['children', 'tasks'] as const)('keeps reads owned but input blocked until %s replay completes, then publishes readiness', async view => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers<void>()
     f.views[view].mockImplementationOnce(() => gate.promise)
     let completed = false
     const creation = f.add().then(record => { completed = true; return record })
@@ -250,7 +245,7 @@ describe('session lifecycle ownership', () => {
   })
 
   it.each(['children', 'tasks'] as const)('does not acknowledge or arm a timer when the client closes during %s initialization', async view => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers<void>()
     f.views[view].mockImplementationOnce(() => gate.promise)
     const creation = f.add(), failure = expect(creation).rejects.toThrow('session closed during initialization')
     await vi.waitFor(() => expect(f.views[view]).toHaveBeenCalledOnce())
@@ -261,7 +256,7 @@ describe('session lifecycle ownership', () => {
   })
 
   it('drains pending task history and retains both errors when a sibling startup view fails', async () => {
-    const f = fixture(), gate = deferred(), sibling = new Error('commands failed'), reader = new Error('task history failed')
+    const f = fixture(), gate = Promise.withResolvers<void>(), sibling = new Error('commands failed'), reader = new Error('task history failed')
     f.views.tasks.mockImplementationOnce(record => record.work.read(async () => { await gate.promise; throw reader }))
     f.views.commands.mockImplementationOnce(() => { throw sibling })
     const creation = f.add(), rejected = expect(creation).rejects.toMatchObject({ errors: [sibling, reader] })
@@ -273,7 +268,7 @@ describe('session lifecycle ownership', () => {
   })
 
   it('drains late native creators when their callback synchronously starts global shutdown', async () => {
-    const f = fixture(), gate = deferred(), create = f.agents.create.getMockImplementation()!
+    const f = fixture(), gate = Promise.withResolvers<void>(), create = f.agents.create.getMockImplementation()!
     let shutdown: Promise<void> | undefined, stopped = false
     f.agents.create.mockImplementationOnce(async options => {
       shutdown = f.sessions.dispose(); void shutdown.then(() => { stopped = true })
@@ -301,7 +296,7 @@ describe('session lifecycle ownership', () => {
   })
 
   it('settles accepted model work before reload flush/capture while refusing new input, and reopens after failure', async () => {
-    const f = fixture(), record = await f.add(), gate = deferred()
+    const f = fixture(), record = await f.add(), gate = Promise.withResolvers<void>()
     vi.mocked(record.model.settle).mockImplementationOnce(async () => {
       await gate.promise
       record.agent.session.append('model/selection', { provider: 'changed', model: 'later' })
@@ -379,7 +374,7 @@ describe('session lifecycle ownership', () => {
   })
 
   it('fixes a live fork at its pre-flush cursor even when the source appends during storage work', async () => {
-    const f = fixture(), source = await f.add(), gate = deferred()
+    const f = fixture(), source = await f.add(), gate = Promise.withResolvers<void>()
     source.agent.session.append('session/title', { title: 'captured' })
     vi.spyOn(source.agent.session, 'snapshotEvents').mockImplementation(() => { throw new Error('no live history reads') })
     const flush = f.flush.getMockImplementation()!
@@ -407,7 +402,7 @@ describe('session lifecycle ownership', () => {
   })
 
   it.each(['load', 'fork', 'points'] as const)('cancels a %s storage read on close but drains its real read and handle cleanup', async kind => {
-    const f = fixture(), source = await f.add(), readGate = deferred(), closeGate = deferred()
+    const f = fixture(), source = await f.add(), readGate = Promise.withResolvers<void>(), closeGate = Promise.withResolvers<void>()
     source.agent.session.append('session/title', { title: 'read required' })
     const read = f.read.getMockImplementation()!
     f.read.mockImplementationOnce(async (...args) => { await readGate.promise; return read(...args) })
@@ -451,7 +446,7 @@ describe('session lifecycle ownership', () => {
   })
 
   it('excludes prompts appended during a rewind-point flush and rejects foreign owners before I/O', async () => {
-    const f = fixture(), source = await f.add(), gate = deferred()
+    const f = fixture(), source = await f.add(), gate = Promise.withResolvers<void>()
     source.agent.session.append('user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: 'captured' }] })
     await expect(f.lifecycle.points(2, { sessionId: 'root' })).rejects.toThrow('unknown session')
     expect(f.flush).not.toHaveBeenCalled(); expect(f.read).not.toHaveBeenCalled()

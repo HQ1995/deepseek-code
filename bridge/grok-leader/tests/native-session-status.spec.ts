@@ -5,11 +5,6 @@ import { createNativeSessionStatus, type NativeStatusProjections } from '../src/
 import type { NativeGoalView } from '../src/projection.ts'
 import { createSessionWork } from '../src/session-work.ts'
 
-function deferred<T>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>(yes => { resolve = yes })
-  return { promise, resolve }
-}
 function fixture() {
   const listeners = new Map<string, (...args: never[]) => void>()
   const stops: Array<ReturnType<typeof vi.fn>> = []
@@ -165,7 +160,7 @@ describe('native session status ownership', () => {
   })
 
   it('aborts withdrawn ownership and rejects late success without cancelling other sessions', async () => {
-    const f = fixture(), held = deferred<never>()
+    const f = fixture(), held = Promise.withResolvers<never>()
     f.execute.mockImplementationOnce(async () => held.promise)
     const work = f.command()
     const rejected = expect(work).rejects.toThrow('session closed')
@@ -182,7 +177,7 @@ describe('native session status ownership', () => {
   })
 
   it('drains a command even when native execution reenters disposal before yielding', async () => {
-    const f = fixture(), held = deferred<never>(), entered = deferred<void>()
+    const f = fixture(), held = Promise.withResolvers<never>(), entered = Promise.withResolvers<void>()
     let disposal!: Promise<void>, drained = false
     f.execute.mockImplementationOnce(async (_agent, _line, _images, signal) => {
       disposal = f.status.dispose()
@@ -204,7 +199,7 @@ describe('native session status ownership', () => {
   })
 
   it('attempts every unsubscribe and drains accepted commands despite cleanup failure', async () => {
-    const f = fixture(), held = deferred<never>()
+    const f = fixture(), held = Promise.withResolvers<never>()
     f.execute.mockImplementationOnce(async () => held.promise)
     const work = f.command(), rejected = expect(work).rejects.toThrow('session closed')
     await vi.waitFor(() => expect(f.execute).toHaveBeenCalledTimes(1))

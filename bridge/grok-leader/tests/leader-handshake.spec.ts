@@ -2,7 +2,6 @@
 import { statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import { makeHarness, mockSessionsStore, mockVisionLlm, packageVersion, register, useLeaderHarness, waitFor } from './support/leader-harness.ts'
 
 describe('leader handshake, registration and socket contract', () => {

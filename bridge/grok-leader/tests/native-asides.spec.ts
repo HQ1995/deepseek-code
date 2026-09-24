@@ -6,11 +6,6 @@ import { createNativeAsides, type NativeAsideRuntime } from '../src/native-aside
 import { createSessionWork } from '../src/session-work.ts'
 
 const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
-function deferred<T>() {
-  let resolve!: (value: T) => void, reject!: (error: unknown) => void
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
-  return { promise, resolve, reject }
-}
 const answer = (text = 'answer'): SubagentResult => ({ output: [{ type: 'text', text }], stopReason: 'completed' })
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { for (const stop of stops.splice(0)) await stop() })
@@ -97,7 +92,7 @@ describe('one-shot native aside ownership', () => {
   })
 
   it('preserves result and disposal failures and releases a normal run exactly once', async () => {
-    const f = fixture(), result = deferred<SubagentResult>(), primary = new Error('native result'), cleanup = new Error('native disposal')
+    const f = fixture(), result = Promise.withResolvers<SubagentResult>(), primary = new Error('native result'), cleanup = new Error('native disposal')
     f.runtime.start.mockResolvedValueOnce({ ...f.run, result: result.promise, dispose: vi.fn(async () => { throw cleanup }) })
     const request = f.btw(), caught = request.catch(error => error)
     result.reject(primary)
@@ -105,7 +100,7 @@ describe('one-shot native aside ownership', () => {
   })
 
   it.each(['session', 'module'])('starts disposal while a returned result is pending on %s cancellation and drains real cleanup', async owner => {
-    const f = fixture(), result = deferred<SubagentResult>(), gate = deferred<void>()
+    const f = fixture(), result = Promise.withResolvers<SubagentResult>(), gate = Promise.withResolvers<void>()
     const dispose = vi.fn(async () => { await gate.promise })
     f.runtime.start.mockResolvedValueOnce({ ...f.run, result: result.promise, dispose })
     const request = f.btw(), caught = request.catch(error => error)
@@ -125,7 +120,7 @@ describe('one-shot native aside ownership', () => {
   })
 
   it('adopts a late handle after close and drains disposal without waiting for its result', async () => {
-    const f = fixture(), start = deferred<SubagentRun>(), result = deferred<SubagentResult>(), gate = deferred<void>()
+    const f = fixture(), start = Promise.withResolvers<SubagentRun>(), result = Promise.withResolvers<SubagentResult>(), gate = Promise.withResolvers<void>()
     const dispose = vi.fn(async () => { await gate.promise })
     f.runtime.start.mockReturnValueOnce(start.promise)
     const request = f.btw(), rejected = expect(request).rejects.toThrow('session closed')
@@ -139,7 +134,7 @@ describe('one-shot native aside ownership', () => {
   })
 
   it('registers pending start before reentrant shutdown and preserves its failure', async () => {
-    const f = fixture(), start = deferred<SubagentRun>(), primary = new Error('failed start')
+    const f = fixture(), start = Promise.withResolvers<SubagentRun>(), primary = new Error('failed start')
     let closing!: Promise<void>, finished = false
     f.runtime.start.mockImplementationOnce(() => {
       closing = f.asides.dispose(); void closing.then(() => { finished = true }); return start.promise
@@ -152,7 +147,7 @@ describe('one-shot native aside ownership', () => {
   })
 
   it('does not publish an answer for a replacement owner and still releases the old child', async () => {
-    const f = fixture(), result = deferred<SubagentResult>()
+    const f = fixture(), result = Promise.withResolvers<SubagentResult>()
     f.runtime.start.mockResolvedValueOnce({ ...f.run, result: result.promise })
     const request = f.btw(), rejected = expect(request).rejects.toThrow('session closed')
     await tick(); f.replace(); result.resolve(answer()); await rejected
@@ -160,7 +155,7 @@ describe('one-shot native aside ownership', () => {
   })
 
   it('finishes cancellation only after disposal even if the result never settles, observing a later rejection', async () => {
-    const f = fixture(), result = deferred<SubagentResult>(), gate = deferred<void>()
+    const f = fixture(), result = Promise.withResolvers<SubagentResult>(), gate = Promise.withResolvers<void>()
     const dispose = vi.fn(async () => { await gate.promise })
     f.runtime.start.mockResolvedValueOnce({ ...f.run, result: result.promise, dispose })
     const request = f.btw(), rejected = expect(request).rejects.toThrow('session closed')
@@ -171,7 +166,7 @@ describe('one-shot native aside ownership', () => {
   })
 
   it('shares one release when native disposal reenters module shutdown', async () => {
-    const f = fixture(), gate = deferred<void>()
+    const f = fixture(), gate = Promise.withResolvers<void>()
     let closing!: Promise<void>, finished = false
     const dispose = vi.fn(async () => {
       closing = f.asides.dispose(); void closing.then(() => { finished = true }); await gate.promise
@@ -191,7 +186,7 @@ describe('one-shot native aside ownership', () => {
   })
 
   it('retains cancellation and disposal errors without abandoning the drain', async () => {
-    const f = fixture(), result = deferred<SubagentResult>(), cleanup = new Error('cleanup failed')
+    const f = fixture(), result = Promise.withResolvers<SubagentResult>(), cleanup = new Error('cleanup failed')
     const dispose = vi.fn(async () => { throw cleanup })
     f.runtime.start.mockResolvedValueOnce({ ...f.run, result: result.promise, dispose })
     const request = f.btw(), caught = request.catch(error => error)
@@ -203,7 +198,7 @@ describe('one-shot native aside ownership', () => {
   })
 
   it('does not cancel a sibling run when releasing a completed aside', async () => {
-    const f = fixture(), result = deferred<SubagentResult>(), dispose = vi.fn(async () => {})
+    const f = fixture(), result = Promise.withResolvers<SubagentResult>(), dispose = vi.fn(async () => {})
     f.runtime.start.mockResolvedValueOnce({ ...f.run, result: result.promise, dispose })
     const held = f.btw(); await tick()
     await expect(f.btw()).resolves.toEqual({ result: { answer: 'answer' } })

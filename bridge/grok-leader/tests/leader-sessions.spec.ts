@@ -1,6 +1,5 @@
 /** Leader socket spec: leader session ownership, history and discovery. */
 import { randomUUID } from 'node:crypto'
-import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -622,6 +621,7 @@ describe('leader session ownership, history and discovery', () => {
         && params.update.content.text === 'seq zero replay'
         && params._meta?.isReplay === true
     })
+    await waitFor(seen)
   })
 
   it('replays every chunk a multi-block user/message event projects', async () => {

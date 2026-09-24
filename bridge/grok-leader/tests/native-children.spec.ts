@@ -8,11 +8,6 @@ import { createSessionWork } from '../src/session-work.ts'
 import { workflowProjection } from '../src/workflows.ts'
 
 type Row = { kind: 'child' | 'diagnostic'; id: string; mode: 'continuable' | 'one-shot'; label?: string; parentId?: string; activity?: 'running' | 'inactive' }
-function deferred<T>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>(yes => { resolve = yes })
-  return { promise, resolve }
-}
 function fixture() {
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
   const stops: Array<ReturnType<typeof vi.fn>> = []
@@ -95,7 +90,7 @@ afterEach(() => vi.useRealTimers())
 
 describe('native child/workflow ownership', () => {
   it('does not combine a pre-settlement history cut with post-settlement idle status', async () => {
-    const f = fixture(), child = f.add('child'), gate = deferred<void>()
+    const f = fixture(), child = f.add('child'), gate = Promise.withResolvers<void>()
     f.logs.get('child')!.push(
       { seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent,
       { seq: 1, time: 1001, type: 'turn/end', data: { turn: 0, reason: { kind: 'aborted' } } } as SessionEvent,
@@ -140,7 +135,7 @@ describe('native child/workflow ownership', () => {
   })
 
   it('cancels descendant listing with the session and host shutdown signals', async () => {
-    const f = fixture(), listing = deferred<Row[]>()
+    const f = fixture(), listing = Promise.withResolvers<Row[]>()
     let seen: AbortSignal | undefined
     f.service.listDescendants.mockImplementationOnce(async (_id, signal) => {
       seen = signal
@@ -177,7 +172,7 @@ describe('native child/workflow ownership', () => {
   })
 
   it('session cancellation prevents a delayed descendant lookup from mutating the same live owner', async () => {
-    const f = fixture(), child = f.add('child'), lookup = deferred<Row[]>()
+    const f = fixture(), child = f.add('child'), lookup = Promise.withResolvers<Row[]>()
     f.service.listDescendants.mockReturnValueOnce(lookup.promise)
     const command = f.command('/subagents queue child late')
     f.root.work.cancel()
@@ -200,7 +195,7 @@ describe('native child/workflow ownership', () => {
   })
 
   it('drains a history lookup that reenters disposal before its first await', async () => {
-    const f = fixture(), held = deferred<Row[]>(), entered = deferred<void>()
+    const f = fixture(), held = Promise.withResolvers<Row[]>(), entered = Promise.withResolvers<void>()
     let disposal!: Promise<void>, done = false
     f.service.listDescendants.mockImplementationOnce(async () => {
       disposal = f.children.dispose()
@@ -251,7 +246,7 @@ describe('native child/workflow ownership', () => {
 
   it('coalesces refreshes and stops discovery retries at the existing deadline', async () => {
     vi.useFakeTimers()
-    const f = fixture(), listing = deferred<Row[]>()
+    const f = fixture(), listing = Promise.withResolvers<Row[]>()
     f.service.listDescendants.mockImplementationOnce(() => listing.promise)
     const first = f.children.snapshot(f.root)
     await Promise.resolve()
@@ -347,7 +342,7 @@ describe('native child/workflow ownership', () => {
     f.projectImages.mockRejectedValueOnce(new Error('preview failed'))
     await expect(f.children.history(1, request)).rejects.toThrow('preview failed')
     expect(f.close).toHaveBeenCalledOnce()
-    const preview = deferred<ProjectedUpdate[]>()
+    const preview = Promise.withResolvers<ProjectedUpdate[]>()
     f.projectImages.mockImplementationOnce(() => preview.promise)
     const history = f.children.history(1, request)
     const rejected = expect(history).rejects.toThrow('session closed')
@@ -359,7 +354,8 @@ describe('native child/workflow ownership', () => {
   })
 
   it('fixes the live prefix before flush and only indexes new events on the next request', async () => {
-    const f = fixture(), child = f.add('child'), gate = deferred<void>()
+    const f = fixture(), gate = Promise.withResolvers<void>()
+    f.add('child')
     const events = f.logs.get('child')!
     events.push({ seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent)
     f.readers.get('child')!.mockImplementation(() => { throw new Error('no synchronous child reads') })
@@ -379,7 +375,7 @@ describe('native child/workflow ownership', () => {
   })
 
   it('serializes through cleanup and re-resolves a queued live child after it becomes cold', async () => {
-    const f = fixture(), child = f.add('child'), gate = deferred<void>()
+    const f = fixture(), child = f.add('child'), gate = Promise.withResolvers<void>()
     f.logs.get('child')!.push({ seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent)
     f.flush.mockImplementation(async () => { if (!f.agents.has(child.session.id)) throw new Error('not live in this store') })
     f.close.mockImplementationOnce(() => gate.promise)
@@ -414,7 +410,7 @@ describe('native child/workflow ownership', () => {
   })
 
   it.each(['open', 'read', 'close'])('cancels an uncooperative %s but drains the actual read handle before disposal', async phase => {
-    const f = fixture(), gate = deferred<void>(); f.add('child')
+    const f = fixture(), gate = Promise.withResolvers<void>(); f.add('child')
     f.logs.get('child')!.push({ seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent)
     const open = f.store.open.getMockImplementation()!, read = f.read.getMockImplementation()!
     if (phase === 'open') f.store.open.mockImplementationOnce(async (...args) => { await gate.promise; return open(...args) })
@@ -435,7 +431,7 @@ describe('native child/workflow ownership', () => {
   })
 
   it('cancels a live-owner read after flush without opening storage and accepts a fresh request', async () => {
-    const f = fixture(), gate = deferred<void>(); f.add('child')
+    const f = fixture(), gate = Promise.withResolvers<void>(); f.add('child')
     f.flush.mockImplementationOnce(() => gate.promise)
     const request = f.children.history(1, { sessionId: 'root', childSessionId: 'child' })
     const rejected = expect(request).rejects.toThrow('session closed')
@@ -447,7 +443,7 @@ describe('native child/workflow ownership', () => {
   })
 
   it('preserves read and close failures, including cleanup that finishes after disposal starts', async () => {
-    const f = fixture(), gate = deferred<void>(); f.add('child')
+    const f = fixture(), gate = Promise.withResolvers<void>(); f.add('child')
     f.logs.get('child')!.push({ seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent)
     const failure = new Error('read failed'), cleanup = new Error('close failed')
     f.read.mockRejectedValueOnce(failure)
@@ -460,7 +456,7 @@ describe('native child/workflow ownership', () => {
   })
 
   it('stops projecting subsequent images when the live owner cancels during an image read', async () => {
-    const f = fixture(), gate = deferred<ProjectedUpdate[]>(); f.add('child')
+    const f = fixture(), gate = Promise.withResolvers<ProjectedUpdate[]>(); f.add('child')
     for (let seq = 0; seq < 2; seq++) f.logs.get('child')!.push({ seq, time: 1000, type: 'tool/ptc-dispatch', data: {
       subCallId: `image-${seq}`, name: 'read', content: [{ type: 'image', mimeType: 'image/png', data: 'fixture' }],
     } } as unknown as SessionEvent)
@@ -474,7 +470,7 @@ describe('native child/workflow ownership', () => {
   })
 
   it('interrupts the latest exact attempt when a new turn starts while its history handle closes', async () => {
-    const f = fixture(), child = f.add('child'), gate = deferred<void>()
+    const f = fixture(), child = f.add('child'), gate = Promise.withResolvers<void>()
     f.logs.get('child')!.push({ seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent)
     f.readers.get('child')!.mockImplementation(() => { throw new Error('no synchronous interruption read') })
     f.close.mockImplementationOnce(() => gate.promise)
@@ -494,7 +490,7 @@ describe('native child/workflow ownership', () => {
   })
 
   it.each(['finished', 'replaced'])('does not interrupt a child that was %s during the storage read', async kind => {
-    const f = fixture(), child = f.add('child'), gate = deferred<void>()
+    const f = fixture(), child = f.add('child'), gate = Promise.withResolvers<void>()
     f.close.mockImplementationOnce(() => gate.promise)
     const request = f.children.cancel(1, { sessionId: 'root', subagentId: 'child' })
     await vi.waitFor(() => expect(f.close).toHaveBeenCalledOnce())
@@ -549,7 +545,7 @@ describe('native child/workflow ownership', () => {
   })
 
   it('drains an accepted refresh while suppressing late work and releasing every subscription', async () => {
-    const f = fixture(), listing = deferred<Row[]>()
+    const f = fixture(), listing = Promise.withResolvers<Row[]>()
     f.service.listDescendants.mockImplementationOnce(() => listing.promise)
     const refresh = f.children.snapshot(f.root)
     await Promise.resolve()

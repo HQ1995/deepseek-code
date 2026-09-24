@@ -1,11 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createLeaderLifecycle } from '../src/leader-lifecycle.ts'
 
-function deferred() {
-  let resolve!: () => void
-  const promise = new Promise<void>(yes => { resolve = yes })
-  return { promise, resolve }
-}
 const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
 const stops: Array<() => Promise<void>> = []
 beforeEach(() => { vi.useFakeTimers() })
@@ -44,7 +39,7 @@ describe('leader host lifecycle ownership', () => {
   })
 
   it('waits for both detached-session drain and every owner before requesting an idle exit', async () => {
-    const f = fixture(), detached = deferred(), owner = deferred()
+    const f = fixture(), detached = Promise.withResolvers<void>(), owner = Promise.withResolvers<void>()
     f.sessions.drain.mockReturnValueOnce(detached.promise); f.owners[0]!.dispose.mockReturnValueOnce(owner.promise)
     f.leader.start(); f.leader.disconnected(7)
     expect(f.sessions.disconnect).toHaveBeenCalledWith(7)
@@ -75,7 +70,7 @@ describe('leader host lifecycle ownership', () => {
   })
 
   it.each(['grace', 'drain'])('invalidates an idle exit when reconnecting during %s', async phase => {
-    const f = fixture(), gate = deferred(); f.leader.start()
+    const f = fixture(), gate = Promise.withResolvers<void>(); f.leader.start()
     if (phase === 'drain') f.sessions.drain.mockReturnValueOnce(gate.promise)
     f.leader.disconnected(1)
     if (phase === 'drain') await vi.advanceTimersByTimeAsync(20)
@@ -87,14 +82,14 @@ describe('leader host lifecycle ownership', () => {
   })
 
   it('manual disposal invalidates an idle callback already awaiting a detached drain', async () => {
-    const f = fixture(), gate = deferred(); f.sessions.drain.mockReturnValueOnce(gate.promise)
+    const f = fixture(), gate = Promise.withResolvers<void>(); f.sessions.drain.mockReturnValueOnce(gate.promise)
     f.leader.start(); f.leader.disconnected(1); await vi.advanceTimersByTimeAsync(20)
     await f.leader.dispose(); gate.resolve(); await tick()
     expect(f.exit).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0)
   })
 
   it('publishes one shutdown promise before native retirement can reenter disposal', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers<void>()
     let reentered: Promise<void> | undefined
     f.sessions.dispose.mockImplementationOnce(() => { reentered = f.leader.dispose(); return gate.promise })
     const closing = f.leader.dispose(); let finished = false
@@ -107,7 +102,7 @@ describe('leader host lifecycle ownership', () => {
   })
 
   it('attempts every cleanup after synchronous failures and drains the last owner', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers<void>()
     f.catalog.dispose.mockImplementationOnce(() => { throw new Error('catalog cleanup') })
     f.transport.close.mockImplementationOnce(() => { throw new Error('transport cleanup') })
     f.owners[0]!.dispose.mockImplementationOnce(() => { throw new Error('first cleanup') })
@@ -123,7 +118,7 @@ describe('leader host lifecycle ownership', () => {
   })
 
   it('retains asynchronous cleanup errors while waiting for a sibling drain', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers<void>()
     f.owners[0]!.dispose.mockRejectedValueOnce(new Error('owner rejected'))
     f.owners[1]!.dispose.mockReturnValueOnce(gate.promise)
     let finished = false; const closing = f.leader.dispose(); void closing.then(() => { finished = true })
@@ -142,7 +137,7 @@ describe('leader host lifecycle ownership', () => {
   })
 
   it('does not lose a pending catalog disposal or repeat reentrant transport cleanup', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers<void>()
     f.catalog.dispose.mockImplementationOnce(() => gate.promise)
     let reentered: Promise<void> | undefined
     f.transport.close.mockImplementationOnce(() => { reentered = f.leader.dispose() })
@@ -153,7 +148,7 @@ describe('leader host lifecycle ownership', () => {
   })
 
   it('keeps the fatal listener error authoritative after all cleanup and reuses the drain', async () => {
-    const f = fixture(), gate = deferred(), fatal = Object.assign(new Error('socket failed'), { code: 'EADDRINUSE' })
+    const f = fixture(), gate = Promise.withResolvers<void>(), fatal = Object.assign(new Error('socket failed'), { code: 'EADDRINUSE' })
     f.transport.failure = fatal; f.owners[0]!.dispose.mockReturnValueOnce(gate.promise)
     f.leader.failed(fatal)
     const closing = f.leader.dispose(), rejected = expect(closing).rejects.toBe(fatal)

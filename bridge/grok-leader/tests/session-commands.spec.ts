@@ -8,11 +8,6 @@ import { parsePrompt } from '../src/prompt-content.ts'
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(stops.splice(0).map(stop => stop())) })
 const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
-function deferred<T = void>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>(yes => { resolve = yes })
-  return { promise, resolve }
-}
 type TestSession = { agent: Agent; clientId: number; work: SessionWork; output: { update: ReturnType<typeof vi.fn> } }
 function fixture(disposalError?: string) {
   const sessions = new Map<SessionId, TestSession>(), events = new Map<string, () => void>(), unsubscribes: Array<ReturnType<typeof vi.fn>> = []
@@ -68,7 +63,7 @@ function fixture(disposalError?: string) {
 
 describe('owned session commands', () => {
   it('passes per-prompt cancellation to native commands and suppresses their late output', async () => {
-    const f = fixture(), gate = deferred<Awaited<ReturnType<NativeCommands['execute']>>>(), controller = new AbortController()
+    const f = fixture(), gate = Promise.withResolvers<Awaited<ReturnType<NativeCommands['execute']>>>(), controller = new AbortController()
     f.execute.mockReturnValueOnce(gate.promise)
     const params = { sessionId: 'one', _meta: { promptId: 'cancelled' } }
     const request = f.commands.execute(f.record, params, parsePrompt([{ type: 'text', text: '/build' }]), controller.signal)!
@@ -115,7 +110,7 @@ describe('owned session commands', () => {
   })
 
   it('owns unbound catalogs and waits for a roster that ignores shutdown', async () => {
-    const f = fixture(), gate = deferred<Array<{ id: string }>>()
+    const f = fixture(), gate = Promise.withResolvers<Array<{ id: string }>>()
     f.roster.mockImplementationOnce(() => gate.promise)
     const catalog = f.commands.catalog(), rejected = expect(catalog).rejects.toThrow('disposed')
     let done = false; const disposal = f.commands.dispose().then(() => { done = true })
@@ -127,7 +122,7 @@ describe('owned session commands', () => {
   })
 
   it('does not continue discovery after a cancelled session generation becomes usable again', async () => {
-    const f = fixture(), gate = deferred<Array<{ id: string }>>()
+    const f = fixture(), gate = Promise.withResolvers<Array<{ id: string }>>()
     f.roster.mockImplementationOnce(() => gate.promise)
     const catalog = f.commands.catalog(1, { sessionId: 'one' }), rejected = expect(catalog).rejects.toThrow('session closed')
     f.record.work.cancel(); gate.resolve([{ id: 'late' }]); await rejected
@@ -136,7 +131,7 @@ describe('owned session commands', () => {
   })
 
   it('coalesces changes during a slow roster read and never publishes the stale advertisement last', async () => {
-    const f = fixture(), gate = deferred<Awaited<ReturnType<NativeSkills['list']>>>(), entered = deferred()
+    const f = fixture(), gate = Promise.withResolvers<Awaited<ReturnType<NativeSkills['list']>>>(), entered = Promise.withResolvers<void>()
     f.list.mockReturnValue([{ name: 'old', description: 'old' }])
     f.skills.mockImplementationOnce(() => { entered.resolve(); return gate.promise })
     const first = f.commands.refresh(f.record); await entered.promise
@@ -252,7 +247,7 @@ describe('owned session commands', () => {
   })
 
   it('suppresses late profile progress and replies after a failed reload restores the same record', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers<void>()
     f.host.profile.execute.mockImplementationOnce(async (_text, notify) => { notify('before'); await gate.promise; notify('late'); return 'late result' })
     const result = f.request('/dsh plugins')!, rejected = expect(result).rejects.toThrow('session closed')
     f.record.work.cancel(); gate.resolve(); await rejected
@@ -261,7 +256,7 @@ describe('owned session commands', () => {
   })
 
   it('never lets a cancelled unknown native command become model fallback', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers<void>()
     f.execute.mockImplementationOnce(async () => { await gate.promise; return undefined })
     const result = f.request('/unknown')!, rejected = expect(result).rejects.toThrow('session closed')
     const signal = f.execute.mock.calls[0]![3]
@@ -270,7 +265,7 @@ describe('owned session commands', () => {
   })
 
   it('aborts native commands on disposal but waits for real completion and preserves native failure', async () => {
-    const f = fixture(), gate = deferred(), error = new Error('native failed')
+    const f = fixture(), gate = Promise.withResolvers<void>(), error = new Error('native failed')
     f.execute.mockImplementationOnce(async () => { await gate.promise; throw error })
     const result = f.request('/native')!, rejected = expect(result).rejects.toBe(error)
     let done = false; const disposal = f.commands.dispose().then(() => { done = true })

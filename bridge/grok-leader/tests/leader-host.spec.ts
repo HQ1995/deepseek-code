@@ -1,6 +1,5 @@
 /** Leader host lifecycle, shutdown drains and shipped bundle composition. */
 import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { Service } from '@deepseek-ai/cordis'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'

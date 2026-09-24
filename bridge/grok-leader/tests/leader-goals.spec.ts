@@ -1,5 +1,4 @@
 /** Leader socket spec: leader native goals. */
-import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'

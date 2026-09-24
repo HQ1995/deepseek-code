@@ -1,5 +1,4 @@
 /** Leader socket spec: leader commands, skills and runtime rails. */
-import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'

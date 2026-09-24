@@ -1,5 +1,4 @@
 /** Leader socket spec: leader prompt turns, content and usage. */
-import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'

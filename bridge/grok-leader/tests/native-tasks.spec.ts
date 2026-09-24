@@ -11,11 +11,6 @@ import { createNativeTasks } from '../src/native-tasks.ts'
 import { createSessionWork } from '../src/session-work.ts'
 
 type Job = { id: string; kind: string; label: string; owner: string; status: 'running' | 'stopping' | 'completed' | 'killed'; startedAt: number; finishedAt?: number }
-function deferred<T>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>(yes => { resolve = yes })
-  return { promise, resolve }
-}
 function fixture() {
   const sessions = new Map<SessionId, ReturnType<typeof session>>()
   function session(id: string, clientId = 1) {
@@ -80,7 +75,7 @@ function fixture() {
 
 describe('native task ownership', () => {
   it('session cancellation aborts a reminder and prevents the following list even if the owner is live again', async () => {
-    const f = fixture(), held = deferred<unknown>()
+    const f = fixture(), held = Promise.withResolvers<unknown>()
     let signal!: AbortSignal
     f.execute.mockImplementationOnce(request => { signal = (request as { signal: AbortSignal }).signal; return held.promise })
     const operation = f.tasks.reminders(1, 'x.ai/scheduler/create', { sessionId: 'owner', text: 'after 10m check build' })
@@ -95,7 +90,7 @@ describe('native task ownership', () => {
   })
 
   it('aborts and drains a reminder whose native executor synchronously starts disposal', async () => {
-    const f = fixture(), held = deferred<unknown>(), entered = deferred<void>()
+    const f = fixture(), held = Promise.withResolvers<unknown>(), entered = Promise.withResolvers<void>()
     let disposal!: Promise<void>, done = false, signal!: AbortSignal
     f.execute.mockImplementationOnce(async request => {
       signal = (request as { signal: AbortSignal }).signal
@@ -117,7 +112,7 @@ describe('native task ownership', () => {
   })
 
   it('drains an accepted producer settlement without issuing another kill during disposal', async () => {
-    const f = fixture(), row = f.job('one'), held = deferred<Job>()
+    const f = fixture(), row = f.job('one'), held = Promise.withResolvers<Job>()
     f.jobs.wait.mockImplementationOnce(() => held.promise)
     const work = f.tasks.kill(1, f.request('one'))
     const rejected = expect(work).rejects.toThrow('session closed')
@@ -187,7 +182,7 @@ describe('native task ownership', () => {
     await expect(f.tasks.kill(1, f.request('done'))).resolves.toMatchObject({ result: { outcome: 'already_exited' } })
     expect(f.jobs.kill).not.toHaveBeenCalled()
     await expect(f.tasks.kill(1, f.request('one'))).rejects.toThrow('producer has not settled')
-    const finish = deferred<Job>()
+    const finish = Promise.withResolvers<Job>()
     f.jobs.wait.mockImplementationOnce(() => finish.promise)
     const cancelled = f.tasks.kill(1, f.request('one'))
     expect(f.jobs.wait).toHaveBeenLastCalledWith('one', 5000, f.owner.agent.session.id)
@@ -198,7 +193,7 @@ describe('native task ownership', () => {
   })
 
   it('does not deliver a late cancellation result to a replaced owner', async () => {
-    const f = fixture(), row = f.job('one'), finish = deferred<Job>()
+    const f = fixture(), row = f.job('one'), finish = Promise.withResolvers<Job>()
     f.jobs.wait.mockImplementationOnce(() => finish.promise)
     const cancelled = f.tasks.kill(1, f.request('one'))
     f.add('owner')
@@ -339,7 +334,7 @@ describe('native task ownership', () => {
   })
 
   it('serializes observed cuts in order and recovers the queue after a failed read', async () => {
-    const f = fixture(), gate = deferred<void>(), record = createAfterScheduleRecord(ScheduleId('once'), 'check', 600, 1000)
+    const f = fixture(), gate = Promise.withResolvers<void>(), record = createAfterScheduleRecord(ScheduleId('once'), 'check', 600, 1000)
     f.append({ version: 1, operation: 'create', schedule: record })
     f.flush.mockImplementationOnce(() => gate.promise)
     const first = f.tasks.snapshot(f.owner)
@@ -359,7 +354,7 @@ describe('native task ownership', () => {
   })
 
   it.each(['owner', 'module'])('cancels and drains an uncooperative fallback read when the %s closes', async kind => {
-    const f = fixture(), gate = deferred<SessionEvent[]>()
+    const f = fixture(), gate = Promise.withResolvers<SessionEvent[]>()
     f.append({ version: 1, operation: 'create', schedule: createAfterScheduleRecord(ScheduleId('once'), 'check', 600, 1000) })
     f.select.mockImplementationOnce(() => gate.promise as never)
     const work = f.tasks.snapshot(f.owner), rejected = expect(work).rejects.toThrow('session closed')
@@ -375,7 +370,7 @@ describe('native task ownership', () => {
   })
 
   it('uses a newly available native state instead of publishing an older fallback', async () => {
-    const f = fixture(), gate = deferred<SessionEvent[]>(), id = ScheduleId('once')
+    const f = fixture(), gate = Promise.withResolvers<SessionEvent[]>(), id = ScheduleId('once')
     f.append({ version: 1, operation: 'create', schedule: createAfterScheduleRecord(id, 'stale', 600, 1000) })
     f.select.mockImplementationOnce(() => gate.promise as never)
     const work = f.tasks.snapshot(f.owner)
@@ -440,7 +435,7 @@ describe('native task ownership', () => {
   })
 
   it.each(['replaced', 'disposed'])('rejects late reminder results after the owner is %s', async action => {
-    const f = fixture(), finish = deferred<unknown>()
+    const f = fixture(), finish = Promise.withResolvers<unknown>()
     f.execute.mockImplementationOnce(() => finish.promise)
     const request = f.tasks.reminders(1, 'x.ai/scheduler/create', { sessionId: 'owner', text: 'after 1m check' })
     const disposal = action === 'disposed' ? f.tasks.dispose() : undefined

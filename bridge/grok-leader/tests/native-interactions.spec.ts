@@ -5,11 +5,6 @@ import { createNativeInteractions } from '../src/native-interactions.ts'
 
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(stops.splice(0).map(stop => stop())) })
-function deferred<T = unknown>() {
-  let resolve!: (value: T) => void, reject!: (reason: unknown) => void
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
-  return { promise, resolve, reject }
-}
 const allowed = { outcome: { outcome: 'selected', optionId: 'allow-once' } }
 function fixture() {
   const record = (id: string, clientId = 1) => ({ agent: { session: { id: SessionId(id) } } as Agent, clientId, yolo: false, queue: { cancel: vi.fn() }, work: { cancel: vi.fn() } })
@@ -85,7 +80,7 @@ describe('native interaction ownership', () => {
   })
 
   it('routes one-shot approvals to the exact owner and preserves unbounded human waits', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers()
     f.replies.mockReturnValue(gate.promise)
     const decision = f.approve()
     await vi.waitFor(() => expect(f.request).toHaveBeenCalledOnce())
@@ -170,7 +165,7 @@ describe('native interaction ownership', () => {
   })
 
   it('preserves native and cancellation failures while still cancelling pending answers', async () => {
-    const f = fixture(), gate = deferred(), native = new Error('native permission write failed'), queue = new Error('queue cancel failed')
+    const f = fixture(), gate = Promise.withResolvers(), native = new Error('native permission write failed'), queue = new Error('queue cancel failed')
     f.replies.mockReturnValue(gate.promise)
     const decision = f.approve()
     await vi.waitFor(() => expect(f.request).toHaveBeenCalledOnce())
@@ -221,7 +216,7 @@ describe('native interaction ownership', () => {
   })
 
   it('invalidates already-resolved replies on cancellation even when the same owner becomes usable again', async () => {
-    const f = fixture(), approval = deferred(), question = deferred()
+    const f = fixture(), approval = Promise.withResolvers(), question = Promise.withResolvers()
     f.replies.mockReturnValueOnce(approval.promise).mockReturnValueOnce(question.promise)
     const decision = f.approve(), answer = f.ask()
     const cancelled = expect(answer).rejects.toMatchObject({ code: 'ASK_CANCELLED' })
@@ -234,7 +229,7 @@ describe('native interaction ownership', () => {
   })
 
   it('rejects late answers for replacement agents and for disconnected owners', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers()
     f.replies.mockReturnValue(gate.promise)
     const decision = f.approve()
     await vi.waitFor(() => expect(f.request).toHaveBeenCalledOnce())
@@ -247,7 +242,7 @@ describe('native interaction ownership', () => {
   })
 
   it('cancels only the native request signal, leaving sibling and other-session approvals live', async () => {
-    const f = fixture(), abort = new AbortController(), gate = deferred()
+    const f = fixture(), abort = new AbortController(), gate = Promise.withResolvers()
     f.replies.mockReturnValue(gate.promise)
     const first = f.approve(f.root, abort.signal), sibling = f.approve(), other = f.approve(f.other)
     await vi.waitFor(() => expect(f.request).toHaveBeenCalledTimes(3))
@@ -263,7 +258,7 @@ describe('native interaction ownership', () => {
   })
 
   it('publishes accepted work before a request callback reenters disposal and stops every listener once', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers()
     let disposal: Promise<void> | undefined
     f.replies.mockImplementationOnce(() => { disposal = f.interactions.dispose(); return gate.promise })
     const decision = f.approve()
@@ -275,7 +270,7 @@ describe('native interaction ownership', () => {
   })
 
   it('drains pending questions and attempts all unsubscribe callbacks even when one throws', async () => {
-    const f = fixture(), gate = deferred()
+    const f = fixture(), gate = Promise.withResolvers()
     f.replies.mockReturnValue(gate.promise)
     const answer = f.ask(), cancelled = expect(answer).rejects.toMatchObject({ code: 'ASK_CANCELLED' })
     await vi.waitFor(() => expect(f.request).toHaveBeenCalledOnce())

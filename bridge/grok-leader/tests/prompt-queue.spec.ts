@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setImmediate } from 'node:timers/promises'
 import type { SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-session'
-import { createPromptQueues, credentialFix, type DurablePromptBlock, type PromptQueue, type PromptQueueHost } from '../src/prompt-queue.ts'
+import { createPromptQueues, credentialFix, type DurablePromptBlock, type PromptQueueHost } from '../src/prompt-queue.ts'
 
 describe('credential failures', () => {
   it('name dscode\'s fix instead of DSH\'s web page, and leave other failures alone', () => {
@@ -16,24 +16,18 @@ describe('credential failures', () => {
 
 const disposers: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(disposers.splice(0).map(dispose => dispose())) })
-function deferred<T>() {
-  let resolve!: (value: T) => void
-  let reject!: (error: unknown) => void
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
-  return { promise, resolve, reject }
-}
 type Snapshot = { seq: number; entries: Array<{ id: string; text: string; version: number }>; runningPromptId?: string; runningCombinedTexts?: string[] }
 function fixture(options: { combineQueued?: boolean; followUpSteer?: boolean; flushOutput?: () => Promise<void>; notify?: () => void; disposalError?: string } = {},
   attach = createPromptQueues({ combineQueued: options.combineQueued ?? false, followUpSteer: options.followUpSteer ?? false, logger: { warn() {} } })) {
   let status: PromptQueueHost['agent']['status'] = 'idle'
   let live = true
-  let idleWait = deferred<void>()
+  let idleWait = Promise.withResolvers<void>()
   const messages: Array<Parameters<PromptQueueHost['agent']['followup']>[0]> = []
   const steered: typeof messages = []
   const notes: Array<{ method: string; params: Record<string, unknown> }> = []
   const echoes: string[] = []
   const followup = vi.fn((message: typeof messages[number]) => {
-    messages.push(message); status = 'running'; idleWait = deferred<void>()
+    messages.push(message); status = 'running'; idleWait = Promise.withResolvers<void>()
   })
   const agent: PromptQueueHost['agent'] = {
     get status() { return status }, followup,
@@ -66,7 +60,7 @@ const tick = () => setImmediate()
 
 describe('owned prompt queue', () => {
   it('releases targeted preparation without losing its native drain or admitting late content', async () => {
-    const f = fixture(), gate = deferred<void>(), write = vi.fn()
+    const f = fixture(), gate = Promise.withResolvers<void>(), write = vi.fn()
     const request = f.queue.submit({ _meta: { promptId: 'image' } }, 'image', async admission => {
       await gate.promise; admission.assertActive(); write(); return []
     })
@@ -84,7 +78,7 @@ describe('owned prompt queue', () => {
   })
 
   it('retires a cancelled waiting admission without letting later input overtake its predecessor', async () => {
-    const f = fixture(), gate = deferred<DurablePromptBlock[]>(), prepare = vi.fn(async () => [])
+    const f = fixture(), gate = Promise.withResolvers<DurablePromptBlock[]>(), prepare = vi.fn(async () => [])
     const first = f.submit('first', {}, () => gate.promise)
     const second = f.submit('second', {}, prepare), third = f.submit('third')
     expect(f.queue.cancelPrompt('second')).toBe('cancelled')
@@ -158,7 +152,7 @@ describe('owned prompt queue', () => {
   })
 
   it('reports a failed native cancellation drain instead of publishing successful completion', async () => {
-    const f = fixture(), drain = deferred<void>(), error = new Error('native drain failed')
+    const f = fixture(), drain = Promise.withResolvers<void>(), error = new Error('native drain failed')
     vi.mocked(f.agent.whenIdle).mockImplementationOnce(() => drain.promise)
     const first = f.submit('first'), rejected = expect(first).rejects.toBe(error)
     await tick(); f.queue.cancel(); drain.reject(error); f.idle()
@@ -188,7 +182,7 @@ describe('owned prompt queue', () => {
   })
 
   it('keeps a settling owner distinct from an active turn during output hydration', async () => {
-    const gate = deferred<void>(), f = fixture({ flushOutput: () => gate.promise }), first = f.submit('first')
+    const gate = Promise.withResolvers<void>(), f = fixture({ flushOutput: () => gate.promise }), first = f.submit('first')
     await tick(); f.claim(1); f.observe(1); await tick()
     expect(f.queue.cancelPrompt('first')).toBe('already_submitted')
     expect(f.agent.cancel).not.toHaveBeenCalled()
@@ -204,7 +198,7 @@ describe('owned prompt queue', () => {
   })
 
   it('drains late failed preparation after targeted cancellation without reviving the row', async () => {
-    const f = fixture(), gate = deferred<DurablePromptBlock[]>(), first = f.submit('image', {}, () => gate.promise)
+    const f = fixture(), gate = Promise.withResolvers<DurablePromptBlock[]>(), first = f.submit('image', {}, () => gate.promise)
     await tick(); f.queue.cancelPrompt('image'); await first
     const disposal = f.queue.dispose()
     gate.reject(new Error('late storage failure')); await disposal
@@ -222,7 +216,7 @@ describe('owned prompt queue', () => {
   })
 
   it('lets accepted preparation stop before its next write when its queue generation is cancelled', async () => {
-    const f = fixture(), gate = deferred<void>(), write = vi.fn()
+    const f = fixture(), gate = Promise.withResolvers<void>(), write = vi.fn()
     const request = f.queue.submit({ _meta: { promptId: 'guarded' } }, 'image', async admission => {
       await gate.promise; admission.assertActive(); write(); return [{ type: 'text', text: 'image' }]
     })
@@ -233,7 +227,7 @@ describe('owned prompt queue', () => {
   })
 
   it('keeps disposal stronger than the preparation cancellation checkpoint and drains the actual wait', async () => {
-    const f = fixture(), gate = deferred<void>(), write = vi.fn()
+    const f = fixture(), gate = Promise.withResolvers<void>(), write = vi.fn()
     const request = f.queue.submit({}, 'image', async admission => {
       await gate.promise; admission.assertActive(); write(); return []
     }), rejected = expect(request).rejects.toThrow('unknown session')
@@ -245,7 +239,7 @@ describe('owned prompt queue', () => {
   })
 
   it('does not mask a native preparation failure with a coincident queue cancellation', async () => {
-    const f = fixture(), gate = deferred<DurablePromptBlock[]>(), failure = new Error('storage failed')
+    const f = fixture(), gate = Promise.withResolvers<DurablePromptBlock[]>(), failure = new Error('storage failed')
     const request = f.submit('image', {}, () => gate.promise), rejected = expect(request).rejects.toBe(failure)
     await tick(); f.queue.cancel(); gate.reject(failure); await rejected
     expect(f.queue.busy).toBe(false)
@@ -270,7 +264,7 @@ describe('owned prompt queue', () => {
   })
 
   it('serializes asynchronous content admission without serializing whole turns', async () => {
-    const f = fixture(), content = deferred<DurablePromptBlock[]>()
+    const f = fixture(), content = Promise.withResolvers<DurablePromptBlock[]>()
     const prepareSecond = vi.fn(async (): Promise<DurablePromptBlock[]> => [{ type: 'text', text: 'second' }])
     const first = f.submit('image', {}, () => content.promise)
     const second = f.submit('second', {}, prepareSecond)
@@ -285,7 +279,7 @@ describe('owned prompt queue', () => {
   })
 
   it('counts content preparation as busy and cancels its generation without disabling future input', async () => {
-    const f = fixture(), content = deferred<DurablePromptBlock[]>()
+    const f = fixture(), content = Promise.withResolvers<DurablePromptBlock[]>()
     const first = f.submit('image', {}, () => content.promise)
     const prepare = vi.fn(async () => [{ type: 'text' as const, text: 'queued' }])
     const second = f.submit('queued', {}, prepare)
@@ -310,7 +304,7 @@ describe('owned prompt queue', () => {
   })
 
   it('blocks late admission after disposal and waits for accepted preparation to retire', async () => {
-    const f = fixture(), content = deferred<DurablePromptBlock[]>()
+    const f = fixture(), content = Promise.withResolvers<DurablePromptBlock[]>()
     const pending = f.submit('late', {}, () => content.promise)
     const rejected = expect(pending).rejects.toThrow('unknown session')
     await tick()
@@ -346,7 +340,7 @@ describe('owned prompt queue', () => {
   })
 
   it('publishes one disposal before cancellation reentry and waits for preparation even when cancellation throws', async () => {
-    const f = fixture({ disposalError: 'native cancellation failed' }), content = deferred<DurablePromptBlock[]>(), error = new Error('native cancellation failed')
+    const f = fixture({ disposalError: 'native cancellation failed' }), content = Promise.withResolvers<DurablePromptBlock[]>(), error = new Error('native cancellation failed')
     const pending = f.submit('late', {}, () => content.promise)
     const rejected = expect(pending).rejects.toThrow('unknown session')
     await tick()
@@ -454,7 +448,7 @@ describe('owned prompt queue', () => {
   })
 
   it('keeps output hydration ahead of completion and successor admission', async () => {
-    const output = deferred<void>()
+    const output = Promise.withResolvers<void>()
     const f = fixture({ flushOutput: () => output.promise })
     const first = f.submit('first'), second = f.submit('second')
     await tick(); f.finish(1); await tick()

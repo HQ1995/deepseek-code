@@ -1,8 +1,6 @@
 /** Leader socket spec: leader native jobs, children, workflows and activity. */
 import { randomUUID } from 'node:crypto'
-import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createAssistantMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'

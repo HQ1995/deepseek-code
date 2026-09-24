@@ -90,7 +90,6 @@ describe('knownRouteBaseUrls', () => {
   })
 
   it('returns [] when no route carries a baseURL', () => {
-    const svc = settingsService([{ ns: 'llm-pi-ai', user: userSection() }])
     const svcB = settingsService([{ ns: 'llm-pi-ai', user: { providers: { 'provider-b': { apiKeyEnv: 'B_KEY' } } } }])
     expect(knownRouteBaseUrls(svcB)).toEqual([])
     expect(knownRouteBaseUrls(settingsService([{ ns: 'llm-pi-ai', user: { providers: {} } }]))).toEqual([])

@@ -9,11 +9,6 @@ import { createSessionWork } from '../src/session-work.ts'
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { for (const stop of stops.splice(0)) await stop() })
 const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
-function deferred<T>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>(yes => { resolve = yes })
-  return { promise, resolve }
-}
 function fixture() {
   const ready = { value: true }, live = { value: true }, terminalAvailable = { value: true }
   const agent = { session: { id: SessionId('one'), header: { agentPreset: 'standard' } } } as Agent
@@ -128,7 +123,7 @@ describe('native execution ownership', () => {
   })
 
   it('does not continue a cancelled installation read even when the same session becomes usable again', async () => {
-    const f = fixture(), gate = deferred<string>()
+    const f = fixture(), gate = Promise.withResolvers<string>()
     f.installation.mockReturnValueOnce(gate.promise)
     const read = f.doctor(), rejected = expect(read).rejects.toThrow('session closed')
     f.record.work.cancel()
@@ -139,7 +134,7 @@ describe('native execution ownership', () => {
   })
 
   it('does not issue the second executable lookup or later projections after cancellation during the first', async () => {
-    const f = fixture(), gate = deferred<string>()
+    const f = fixture(), gate = Promise.withResolvers<string>()
     f.subprocess.resolveExecutable.mockReturnValueOnce(gate.promise)
     const read = f.doctor(), rejected = expect(read).rejects.toThrow('session closed')
     await tick(); expect(f.subprocess.resolveExecutable).toHaveBeenCalledOnce()
@@ -149,7 +144,7 @@ describe('native execution ownership', () => {
   })
 
   it('aborts and drains an installation read that synchronously reenters module disposal', async () => {
-    const f = fixture(), gate = deferred<string>()
+    const f = fixture(), gate = Promise.withResolvers<string>()
     let disposal!: Promise<void>, done = false
     f.installation.mockImplementationOnce(() => {
       disposal = f.execution.dispose(); void disposal.then(() => { done = true }); return gate.promise
@@ -197,7 +192,7 @@ describe('native execution ownership', () => {
   })
 
   it('awaits native interruption and close before refreshing the owned roster', async () => {
-    const f = fixture(), gate = deferred<{ delivered: true; targetPgid: number }>()
+    const f = fixture(), gate = Promise.withResolvers<{ delivered: true; targetPgid: number }>()
     f.terminals.signal.mockReturnValueOnce(gate.promise)
     const interrupt = f.control({ action: 'interrupt', terminalId: 'pty' })
     await tick(); expect(f.terminals.list).toHaveBeenCalledOnce()
@@ -216,7 +211,7 @@ describe('native execution ownership', () => {
   })
 
   it('drains an uncancellable native kill on module close without issuing another kill or a late read', async () => {
-    const f = fixture(), gate = deferred<boolean>()
+    const f = fixture(), gate = Promise.withResolvers<boolean>()
     let disposal!: Promise<void>, done = false
     f.terminals.kill.mockImplementationOnce(() => {
       disposal = f.execution.dispose(); void disposal.then(() => { done = true }); return gate.promise

@@ -6,11 +6,6 @@ import type { AgentDefaultModelLike } from '../src/native-seams.ts'
 import { acceptedReasoningEffort, modelEffortKey, modelSelectionFromRequest, type ModelCatalog } from '../src/wire-catalog.ts'
 import { createSessionModels, type SessionModel } from '../src/session-models.ts'
 
-function deferred<T>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>(yes => { resolve = yes })
-  return { promise, resolve }
-}
 interface Record { clientId: number; agent: Agent; model: SessionModel }
 function fixture(config: { provider?: string; model?: string } = {}) {
   const sessions = new Map<SessionId, Record>(), clients = new Set([1, 2, 3])
@@ -163,7 +158,7 @@ describe('session model ownership', () => {
   })
 
   it('serializes selection writes within one session without blocking another session', async () => {
-    const f = fixture(), held = deferred<void>(), entered = deferred<void>()
+    const f = fixture(), held = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
     const root = await f.add(); await f.add('other', 2)
     vi.mocked(f.defaults.saveSelection).mockImplementationOnce(async () => { entered.resolve(); await held.promise })
     const first = f.set('beta:shared', 'low')
@@ -178,7 +173,7 @@ describe('session model ownership', () => {
   })
 
   it('rejects a retired owner after catalog lookup without touching native state or defaults', async () => {
-    const f = fixture(), root = await f.add(), held = deferred<ModelCatalog>()
+    const f = fixture(), root = await f.add(), held = Promise.withResolvers<ModelCatalog>()
     f.catalog.current.mockImplementationOnce(() => held.promise)
     const work = f.set('plain'), rejected = expect(work).rejects.toThrow('session closed')
     await vi.waitFor(() => expect(f.catalog.current).toHaveBeenCalledOnce())
@@ -190,7 +185,7 @@ describe('session model ownership', () => {
   })
 
   it('drains a committed choice through final flush during retirement and suppresses late catalog/UI work', async () => {
-    const f = fixture(), root = await f.add(), held = deferred<void>(), entered = deferred<void>()
+    const f = fixture(), root = await f.add(), held = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
     f.flush.mockImplementationOnce(async () => { entered.resolve(); await held.promise })
     const work = f.set('plain'), rejected = expect(work).rejects.toThrow('session closed')
     await entered.promise
@@ -207,7 +202,7 @@ describe('session model ownership', () => {
   })
 
   it('reads late default capabilities and prevents preparation from publishing after disposal', async () => {
-    const f = fixture(), held = deferred<ModelSelection | undefined>()
+    const f = fixture(), held = Promise.withResolvers<ModelSelection | undefined>()
     f.host.defaults = () => undefined
     expect((await f.models.prepare()).current).toBeUndefined()
     f.host.defaults = () => f.defaults
@@ -222,7 +217,7 @@ describe('session model ownership', () => {
   })
 
   it('drains a default writer that synchronously reenters global disposal', async () => {
-    const f = fixture(), root = await f.add(), held = deferred<void>(), entered = deferred<void>()
+    const f = fixture(), root = await f.add(), held = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
     let disposal!: Promise<void>, done = false
     vi.mocked(f.defaults.saveSelection).mockImplementationOnce(async () => {
       disposal = f.models.dispose()

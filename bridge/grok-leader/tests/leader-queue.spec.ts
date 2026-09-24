@@ -6,7 +6,7 @@ describe('leader prompt queue, steering and interjection', () => {
   const start = useLeaderHarness()
 
   it('broadcasts x.ai/queue/changed while a prompt runs and when it settles', async () => {
-    const { registry, client: c } = await start()
+    const { client: c } = await start()
     register(c)
     await c.next()
 

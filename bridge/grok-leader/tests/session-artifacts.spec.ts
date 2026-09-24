@@ -7,11 +7,6 @@ import { createSessionWork } from '../src/session-work.ts'
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { for (const stop of stops.splice(0)) await stop() })
 const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
-function deferred<T>() {
-  let resolve!: (value: T) => void, reject!: (error: unknown) => void
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
-  return { promise, resolve, reject }
-}
 function fixture() {
   const ready = { value: true }, client = new AbortController(), configured = { titles: true, references: true, client: true }
   const agent = { session: { id: SessionId('one'), header: { cwd: '/workspace' } } } as Agent
@@ -82,7 +77,7 @@ describe('session artifact ownership', () => {
   })
 
   it('drains an accepted archive after client abort without a late success or rollback', async () => {
-    const f = fixture(), gate = deferred<string>()
+    const f = fixture(), gate = Promise.withResolvers<string>()
     f.host.archive.mockReturnValueOnce(gate.promise)
     const request = f.archive(), rejected = expect(request).rejects.toThrow()
     f.client.abort()
@@ -103,7 +98,7 @@ describe('session artifact ownership', () => {
   })
 
   it('passes the exact native agent and query and suppresses a late cancelled reference result', async () => {
-    const f = fixture(), gate = deferred<Awaited<ReturnType<NativeSessionReferences['remoteExportCandidates']>>>()
+    const f = fixture(), gate = Promise.withResolvers<Awaited<ReturnType<NativeSessionReferences['remoteExportCandidates']>>>()
     f.references.remoteExportCandidates.mockReturnValueOnce(gate.promise)
     const request = f.reference({ query: 'a'.repeat(1024) }), rejected = expect(request).rejects.toThrow('session closed')
     expect(f.references.remoteExportCandidates).toHaveBeenCalledWith(f.record.agent, 'a'.repeat(1024), expect.any(AbortSignal))
@@ -149,7 +144,7 @@ describe('session artifact ownership', () => {
   })
 
   it('signals title refresh cancellation but still drains its native completion', async () => {
-    const f = fixture(), gate = deferred<unknown>()
+    const f = fixture(), gate = Promise.withResolvers<unknown>()
     f.titles.refresh.mockReturnValueOnce(gate.promise)
     const request = f.rename({ resetToAuto: true }), rejected = expect(request).rejects.toThrow('session closed')
     f.record.work.cancel()
@@ -161,7 +156,7 @@ describe('session artifact ownership', () => {
   })
 
   it('preserves a native failure even when shutdown starts before it settles', async () => {
-    const f = fixture(), gate = deferred<unknown>(), failure = new Error('title write failed')
+    const f = fixture(), gate = Promise.withResolvers<unknown>(), failure = new Error('title write failed')
     f.titles.rename.mockReturnValueOnce(gate.promise)
     const request = f.rename(), rejected = expect(request).rejects.toBe(failure)
     const drain = f.artifacts.dispose()
@@ -169,7 +164,7 @@ describe('session artifact ownership', () => {
   })
 
   it.each(['archive', 'references', 'rename'] as const)('registers %s before a synchronous native callback can reenter disposal', async kind => {
-    const f = fixture(), gate = deferred<unknown>()
+    const f = fixture(), gate = Promise.withResolvers<unknown>()
     let disposal!: Promise<void>, done = false
     const enter = () => { disposal = f.artifacts.dispose(); void disposal.then(() => { done = true }); return gate.promise }
     if (kind === 'archive') f.host.archive.mockImplementationOnce(async () => { await enter(); return '/late.zip' })
