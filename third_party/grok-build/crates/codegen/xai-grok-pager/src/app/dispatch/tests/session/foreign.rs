@@ -511,17 +511,6 @@ fn external_filter_clears_and_suppresses_native_content_state() {
     );
     assert!(
         dispatch(
-            Action::DeleteSession {
-                source: "local".into(),
-                session_id: "native".into(),
-                cwd: "/repo".into(),
-            },
-            &mut app,
-        )
-        .is_empty()
-    );
-    assert!(
-        dispatch(
             Action::PickContentSession {
                 session_id: "native-hit".into(),
                 cwd: "/repo".into(),
@@ -834,29 +823,6 @@ fn colliding_native_and_foreign_ids_use_source_at_initiation() {
         )
         .is_empty()
     );
-    assert!(
-        dispatch(
-            Action::DeleteSession {
-                source: "codex".into(),
-                session_id: "shared-id".into(),
-                cwd: "/repo".into(),
-            },
-            &mut app,
-        )
-        .is_empty()
-    );
-    assert!(matches!(
-        dispatch(
-            Action::DeleteSession {
-                source: "local".into(),
-                session_id: "shared-id".into(),
-                cwd: "/repo".into(),
-            },
-            &mut app,
-        )
-        .as_slice(),
-        [Effect::DeleteSession { session_id, .. }] if session_id == "shared-id"
-    ));
 }
 
 #[test]
@@ -981,17 +947,6 @@ fn foreign_selection_and_mutation_guards_remain_central() {
             Action::ExpandSessionCard {
                 source: "cursor".into(),
                 session_id: "foreign-id".into(),
-            },
-            &mut app,
-        )
-        .is_empty()
-    );
-    assert!(
-        dispatch(
-            Action::DeleteSession {
-                source: "cursor".into(),
-                session_id: "foreign-id".into(),
-                cwd: "/repo".into(),
             },
             &mut app,
         )

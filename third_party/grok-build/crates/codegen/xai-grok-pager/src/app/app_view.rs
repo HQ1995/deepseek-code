@@ -957,7 +957,6 @@ pub struct AppView {
     /// [`crate::views::session_picker::effective_filter_query`], skips the
     /// local fuzzy re-filter for server search results.
     pub session_picker_entries_query: Option<String>,
-    pub session_picker_pending_delete: Option<crate::views::session_picker::PendingDelete>,
     /// Tick counter for welcome screen spinner animation.
     pub welcome_tick: u64,
     /// Last shimmer frame drawn on the welcome screen. Lets `tick` throttle the
@@ -1554,7 +1553,6 @@ impl AppView {
             session_picker_lanes: Default::default(),
             session_picker_detail_generation: 0,
             session_picker_entries_query: None,
-            session_picker_pending_delete: None,
             welcome_tick: 0,
             welcome_shimmer_frame: 0,
             cli_model_override: None,
@@ -2620,7 +2618,6 @@ impl AppView {
                     cwd_has_git_ancestor: self.cwd_has_git_ancestor,
                     session_picker_grouped: self.session_picker_grouped,
                     sp_source_filter: &mut self.session_picker_source_filter,
-                    sp_pending_delete: &mut self.session_picker_pending_delete,
                     chat_mode: self.chat_mode,
                     #[cfg(feature = "local-workspace")]
                     workspace_mode: &mut self.welcome_workspace_mode,
@@ -3260,7 +3257,6 @@ struct WelcomeInputCtx<'a> {
     cwd_has_git_ancestor: bool,
     session_picker_grouped: bool,
     sp_source_filter: &'a mut crate::views::session_picker::SourceFilter,
-    sp_pending_delete: &'a mut Option<crate::views::session_picker::PendingDelete>,
     /// Process-wide `--chat`: the session picker hides its source filter
     /// (conversations-only list), so `f` must not cycle it.
     chat_mode: bool,
@@ -3533,19 +3529,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         );
         let entry_count = entry_map.len();
         let non_selectable_flags: Vec<bool> = entry_map.iter().map(|e| e.is_none()).collect();
-        let focused_is_foreign = match entry_map
-            .get(ctx.sp_state.selected)
-            .and_then(|entry| entry.as_ref())
-        {
-            Some(PickerItem::Fuzzy { original_index }) => ctx
-                .sp_entries
-                .as_ref()
-                .and_then(|entries| entries.get(*original_index))
-                .is_some_and(|entry| {
-                    crate::app::foreign_sessions::is_foreign_picker_source(&entry.source)
-                }),
-            _ => false,
-        };
         let config = PickerConfig {
             title: Some("Resume session"),
             show_search_hint: true,
@@ -3562,30 +3545,14 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             filter_key_hint: (!ctx.chat_mode).then_some("f"),
             filter_active: !ctx.chat_mode && source_filter.is_active(),
             header_note: None,
-            action_keys: if ctx.chat_mode || focused_is_foreign {
-                &[]
-            } else {
-                &[('d', "delete")]
-            },
+            // DIVERGENCE(dscode): no `d delete` (DSH has no session delete;
+            // see the modal picker).
+            action_keys: &[],
             disable_search: false,
             compact_bottom_bar: false,
             search_only_on_slash: false,
             vim_normal_first: crate::appearance::cache::load_vim_mode(),
         };
-        match crate::views::session_picker::handle_pending_delete_key(ctx.sp_pending_delete, ev) {
-            crate::views::session_picker::PendingDeleteKey::Confirm(pd) => {
-                return InputOutcome::Action(Action::DeleteSession {
-                    source: pd.source,
-                    session_id: pd.session_id,
-                    cwd: pd.cwd,
-                });
-            }
-            crate::views::session_picker::PendingDeleteKey::Cancel => {
-                return InputOutcome::Changed;
-            }
-            crate::views::session_picker::PendingDeleteKey::Disarmed
-            | crate::views::session_picker::PendingDeleteKey::NotArmed => {}
-        }
         if let Event::Key(key) = ev {
             if key.kind == KeyEventKind::Press
                 && (key!('c', CONTROL).matches(key) || key!('d', CONTROL).matches(key))
@@ -3613,11 +3580,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 });
             }
         }
-        let selected_before = ctx.sp_state.selected;
         let outcome = handle_picker_input(ev, ctx.sp_state, entry_count, &config);
-        if ctx.sp_pending_delete.is_some() && ctx.sp_state.selected != selected_before {
-            *ctx.sp_pending_delete = None;
-        }
         match outcome {
             PickerOutcome::Selected(i) => match entry_map.get(i).and_then(|e| e.as_ref()) {
                 Some(PickerItem::Fuzzy { original_index }) => {
@@ -3648,7 +3611,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 *ctx.sp_entries = None;
                 ctx.sp_state.reset();
                 *ctx.sp_source_filter = crate::views::session_picker::SourceFilter::default();
-                *ctx.sp_pending_delete = None;
                 return InputOutcome::Action(Action::SessionPickerClosed);
             }
             PickerOutcome::Expand(i) => {
@@ -3741,16 +3703,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             }
             PickerOutcome::FilterCycled => {
                 return InputOutcome::Action(Action::CycleSessionSourceFilter);
-            }
-            PickerOutcome::Action('d') => {
-                *ctx.sp_pending_delete =
-                    crate::views::session_picker::pending_delete_from_selection(
-                        ctx.sp_state.selected,
-                        &entry_map,
-                        ctx.sp_entries.as_deref(),
-                        ctx.sp_content_results.as_deref(),
-                    );
-                return InputOutcome::Changed;
             }
             PickerOutcome::NonSelectableClick(_)
             | PickerOutcome::TabChanged(_)
@@ -4657,9 +4609,6 @@ impl AppView {
                             subscription_tier: self.subscription_tier.as_deref(),
                             session_picker_grouped: self.session_picker_grouped,
                             session_picker_source_filter: self.session_picker_source_filter,
-                            session_picker_pending_delete: self
-                                .session_picker_pending_delete
-                                .is_some(),
                             chat_mode: self.chat_mode,
                             credit_balance: self.credit_balance.as_ref(),
                             auto_topup: self.auto_topup.as_ref(),

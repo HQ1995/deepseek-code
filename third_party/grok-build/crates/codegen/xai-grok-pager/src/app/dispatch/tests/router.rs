@@ -2836,25 +2836,6 @@ fn pick_content_session_in_worktree_refuses_conversation_row() {
     );
     assert!(read_toast(&app).contains("worktree"));
 }
-/// Delete acts on local disk + registry; conversation rows have neither.
-#[test]
-fn delete_session_refuses_conversation_row() {
-    let mut app = test_app_with_agent();
-    open_session_picker_with(&mut app, vec![make_conversation_entry("conv-del-1")]);
-    let effects = dispatch(
-        Action::DeleteSession {
-            source: "conversation".into(),
-            session_id: "conv-del-1".into(),
-            cwd: String::new(),
-        },
-        &mut app,
-    );
-    assert!(
-        effects.is_empty(),
-        "no DeleteSession effect for a conversation row, got {effects:?}"
-    );
-    assert!(read_toast(&app).contains("isn't supported"));
-}
 /// Expanding a conversation card must not read `chat_history.jsonl`
 /// (it doesn't exist); the row still toggles open.
 #[test]

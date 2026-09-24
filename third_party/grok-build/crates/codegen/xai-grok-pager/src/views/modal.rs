@@ -232,9 +232,6 @@ pub enum ActiveModal {
         entries_query: Option<String>,
         /// Source filter for the modal session picker.
         source_filter: crate::views::session_picker::SourceFilter,
-        /// Session armed for delete via `d` (see
-        /// [`crate::views::session_picker::PendingDelete`]).
-        pending_delete: Option<crate::views::session_picker::PendingDelete>,
     },
     /// How-to documentation list modal (wider picker style).
     DocPicker {

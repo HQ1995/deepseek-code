@@ -1060,7 +1060,6 @@ impl AgentView {
                                         entries_query: None,
                                         source_filter:
                                             crate::views::session_picker::SourceFilter::default(),
-                                        pending_delete: None,
                                     });
                                     return InputOutcome::Action(Action::FetchSessionList);
                                 }
@@ -1144,7 +1143,6 @@ impl AgentView {
                 content_loading,
                 entries_query,
                 source_filter,
-                pending_delete,
                 ..
             } => {
                 use crate::views::session_picker::{
@@ -1169,21 +1167,9 @@ impl AgentView {
                 );
                 let entry_count = entry_map.len();
                 let non_sel: Vec<bool> = entry_map.iter().map(|e| e.is_none()).collect();
-                let focused_is_foreign = match entry_map
-                    .get(state.selected)
-                    .and_then(|entry| entry.as_ref())
-                {
-                    Some(PickerItem::Fuzzy { original_index }) => entries
-                        .as_ref()
-                        .and_then(|entries| entries.get(*original_index))
-                        .is_some_and(|entry| {
-                            crate::app::foreign_sessions::is_foreign_picker_source(&entry.source)
-                        }),
-                    _ => false,
-                };
 
                 // Chat-mode picker lists conversations only: the source
-                // filter and local-disk delete are dead weight there.
+                // filter is dead weight there.
                 let chat_mode = self.app_chat_mode;
                 let config = PickerConfig {
                     title: Some("Resume session"),
@@ -1201,31 +1187,16 @@ impl AgentView {
                     filter_key_hint: (!chat_mode).then_some("f"),
                     filter_active: !chat_mode && source_filter.is_active(),
                     header_note: None,
-                    action_keys: if chat_mode || focused_is_foreign {
-                        &[]
-                    } else {
-                        &[('d', "delete")]
-                    },
+                    // DIVERGENCE(dscode): no `d delete`. DSH has no session
+                    // delete (archive only) and the bridge serves no
+                    // `x.ai/session/delete`, so the key only ever ended in
+                    // "method not found".
+                    action_keys: &[],
                     disable_search: false,
                     compact_bottom_bar: false,
                     search_only_on_slash: false,
                     vim_normal_first: crate::appearance::cache::load_vim_mode(),
                 };
-
-                match crate::views::session_picker::handle_pending_delete_key(pending_delete, ev) {
-                    crate::views::session_picker::PendingDeleteKey::Confirm(pd) => {
-                        return InputOutcome::Action(Action::DeleteSession {
-                            source: pd.source,
-                            session_id: pd.session_id,
-                            cwd: pd.cwd,
-                        });
-                    }
-                    crate::views::session_picker::PendingDeleteKey::Cancel => {
-                        return InputOutcome::Changed;
-                    }
-                    crate::views::session_picker::PendingDeleteKey::Disarmed
-                    | crate::views::session_picker::PendingDeleteKey::NotArmed => {}
-                }
 
                 if let crossterm::event::Event::Key(key) = ev
                     && let Some(selection) = session_picker_worktree_selection(
@@ -1250,11 +1221,7 @@ impl AgentView {
                     });
                 }
 
-                let selected_before = state.selected;
                 let outcome = handle_picker_input(ev, state, entry_count, &config);
-                if pending_delete.is_some() && state.selected != selected_before {
-                    *pending_delete = None;
-                }
                 match outcome {
                     PickerOutcome::Selected(i) => {
                         match entry_map.get(i).and_then(|e| e.as_ref()) {
@@ -1401,16 +1368,6 @@ impl AgentView {
                     }
                     PickerOutcome::FilterCycled => {
                         InputOutcome::Action(Action::CycleSessionSourceFilter)
-                    }
-                    PickerOutcome::Action('d') => {
-                        *pending_delete =
-                            crate::views::session_picker::pending_delete_from_selection(
-                                state.selected,
-                                &entry_map,
-                                entries.as_deref(),
-                                content_results.as_deref(),
-                            );
-                        InputOutcome::Changed
                     }
                     PickerOutcome::NonSelectableClick(_)
                     | PickerOutcome::TabChanged(_)
@@ -2193,7 +2150,6 @@ impl AgentView {
                 content_loading,
                 entries_query,
                 source_filter,
-                pending_delete,
                 ..
             } = active_modal
             {
@@ -2203,66 +2159,40 @@ impl AgentView {
                 use crate::views::session_picker::{
                     build_content_entry_data, build_content_header_label,
                 };
-                // While a delete confirmation is armed, the footer swaps to a
-                // "y confirm / n cancel" prompt. Otherwise show the normal
-                // hints plus the `d delete` action. Chat mode drops the
-                // deep-search / filter / delete hints (local-disk-row actions).
+                // Chat mode drops the deep-search / filter hints
+                // (local-disk-row actions). DIVERGENCE(dscode): no `d delete`
+                // hint; DSH sessions cannot be deleted from here.
                 let chat_mode = self.app_chat_mode;
-                let mut session_shortcuts: Vec<Shortcut> = if pending_delete.is_some() {
-                    vec![
+                let external =
+                    *source_filter == crate::views::session_picker::SourceFilter::External;
+                let mut session_shortcuts = vec![Shortcut {
+                    label: "\u{2191}\u{2193} nav",
+                    clickable: false,
+                    id: 0,
+                }];
+                if !external {
+                    session_shortcuts.extend([
                         Shortcut {
-                            label: "y confirm delete",
+                            label: "e expand",
                             clickable: false,
                             id: 0,
                         },
                         Shortcut {
-                            label: "n cancel",
+                            label: "/ search",
                             clickable: false,
                             id: 0,
                         },
-                    ]
-                } else {
-                    let external =
-                        *source_filter == crate::views::session_picker::SourceFilter::External;
-                    let mut shortcuts = vec![Shortcut {
-                        label: "\u{2191}\u{2193} nav",
+                    ]);
+                }
+                if !chat_mode {
+                    session_shortcuts.push(Shortcut {
+                        label: "f filter",
                         clickable: false,
                         id: 0,
-                    }];
-                    if !external {
-                        shortcuts.extend([
-                            Shortcut {
-                                label: "e expand",
-                                clickable: false,
-                                id: 0,
-                            },
-                            Shortcut {
-                                label: "/ search",
-                                clickable: false,
-                                id: 0,
-                            },
-                        ]);
-                    }
-                    if !chat_mode {
-                        shortcuts.push(Shortcut {
-                            label: "f filter",
-                            clickable: false,
-                            id: 0,
-                        });
-                        if !external {
-                            shortcuts.push(Shortcut {
-                                label: "d delete",
-                                clickable: false,
-                                id: 0,
-                            });
-                        }
-                    }
-                    shortcuts
-                };
-                // Surface `i search` in the footer when vim nav mode is active.
-                if pending_delete.is_none() {
-                    mw::push_vim_nav_search_hint(&mut session_shortcuts, state.search_active);
+                    });
                 }
+                // Surface `i search` in the footer when vim nav mode is active.
+                mw::push_vim_nav_search_hint(&mut session_shortcuts, state.search_active);
                 let compact = self.scrollback.appearance().prompt.compact;
                 let modal_config = ModalWindowConfig {
                     title: "Resume session",
@@ -2740,13 +2670,13 @@ impl AgentView {
 }
 
 #[cfg(test)]
-mod session_picker_delete_tests {
+mod session_picker_tests {
     use crate::app::actions::Action;
     use crate::app::agent_view::AgentView;
     use crate::app::agent_view::test_fixtures::make_agent;
     use crate::app::app_view::{InputOutcome, SessionPickerEntry};
     use crate::views::modal::ActiveModal;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
     fn native_reference_picker_inserts_without_submitting_and_cancel_preserves_draft() {
@@ -2816,7 +2746,6 @@ mod session_picker_delete_tests {
             deep_search_seq: 0,
             entries_query: None,
             source_filter: crate::views::session_picker::SourceFilter::default(),
-            pending_delete: None,
         });
     }
 
@@ -2824,96 +2753,32 @@ mod session_picker_delete_tests {
         Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
     }
 
-    fn pending(agent: &AgentView) -> Option<String> {
-        match agent.active_modal.as_ref() {
-            Some(ActiveModal::SessionPicker { pending_delete, .. }) => {
-                pending_delete.as_ref().map(|pd| pd.session_id.clone())
-            }
-            _ => None,
-        }
-    }
-
+    /// DIVERGENCE(dscode): DSH has no session delete, so `d` is no longer a
+    /// /resume picker action key: it types into the search like any other
+    /// letter, and the picker stays open on its rows.
     #[test]
-    fn d_arms_then_y_confirms_delete() {
+    fn d_is_not_a_delete_key() {
+        crate::appearance::cache::set_vim_mode(false);
         let mut agent = make_agent();
         open_picker(&mut agent, vec![entry("s0"), entry("s1")]);
-
-        // `d` arms the confirmation on the first selectable row (s0).
         let out = agent.handle_palette_or_arg_input(&key('d'));
-        assert!(matches!(out, InputOutcome::Changed));
-        assert_eq!(pending(&agent).as_deref(), Some("s0"));
-
-        // `y` confirms — fires DeleteSession for the armed session.
-        let out = agent.handle_palette_or_arg_input(&key('y'));
         assert!(
             matches!(
                 out,
-                InputOutcome::Action(Action::DeleteSession {
-                    ref source,
-                    ref session_id,
-                    ref cwd,
-                }) if source == "local" && session_id == "s0" && cwd == "/repo"
+                InputOutcome::Changed | InputOutcome::Action(Action::TriggerDeepSearch)
             ),
-            "y must confirm deletion of the armed session"
+            "{out:?}"
         );
-        assert!(pending(&agent).is_none(), "pending cleared after confirm");
-    }
-
-    #[test]
-    fn d_arms_then_n_cancels() {
-        let mut agent = make_agent();
-        open_picker(&mut agent, vec![entry("s0")]);
-
-        agent.handle_palette_or_arg_input(&key('d'));
-        assert_eq!(pending(&agent).as_deref(), Some("s0"));
-
-        let out = agent.handle_palette_or_arg_input(&key('n'));
-        assert!(matches!(out, InputOutcome::Changed));
-        assert!(pending(&agent).is_none(), "n cancels the confirmation");
-    }
-
-    #[test]
-    fn other_key_cancels_pending_delete() {
-        let mut agent = make_agent();
-        open_picker(&mut agent, vec![entry("s0"), entry("s1")]);
-
-        agent.handle_palette_or_arg_input(&key('d'));
-        assert_eq!(pending(&agent).as_deref(), Some("s0"));
-
-        // A navigation key cancels the armed confirmation.
-        agent.handle_palette_or_arg_input(&key('j'));
-        assert!(
-            pending(&agent).is_none(),
-            "any non-y/d key cancels the pending delete"
-        );
-    }
-
-    #[test]
-    fn mouse_move_keeps_pending_delete() {
-        let mut agent = make_agent();
-        open_picker(&mut agent, vec![entry("s0"), entry("s1")]);
-        agent.handle_palette_or_arg_input(&key('d'));
-        agent.handle_palette_or_arg_input(&Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Moved,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        }));
-        assert_eq!(pending(&agent).as_deref(), Some("s0"));
-    }
-
-    #[test]
-    fn y_without_armed_confirmation_does_not_delete() {
-        let mut agent = make_agent();
-        open_picker(&mut agent, vec![entry("s0")]);
-
-        // No `d` first — `y` is the copy hotkey, never a delete.
-        let out = agent.handle_palette_or_arg_input(&key('y'));
-        assert!(
-            !matches!(out, InputOutcome::Action(Action::DeleteSession { .. })),
-            "y alone must not delete"
-        );
-        assert!(pending(&agent).is_none());
+        let Some(ActiveModal::SessionPicker {
+            entries: Some(entries),
+            state,
+            ..
+        }) = agent.active_modal.as_ref()
+        else {
+            panic!("the picker stays open");
+        };
+        assert_eq!(state.query(), "d");
+        assert_eq!(entries.len(), 2);
     }
 
     /// Plain close (Esc) must surface `SessionPickerClosed` so the dispatch
@@ -2932,19 +2797,13 @@ mod session_picker_delete_tests {
         assert!(agent.active_modal.is_none(), "modal cleared on close");
     }
 
-    /// Chat-mode picker is conversations-only: `d` (local delete) must not
-    /// arm a confirmation and `f` must not cycle the hidden source filter.
+    /// Chat-mode picker is conversations-only: `f` must not cycle the hidden
+    /// source filter.
     #[test]
-    fn chat_mode_disables_delete_and_filter_keys() {
+    fn chat_mode_disables_filter_key() {
         let mut agent = make_agent();
         agent.app_chat_mode = true;
         open_picker(&mut agent, vec![entry("c0"), entry("c1")]);
-
-        agent.handle_palette_or_arg_input(&key('d'));
-        assert!(
-            pending(&agent).is_none(),
-            "d must not arm delete under chat mode"
-        );
 
         agent.handle_palette_or_arg_input(&key('f'));
         let filter = match agent.active_modal.as_ref() {
@@ -2977,7 +2836,7 @@ mod session_picker_delete_tests {
     }
 
     #[test]
-    fn foreign_row_refuses_delete_detail_and_worktree_actions() {
+    fn foreign_row_refuses_detail_and_worktree_actions() {
         let mut agent = make_agent();
         let mut foreign = entry("codex-session");
         foreign.source = "codex".into();
@@ -2987,10 +2846,6 @@ mod session_picker_delete_tests {
         {
             *source_filter = crate::views::session_picker::SourceFilter::All;
         }
-
-        let delete = agent.handle_palette_or_arg_input(&key('d'));
-        assert!(matches!(delete, InputOutcome::Changed));
-        assert!(pending(&agent).is_none(), "foreign delete must not arm");
 
         let expand = agent.handle_palette_or_arg_input(&key('e'));
         assert!(

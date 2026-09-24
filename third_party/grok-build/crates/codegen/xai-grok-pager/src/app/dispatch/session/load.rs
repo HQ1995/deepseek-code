@@ -533,29 +533,12 @@ pub(in crate::app::dispatch) fn dispatch_pick_session_in_worktree(
     }
     dispatch_new_worktree_session(app, Some(session_id), None, None, None, None, None)
 }
-fn keep_picker_entry(
-    entry: &crate::app::app_view::SessionPickerEntry,
-    source: &str,
-    session_id: &str,
-    match_id_only: bool,
-) -> bool {
-    if match_id_only {
-        entry.id != session_id
-    } else {
-        entry.source != source || entry.id != session_id
-    }
-}
-/// Remove a deleted session identity from the modal session picker and the
-/// welcome-screen picker, then re-anchor the selection on a real row.
+/// Remove every row of a deleted session id from the modal session picker and
+/// the welcome-screen picker, then re-anchor the selection on a real row.
 ///
 /// Called after [`crate::app::actions::TaskResult::DeleteSessionComplete`] so
 /// the just-deleted entry vanishes from the open list without a full refetch.
-pub(in crate::app::dispatch) fn remove_session_from_pickers(
-    app: &mut AppView,
-    source: &str,
-    session_id: &str,
-    match_id_only: bool,
-) {
+pub(in crate::app::dispatch) fn remove_session_from_pickers(app: &mut AppView, session_id: &str) {
     use crate::views::modal::ActiveModal;
     use crate::views::session_picker::build_entry_map;
     app.session_picker_detail_generation += 1;
@@ -567,18 +550,11 @@ pub(in crate::app::dispatch) fn remove_session_from_pickers(
             source_filter,
             content_loading,
             entries_query,
-            pending_delete,
             ..
         }) = agent.active_modal.as_mut()
     {
-        if pending_delete
-            .as_ref()
-            .is_some_and(|pd| pd.source == source && pd.session_id == session_id)
-        {
-            *pending_delete = None;
-        }
         if let Some(list) = entries.as_mut() {
-            list.retain(|entry| keep_picker_entry(entry, source, session_id, match_id_only));
+            list.retain(|entry| entry.id != session_id);
         }
         if let Some(hits) = content_results.as_mut() {
             hits.retain(|h| h.session_id != session_id);
@@ -599,15 +575,8 @@ pub(in crate::app::dispatch) fn remove_session_from_pickers(
         );
         reanchor_grouped_selection(state, &map);
     }
-    if app
-        .session_picker_pending_delete
-        .as_ref()
-        .is_some_and(|pd| pd.source == source && pd.session_id == session_id)
-    {
-        app.session_picker_pending_delete = None;
-    }
     if let Some(list) = app.session_picker_entries.as_mut() {
-        list.retain(|entry| keep_picker_entry(entry, source, session_id, match_id_only));
+        list.retain(|entry| entry.id != session_id);
     }
     if let Some(hits) = app.session_picker_content_results.as_mut() {
         hits.retain(|h| h.session_id != session_id);
@@ -670,7 +639,6 @@ pub(in crate::app::dispatch) fn dispatch_cycle_session_source_filter(
             content_loading,
             deep_search_seq,
             source_filter,
-            pending_delete,
             ..
         }) = agent.active_modal.as_mut()
     {
@@ -682,7 +650,6 @@ pub(in crate::app::dispatch) fn dispatch_cycle_session_source_filter(
             *content_loading = false;
             *deep_search_seq += 1;
             state.expanded.clear();
-            *pending_delete = None;
         }
         return vec![];
     }
@@ -840,38 +807,6 @@ pub(in crate::app::dispatch) fn session_picker_entry_is_conversation(
     session_id: &str,
 ) -> bool {
     session_picker_entry_source(app, session_id) == Some("conversation")
-}
-pub(in crate::app::dispatch) fn session_picker_entry_matches(
-    app: &AppView,
-    source: &str,
-    session_id: &str,
-) -> bool {
-    use crate::views::modal::ActiveModal;
-    if let Some(agent) = get_active_agent(app)
-        && let Some(ActiveModal::SessionPicker {
-            entries,
-            content_results,
-            ..
-        }) = agent.active_modal.as_ref()
-    {
-        return entries.as_ref().is_some_and(|entries| {
-            entries
-                .iter()
-                .any(|entry| entry.source == source && entry.id == session_id)
-        }) || (source == "local"
-            && content_results
-                .as_ref()
-                .is_some_and(|results| results.iter().any(|hit| hit.session_id == session_id)));
-    }
-    app.session_picker_entries.as_ref().is_some_and(|entries| {
-        entries
-            .iter()
-            .any(|entry| entry.source == source && entry.id == session_id)
-    }) || (source == "local"
-        && app
-            .session_picker_content_results
-            .as_ref()
-            .is_some_and(|results| results.iter().any(|hit| hit.session_id == session_id)))
 }
 /// Pick a session from deep content search results.
 pub(in crate::app::dispatch) fn dispatch_pick_content_session(
@@ -1445,7 +1380,6 @@ pub(in crate::app::dispatch) fn dispatch_show_session_picker(app: &mut AppView) 
             deep_search_seq: 0,
             entries_query: None,
             source_filter: crate::views::session_picker::SourceFilter::default(),
-            pending_delete: None,
         });
     });
     dispatch_fetch_session_list(app)

@@ -2179,29 +2179,6 @@ fn translate_local_submit_never_returns_persist_never_for_new_session() {
     }
 }
 #[test]
-fn delete_session_action_emits_delete_effect() {
-    use crate::app::actions::AfterSessionDelete;
-    let mut app = test_app_with_agent();
-    open_session_picker_with(&mut app, vec![make_picker_entry("s1", "/repo")]);
-    let effects = dispatch(
-        Action::DeleteSession {
-            source: "local".into(),
-            session_id: "s1".into(),
-            cwd: "/repo".into(),
-        },
-        &mut app,
-    );
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::DeleteSession {
-            source,
-            session_id,
-            cwd,
-            after: AfterSessionDelete::Stay,
-        }] if source == "local" && session_id == "s1" && cwd == "/repo"
-    ));
-}
-#[test]
 fn delete_current_session_confirm_emits_effect() {
     use crate::app::actions::AfterSessionDelete;
     let mut app = test_app_with_agent();

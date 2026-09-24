@@ -68,7 +68,7 @@ use super::session::load::{
     clear_stale_session_id, dispatch_cycle_session_source_filter, dispatch_load_session,
     dispatch_pick_content_session, dispatch_pick_content_session_in_worktree,
     dispatch_pick_session, dispatch_pick_session_in_worktree, dispatch_session_picker_closed,
-    dispatch_show_session_picker, dispatch_trigger_deep_search, session_picker_entry_matches,
+    dispatch_show_session_picker, dispatch_trigger_deep_search,
     session_picker_external_filter_active,
 };
 use super::session::modal::{dispatch_rename_session, dispatch_reset_session_title};
@@ -1310,35 +1310,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::PickContentSessionInWorktree { session_id, cwd } => {
             dispatch_pick_content_session_in_worktree(app, session_id, cwd)
-        }
-        Action::DeleteSession {
-            source,
-            session_id,
-            cwd,
-        } => {
-            if session_picker_external_filter_active(app) {
-                return vec![];
-            }
-            if crate::app::foreign_sessions::is_foreign_picker_source(&source) {
-                app.show_toast("External sessions can't be deleted");
-                return vec![];
-            }
-            if source == "conversation" {
-                app.show_toast("Deleting chat conversations isn't supported yet");
-                return vec![];
-            }
-            if !matches!(source.as_str(), "local" | "remote" | "both")
-                || !session_picker_entry_matches(app, &source, &session_id)
-            {
-                return vec![];
-            }
-            app.show_toast("Deleting session\u{2026}");
-            vec![Effect::DeleteSession {
-                source,
-                session_id,
-                cwd,
-                after: crate::app::actions::AfterSessionDelete::Stay,
-            }]
         }
         Action::Fork(args) => dispatch_fork(app, args),
         Action::ForkAnswered {
