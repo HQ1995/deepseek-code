@@ -186,8 +186,6 @@ dependencies installed; `bridgeRoot` defaults to `../bridge/grok-leader/`.
 - `node --experimental-strip-types --expose-gc bench-session-output.mjs
   <src/session-output.ts> [events=20000] [text|metadata|slow]
   [--count-promises]`: replay through the output module into a framed sink.
-- `bench-startup.mjs <compiled-bridge-entry>`: bridge import cost with and
-  without Node's compile cache.
 - `bench-workflows.mjs [historySize=100000] [members=200] [bridgeRoot]`:
   `dscodeWorkflows` append/render per transition, warm reads, rebuild.
 - `SOAK_TURNS=200 bash soak-product-loop.sh`: real TUI → dsh → bridge loop;
