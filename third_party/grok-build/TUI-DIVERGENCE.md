@@ -733,3 +733,27 @@ Selecting the DSH backend preserves the user's automatic-update setting.
 Whole-product update delegation carries the original trigger so the launcher
 can honor background opt-out and avoid stale-target reinstalls. Socket isolation,
 version compatibility and launch/update argument checks run in the release gate.
+
+### Remote workspace paths fail closed
+
+A dscode leader reports `_meta.dscodeExecutionWorld` in `initialize` (class:
+feature). An SSH world means session paths name files on another machine. The
+pager records the world once, in the render crate's `execution_world`, before
+any session exists. An unknown or malformed world counts as remote.
+
+In a remote world the pager:
+- opens sessions at the remote workspace (or a directory inside it) and sends
+  no local project MCP servers, both interactive and headless;
+- records the leader's workspace as the session cwd;
+- never links or opens a file target (`osc8` resolution, `OpenLink`), whether
+  or not the path exists locally;
+- skips full-file edit highlighting, the line viewer, `@` completion, media
+  scanning of message text and git discovery;
+- refuses worktrees, location changes, the agents/personas modal and dropped
+  non-image files;
+- runs the status-line command outside session directories;
+- skips the folder-trust question for its launch directory, from which it
+  loads nothing.
+
+Bridge-written tool images stay local and open as before. Unit tests cover the
+parse, the session cwd rule and each refusal.

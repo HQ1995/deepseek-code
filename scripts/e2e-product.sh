@@ -124,7 +124,7 @@ if [[ -n "$("$NODE_BIN" -p "require('$BRIDGE/package.json').dsh?.sourceCommit ||
   fi
   mkdir -p "$STAGE/runtime" "$STAGE/bridge/grok-leader"
   tar -xzf "$RELEASE_DIR/dscode-runtime-$PLATFORM.tar.gz" -C "$STAGE/runtime"
-  for entry in src bin browser tests presets package.json tsconfig.json cordis.patch.yml; do
+  for entry in src bin browser ssh shared tests presets package.json tsconfig.json cordis.patch.yml; do
     cp -R "$BRIDGE/$entry" "$STAGE/bridge/grok-leader/$entry"
   done
   cp "$ROOT/VERSION" "$STAGE/VERSION"

@@ -3,7 +3,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { importRuntime } from './runtime-modules.mjs'
+import { importRuntime } from '../shared/runtime-modules.mjs'
 import * as McpClient from '@deepseek-ai/dsh-mcp-client'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { browserOperation } from './operation.mjs'

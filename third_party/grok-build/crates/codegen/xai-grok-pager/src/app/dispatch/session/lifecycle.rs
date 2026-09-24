@@ -1086,6 +1086,9 @@ pub(in crate::app::dispatch) fn handle_session_created(
     let switch_hint =
         crate::views::dashboard::session_switch_hint_command(app.screen_mode.is_minimal());
     if let Some(agent) = app.agents.get_mut(&agent_id) {
+        // The leader opened a remote session in its workspace: show and
+        // resolve against that, not the directory this TUI started in.
+        agent.session.cwd = crate::execution_world::execution_world().session_cwd(&agent.session.cwd);
         let session_id_clone = session_id.clone();
         if agent.session.created_via_new
             && agent_count > 1

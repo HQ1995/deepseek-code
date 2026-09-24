@@ -5,6 +5,7 @@ import { errorChain } from '@deepseek-ai/dsh-llm'
 import { SessionId, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionPersistenceNotFoundError, type SessionInspection, type SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { internalError, invalidParams, paramRecord } from './acp.ts'
+import { assertMcpTransports, sessionCwd, type ExecutionWorld } from './execution-world.ts'
 import { AcpMcpConfigError, mountMcpConfigs, resolveAcpMcpConfigs, type McpClientConfig } from './mcp.ts'
 import { createPromptQueues, type PromptQueue } from './prompt-queue.ts'
 import { createSessionOutput, type SessionOutput, type SessionOutputHost } from './session-output.ts'
@@ -53,6 +54,8 @@ interface LifecycleHost {
   discovery: Pick<SessionDiscovery, 'inspect' | 'select'>
   client(id: number): { readonly closed: boolean; notify(method: string, params: unknown): void; drain?(): Promise<void> | undefined } | undefined
   queue: { combineQueued: boolean; followUpSteer: boolean }
+  /** Where this profile's tools run; remote sessions stay in the remote workspace. */
+  world(): ExecutionWorld
   permissions: Pick<ReturnType<typeof createNativeInteractions<SessionRecord>>, 'validateMeta' | 'apply' | 'assertReady'>
   contextValues(record: SessionRecord): ContextProjectionValues
   projectImages: SessionOutputHost['projectImages']
@@ -227,10 +230,13 @@ export function createSessionLifecycle(host: LifecycleHost) {
     cwd: string
     mcpConfigs: McpClientConfig[]
   }> => {
-    const cwd = p.cwd
-    if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw invalidParams('cwd must be an absolute path: ' + String(cwd))
+    const requested = p.cwd
+    if (typeof requested !== 'string' || !isAbsolute(requested)) throw invalidParams('cwd must be an absolute path: ' + String(requested))
+    const world = host.world(), cwd = sessionCwd(world, requested)
     try {
-      return { cwd, mcpConfigs: await resolveAcpMcpConfigs(p.mcpServers, cwd) }
+      const mcpConfigs = await resolveAcpMcpConfigs(p.mcpServers, cwd)
+      assertMcpTransports(world, mcpConfigs)
+      return { cwd, mcpConfigs }
     } catch (error) {
       if (error instanceof AcpMcpConfigError) throw invalidParams(error.message)
       throw error

@@ -431,7 +431,7 @@ export const main = async () => {
   const updateIndex = updateCommandIndex(args)
   if (updateIndex === -1 && (args.includes('--help') || args.includes('-h'))) {
     if (existsSync(binPath)) spawnAndExit(binPath, args, process.env)
-    else console.log('Usage: dscode [OPTIONS] [PROMPT]\n       dscode update [--stable | --beta | --alpha] [--version VERSION] [--check] [--json] [--force-reinstall]\n       dscode uninstall')
+    else console.log('Usage: dscode [OPTIONS] [PROMPT]\n       dscode update [--stable | --beta | --alpha] [--version VERSION] [--check] [--json] [--force-reinstall]\n       dscode remote init|status|remove\n       dscode uninstall')
     return
   }
   if (updateIndex !== -1) {
@@ -484,6 +484,24 @@ export const main = async () => {
   }
   if (process.argv[2] === 'uninstall') {
     await uninstallInstallation(args.slice(1))
+    return
+  }
+  if (args[0] === 'remote') {
+    const { remoteCommand } = await import('./remote.mjs')
+    // Only an explicitly chosen home may become remote; ~/.dsh keeps local workspaces.
+    const defaultProfile = join(homedir(), '.dsh', 'profiles', PROFILE_NAME)
+    await remoteCommand(args.slice(1), {
+      profileDir, dedicatedHome: resolve(profileDir) !== resolve(defaultProfile),
+      withLock: async action => {
+        try { return await withProfileLock(profileDir, action) } catch (error) {
+          // Without an installed runtime no leader can run in this home, so
+          // nothing else writes its patch: a first-time init needs no lock.
+          if (error?.code !== 'DSCODE_PROFILE_LOCK_UNAVAILABLE') throw error
+          return await action()
+        }
+      },
+      scaffold: scaffoldProfile, write: atomicWrite, log: message => console.log(message),
+    })
     return
   }
   if (!nodeVersionSupported(process.versions.node)) {

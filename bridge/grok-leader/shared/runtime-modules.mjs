@@ -1,6 +1,6 @@
 /** The runtime's plugin resolution follows the dsh CLI's dependency graph,
- * which does not reach the browser packages the dscode runtime ships
- * (dsh-browser-use, the experimental browser-use runtime and Playwright MCP).
+ * which does not reach some packages the dscode runtime ships (the browser-use
+ * and Playwright MCP packages, and the SSH providers).
  * Load them from the same installation, beside a package that graph reaches,
  * so there is one SDK copy and nothing is installed from the network. */
 import { createRequire } from 'node:module'

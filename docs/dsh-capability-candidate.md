@@ -19,8 +19,9 @@ Bridge changes, active in every dscode profile:
 Opt-in bundles and keyless acceptance scripts under `experiments/`, referenced
 by no dscode bundle, preset, launcher or release builder: `native-messages/`,
 `teams/`, `ssh/`, `inspector/`, `playwright/` and `capabilities/`. On
-`dsh-integration`, `playwright/` is replaced by the product `/browser` and
-`teams/` by the shipped `teams` preset; both are removed. Candidate
+`dsh-integration`, `playwright/` is replaced by the product `/browser`,
+`teams/` by the shipped `teams` preset and `ssh/` by the shipped remote
+workspace (`dscode remote`); all three are removed. Candidate
 commits `fa1b5b9` and `5aa44f1` needed no port: main's alpha.2 adoption already
 carries `workflow-ptc`, `agent/created`, the session-log opt-out and Ralph in
 the owned presets.

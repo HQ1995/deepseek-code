@@ -252,7 +252,14 @@ async fn run_command(
     // payload carries the lossy form JSON can hold.
     let repo_root = ctx.workspace.repo_root.clone().unwrap_or_default();
     let mut local_cwd = None;
-    for dir in [ctx.cwd.as_str(), repo_root.as_str()] {
+    // A remote session's cwd names another machine; a local directory that
+    // happens to share its path is not the workspace.
+    let session_dirs = if crate::execution_world::is_remote() {
+        [""; 2]
+    } else {
+        [ctx.cwd.as_str(), repo_root.as_str()]
+    };
+    for dir in session_dirs {
         if !dir.is_empty()
             && tokio::fs::metadata(dir)
                 .await

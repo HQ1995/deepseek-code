@@ -4,7 +4,8 @@ import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { releaseSdk } from './runtime.mjs'
-import * as Remote from '../ssh/index.mjs'
+// The shipped adapter; its runtime packages resolve beside the bridge's node_modules.
+import * as Remote from '../../bridge/grok-leader/ssh/index.mjs'
 
 const { sdk, mount } = releaseSdk(process.argv[2])
 const { Context } = await sdk('@deepseek-ai/cordis')

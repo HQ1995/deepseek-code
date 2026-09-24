@@ -370,6 +370,13 @@ impl AgentView {
                         inserted_image = true;
                     }
                 }
+                crate::prompt_images::DroppedPath::NonImage(_)
+                    if crate::execution_world::is_remote() =>
+                {
+                    // Its path names this computer; the remote model would read
+                    // whatever the other machine has there.
+                    self.show_toast("Local files cannot be attached in a remote workspace");
+                }
                 crate::prompt_images::DroppedPath::NonImage(path) => {
                     let to_insert = format!("{} ", path.display());
                     if !group_open {
@@ -1028,6 +1035,31 @@ pub(super) mod paste_key_tests {
             "decoded path + trailing space must be inserted; got {:?}, want substring {:?}",
             agent.prompt.text(),
             want_with_trailing_space
+        );
+    }
+    /// A remote workspace never receives a dropped local path: the remote
+    /// model would read whatever the other machine has at that path.
+    #[test]
+    fn event_paste_non_image_file_refused_in_a_remote_workspace() {
+        use crate::execution_world::{ExecutionWorld, with_test_world};
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        let dir = tempfile::tempdir().unwrap();
+        let txt = dir.path().join("local_notes.txt");
+        std::fs::write(&txt, b"hello").unwrap();
+        let url = format!("file://{}", txt.display());
+        let registry = ActionRegistry::defaults();
+        let remote = ExecutionWorld::Remote {
+            host: "swoop".into(),
+            workspace: "/srv/w".into(),
+        };
+        with_test_world(remote, || {
+            agent.handle_input(&Event::Paste(url), &registry);
+        });
+        assert!(
+            !agent.prompt.text().contains("local_notes.txt"),
+            "no local path may reach a remote prompt; got {:?}",
+            agent.prompt.text()
         );
     }
     /// A multi-image drop that pushes us past the cap must NOT block

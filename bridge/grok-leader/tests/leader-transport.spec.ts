@@ -1,7 +1,8 @@
 import { once } from 'node:events'
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdtemp } from 'node:fs/promises'
 import { createConnection, type Socket } from 'node:net'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { encodeJsonFrame, FrameDecoder } from '../src/codec.ts'
 import { createLeaderTransport, type LeaderTransportOptions } from '../src/leader-transport.ts'
@@ -64,19 +65,45 @@ it('owns registration, framing, ACP normalization and notification encoding with
   expect(await c.nextAcp()).toMatchObject({ method: 'session/update' })
 })
 
-it('binds the socket owner-only and restores the process umask afterwards', async () => {
+it('binds the socket owner-only without ever changing the process umask', async () => {
   const root = mkdtempSync('/tmp/dscode-umask-')
   cleanup.push(async () => rmSync(root, { recursive: true, force: true }))
   writeFileSync(join(root, 'before'), 'x')
+  const umask = process.umask()
+  process.umask(umask)
+  // Directories other plugins create while the leader binds must stay usable.
+  const concurrent = mkdtemp(join(root, 'plugin-'))
   const f = await fixture()
-  // existsSync resolves at bind time, before the listen callback restores
-  // the umask; a completed connection proves the callback has run.
+  expect(process.umask()).toBe(umask)
+  expect(statSync(await concurrent).mode & 0o777).toBe(0o700 & ~umask)
+  // The socket appears only once it is owner-only, fully bound and published.
   await f.connect()
+  expect(readdirSync(dirname(f.options.socketPath)).filter(name => name.startsWith('.'))).toEqual([])
   writeFileSync(join(root, 'after'), 'x')
   expect(statSync(f.options.socketPath).mode & 0o777).toBe(0o600)
   // A umask left at 0o177 would make this file 0o600 instead of matching
   // the file created before the transport started.
   expect(statSync(join(root, 'after')).mode).toBe(statSync(join(root, 'before')).mode)
+})
+
+it('binds in place, still owner-only, when a staging name would exceed the socket path limit', async () => {
+  // Deep enough that <dir>/.XXXXXX/s is too long while <dir>/l.sock still fits.
+  const base = mkdtempSync('/tmp/dscode-deep-')
+  cleanup.push(async () => rmSync(base, { recursive: true, force: true }))
+  const limit = process.platform === 'linux' ? 107 : 103
+  const dir = join(base, 'd'.repeat(limit - base.length - 1 - 8))
+  mkdirSync(dir)
+  const socketPath = join(dir, 'l.sock')
+  expect(Buffer.byteLength(socketPath)).toBeLessThanOrEqual(limit)
+  const umask = process.umask()
+  process.umask(umask)
+  const f = await fixture({ socketPath })
+  expect(process.umask()).toBe(umask)
+  const c = await f.connect()
+  c.send(register)
+  expect(await c.next()).toMatchObject({ type: 'registered' })
+  expect(statSync(socketPath).mode & 0o777).toBe(0o600)
+  expect(readdirSync(dir).filter(name => name.startsWith('.'))).toEqual([])
 })
 
 it('scopes reverse requests to each client and session and releases them on reply, cancellation or disconnect', async () => {

@@ -24,6 +24,7 @@
     },
     "./src/*": "./src/*",
     "./browser": "./browser/index.mjs",
+    "./ssh": "./ssh/index.mjs",
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
@@ -38,6 +39,8 @@
     "lib/",
     "bin/",
     "browser/",
+    "ssh/",
+    "shared/",
     "src/",
     "presets/",
     "cordis.patch.yml"

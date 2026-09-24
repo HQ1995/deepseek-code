@@ -468,6 +468,34 @@ fn dashboard_change_location_blocked_when_not_foreground() {
     );
 }
 #[tokio::test]
+async fn dashboard_change_location_refused_in_a_remote_workspace() {
+    use crate::execution_world::{ExecutionWorld, with_test_world};
+    let mut app = test_app();
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    let before = app.cwd.clone();
+    let dir = std::env::temp_dir();
+    let remote = ExecutionWorld::Remote {
+        host: "swoop".into(),
+        workspace: "/srv/w".into(),
+    };
+    let effects = with_test_world(remote, || {
+        dispatch(
+            Action::DashboardChangeLocation {
+                input: dir.to_string_lossy().into_owned(),
+            },
+            &mut app,
+        )
+    });
+    assert_eq!(app.cwd, before, "a remote workspace keeps the TUI's own directory");
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SetWorkingDir { .. }))
+    );
+}
+
+#[tokio::test]
 async fn dashboard_change_location_valid_updates_cwd_and_closes_modal() {
     let mut app = test_app();
     app.active_view = ActiveView::AgentDashboard;
@@ -2230,6 +2258,33 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
         Some(xai_grok_tools::types::SessionMode::Plan),
     );
     assert_eq!(agent.plan_mode_pending, Some(true));
+}
+/// A remote leader opens the session in its workspace; the record follows,
+/// so the header and path resolution never name the TUI's local directory.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn remote_session_created_takes_the_remote_workspace_as_cwd() {
+    use crate::execution_world::{ExecutionWorld, with_test_world};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.session_id = None;
+    app.agents.get_mut(&id).unwrap().session.cwd = PathBuf::from("/Users/me/project");
+    let remote = ExecutionWorld::Remote {
+        host: "swoop".into(),
+        workspace: "/srv/w".into(),
+    };
+    with_test_world(remote, || {
+        dispatch(
+            Action::TaskComplete(TaskResult::SessionCreated {
+                agent_id: id,
+                session_id: "remote-session".into(),
+                models: None,
+                scheduler_background_loops: None,
+            }),
+            &mut app,
+        )
+    });
+    assert_eq!(app.agents[&id].session.cwd, PathBuf::from("/srv/w"));
 }
 /// The deferred plan `SessionMode` is emitted (and cleared) once the
 /// session exists, mirroring the deferred model switch.

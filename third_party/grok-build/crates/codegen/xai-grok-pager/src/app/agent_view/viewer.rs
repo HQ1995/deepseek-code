@@ -32,6 +32,11 @@ impl AgentView {
         path: &std::path::Path,
         initial_range: Option<std::ops::Range<usize>>,
     ) {
+        // A remote session's file references name files on another machine.
+        if crate::execution_world::is_remote() {
+            self.prompt.textarea.cancel_undo_group();
+            return;
+        }
         // Resolve path relative to cwd.
         let full_path = if path.is_relative() {
             self.session.cwd.join(path)

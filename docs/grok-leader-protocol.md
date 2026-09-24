@@ -48,13 +48,23 @@ field on the failed result.
 
 | Surface | Contract |
 |---|---|
-| `initialize`, `authenticate` | advertise models, commands, capabilities, and the bridge-owned auth stub |
-| `session/new` | create a dsh agent for an absolute cwd and optional preset/model metadata |
+| `initialize`, `authenticate` | advertise models, commands, capabilities, the execution world, and the bridge-owned auth stub |
+| `session/new` | create a dsh agent for an absolute cwd and optional preset/model metadata; a remote world confines the cwd to its workspace |
 | `session/prompt`, `session/update` | admit durable images, stream text/reasoning/tool activity/diffs, and project exact token/cache usage plus turn completion |
 | `session/cancel` | cancel the active turn and reconcile queued prompts |
 | `session/load`, `session/list`, `session/close` | resume, enumerate, and dispose durable dsh sessions |
 | `session/set_model`, `session/set_mode` | switch model/effort and plan mode |
 | `session/request_permission` | wait for the owning client's answer; disconnect/cancel cancels the request without inventing a user rejection |
+
+`initialize` `_meta.dscodeExecutionWorld` says where tools run: `{kind: 'local'}`,
+or `{kind: 'ssh', host, workspace}` for a profile whose SSH adapter owns the
+filesystem, subprocess, sandbox and PTC providers. In a remote world, session
+paths are not host paths. The TUI then opens sessions at the remote workspace,
+and it must not link, open, read, preview or complete session paths on this
+computer, nor load local project configuration. The bridge refuses a
+`session/new` or `session/load` cwd outside the workspace and ACP stdio MCP
+servers, and writes relative `.zip` exports under the home directory on this
+computer.
 
 The bridge also implements the `x.ai/*` surfaces required by this TUI:
 

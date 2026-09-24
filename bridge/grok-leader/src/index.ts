@@ -33,6 +33,7 @@ import { createPluginRows, type PluginManagerLike } from './plugin-rows.ts'
 import { createBrowserControl, type BrowserStatus } from './browser-control.ts'
 import { createNativeTeam, type TeamServiceLike } from './native-team.ts'
 import { TEAM_TOOLS_MODULE } from './team-presets.ts'
+import { configuredRemote, executionWorld, type ConfigEntryLike, type RemoteLike } from './execution-world.ts'
 import type { LlmLike, SettingsLike, CredentialsLike, AgentDefaultModelLike } from './native-seams.ts'
 export { providerUserSection, providerUserProfile, hasUserProviderRoute, knownRouteBaseUrls } from './provider-profile.ts'
 /**
@@ -51,6 +52,7 @@ export { providerUserSection, providerUserProfile, hasUserProviderRoute, knownRo
  */
 
 import { statSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { createLeaderTransport } from './leader-transport.ts'
 import { fileURLToPath } from 'node:url'
 
@@ -156,6 +158,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const projectImages = createImageOutputProjector(ctx)
   ctx.effect(() => installLegacySessionMigration(ctx.get('sessionPersistence')))
   const logger = ctx.logger
+  // The configured SSH row decides the world, connected or not.
+  const remote = (): RemoteLike | undefined => configuredRemote((ctx.get('configEditor') as { entries(): Iterable<ConfigEntryLike> } | undefined)?.entries() ?? [])
+  const world = () => executionWorld(remote())
   // Build provenance banner: three caches can pin stale bridge code (the
   // profile's node_modules copy, a live leader process, a stale lib build),
   // and "which build is actually serving" has been unanswerable from logs.
@@ -265,7 +270,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     onCreated: listener => ctx.on('session/created', listener),
   })
   const lifecycle = createSessionLifecycle({
-    agents, registry, models: sessionModels, presets: sessionPresets, persistence, discovery,
+    agents, registry, models: sessionModels, presets: sessionPresets, persistence, discovery, world,
     flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),
     client: id => connections.get(id),
     queue: { combineQueued, followUpSteer },
@@ -341,6 +346,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       // session/set_model.
       _meta: {
         grokShell: true,
+        // A remote world tells the TUI that session paths are not host paths.
+        dscodeExecutionWorld: world(),
         cancelRewind: false,
         sessionRecap: false,
         availableCommands: (await sessionCommands.catalog()).commands,
@@ -417,6 +424,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     owned: ownedRecord, profileDirectory: profilePlugins.directory,
     inspector: () => ctx.get('dscodeInspector') as { url: string; captureFetch: boolean } | undefined,
     browser: () => (ctx.get('dscodeBrowser') as { status(): BrowserStatus } | undefined)?.status(),
+    remote: () => { const configured = remote(); return configured === undefined ? undefined : { ...configured, connected: ctx.get('ssh') !== undefined } },
     hostTeamRows: async () => (await (ctx.get('pluginManager') as PluginManagerLike | undefined)?.listPlugins() ?? [])
       .filter(row => row.enabled && row.moduleName === TEAM_TOOLS_MODULE).map(row => row.patchId ?? row.entryId),
     terminals: record => presetServiceFor(record, 'terminals') as NativeTerminals | undefined,
@@ -433,7 +441,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     owned: ownedRecord, client: id => connections.get(id),
     titles: () => ctx.get('sessionTitle') as NativeSessionTitles | undefined,
     references: () => ctx.get('sessionReferenceResolver') as NativeSessionReferences | undefined,
-    archive: (id, cwd, filename, signal) => exportSessionArchive(ctx, id, cwd, filename, signal),
+    // Archives are written on this computer: a remote cwd names no host directory.
+    archive: (id, cwd, filename, signal) => exportSessionArchive(ctx, id, world().kind === 'local' ? cwd : homedir(), filename, signal),
   })
 
   const dispatchRequest = async (clientId: number, method: string, params: unknown): Promise<unknown> => {

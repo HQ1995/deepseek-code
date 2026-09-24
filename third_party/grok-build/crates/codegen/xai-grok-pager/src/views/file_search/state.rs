@@ -210,6 +210,12 @@ impl FileSearchState {
     ///
     /// Called after every text change or cursor movement.
     pub fn update_context(&mut self, text: &str, cursor: usize) {
+        // Completion walks this computer's disk; a remote workspace is elsewhere.
+        // `@path` text still reaches the model, which resolves it remotely.
+        if crate::execution_world::is_remote() {
+            self.clear_context();
+            return;
+        }
         let new_ctx = context::detect_with_drill(text, cursor, self.drill_prefix.as_deref());
 
         match (&self.context, &new_ctx) {

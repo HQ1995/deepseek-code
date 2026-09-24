@@ -238,6 +238,11 @@ impl AgentView {
             (edit.path.clone(), edit.hunks.clone())
         };
 
+        // Full-file highlighting reads the edited file from this computer; a
+        // remote session's path names another machine. Hunk colouring remains.
+        if crate::execution_world::is_remote() {
+            return;
+        }
         let Some(target_path) = resolve_edit_target_path(&path, Some(self.session.cwd.as_path()))
         else {
             return;

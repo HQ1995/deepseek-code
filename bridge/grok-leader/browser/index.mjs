@@ -3,7 +3,7 @@
  * approval for every call and cleanup on cancellation. Shipped disabled;
  * `/browser on` enables the row. It does not confine network or host access. */
 import Schema from '@deepseek-ai/schemastery'
-import { importRuntime, playwrightMcpCli } from './runtime-modules.mjs'
+import { importRuntime, playwrightMcpCli } from '../shared/runtime-modules.mjs'
 import { browserLaunchArgs, resolveBrowserExecutable, sandboxRestriction } from './executable.mjs'
 import { browserDenial, navigationPolicy, prefix } from './policy.mjs'
 import { mountBrowserSessions } from './session-browser.mjs'

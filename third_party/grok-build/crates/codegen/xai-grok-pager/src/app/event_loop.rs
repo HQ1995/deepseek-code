@@ -331,7 +331,10 @@ fn seed_trust_state(
     use xai_grok_workspace::trust::workspace_key;
 
     let feature = feature_enabled(remote);
-    if !feature {
+    // A remote world loads no project configuration from this directory (its
+    // sessions and tools live on the other machine), so there is nothing here
+    // to trust. The leader's world is known: connect completes first.
+    if !feature || crate::execution_world::is_remote() {
         app.trust_state = TrustState::Done;
         return;
     }

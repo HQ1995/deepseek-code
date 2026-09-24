@@ -1077,6 +1077,8 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         }
         let hydrate_sid = session_id.clone();
         agent.bind_session_id(session_id);
+        // A remote session's cwd is the one the leader opened (see create).
+        agent.session.cwd = crate::execution_world::execution_world().session_cwd(&agent.session.cwd);
         agent.scheduler_background_loops = scheduler_background_loops;
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;

@@ -42,6 +42,7 @@ describe('leader handshake, registration and socket contract', () => {
       authMethods: [{ id: 'xai.api_key', name: 'API key' }],
       _meta: {
         grokShell: true,
+        dscodeExecutionWorld: { kind: 'local' },
         modelState: {
           currentModelId: 'deepseek-chat',
           availableModels: [

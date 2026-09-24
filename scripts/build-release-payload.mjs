@@ -202,7 +202,7 @@ function buildRuntime(consumer, source, manifest, out, work) {
 function buildPlugin(consumer, manifest, version, out, work) {
   const stage = join(work, 'plugin');
   mkdirSync(stage);
-  for (const name of ['src', 'bin', 'browser', 'presets', 'README.md', 'cordis.patch.yml', 'tsconfig.json']) cpSync(join(root, 'bridge/grok-leader', name), join(stage, name), { recursive: true });
+  for (const name of ['src', 'bin', 'browser', 'ssh', 'shared', 'presets', 'README.md', 'cordis.patch.yml', 'tsconfig.json']) cpSync(join(root, 'bridge/grok-leader', name), join(stage, name), { recursive: true });
   // A temporary compilation tree consumes the source-built SDK, never registry alpha SDKs.
   symlinkSync(join(consumer, 'node_modules'), join(stage, 'node_modules'));
   save(join(stage, 'package.json'), manifest);

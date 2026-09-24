@@ -569,6 +569,8 @@ async fn initialize(
 
     let session_recap_available = parse_session_recap_available(resp.meta.as_ref());
     let default_auth_method_id = parse_default_auth_method_id(resp.meta.as_ref());
+    // Recorded before any session exists, so every path gate sees the world.
+    crate::execution_world::set_execution_world(parse_execution_world(resp.meta.as_ref()));
 
     Ok((
         models,
@@ -589,6 +591,31 @@ pub fn parse_available_commands(meta: Option<&acp::Meta>) -> Vec<acp::AvailableC
     meta.and_then(|m| m.get("availableCommands"))
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default()
+}
+
+/// Parse dscode's `dscodeExecutionWorld` from `InitializeResponse.meta`.
+///
+/// Absent or `local` means session paths are host paths. Any other kind fails
+/// closed as remote; an SSH world names its host and workspace.
+pub fn parse_execution_world(meta: Option<&acp::Meta>) -> crate::execution_world::ExecutionWorld {
+    use crate::execution_world::ExecutionWorld;
+    let Some(world) = meta.and_then(|m| m.get("dscodeExecutionWorld")) else {
+        return ExecutionWorld::Local;
+    };
+    let text = |key: &str| {
+        world
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    match world.get("kind").and_then(|v| v.as_str()) {
+        Some("local") => ExecutionWorld::Local,
+        _ => ExecutionWorld::Remote {
+            host: text("host"),
+            workspace: text("workspace"),
+        },
+    }
 }
 
 /// Parse `sessionRecap` from `InitializeResponse.meta` (shell rollout gate).
@@ -913,6 +940,26 @@ mod tests {
         let meta = serde_json::json!({ "grokShell": true, "cancelRewind": true });
         assert!(!parse_session_recap_available(meta.as_object()));
         assert!(!parse_session_recap_available(None));
+    }
+
+    #[test]
+    fn parse_execution_world_is_local_only_when_the_leader_says_so() {
+        use crate::execution_world::ExecutionWorld;
+        assert_eq!(parse_execution_world(None), ExecutionWorld::Local);
+        let absent = serde_json::json!({ "grokShell": true });
+        assert_eq!(parse_execution_world(absent.as_object()), ExecutionWorld::Local);
+        let local = serde_json::json!({ "dscodeExecutionWorld": { "kind": "local" } });
+        assert_eq!(parse_execution_world(local.as_object()), ExecutionWorld::Local);
+        let ssh = serde_json::json!({ "dscodeExecutionWorld": { "kind": "ssh", "host": "swoop", "workspace": "/srv/w" } });
+        assert_eq!(
+            parse_execution_world(ssh.as_object()),
+            ExecutionWorld::Remote { host: "swoop".into(), workspace: "/srv/w".into() }
+        );
+        // An unknown or malformed world fails closed.
+        let unknown = serde_json::json!({ "dscodeExecutionWorld": { "kind": "container" } });
+        assert!(parse_execution_world(unknown.as_object()).is_remote());
+        let malformed = serde_json::json!({ "dscodeExecutionWorld": "ssh" });
+        assert!(parse_execution_world(malformed.as_object()).is_remote());
     }
 
     #[test]

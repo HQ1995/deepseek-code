@@ -4,6 +4,7 @@ import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from 
 import { SessionId, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionPersistenceRevision, type SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import { createSessionLifecycle, type PersistenceLike, type SessionRecord } from '../src/session-lifecycle.ts'
+import type { ExecutionWorld } from '../src/execution-world.ts'
 import { createSessionRegistry } from '../src/session-registry.ts'
 import { createSessionDiscovery } from '../src/session-discovery.ts'
 import type { SessionModel } from '../src/session-models.ts'
@@ -93,6 +94,7 @@ function fixture() {
   stops.push(() => discovery.dispose())
   const host = { discovery, agents, registry: sessions, models, presets, flush, persistence: (): PersistenceLike | undefined => persistence as unknown as PersistenceLike,
     client: (id: number) => clients.get(id), queue: { combineQueued: false, followUpSteer: false },
+    world: vi.fn((): ExecutionWorld => ({ kind: 'local' })),
     permissions: { validateMeta: vi.fn(), apply: permissions, assertReady: vi.fn() }, views, contextValues: () => ({}), projectImages: vi.fn(async (_event: SessionEvent, updates: unknown[]) => updates) as never,
     logger: { warn: vi.fn() } }
   const lifecycle = createSessionLifecycle(host)
@@ -128,6 +130,19 @@ describe('session lifecycle ownership', () => {
     await expect(f.add()).rejects.toThrow('already in use')
     expect(f.agents.create).toHaveBeenCalledTimes(1)
     expect(record.model.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps remote sessions inside the remote workspace and refuses host stdio MCP servers', async () => {
+    const f = fixture()
+    f.host.world.mockReturnValue({ kind: 'ssh', host: 'swoop', workspace: '/home/u/work' })
+    for (const cwd of ['/Users/me/project', '/home/u/work-other', '/home/u']) {
+      await expect(f.lifecycle.new(1, { cwd, mcpServers: [] })).rejects.toThrow('remote workspace swoop:/home/u/work')
+    }
+    await expect(f.lifecycle.new(1, { cwd: '/home/u/work', mcpServers: [{ name: 'local', command: '/usr/bin/true', args: [], env: [] }] }))
+      .rejects.toThrow('Local stdio MCP servers cannot run beside a remote workspace (local)')
+    expect(f.agents.create).not.toHaveBeenCalled()
+    await f.lifecycle.new(1, { cwd: '/home/u/work/sub/../pkg/', mcpServers: [{ type: 'http', name: 'remote', url: 'https://mcp.example/x', headers: [] }], _meta: { sessionId: 'remote' } })
+    expect(f.agents.create).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'remote', meta: expect.objectContaining({ cwd: '/home/u/work/pkg' }) }))
   })
 
   it('answers one pinned durable id with a point query instead of listing the store', async () => {

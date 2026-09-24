@@ -1241,6 +1241,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 Some(LinkTarget::Url(url)) => {
                     crate::app::link_opener::open_url(&url);
                 }
+                None if matches!(target, LinkTarget::File(_)) && crate::execution_world::is_remote() => {
+                    app.show_toast("Remote session files are not opened on this computer");
+                }
                 None => {}
             }
             vec![]

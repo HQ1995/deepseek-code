@@ -63,6 +63,9 @@ pub fn resolve_link_target_for_context(
                 open_target: Some(LinkTarget::Url(Arc::clone(url))),
             })
         }
+        // A remote world's session paths name files on another machine: never
+        // emit or open them here, whether or not the same path exists locally.
+        LinkTarget::File(_) if crate::execution_world::is_remote() => None,
         LinkTarget::File(_)
             if terminal.brand == crate::terminal::TerminalName::VsCode
                 && terminal.is_official_vscode_remote
@@ -942,6 +945,26 @@ mod tests {
             }
         );
         assert_eq!(resolve_link_open_target(&file), Some(file));
+    }
+
+    #[test]
+    fn remote_world_never_links_or_opens_session_paths() {
+        use crate::execution_world::{ExecutionWorld, with_test_world};
+        let remote = ExecutionWorld::Remote { host: "swoop".into(), workspace: "/home/u/work".into() };
+        with_test_world(remote, || {
+            // Even a path that exists on this computer stays plain text.
+            let file = LinkTarget::File(Arc::from(Path::new("/etc/hosts")));
+            assert_eq!(resolve_link_target(&file), None);
+            assert_eq!(resolve_link_open_target(&file), None);
+            // A relative Markdown link that collides with a local file is found
+            // locally, and still never becomes a link.
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("notes.md"), b"local").unwrap();
+            let collision = local_link_to_file_target("notes.md", &[], Some(dir.path())).unwrap();
+            assert_eq!(resolve_link_target(&collision), None);
+            let web = LinkTarget::Url(Arc::from("https://example.com/docs"));
+            assert!(resolve_link_target(&web).is_some());
+        });
     }
 
     #[test]

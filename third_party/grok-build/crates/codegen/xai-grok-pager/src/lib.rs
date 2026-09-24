@@ -60,8 +60,8 @@ pub mod wrap_cmd;
 pub(crate) mod wrap_filter;
 pub(crate) mod wrap_restore;
 pub use xai_grok_pager_render::{
-    appearance, clipboard, gboom, glyphs, host, link_opener, modal_window_state, prompt_images,
-    render, syntax, terminal, theme, util,
+    appearance, clipboard, execution_world, gboom, glyphs, host, link_opener, modal_window_state,
+    prompt_images, render, syntax, terminal, theme, util,
 };
 #[cfg(test)]
 pub mod test_util;

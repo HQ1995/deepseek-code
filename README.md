@@ -91,6 +91,27 @@ asks for approval, also in always-approve mode. It is not an OS network or host
 sandbox; see the [browser notes](docs/upgrade-strategy.md#browser) for browser
 discovery, the Chromium sandbox and origin filtering.
 
+## Remote workspace over SSH (experimental)
+
+A remote workspace is its own dscode home: every tool, shell, file edit and
+code run happens on one POSIX host over SSH, while the TUI, model access and
+session history stay on this computer. Install the matching remote helper, Node
+and PTC bootstrap on the host first; see the
+[remote workspace notes](docs/upgrade-strategy.md#remote-workspace-over-ssh).
+
+```sh
+DSH_HOME=~/.dsh-remote/build dscode remote init --host build --workspace /srv/work \
+  --node /opt/node/bin/node --helper <remote helper.js> --helper-hash <sha256> \
+  --bootstrap <remote process.js> --bootstrap-hash <sha256>
+DSH_HOME=~/.dsh-remote/build dscode        # sessions open in build:/srv/work
+DSH_HOME=~/.dsh-remote/build dscode remote status
+```
+
+The host alias must already work with `ssh -o BatchMode=yes <alias>` and a
+known host key. Session paths are remote, so the TUI never links, opens or
+previews them here, and it does not use this directory's project settings or
+worktrees. `dscode remote remove` makes the home local again.
+
 ## Per-run configuration
 
 ```sh

@@ -38,6 +38,7 @@ function fixture() {
     inspector: vi.fn<() => { url: string; captureFetch: boolean } | undefined>(() => undefined),
     browser: vi.fn<() => BrowserStatus | undefined>(() => undefined),
     hostTeamRows: vi.fn(async (): Promise<readonly string[]> => []),
+    remote: vi.fn((): { host: string; workspace: string; helperHash?: string; connected: boolean } | undefined => undefined),
   }
   const installation = vi.fn(async (_version: string, _directory: string | undefined, _signal: AbortSignal) => JSON.stringify([{ status: 'OK', name: 'Runtime', detail: 'pinned' }]))
   const execution = createNativeExecution(host, installation)
@@ -56,6 +57,14 @@ describe('native execution ownership', () => {
     expect((await f.doctor()).text).toContain('Fetch capture off. Open in Chrome: devtools://fixture')
     f.host.inspector.mockReturnValue({ url: 'devtools://fixture', captureFetch: true })
     expect((await f.doctor()).text).toContain('ON (raw secrets may be retained)')
+  })
+  it('names the remote workspace of an SSH profile', async () => {
+    const f = fixture()
+    expect((await f.doctor()).text).not.toContain('Remote workspace')
+    f.host.remote.mockReturnValue({ host: 'swoop', workspace: '/home/u/work', helperHash: 'abc', connected: true })
+    expect((await f.doctor()).text).toContain('[INFO] Remote workspace: ssh swoop:/home/u/work; helper sha256 abc. Tools, shells and file edits run there')
+    f.host.remote.mockReturnValue({ host: 'swoop', workspace: '/home/u/work', connected: false })
+    expect((await f.doctor()).text).toContain('[ERROR] Remote workspace: ssh swoop:/home/u/work. NOT connected')
   })
   it('warns about host-level Team tools rows, which reach every session', async () => {
     const f = fixture()

@@ -554,6 +554,12 @@ pub(super) fn dispatch_open_config_agents_modal(
         toast_session_only_slash(app, config_agents_slash_name(initial_tab));
         return vec![];
     };
+    // The modal reads and writes `.grok` under the session cwd on this
+    // computer; a remote workspace's cwd names another machine.
+    if crate::execution_world::is_remote() {
+        app.show_toast("Agent and persona files are unavailable in a remote workspace");
+        return vec![];
+    }
     let bundle = app.bundle_state.clone();
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];

@@ -81,7 +81,7 @@ JS
 
 # The product E2E uses the same layout; never replace the checkout's node_modules.
 mkdir -p "$STAGE/bridge/grok-leader"
-for entry in src bin browser tests presets package.json tsconfig.json cordis.patch.yml; do
+for entry in src bin browser ssh shared tests presets package.json tsconfig.json cordis.patch.yml; do
   cp -R "$BRIDGE/$entry" "$STAGE/bridge/grok-leader/$entry"
 done
 cp "$ROOT/VERSION" "$STAGE/VERSION"

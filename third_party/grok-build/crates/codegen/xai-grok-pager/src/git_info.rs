@@ -225,7 +225,14 @@ fn cwd_cache_insert(
 }
 
 fn compute_snapshot(cwd: &Path) -> GitSnapshot {
-    let Ok(repo) = git2::Repository::discover(cwd) else {
+    // A remote session's cwd names another machine: never discover a local
+    // repository that happens to share its path.
+    let discovered = if crate::execution_world::is_remote() {
+        Err(git2::Error::from_str("remote workspace"))
+    } else {
+        git2::Repository::discover(cwd)
+    };
+    let Ok(repo) = discovered else {
         return GitSnapshot {
             repo_root_display: None,
             branch: None,

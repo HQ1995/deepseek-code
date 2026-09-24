@@ -118,7 +118,7 @@ forward.
 | V4 logs, immutable migration, SessionHandle and process locks | Native persistence, legacy model-selection adapter and tool-role replay; resume/fork/archive tests |
 | Parent-owned subagent catalog and ordered discovery | Native `listDescendants`; `/subagents`, Tasks and child history; catalog survives restart |
 | Continuable children, queue/edit/remove/steer/stop | Existing native inbox adapters and TUI controls; terminal states retain readable history |
-| Agent Team messaging changes | Included in the runtime; experimental Team composition remains opt-in (see below) |
+| Agent Team messaging changes | Included in the runtime and the shipped `teams` preset (see [Agent Teams](#agent-teams)) |
 | Goals, explicit pause/resume and turn cancellation | `/goal` and native controls; pausing does not let the model resume itself |
 | Reminder scheduling | `/reminders`; native durable schedules, delivered while the owning session is open |
 | Jobs, retained output and subprocess cleanup | `/tasks`, native non-consuming `readAt`, session-owned events and cancellation; host PID validation remains enforced |
@@ -259,6 +259,74 @@ the runtime's closure. `scripts/e2e-browser-installed.mjs <runtime> <home> <chro
 checks an installed leader over ACP: off by default, `/browser on` for new
 Sessions only, approvals, rejection and cancel without late page requests,
 resume with fresh storage, then `/browser off`.
+
+### Remote workspace over SSH
+
+A remote workspace is a dedicated `DSH_HOME` whose dscode profile runs every
+tool on one POSIX host. `dscode remote init` writes one marked block into that
+profile's `cordis.patch.yml`:
+- it disables the local `subprocess`, `sandbox`, `fs-sandbox` and `ptc-runtime` rows;
+- it points `sandbox-policy` at the remote workspace;
+- it inserts the shipped `@hqzhao95/dscode/ssh` row with literal settings.
+
+That row owns DSH's SSH connection, filesystem, subprocess, sandbox and Node PTC
+providers. Like the browser packages, they load from the runtime closure. The
+command refuses the default home and edits the patch as text, so user `!!js`
+entries survive. The leader socket is per profile, so local and remote sessions
+never share a leader. `dscode remote remove` restores a local home.
+
+The host needs the helper and PTC bootstrap from the same DSH release,
+installed outside the workspace, plus an absolute Node path. For example:
+`npm install @deepseek-ai/dsh-ssh@<release> @deepseek-ai/dsh-ptc-runtime-node@<release>`,
+then take the SHA-256 of `dsh-ssh/lib/helper.js` and
+`dsh-ptc-runtime-node/lib/process.js`. The connection runs
+`ssh -T -M -o BatchMode=yes -o StrictHostKeyChecking=yes <alias>`, so the alias
+must already connect non-interactively with a known host key. Digest mismatches
+refuse the connection.
+
+The leader reports `_meta.dscodeExecutionWorld` from the configured row,
+connected or not, so a failed connection never looks local. Inside that world:
+- **Session cwd:** the TUI opens sessions at the remote workspace (or a
+  directory inside it). The bridge refuses any other cwd and any ACP stdio MCP
+  server.
+- **Session paths:** the TUI never links, opens, highlights from disk, previews
+  or `@`-completes them. It does not scan agent text for local images or videos,
+  or discover git in a local directory with the same name.
+- **Local context:** it does not use this directory's MCP config, persona files,
+  worktrees or location changes, and asks no folder-trust question for it. It
+  refuses dropped local files; dropped images still attach as data.
+- **Exports:** relative `.zip` exports land in the home directory on this computer.
+- **`/doctor`:** it names the host, workspace and helper digest, and reports
+  ERROR while disconnected.
+
+Transcripts, attachments and credentials stay on this computer.
+
+Limits of this first phase:
+- The SSH connection does not reconnect; losing it needs a leader restart.
+- The sandbox root is fixed to the configured workspace, and there is no remote
+  file watching.
+- `@` completion, the line viewer, full-file edit highlighting and the git
+  branch display are unavailable until a remote read API exists.
+
+`scripts/e2e-remote-installed.mjs <runtime> <home> <config.json>` checks an
+installed remote profile against a real host over ACP:
+- the advertised world;
+- the refused host cwd and stdio MCP server;
+- remote `bash`, and a write that lands only remotely;
+- the doctor row and the export location.
+
+`scripts/e2e-remote-tui.mjs <runtime> <home> <config.json> <tui>` adds the
+real TUI binary from a local project with its own `.mcp.json`. It runs headless
+and then interactive in tmux, where the header must name the remote workspace. With a TUI that predates these gates,
+the bridge still refuses the host cwd, so an old client fails closed.
+`experiments/capabilities/ssh-smoke.mjs` drives the shipped adapter through
+the SDK: remote PTY, PTC, cancellation and SSH-master loss.
+
+The leader socket is bound in a private directory, restricted to the owner
+and then hard-linked into place, instead of holding a process-wide `0o177`
+umask during the bind. The old umask briefly applied to files and directories
+other plugins created at boot. It left the SSH adapter's control directory
+unsearchable, so the connection failed.
 
 ## Bridge changes
 

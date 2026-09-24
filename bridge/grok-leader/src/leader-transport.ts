@@ -1,6 +1,7 @@
 /** Leader framing, registration and ACP lifetimes, independent of DSH/agents. */
-import { chmodSync, unlinkSync } from 'node:fs'
+import { chmodSync, linkSync, mkdtempSync, rmSync, unlinkSync } from 'node:fs'
 import { createServer, type Socket } from 'node:net'
+import { dirname, join, sep } from 'node:path'
 import { writeJsonFrame, waitForDrain, FrameDecoder } from './codec.ts'
 import { LEADER_PROTOCOL_VERSION, RpcError, decodeClientMessage, encodeServerMessage, type ClientMessage, type ServerMessage } from './protocol.ts'
 import { internalError } from './acp.ts'
@@ -30,6 +31,9 @@ export interface LeaderTransportOptions {
   registrationTimeoutMs?: number
 }
 
+/** Longest Unix socket path the kernel accepts (sun_path less its NUL). */
+const MAX_SOCKET_PATH = process.platform === 'linux' ? 107 : 103
+
 /** Normalize direct x.ai/foo and wrapped _x.ai/foo forms (upstream method_of). */
 const normalizeMethod = (method: string, params: unknown): string => {
   if (!method.startsWith('_')) return method
@@ -43,9 +47,9 @@ export function createLeaderTransport(options: LeaderTransportOptions) {
   const sockets = new Set<Socket>()
   let sequence = 0, closed = false, started = false, bound = false
   let failure: NodeJS.ErrnoException | undefined
-  // Holds the umask restore while a bind is in flight; start() installs the
-  // real closure, close() calls it in case the listen callback never fires.
-  let restoreUmask: () => void = () => {}
+  // Removes the private bind directory; start() installs the real closure,
+  // close() calls it in case the listen callback never fires.
+  let discardStaging: () => void = () => {}
   const debug = options.debug ?? process.env.DSCODE_DEBUG === '1'
   const server = createServer(accept)
   const trace = (direction: string, value: unknown, max: number): void => {
@@ -223,35 +227,71 @@ export function createLeaderTransport(options: LeaderTransportOptions) {
     start() {
       if (started || closed) throw new Error('leader transport cannot be started again')
       started = true
-      // bind() applies the process umask to the socket node, so hold 0o177
-      // until the listen callback (or a bind error): without it the socket is
-      // briefly world-connectable between bind and the chmod below.
-      const previousUmask = process.platform === 'win32' ? undefined : process.umask(0o177)
-      let restored = false
-      restoreUmask = () => {
-        if (restored) return
-        restored = true
-        if (previousUmask !== undefined) process.umask(previousUmask)
+      // Never change the process umask: plugins create files and directories
+      // concurrently at boot, and a umask held across the asynchronous listen
+      // made their directories unsearchable (the SSH adapter's control
+      // directory). Bind in a private directory beside the socket path,
+      // restrict the socket, then publish it by hard link: it is never
+      // reachable before it is owner-only, and the link fails like a bind when
+      // another leader owns the path, whose socket is never removed. A pipe
+      // binds and listens synchronously inside listen(), so all of this
+      // happens in this turn, before any client can connect.
+      let staging: string
+      // Concatenated, not joined: join() would normalize the trailing '.' away.
+      try { staging = mkdtempSync(dirname(options.socketPath) + sep + '.') } catch (error) {
+        queueMicrotask(() => server.emit('error', error))
+        return
       }
-      server.once('error', restoreUmask)
+      let discarded = false
+      discardStaging = () => {
+        if (discarded) return
+        discarded = true
+        rmSync(staging, { recursive: true, force: true })
+      }
+      const staged = join(staging, 's')
+      const onListening = () => { if (closed) { server.close(); removeSocketFile() } }
+      if (Buffer.byteLength(staged) > MAX_SOCKET_PATH) {
+        // No room for a staging name (Node 22 would silently truncate it):
+        // bind in place. The node takes the umask at bind, which happens
+        // synchronously inside listen(), so an owner-only umask held for just
+        // that call leaves no connectable window and ends before any other
+        // JavaScript runs.
+        discardStaging()
+        const previousUmask = process.umask(0o177)
+        try { server.listen(options.socketPath, onListening) } finally { process.umask(previousUmask) }
+        if (!server.listening) return
+        bound = true
+        try { chmodSync(options.socketPath, 0o600) } catch (error) {
+          options.logger.warn('grok-leader: socket chmod failed: ' + String(error))
+        }
+        return
+      }
+      server.once('error', discardStaging)
+      server.listen(staged, onListening)
+      // A failed bind is reported by the 'error' event, which also discards staging.
+      if (!server.listening) return
       try {
-        server.listen(options.socketPath, () => {
-          restoreUmask()
-          bound = true
-          if (closed) { server.close(); removeSocketFile(); return }
-          try { chmodSync(options.socketPath, 0o600) } catch (error) {
-            options.logger.warn('grok-leader: socket chmod failed: ' + String(error))
-          }
-        })
+        chmodSync(staged, 0o600)
+        linkSync(staged, options.socketPath)
       } catch (error) {
-        restoreUmask()
-        throw error
+        const cause = error as NodeJS.ErrnoException
+        server.off('error', discardStaging)
+        discardStaging()
+        server.close()
+        const reported = cause.code !== 'EEXIST' ? cause
+          : Object.assign(new Error('listen EADDRINUSE: address already in use ' + options.socketPath), { code: 'EADDRINUSE', errno: cause.errno, syscall: 'listen', address: options.socketPath })
+        queueMicrotask(() => server.emit('error', reported))
+        return
       }
+      bound = true
+      // The listening socket keeps its inode; only the staging name goes.
+      server.off('error', discardStaging)
+      discardStaging()
     },
     close() {
       if (closed) return
       closed = true
-      restoreUmask()
+      discardStaging()
       server.close()
       for (const socket of sockets) socket.destroy()
       removeSocketFile()

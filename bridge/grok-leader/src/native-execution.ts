@@ -26,6 +26,8 @@ interface ExecutionHost<S extends ExecutionSession> {
   browser?(): BrowserStatus | undefined
   /** Enabled host-level Team tools rows, which reach every session's agents. */
   hostTeamRows?(): Promise<readonly string[]>
+  /** The remote workspace identity when this profile runs tools over SSH. */
+  remote?(): { host: string; workspace: string; helperHash?: string; connected: boolean } | undefined
 }
 type InstallationReader = (version: string, directory: string | undefined, signal: AbortSignal) => Promise<string>
 const execute = promisify(execFile)
@@ -122,6 +124,12 @@ export function createNativeExecution<S extends ExecutionSession>(host: Executio
         const browser = host.browser?.()
         if (browser !== undefined) findings.push({ status: browser.executable === undefined || !browser.sandbox || browser.sandboxWarning !== undefined ? 'WARN' : 'OK', name: 'Browser',
           detail: describeBrowser(browser).replace(/^Browser: /, '').split('\n').map(line => line.trim().replace(/\.$/, '')).join('; ') + '. Browser state is isolated; network and host access are not confined.' })
+        const remote = host.remote?.()
+        if (remote !== undefined) findings.push({ status: remote.connected ? 'INFO' : 'ERROR', name: 'Remote workspace', detail: `ssh ${remote.host}:${remote.workspace}`
+          + (remote.helperHash === undefined ? '' : `; helper sha256 ${remote.helperHash}`)
+          + (remote.connected
+            ? '. Tools, shells and file edits run there; session paths are never opened on this computer. Losing the SSH connection needs a leader restart.'
+            : '. NOT connected: no tool can run. Check the SSH alias, helper and digests, then restart dscode.') })
         const hostTeamRows = await host.hostTeamRows?.() ?? []
         active(record, scope)
         if (hostTeamRows.length > 0) findings.push({ status: 'WARN', name: 'Agent Teams', detail: `Host-level Team tools (${hostTeamRows.join(', ')})`

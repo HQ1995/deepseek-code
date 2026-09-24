@@ -1808,6 +1808,11 @@ pub fn is_media_only_markdown(text: &str, resolved_ref_count: usize) -> bool {
 pub fn extract_image_refs(text: &str) -> Vec<ScrollbackImageRef> {
     use std::sync::LazyLock;
 
+    // A remote session's paths name another machine: never read them here.
+    if crate::execution_world::is_remote() {
+        return Vec::new();
+    }
+
     static MD_RE: LazyLock<regex::Regex> =
         LazyLock::new(|| regex::Regex::new(MARKDOWN_IMAGE_REF_PATTERN).unwrap());
 
@@ -1890,6 +1895,11 @@ impl ScrollbackVideoRef {
 /// Extract video references from text (markdown `![](path)` and bare paths).
 pub fn extract_video_refs(text: &str) -> Vec<ScrollbackVideoRef> {
     use std::sync::LazyLock;
+
+    // A remote session's paths name another machine: never read them here.
+    if crate::execution_world::is_remote() {
+        return Vec::new();
+    }
 
     // Reuse the markdown image ref pattern — video_gen uses ![prompt](path.mp4).
     static MD_RE: LazyLock<regex::Regex> =
@@ -4812,5 +4822,26 @@ mod tests {
         // Second call is a no-op, returns true.
         assert!(viewer.finish_loading());
         assert!(!viewer.loading);
+    }
+}
+
+#[cfg(test)]
+mod remote_world_tests {
+    use super::*;
+    use crate::execution_world::{ExecutionWorld, with_test_world};
+
+    #[test]
+    fn remote_world_reads_no_media_paths_from_message_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("shot.png");
+        let png = image::RgbaImage::new(1, 1);
+        png.save(&image).unwrap();
+        let text = format!("![shot]({})", image.display());
+        assert_eq!(extract_image_refs(&text).len(), 1);
+        let remote = ExecutionWorld::Remote { host: "swoop".into(), workspace: "/home/u/work".into() };
+        with_test_world(remote, || {
+            assert!(extract_image_refs(&text).is_empty());
+            assert!(extract_video_refs(&format!("![clip]({})", dir.path().join("clip.mp4").display())).is_empty());
+        });
     }
 }

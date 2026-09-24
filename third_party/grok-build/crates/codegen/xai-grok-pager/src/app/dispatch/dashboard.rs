@@ -885,6 +885,11 @@ pub(super) fn dispatch_dashboard_change_location(app: &mut AppView, input: Strin
         app.show_toast("Open the dashboard (/dashboard) to change location");
         return vec![];
     }
+    // Locations are checked on this computer's disk; a remote workspace's are not here.
+    if crate::execution_world::is_remote() {
+        app.show_toast("Changing location is unavailable in a remote workspace");
+        return vec![];
+    }
     let path = match resolve_location_input(&input, &app.cwd).filter(|p| p.is_dir()) {
         Some(p) => p,
         None => {

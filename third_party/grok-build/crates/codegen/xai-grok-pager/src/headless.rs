@@ -413,8 +413,7 @@ fn stop_reason_wire(reason: acp::StopReason) -> String {
 
 /// Configured MCP servers for the `init` line; all report `"connected"` (status is not resolved here).
 fn mcp_server_names(cwd: &Path) -> Vec<McpServer> {
-    let servers =
-        cli_config::load_mcp_servers(cwd, &xai_grok_tools::types::compat::CompatConfig::default());
+    let servers = session_mcp_servers(cwd);
     servers
         .iter()
         .filter_map(|s| {
@@ -589,6 +588,16 @@ fn build_headless_session_meta(
     Ok(meta)
 }
 
+/// Local project MCP servers for a session, or none in a remote world, whose
+/// sessions never read this computer's project configuration.
+fn session_mcp_servers(cwd: &Path) -> Vec<acp::McpServer> {
+    if crate::execution_world::is_remote() {
+        return Vec::new();
+    }
+    // Sessions open before the agent resolves per-vendor compat; default all-on until it does.
+    cli_config::load_mcp_servers(cwd, &xai_grok_tools::types::compat::CompatConfig::default())
+}
+
 async fn open_session(
     acp_tx: &AcpAgentTx,
     cwd: &Path,
@@ -596,9 +605,9 @@ async fn open_session(
     restore_code: Option<bool>,
     session_meta: Option<&acp::Meta>,
 ) -> anyhow::Result<OpenedSession> {
-    // Sessions open before the agent resolves per-vendor compat; default all-on until it does.
-    let mcp_servers =
-        cli_config::load_mcp_servers(cwd, &xai_grok_tools::types::compat::CompatConfig::default());
+    // A remote world opens sessions in its workspace, never at a host path.
+    let cwd = &crate::execution_world::execution_world().session_cwd(cwd);
+    let mcp_servers = session_mcp_servers(cwd);
 
     if let Some(sid) = session_id_flag {
         let try_load: Result<acp::LoadSessionResponse, _> = acp_send(
@@ -645,8 +654,8 @@ async fn open_session_with_id(
     session_id: &str,
     session_meta: Option<&acp::Meta>,
 ) -> anyhow::Result<OpenedSession> {
-    let mcp_servers =
-        cli_config::load_mcp_servers(cwd, &xai_grok_tools::types::compat::CompatConfig::default());
+    let cwd = &crate::execution_world::execution_world().session_cwd(cwd);
+    let mcp_servers = session_mcp_servers(cwd);
     let new_resp: acp::NewSessionResponse = acp_send(
         acp::NewSessionRequest::new(cwd.to_path_buf())
             .mcp_servers(mcp_servers)
