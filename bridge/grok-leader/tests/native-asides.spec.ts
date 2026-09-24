@@ -4,8 +4,8 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
 import { createNativeAsides, type NativeAsideRuntime } from '../src/native-asides.ts'
 import { createSessionWork } from '../src/session-work.ts'
+import { tick } from './support/async.ts'
 
-const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
 const answer = (text = 'answer'): SubagentResult => ({ output: [{ type: 'text', text }], stopReason: 'completed' })
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { for (const stop of stops.splice(0)) await stop() })

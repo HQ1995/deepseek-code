@@ -4,10 +4,10 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { createSessionCommands, type NativeCommands, type NativeSkills } from '../src/session-commands.ts'
 import { createSessionWork, type SessionWork } from '../src/session-work.ts'
 import { parsePrompt } from '../src/prompt-content.ts'
+import { tick } from './support/async.ts'
 
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(stops.splice(0).map(stop => stop())) })
-const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
 type TestSession = { agent: Agent; clientId: number; work: SessionWork; output: { update: ReturnType<typeof vi.fn> } }
 function fixture(disposalError?: string) {
   const sessions = new Map<SessionId, TestSession>(), events = new Map<string, () => void>(), unsubscribes: Array<ReturnType<typeof vi.fn>> = []

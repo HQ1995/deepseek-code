@@ -3,10 +3,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createSessionArtifacts, type NativeSessionReferences, type NativeSessionTitles } from '../src/session-artifacts.ts'
 import { createSessionWork } from '../src/session-work.ts'
+import { tick } from './support/async.ts'
 
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { for (const stop of stops.splice(0)) await stop() })
-const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
 function fixture() {
   const ready = { value: true }, client = new AbortController(), configured = { titles: true, references: true, client: true }
   const agent = { session: { id: SessionId('one'), header: { cwd: '/workspace' } } } as Agent

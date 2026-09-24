@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createLeaderLifecycle } from '../src/leader-lifecycle.ts'
+import { tick } from './support/async.ts'
 
-const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
 const stops: Array<() => Promise<void>> = []
 beforeEach(() => { vi.useFakeTimers() })
 afterEach(async () => {
