@@ -335,7 +335,7 @@ function deliveredFiles(files: ReadonlyArray<{ path: string; description?: strin
 /** One tool card opening; native calls and PTC sub-calls share it. A card titled by what
  * it does keeps its tool name in `_meta['x.ai/tool']`, which headless output reads first. */
 function toolCallStarted(toolCallId: string, name: string, args: unknown): GrokSessionUpdate {
-  const title = browserCardTitle(name, args) ?? argumentTitle(args) ?? name
+  const title = browserCardTitle(name, args) ?? argumentTitle(toolKindForName(name, args), args) ?? name
   return { sessionUpdate: 'tool_call', toolCallId, title, kind: toolKindForName(name, args), status: 'in_progress', rawInput: rawInputForTool(name, args),
     ...title === name ? {} : { _meta: { 'x.ai/tool': { name } } } }
 }

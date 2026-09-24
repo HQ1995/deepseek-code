@@ -47,10 +47,13 @@ drops the entire frame, not just its status. Error metadata remains a separate
 field on the failed result.
 
 A `tool_call` is titled by its tool name unless its arguments say what it does:
-a browser action reads `Browser: <action>`, and a call whose arguments carry
+a browser action reads `Browser: <action>`, a call whose arguments carry
 `questions: [{question}]` reads `Ask: <question>` (`Ask N questions` for
-several). Such a card keeps its tool name in `_meta['x.ai/tool'].name`, which
-headless output reads before the title.
+several), and an execute call that runs `code` rather than a shell `command`
+(PTC's `run_code`) reads `code: <first non-empty line>`, which the TUI shows as
+`Run code: …`. Its result keeps no Bash-shaped `rawOutput`. Such a card keeps
+its tool name in `_meta['x.ai/tool'].name`, which headless output reads before
+the title.
 
 | Surface | Contract |
 |---|---|
