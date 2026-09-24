@@ -629,6 +629,41 @@ fn cwd_scoped_storage_view_fails_for_missing_authority_in_requested_cwd() {
     assert!(view.session_dirs(Some("/other")).unwrap().is_empty());
 }
 
+/// Ported from upstream: a cwd bucket another process (or a sibling test on a
+/// shared home) deletes between the sessions readdir and opening the bucket
+/// is skipped, not reported as a listing failure.
+#[test]
+fn load_skips_cwd_bucket_that_vanishes_during_scan() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    for i in 0..32 {
+        fs::create_dir_all(sessions.join(format!("%2Fstable{i}")).join("sid")).unwrap();
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_root = sessions.clone();
+    let writer_stop = Arc::clone(&stop);
+    let writer = std::thread::spawn(move || {
+        let bucket = writer_root.join("%2Ftmp%2F.tmprace%2Frepo");
+        while !writer_stop.load(Ordering::Relaxed) {
+            let sid = bucket.join("sid");
+            let _ = fs::create_dir_all(&sid);
+            let _ = fs::write(sid.join("summary.json"), b"{}");
+            let _ = fs::remove_dir_all(&bucket);
+        }
+    });
+
+    for _ in 0..200 {
+        RelocationView::load(temp.path())
+            .expect("a cwd bucket deleted mid-scan must not fail listing");
+    }
+    stop.store(true, Ordering::Relaxed);
+    writer.join().expect("writer thread");
+}
+
 #[test]
 fn long_cwd_marker_publication_is_atomic_and_retryable() {
     let target = format!("/{}", "long-segment/".repeat(40));

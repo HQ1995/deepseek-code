@@ -154,15 +154,25 @@ fn load_candidates(sessions_root: &Path) -> Result<(SessionCandidates, SessionCa
         if !cwd_type.is_dir() || cwd_type.is_symlink() {
             continue;
         }
-        for session_entry in fs::read_dir(&cwd_path)
-            .map_err(|error| super::fs::io_error("read", &cwd_path, error))?
-        {
-            let session_entry =
-                session_entry.map_err(|error| super::fs::io_error("read", &cwd_path, error))?;
+        // A sibling test (or another process on a shared $HOME) can unlink this
+        // cwd bucket after readdir(parent) and before we open it.
+        let session_entries = match fs::read_dir(&cwd_path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(super::fs::io_error("read", &cwd_path, error)),
+        };
+        for session_entry in session_entries {
+            let session_entry = match session_entry {
+                Ok(entry) => entry,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(super::fs::io_error("read", &cwd_path, error)),
+            };
             let path = session_entry.path();
-            let file_type = session_entry
-                .file_type()
-                .map_err(|error| super::fs::io_error("inspect", &path, error))?;
+            let file_type = match session_entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(super::fs::io_error("inspect", &path, error)),
+            };
             let Some(id) = session_entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
