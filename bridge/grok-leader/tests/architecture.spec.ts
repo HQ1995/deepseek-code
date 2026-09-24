@@ -102,7 +102,7 @@ const declaredDependencies = [
     ['tool-titles', []],
     ['tool-output', []],
     ['child-controls', ['acp', 'projection']],
-    ['child-history', ['projection']],
+    ['child-history', ['acp', 'projection', 'session-work']],
     ['image-output', ['projection', 'guards']],
     ['job-output', []],
     ['mcp', ['guards']],

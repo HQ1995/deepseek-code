@@ -78,7 +78,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `mcp` | ACP MCP declarations to agent-scoped DSH MCP clients, loaded lazily |
 | `native-children` | Workflow membership, child views, bounded history, `/subagents` controls |
 | `child-controls` | Child overview, `/subagents` grammar and verbs, inbox views; native calls through ports |
-| `child-history` | Append-only child tool/turn metadata index; no transcript copy |
+| `child-history` | Append-only child tool/turn metadata index and its serialized, bounded log reads; no transcript copy |
 | `workflows` | Read-only projection of tool-workflow durable records (`dscodeWorkflows`) |
 | `native-tasks` | Task controls, reminder views from `ctx.schedule`, passive job-output snapshots; no own timer |
 | `job-output` | Job-output snapshots and patches from the non-consuming native ring |
