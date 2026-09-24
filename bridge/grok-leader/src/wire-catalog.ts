@@ -7,14 +7,6 @@ import { invalidParams } from './acp.ts'
 import { nonEmpty } from './guards.ts'
 import type { CredentialInfo, ModelInfo } from './native-seams.ts'
 
-/**
- * Fallback reasoning effort shown in the TUI before the user has explicitly
- * picked one. DeepSeek's own adapter defaults to high when omitted; this is
- * also the first canonical level in the bridge's advertised effort menu.
- */
-const DEFAULT_REASONING_EFFORT = 'high'
-/** Fallback effort menu when the llm service exposes no exact-model reasoning metadata. */
-const DEFAULT_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 /** Separator used to disambiguate the same model id owned by different providers. */
 const MODEL_ID_SEPARATOR = ':'
 
@@ -102,15 +94,13 @@ export const providerNote = (configurationError: string | undefined, modelCount:
   configurationError ?? (modelCount > 0 ? undefined
     : 'no models yet — the provider may need a login or API key (its plugin may register a /login command)')
 
-/** One advertised row. An exact metadata resolver returning no reasoning means
- * the model does not expose selectable effort; only legacy llm seams with no
- * resolver get the compatibility vocabulary. */
+/** One advertised row. Exact metadata without reasoning (or none resolved)
+ * means the model exposes no selectable effort. */
 function advertise(
   wireId: string,
   provider: string,
   model: ProviderModels['models'][number],
   info: ModelInfo | undefined,
-  hasMetadataResolver: boolean,
 ): CatalogModel {
   const inputModalities = (info?.inputModalities ?? model.inputModalities)?.filter(nonEmpty)
   const efforts = info?.reasoning?.efforts?.map(effort => effort.id).filter(nonEmpty)
@@ -120,12 +110,10 @@ function advertise(
     ...model.description === undefined ? {} : { description: model.description },
     _meta: {
       provider,
-      supportsReasoningEffort: hasMetadataResolver ? (efforts?.length ?? 0) > 0 : true,
+      supportsReasoningEffort: (efforts?.length ?? 0) > 0,
       acceptsImages: inputModalities?.includes('image') === true,
       ...inputModalities === undefined ? {} : { inputModalities: [...inputModalities] },
-      ...efforts !== undefined && efforts.length > 0
-        ? { reasoningEfforts: efforts }
-        : !hasMetadataResolver ? { reasoningEfforts: [...DEFAULT_REASONING_EFFORTS] } : {},
+      ...efforts !== undefined && efforts.length > 0 ? { reasoningEfforts: efforts } : {},
     },
   }
 }
@@ -141,7 +129,7 @@ interface Routes {
 /** Flatten provider listings into unique wire ids. The first provider listing a
  * raw id keeps the bare id for compatibility; later providers with the same id
  * get a provider-qualified id (suffixed if that collides) so both stay selectable. */
-function flattenRoutes(rows: readonly ProviderModels[], hasMetadataResolver: boolean): Routes {
+function flattenRoutes(rows: readonly ProviderModels[]): Routes {
   const routes: Routes = { availableModels: [], routesByModel: new Map(), providerModelToWireId: new Map(), defaultEfforts: new Map() }
   const reservedRawIds = new Set(rows.flatMap(row => row.models.map(model => model.id)))
   const rawModelOwners = new Map<string, string>()
@@ -162,7 +150,7 @@ function flattenRoutes(rows: readonly ProviderModels[], hasMetadataResolver: boo
       const info = row.metadata.get(model.id)
       const defaultEffort = info?.reasoning?.defaultEffort
       if (nonEmpty(defaultEffort)) routes.defaultEfforts.set(pairKey, defaultEffort)
-      routes.availableModels.push(advertise(wireId, row.provider, model, info, hasMetadataResolver))
+      routes.availableModels.push(advertise(wireId, row.provider, model, info))
     }
   }
   return routes
@@ -172,8 +160,6 @@ function flattenRoutes(rows: readonly ProviderModels[], hasMetadataResolver: boo
 export interface CatalogSources {
   rows: readonly ProviderModels[]
   providers: CatalogProvider[]
-  /** Whether the llm service resolves exact-model metadata. */
-  hasMetadataResolver: boolean
   config: { provider?: string; model?: string }
   defaultSelection: Selection | undefined
 }
@@ -184,8 +170,8 @@ export interface CatalogSources {
  * `_meta.reasoningEffort` carries the persisted choice, or the adapter default,
  * so the TUI status survives restarts. */
 export function assembleCatalog(sources: CatalogSources): { catalog: ModelCatalog; missingRequested?: string } {
-  const { rows, providers, hasMetadataResolver, config, defaultSelection } = sources
-  const routes = flattenRoutes(rows, hasMetadataResolver)
+  const { rows, providers, config, defaultSelection } = sources
+  const routes = flattenRoutes(rows)
   const requestedProvider = firstNonEmpty(config.provider, defaultSelection?.provider)
   const requestedRawModel = firstNonEmpty(config.model, defaultSelection?.model)
   const requested = requestedRawModel === undefined || requestedProvider === undefined
@@ -206,7 +192,6 @@ export function assembleCatalog(sources: CatalogSources): { catalog: ModelCatalo
     : undefined
   const selectedEffort = acceptedReasoningEffort(current, persisted)
     ?? acceptedReasoningEffort(current, routes.defaultEfforts.get(modelEffortKey(currentProviderId, currentRawModel)))
-    ?? (hasMetadataResolver ? undefined : acceptedReasoningEffort(current, DEFAULT_REASONING_EFFORT))
   const availableModels = selectedEffort === undefined || current?._meta === undefined
     ? routes.availableModels
     : routes.availableModels.map(model => model === current ? { ...model, _meta: { ...model._meta!, reasoningEffort: selectedEffort } } : model)

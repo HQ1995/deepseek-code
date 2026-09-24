@@ -22,6 +22,7 @@ function fixture() {
     }),
   }
   const llm: LlmLike = {
+    listConfigurableProviders: () => [],
     listProviders: () => [...new Set(['alpha', 'beta', ...Object.keys(routes)])].map(id => ({ id })),
     listModels: vi.fn(async () => [{ id: 'shared', name: 'Shared model' }]),
     resolveModelInfo: async (provider, id) => ({ provider, id,

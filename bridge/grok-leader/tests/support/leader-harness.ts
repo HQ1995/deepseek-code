@@ -139,8 +139,13 @@ export function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry
   }
 }
 
+/** Exact metadata for fake routes: the full effort menu, defaulting to high. */
+export const resolveEffortMenu = async (provider: string, id: string) =>
+  ({ provider, id, reasoning: { defaultEffort: 'high', efforts: ['low', 'medium', 'high', 'xhigh', 'max'].map(effort => ({ id: effort })) } })
+
 export const mockLlm = {
   listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' }, { id: 'pi', name: 'Pi AI' }],
+  listConfigurableProviders: () => [],
   listModels: async (provider: string) => provider === 'deepseek'
     ? [
       { provider: 'deepseek', id: 'deepseek-chat', name: 'DeepSeek Chat' },
@@ -149,10 +154,12 @@ export const mockLlm = {
     : provider === 'pi'
       ? [{ provider: 'pi', id: 'pi-code', name: 'Pi Code' }]
       : [],
+  resolveModelInfo: resolveEffortMenu,
 }
 
 export const mockVisionLlm = {
   listProviders: () => [{ id: 'vision', name: 'Vision Provider' }],
+  listConfigurableProviders: () => [],
   listModels: async () => [{
     provider: 'vision',
     id: 'vision-model',
@@ -170,9 +177,11 @@ export const mockVisionLlm = {
 /** Two providers that both list the id "shared": exercises the catalog dedup. */
 export const collidingLlm = {
   listProviders: () => [{ id: 'a' }, { id: 'b' }],
+  listConfigurableProviders: () => [],
   listModels: async (provider: string) => provider === 'a'
     ? [{ id: 'shared', name: 'Shared A' }, { id: 'only-a', name: 'Only A' }]
     : [{ id: 'shared', name: 'Shared B' }, { id: 'only-b', name: 'Only B' }],
+  resolveModelInfo: resolveEffortMenu,
 }
 
 export function makeMockPersistence() {

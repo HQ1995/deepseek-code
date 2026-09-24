@@ -300,7 +300,7 @@ describe('leader native goals', () => {
     const execute = vi.fn(async () => undefined)
     const { registry, client: c } = await start({
       ...(availability === 'no registry' ? {} : { commands: { list: () => [], execute } }),
-      llm: { listProviders: () => [], listModels: async () => [] },
+      llm: { listProviders: () => [], listConfigurableProviders: () => [], listModels: async () => [] },
     })
     register(c)
     await c.next()

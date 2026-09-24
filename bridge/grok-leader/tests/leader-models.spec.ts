@@ -20,6 +20,7 @@ describe('leader model catalog and selection', () => {
 
   it('raw model names containing their provider prefix retain the full name', async () => {
     const llm = {
+      listConfigurableProviders: () => [],
       listProviders: () => [{ id: 'p' }],
       listModels: async () => [{ id: 'base', name: 'Base' }, { id: 'p:mini', name: 'Tagged mini' }],
     }
@@ -36,6 +37,7 @@ describe('leader model catalog and selection', () => {
 
   it('raw and generated model identifiers stay unique in the wire catalog', async () => {
     const llm = {
+      listConfigurableProviders: () => [],
       listProviders: () => [{ id: 'a' }, { id: 'b' }],
       listModels: async (provider: string) => provider === 'a'
         ? [{ id: 'base', name: 'Base' }, { id: 'b:shared', name: 'A tagged model' }, { id: 'shared', name: 'A shared' }]
@@ -89,6 +91,7 @@ describe('leader model catalog and selection', () => {
     const seen = new Set<string>()
     let effort = 'high'
     const llm = {
+      listConfigurableProviders: () => [],
       listProviders: () => [{ id: 'one' }, { id: 'two' }],
       listModels: async () => [{ id: 'shared', name: 'Shared' }],
       resolveModelInfo: async (provider: string, id: string) => {
@@ -115,6 +118,7 @@ describe('leader model catalog and selection', () => {
 
   it('advertises exact model image capabilities to the TUI composer', async () => {
     const llm = {
+      listConfigurableProviders: () => [],
       listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' }],
       listModels: async () => [
         { id: 'vision', name: 'Vision', inputModalities: ['text', 'image'] },
@@ -231,6 +235,7 @@ describe('leader model catalog and selection', () => {
 
   it('drops a stale saved effort when exact model metadata exposes no reasoning', async () => {
     const exactLlm = {
+      listConfigurableProviders: () => [],
       listProviders: () => [{ id: 'ocx', name: 'OpenCodex' }],
       listModels: async () => [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }],
       resolveModelInfo: async () => ({
@@ -441,6 +446,7 @@ describe('leader model catalog and selection', () => {
 
   it('annotates every empty provider with the generic setup note', async () => {
     const subscriptionLlm = {
+      listConfigurableProviders: () => [],
       listProviders: () => [
         { id: 'deepseek', name: 'DeepSeek' },
         { id: 'codex', name: 'ChatGPT (Codex)' },

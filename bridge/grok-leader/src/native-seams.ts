@@ -4,10 +4,10 @@
 /** Structural read of the llm service: provider and model catalogs only. */
 export interface LlmLike {
   listProviders(): Array<{ id: string; name?: string }>
-  listConfigurableProviders?(): Array<{ provider: string; displayName: string; settingsNs: string; error?: string }>
+  listConfigurableProviders(): Array<{ provider: string; displayName: string; settingsNs: string; error?: string }>
   listModels(provider: string): Promise<Array<{ id: string; name: string; description?: string; inputModalities?: readonly string[] }>>
   /** Exact-route model metadata (used for adapter-configured effort and modality metadata). */
-  resolveModelInfo?(
+  resolveModelInfo(
     provider: string,
     model: string,
     signal?: AbortSignal,
@@ -31,7 +31,7 @@ export interface LlmLike {
 }
 
 /** Exact-model metadata as the llm service resolves it. */
-export type ModelInfo = Awaited<ReturnType<NonNullable<LlmLike['resolveModelInfo']>>>
+export type ModelInfo = Awaited<ReturnType<LlmLike['resolveModelInfo']>>
 
 /** Non-secret credential facts safe to expose to configuration UIs. */
 export interface CredentialInfo {

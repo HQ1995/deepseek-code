@@ -142,14 +142,12 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     const discovered = discoveredModels.get(provider)
     const models = discovered === undefined ? staticModels : discovered.map(model => ({ id: model.id, name: model.name ?? model.id }))
     const metadata = new Map<string, ModelInfo>()
-    if (llmService.resolveModelInfo !== undefined) {
-      for (const model of models) {
-        assertOpen()
-        if (metadata.has(model.id)) continue
-        try { metadata.set(model.id, await llmService.resolveModelInfo(provider, model.id)) }
-        catch (error) {
-          logger.warn('grok-leader: could not resolve model metadata for ' + provider + '/' + model.id + ': ' + errorMessage(error))
-        }
+    for (const model of models) {
+      assertOpen()
+      if (metadata.has(model.id)) continue
+      try { metadata.set(model.id, await llmService.resolveModelInfo(provider, model.id)) }
+      catch (error) {
+        logger.warn('grok-leader: could not resolve model metadata for ' + provider + '/' + model.id + ': ' + errorMessage(error))
       }
     }
     return { provider, models, metadata }
@@ -188,7 +186,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     const llmService = llm()
     const userSection = displaySection()
     const activeProviders = llmService?.listProviders() ?? []
-    const configured = new Map((llmService?.listConfigurableProviders?.() ?? []).map(row => [row.provider, row]))
+    const configured = new Map((llmService?.listConfigurableProviders() ?? []).map(row => [row.provider, row]))
     // A configurable provider whose configuration failed stays visible with its diagnostic.
     const rosterRows = new Map<string, { id: string; name?: string }>(activeProviders.map(row => [row.id, row]))
     for (const row of configured.values()) {
@@ -202,7 +200,6 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     assertOpen()
     const assembled = assembleCatalog({
       rows, providers, config,
-      hasMetadataResolver: llmService?.resolveModelInfo !== undefined,
       defaultSelection: getDefaultModel()?.currentSelection?.(),
     })
     if (assembled.missingRequested !== undefined) {
@@ -233,9 +230,9 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
   /** Endpoint effort extensions for an OpenAI-compatible route already known
    * to this bridge; a failed probe keeps the native catalog metadata. */
   const probeEndpointCapabilities = async (
-    id: string, llmService: LlmLike, draft: Profile, knownEndpoint: boolean, apiKey: string | undefined,
+    id: string, draft: Profile, knownEndpoint: boolean, apiKey: string | undefined,
   ): Promise<EndpointCapabilities> => {
-    if (!knownEndpoint || !nonEmpty(draft.baseURL) || !isDiscoverableApi(draft.api) || llmService.resolveModelInfo === undefined) return new Map()
+    if (!knownEndpoint || !nonEmpty(draft.baseURL) || !isDiscoverableApi(draft.api)) return new Map()
     try {
       return await discoverEndpointModelCapabilities(draft.baseURL, apiKey, dependencies.fetch)
     } catch (error) {
@@ -272,7 +269,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
       throw internalError('cannot add provider "' + id + '": model discovery failed: ' + errorMessage(error))
     }
     if (models.length === 0) throw internalError('cannot add provider "' + id + '": its endpoint listed no models')
-    const capabilities = await probeEndpointCapabilities(id, llmService, draft, knownEndpoint, apiKey)
+    const capabilities = await probeEndpointCapabilities(id, draft, knownEndpoint, apiKey)
     return models.map(model => ({
       id: model.id,
       ...model.name === undefined ? {} : { name: model.name },

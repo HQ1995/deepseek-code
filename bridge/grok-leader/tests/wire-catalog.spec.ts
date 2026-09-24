@@ -8,7 +8,7 @@ const listing = (provider: string, ids: string[], metadata: Record<string, Parti
   metadata: new Map(Object.entries(metadata).map(([id, info]) => [id, { provider, id, ...info }])),
 })
 const sources = (overrides: Partial<CatalogSources>): CatalogSources => ({
-  rows: [], providers: [], hasMetadataResolver: true, config: {}, defaultSelection: undefined, ...overrides,
+  rows: [], providers: [], config: {}, defaultSelection: undefined, ...overrides,
 })
 const efforts = (...ids: string[]) => ({ reasoning: { efforts: ids.map(id => ({ id })) } })
 
@@ -20,7 +20,7 @@ describe('assembleCatalog', () => {
     expect(catalog.providerModelToWireId.get('a\u0000b:m')).toBe('b:m')
   })
 
-  it('prefers the saved effort, then the adapter default, and never invents one with a resolver', () => {
+  it('prefers the saved effort, then the adapter default, and never invents one', () => {
     const rows = [listing('p', ['m'], { m: { reasoning: { defaultEffort: 'high', efforts: [{ id: 'low' }, { id: 'high' }] } } })]
     const saved = assembleCatalog(sources({ rows, defaultSelection: { provider: 'p', model: 'm', reasoningEffort: 'low' } }))
     expect(saved.catalog.availableModels[0]!._meta).toMatchObject({ reasoningEffort: 'low', reasoningEfforts: ['low', 'high'] })
@@ -28,13 +28,6 @@ describe('assembleCatalog', () => {
     expect(unsupported.catalog.availableModels[0]!._meta?.reasoningEffort).toBe('high')
     const plain = assembleCatalog(sources({ rows: [listing('p', ['m'])] }))
     expect(plain.catalog.availableModels[0]!._meta).toEqual({ provider: 'p', supportsReasoningEffort: false, acceptsImages: false })
-  })
-
-  it('gives legacy llm seams without a metadata resolver the compatibility effort menu', () => {
-    const { catalog } = assembleCatalog(sources({ rows: [listing('p', ['m'])], hasMetadataResolver: false }))
-    expect(catalog.availableModels[0]!._meta).toMatchObject({
-      supportsReasoningEffort: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoningEffort: 'high',
-    })
   })
 
   it('falls back to the first advertised model and reports a requested model the catalog lost', () => {

@@ -101,6 +101,7 @@ describe('leader handshake, registration and socket contract', () => {
 
   it('supports a provider-neutral fresh profile with an empty model catalog', async () => {
     const emptyLlm = {
+      listConfigurableProviders: () => [],
       listProviders: () => [],
       listModels: async () => [],
     }

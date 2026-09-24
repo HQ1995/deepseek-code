@@ -129,6 +129,8 @@ describe('lifecycle boundary regressions', () => {
     mockAppExit.calls.length = 0
     let release!: () => void, started = false
     const gate = new Promise<void>(resolve => { release = resolve })
+    // Keep the known route's /models capability probe off the network.
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ data: [] })))
     const made = await makeHarness({ idleExitMs: 5,
       llm: { ...mockLlm,
         listProviders: () => [{ id: 'custom' }],
@@ -154,7 +156,7 @@ describe('lifecycle boundary regressions', () => {
       const exitedBeforeWrite = mockAppExit.calls.length
       release(); await waitFor(() => mockAppExit.calls.length === 1)
       expect(exitedBeforeWrite).toBe(0); expect(mockAppExit.calls).toEqual([0])
-    } finally { release(); client.socket.destroy(); await made.ctx.fiber.dispose() }
+    } finally { release(); client.socket.destroy(); await made.ctx.fiber.dispose(); vi.unstubAllGlobals() }
   })
 
   it('host shutdown drains an accepted terminal close before flushing and disposing its session', async () => {
