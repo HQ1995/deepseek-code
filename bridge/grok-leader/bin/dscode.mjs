@@ -552,8 +552,6 @@ export const main = async () => {
 
     DSH_BIN: dshBin,
     DSCODE_HOME: tuiHome,
-    // 0.0.10 TUI only reads DSC_HOME; drop after that binary is gone.
-    DSC_HOME: tuiHome,
     DSH_PROFILE_DIR: profileDir,
   }
   spawnTui(bin, env)
