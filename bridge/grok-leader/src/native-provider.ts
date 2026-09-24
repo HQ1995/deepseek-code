@@ -5,22 +5,25 @@
  * key works exactly like a pi-ai route's. No other route is touched. */
 import { internalError, invalidParams } from './acp.ts'
 import type { CredentialsLike, SettingsLike } from './native-seams.ts'
-import type { PluginRows } from './plugin-rows.ts'
+import type { PluginRow, PluginRows } from './plugin-rows.ts'
 
 export const NATIVE_DEEPSEEK_PROVIDER = 'deepseek-official'
 /** Wire marker for the add-provider form; never a pi-ai `api` value. */
 export const NATIVE_DEEPSEEK_API = 'deepseek-native'
 /** How /provider and /model name this route beside a pi-ai "DeepSeek" route. */
 export const NATIVE_DEEPSEEK_NAME = 'DeepSeek (native)'
-/** DSH 0.1.7-rc.1 lists its default model without a description (its own
- * picker still keys one to the older `deepseek-v4-flash` id). These fill a
- * missing one with what the adapter's catalog states: the first entry, image
- * input, and V4-Pro described as the costlier choice. */
+/** DSH 0.1.7-rc.2 (as rc.1) lists its default model without a description
+ * (its own picker still keys one to the older `deepseek-v4-flash` id). These
+ * fill a missing one with what the adapter's catalog states: the first entry,
+ * image input, and V4-Pro described as the costlier choice. */
 export const NATIVE_MODEL_DESCRIPTIONS: Readonly<Record<string, string>> = {
   'deepseek-flash': 'Default model for everyday coding, with image input; costs less than DeepSeek-V4-Pro.',
 }
 const ROW_ID = 'llm-deepseek'
-const MODULE = '@deepseek-ai/dsh-llm-deepseek'
+/** The base row's module. Since 0.1.7-rc.2 `@deepseek-ai/dsh-llm-deepseek` is
+ * the shared protocol library; this API-key half registers `deepseek-official`
+ * (the account half, `llm-deepseek-account`, stays disabled in dscode). */
+const MODULE = '@deepseek-ai/dsh-llm-deepseek-api-key'
 const DEFAULT_KEY_ENV = 'DEEPSEEK_API_KEY'
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 
@@ -60,8 +63,11 @@ export function nativeProviderForm(request: Record<string, unknown>): NativeProv
   return { ...apiKeyEnv === undefined ? {} : { apiKeyEnv }, ...apiKey === undefined ? {} : { apiKey }, ...baseURL === undefined ? {} : { baseURL } }
 }
 
+/** The profile row /provider toggles, matched by patch id and module name. */
+export const NATIVE_DEEPSEEK_ROW: Readonly<PluginRow> = { id: ROW_ID, module: MODULE, label: 'DeepSeek adapter' }
+
 export function createNativeProviders(dependencies: NativeProviderDependencies) {
-  const ROW = { id: ROW_ID, module: MODULE, label: 'DeepSeek adapter' }
+  const ROW = NATIVE_DEEPSEEK_ROW
   /** The adapter's own settings section, as written by this module. */
   const section = (): Record<string, unknown> => {
     const user = dependencies.settings()?.describe?.().find(row => row.ns === ROW_ID)?.user

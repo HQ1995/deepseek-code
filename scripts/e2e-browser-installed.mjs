@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-/** Installed dscode over ACP: /browser on/off, native approval, real Chromium,
- * screenshots, rejection, cancellation and resume, against a loopback
- * Messages fixture through the native DeepSeek provider. Keyless.
+/** Installed dscode over ACP: /browser on/off (reaching the running session
+ * and its tool-change notices), native approval, real Chromium, screenshots,
+ * rejection, cancellation and resume, against a loopback Messages fixture
+ * through the native DeepSeek provider. Keyless.
  * Usage: e2e-browser-installed.mjs <extracted-runtime> <fresh-dsh-home-with-dscode> <chromium-executable|discover>
  * `discover` leaves the executable to dscode's discovery and requires it to succeed. */
 import assert from 'node:assert/strict'
@@ -90,6 +91,9 @@ try {
     await rpc('session/prompt', { sessionId, prompt: [{ type: 'text', text }] })
     return notes.slice(before).map(note => note.params?.update?.content?.text ?? '').join('\n')
   }
+  // DSH records a tool-list change in the conversation; the bridge shows it as a system notice.
+  const toolNotices = id => notes.filter(note => /x\.ai\/session_notification$/.test(note.method) && note.params?.sessionId === id
+    && note.params?.update?.sessionUpdate === 'image_dropped').flatMap(note => note.params.update.notes).filter(line => line.startsWith('Tools '))
   const bootstrap = await rpc('session/new', { cwd: workspace, mcpServers: [] })
   await rpc('x.ai/providers/add', { id: 'deepseek-official', api: 'deepseek-native', apiKey: KEY, baseURL: origin + '/anthropic', credentialSource: 'saved' })
   await rpc('session/close', { sessionId: bootstrap.sessionId })
@@ -103,15 +107,26 @@ try {
   const on = await command(first, `/browser on ${discover ? '' : `--executable "${executablePath}" `}--origin ${origin}`)
   assert.match(on, /Browser turned on/)
   assert.match(on, new RegExp('allowed origins: ' + origin.replace(/[.:/]/g, '\\$&')))
-  assert.equal((await prompt(first, 'off', 'still off')).stopReason, 'end_turn')
-  checks.push('/browser on applies to new Sessions, not the running one')
+  // The reply comes after the running session's browser started.
+  assert.match(on, /Browser: on \(1 open\)/)
+  assert.deepEqual(toolNotices(first), [])
+  assert.equal((await prompt(first, 'running', 'use the browser now')).stopReason, 'end_turn')
+  assert.equal(approvals, 1)
+  assert.ok(pageRequests.includes('/fixture'), 'the running session navigated with its new browser')
+  assert.equal(toolNotices(first).length, 1)
+  // Canonical tool order, so the browser names may follow other newly added tools.
+  assert.match(toolNotices(first)[0], /^Tools added: .*\bmcp__playwright-mcp__browser_\w+/)
+  checks.push('/browser on reaches the running session: its next step calls a browser tool, with a tool-change notice')
 
   const sessionId = await open()
   const doctor = await rpc('x.ai/doctor', { sessionId, tuiVersion: '0.0.14-alpha.12' })
-  assert.match(doctor.text, discover ? /\[OK\] Browser: on \(1 open\); executable: \/\S.* \(discovered\);/ : /\[OK\] Browser: on \(1 open\); executable: \//)
+  // Two open: the running session's browser and this new one.
+  assert.match(doctor.text, discover ? /\[OK\] Browser: on \(2 open\); executable: \/\S.* \(discovered\);/ : /\[OK\] Browser: on \(2 open\); executable: \//)
   assert.match(doctor.text, /sandbox: on/)
   assert.equal((await prompt(sessionId, 'normal')).stopReason, 'end_turn')
-  assert.equal(approvals, 2)
+  assert.equal(approvals, 3)
+  // A session that started with the browser has no tool change to announce.
+  assert.deepEqual(toolNotices(sessionId), [])
   const paths = notes.flatMap(note => note.params?.update?.rawOutput?.dscodeImages ?? [])
   assert.ok(paths.length > 0, 'screenshot must reach the pager image wire')
   assert.ok((await readFile(paths[0])).length > 100)
@@ -142,7 +157,11 @@ try {
   const after = await open()
   assert.equal((await prompt(after, 'off', 'after off')).stopReason, 'end_turn')
   assert.doesNotMatch((await rpc('x.ai/doctor', { sessionId: after, tuiVersion: '0.0.14-alpha.12' })).text, /\] Browser:/)
-  checks.push('/browser off removes browser tools and the doctor finding')
+  // The running session loses the tools at its next step, and says so.
+  assert.equal((await prompt(first, 'off', 'running after off')).stopReason, 'end_turn')
+  assert.equal(toolNotices(first).length, 2)
+  assert.match(toolNotices(first)[1], /^Tools removed: .*\bmcp__playwright-mcp__browser_\w+/)
+  checks.push('/browser off removes browser tools, from running sessions too, and the doctor finding')
   for (const id of [first, sessionId, after]) await rpc('session/close', { sessionId: id }).catch(() => {})
   assert.doesNotMatch(host.diagnostics, /failed to import|duplicate service|unresolved|did not activate/i)
   if (failure) throw failure

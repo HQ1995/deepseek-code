@@ -60,7 +60,7 @@ pub enum Command {
     Memory(crate::memory_cmd::MemoryArgs),
     /// List available models and exit
     Models,
-    /// List, search, or restore sessions
+    /// List or search DSH sessions
     Sessions(crate::sessions_cmd::SessionsArgs),
     /// Fetch and install managed configuration
     #[command(hide = true)]

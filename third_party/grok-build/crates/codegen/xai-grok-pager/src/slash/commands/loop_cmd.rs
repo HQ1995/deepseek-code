@@ -128,7 +128,7 @@ impl SlashCommand for LoopCommand {
         CommandResult::InjectSkill {
             display_text: format!("/loop {args}"),
             prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(format!(
-                "Create a session-local recurring reminder with schedule_create. Parse a <number><unit> interval (s/m/h/d) or natural-language cadence; if absent, ask the user how often. Use prompt and every_seconds (a safe integer of at least 300). Reminders run only while this session is live; missed intervals coalesce when resumed. User request: {args}"
+                "Create a session-local recurring reminder with schedule_create. Parse a <number><unit> interval (s/m/h/d) or natural-language cadence; if absent, ask the user how often. Use a short title, the prompt, and every_seconds (a safe integer of at least 60). Reminders run only while this session is live; missed intervals coalesce when resumed. User request: {args}"
             )))],
             display_as_skill: false,
             scheduled_task_preview: Some(ScheduledTaskPreview {
@@ -370,7 +370,8 @@ mod tests {
                     };
                     assert!(text.text.contains("schedule_create"));
                     assert!(text.text.contains("every_seconds"));
-                    assert!(text.text.contains("at least 300"));
+                    assert!(text.text.contains("a short title"));
+                    assert!(text.text.contains("at least 60)"));
                     assert!(text.text.contains("only while this session is live"));
                     assert!(text.text.contains(args));
                     assert!(!text.text.contains("cron"));

@@ -426,7 +426,7 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
         "s1",
         TerminalSignal {
             prompt_id: Some("p1"),
-            stop_reason: Some("max_tokens"),
+            stop_reason: Some("max_turn_requests"),
             ..Default::default()
         },
     );
@@ -434,6 +434,48 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
         last_session_event(&agent.scrollback),
         Some(SessionEvent::TurnCompleted { .. })
     ));
+    assert!(
+        !session_events(&agent.scrollback).contains(&"OutputTokenLimit".to_string()),
+        "only a max_tokens end warns about a cut-off reply"
+    );
+}
+
+fn session_events(sb: &ScrollbackState) -> Vec<String> {
+    (0..sb.len())
+        .filter_map(|i| match sb.get(i).map(|e| &e.block) {
+            Some(RenderBlock::SessionEvent(b)) => Some(match &b.event {
+                SessionEvent::OutputTokenLimit => "OutputTokenLimit".to_string(),
+                SessionEvent::TurnCompleted { .. } => "TurnCompleted".to_string(),
+                other => format!("{other:?}"),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A `max_tokens` end is not a finished reply: the viewer rail warns that the
+/// reply was cut off, right before the "Worked for" marker.
+#[test]
+fn viewer_max_tokens_turn_completion_warns_reply_was_cut_off() {
+    let mut agent = running_viewer("p1");
+    let _ = finalize_turn_from_terminal(
+        &mut agent,
+        "s1",
+        TerminalSignal {
+            prompt_id: Some("p1"),
+            stop_reason: Some("max_tokens"),
+            ..Default::default()
+        },
+    );
+    assert!(agent.session.state.is_idle());
+    assert_eq!(
+        session_events(&agent.scrollback),
+        ["OutputTokenLimit", "TurnCompleted"],
+        "the notice precedes the marker"
+    );
+    let notice = SessionEvent::OutputTokenLimit.message();
+    assert!(notice.contains("Output token limit reached"), "{notice}");
+    assert!(notice.contains("send \"continue\""), "{notice}");
 }
 
 #[test]

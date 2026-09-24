@@ -142,7 +142,7 @@ async function packaging() {
   }
   const manifest = JSON.parse(await readFile(join(packageDir, 'package.json'), 'utf8'))
   const expected = manifest.dsh.testedVersion
-  assert.equal(expected, '0.1.7-rc.1', 'Acceptance targets the requested upstream runtime');
+  assert.equal(expected, '0.1.7-rc.2', 'Acceptance targets the requested upstream runtime');
   const cli = await execute(env.DSH_BIN, ['--version'], { env: baseEnv, timeout: 10000 })
   assert.equal(cli.stdout.trim().split('\n')[0], expected)
   let runtimeModules
@@ -196,6 +196,11 @@ async function permissionAcceptance() {
   const denied = join(scratch, 'permission-denied')
   await send(`DSCODE_PERMISSION_ESCALATED:${Buffer.from(denied).toString('base64url')}`)
   await wait(/No, reject \(type to add feedback\)/, 30000)
+  // DSH 0.1.7-rc.2's approval reason rides the tool title ("bash — <reason>");
+  // the prompt keeps the command's description as its title and shows the
+  // reason under the command.
+  const reasonScreen = await wait(/bash — (?:Allow this operation with|允许本次操作使用) danger-full-access/, 30000)
+  assert.match(reasonScreen, /DSCODE permission probe/)
   await settle(700)
   await assert.rejects(readFile(denied), { code: 'ENOENT' }, 'Ask must hold the real shell operation pending approval')
   await artifact('permission-pending', { initial, asking, peerBefore, peerAfter, screen: await capture() })
@@ -260,7 +265,8 @@ async function tasksAcceptance() {
   assert.equal(empty.jobs.length, 0)
   assert.equal(empty.descendants.length, 0)
   await key('C-g')
-  await key('x')
+  // A stop arms on the first `x` and fires on the second.
+  await key('x'); await key('x')
   await settle(300)
   assert.deepEqual((await state()).jobs, empty.jobs, 'Empty task control must not manufacture or route a job')
   assert.deepEqual((await state()).descendants, empty.descendants)
@@ -295,7 +301,7 @@ async function tasksAcceptance() {
   await key('Home')
   for (let step = 0; step < 30; step++) {
     await key('Right')
-    await key('x')
+    await key('x'); await key('x')
     await settle(200)
     const value = await state()
     if (value.jobs.find(row => row.id === job.id)?.status === 'killed' && value.descendants.some(row => row.id === child.id && row.activity === 'inactive')) break
@@ -312,7 +318,7 @@ async function tasksAcceptance() {
     await artifact('subprocess-containment-stopped', { escapedPid, reaped: true })
   }
   await key('h')
-  await key('x')
+  await key('x'); await key('x')
   await settle(300)
   assert.equal((await state()).jobs.find(row => row.id === job.id)?.status, 'killed', 'Already-ended control cannot restart a job')
   await artifact('tasks-ended', { state: ended, screen: await capture() })

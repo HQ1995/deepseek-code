@@ -104,6 +104,8 @@ interface PresetHost<S extends PresetSession> {
   flush(session: Agent['session']): Promise<unknown>
   /** Already-maintained state at the native Session cursor. */
   history(record: S): PresetHistory
+  /** A preset change on this session ended, committed, rolled back or failed. */
+  unblocked(record: S): void
 }
 interface State { closed: boolean; changing: boolean; inconsistent: boolean; pending: Set<Promise<unknown>>; disposal?: Promise<void> }
 interface PreparedPreset<S> {
@@ -153,7 +155,10 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
     assertReady(record)
     const state = stateOf(record)
     state.changing = true
-    try { return await operation() } finally { state.changing = false }
+    try { return await operation() } finally {
+      state.changing = false
+      host.unblocked(record)
+    }
   }, record)
   const drain = async (work: ReadonlySet<Promise<unknown>>) => {
     while (work.size > 0) await Promise.allSettled([...work])

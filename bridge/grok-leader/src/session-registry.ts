@@ -13,17 +13,19 @@ export interface OwnedSession {
   dispose(): Promise<void>
 }
 
-export interface SessionRegistryDependencies {
+export interface SessionRegistryDependencies<T extends OwnedSession = OwnedSession> {
   clientIsLive(clientId: number): boolean
   flush(session: Agent['session']): Promise<unknown>
   cancelRequests(clientId: number, sessionId: SessionId): void
+  /** A failed reload returned input admission to its still-published owner. */
+  unblocked(record: T): void
   logger: { warn(message: string): void }
 }
 
 /** Sole owner of accepted sessions and their lifecycle. A retiring id stays
  * reserved until durable flush and disposal finish; a late creator is disposed
  * before its failed publication returns. Features receive only the read view. */
-export function createSessionRegistry<T extends OwnedSession>(dependencies: SessionRegistryDependencies) {
+export function createSessionRegistry<T extends OwnedSession>(dependencies: SessionRegistryDependencies<T>) {
   const records = new Map<SessionId, T>()
   const retiring = new Map<SessionId, T>()
   const releases = new WeakMap<T, Promise<void>>()
@@ -162,7 +164,11 @@ export function createSessionRegistry<T extends OwnedSession>(dependencies: Sess
         finishPreflight()
         await retire(record, true)
         return result
-      } finally { finishPreflight(); reloading.delete(record) }
+      } finally {
+        finishPreflight()
+        reloading.delete(record)
+        if (records.get(record.agent.session.id) === record) dependencies.unblocked(record)
+      }
     },
     async operation<R>(clientId: number, operation: () => Promise<R>): Promise<R> {
       assertOpen()

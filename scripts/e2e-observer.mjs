@@ -13,6 +13,9 @@ export function apply(ctx) {
     sampling = true
     try {
       const agents = []
+      // DSH 0.1.7-rc.2 keeps reminders in the Host Schedule service, not in
+      // session events: one read-only catalog (active and inactive rows) per sample.
+      const reminders = await ctx.get('schedule')?.catalog() ?? []
       for (const listed of ctx.agents.list()) {
         const agent = ctx.agents.get(listed.id)
         if (!agent) continue
@@ -27,7 +30,7 @@ export function apply(ctx) {
           permission, policy: ctx.permissionPresets.resolve(permission),
           goal: ctx.goals.get(agent) ?? null,
           workflows: agent.session.snapshotEvents().filter(event => String(event.type).startsWith('tool-workflow/')),
-          schedules: agent.session.ownEvents().filter(event => event.type === 'schedule/change'),
+          reminders: reminders.filter(entry => entry.sessionId === agent.session.id),
           deliveries: agent.session.snapshotEvents().filter(event => event.type === 'deliverables/presented'),
           feedback: agent.session.ownEvents().filter(event => event.type === 'feedback/record'),
           images: agent.session.snapshotEvents().flatMap(event => event.type !== 'tool/result' ? [] :
@@ -36,7 +39,7 @@ export function apply(ctx) {
                 path: ctx.get('attachments')?.imageHostPath(block.attachment),
               }))),
           projections: ctx.sessionProjections.snapshot(agent.session,
-            ['contextPressure', 'tokenUsage', 'contextBreakdown', 'goal', 'permissions', 'schedule', 'subagentCatalog']),
+            ['contextPressure', 'tokenUsage', 'contextBreakdown', 'goal', 'permissions', 'subagentCatalog']),
           jobs: ctx.jobs.list(agent.session.id),
           terminals: ctx.get('terminals')?.list(agent) ?? [],
           descendants: descendants.map(child => ({ ...child,

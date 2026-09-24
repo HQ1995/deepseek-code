@@ -69,7 +69,10 @@ const prompt = async (rpc, sessionId, list) => {
 
 try {
   await withLeader(async (rpc, sessionId) => {
-    assert.deepEqual(nativeModels(await rpc('x.ai/models/list', { sessionId })), [], 'the adapter starts disabled')
+    const initial = await rpc('x.ai/models/list', { sessionId })
+    assert.deepEqual(nativeModels(initial), [], 'the adapter starts disabled')
+    // 0.1.7-rc.2 ships a default-on account route; dscode's patch keeps it off.
+    assert.ok(!initial._meta.providers.some(provider => provider.id === 'deepseek-account'), 'no DeepSeek Account row in the roster')
     // Another route stays current, so the native one can be removed while unused.
     await rpc('x.ai/providers/add', { id: 'fixture', displayName: 'Fixture', api: 'openai-completions',
       baseURL: `http://127.0.0.1:${server.address().port}/v1`, apiKeyEnv: 'FIXTURE_KEY', apiKey: 'fixture', credentialSource: 'saved' })

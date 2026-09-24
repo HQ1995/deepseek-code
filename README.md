@@ -38,7 +38,7 @@ dscode "review this repository"     # start with a prompt
 dscode -p "explain src/index.ts"     # headless single turn
 dscode -c                           # continue the latest session for this cwd
 dscode --resume <id-or-title>       # resume a session
-dscode sessions list                # list durable sessions
+dscode sessions list [--all]        # this cwd's sessions (all cwds); also `sessions search <q>`
 dscode -w                           # new session in an auto-named worktree
 dscode --worktree=feat "fix it"     # named worktree with an initial prompt
 dscode worktree list                # inspect managed worktrees
@@ -59,7 +59,7 @@ unless `--force` is explicit. Headless formats are `plain`, `json`,
 | `/subagents`, `/inbox` | Inspect children; queue, steer, edit, remove, or stop pending work |
 | `/tasks`, `/workflows` | Read jobs, child transcripts, workflow phases, and retained output |
 | `/tasks terminals` | Inspect persistent shells; `i` interrupts, `x` then Enter closes |
-| `/reminders` | Schedule `after 10m <text>`, `every 5m <text>`, or `at <ISO time> <text>` |
+| `/reminders` | Schedule `after 10m <text>`, `every 1h <text>`, `at <ISO time> <text>`, `daily 09:00 <text>`, `weekly mon,wed 09:00 <text>` or `cron "0 9 * * 1-5" <text>` (local time zone) |
 | `/skills`, `/mcps` | Browse session skills and MCP servers; `u` inserts a selected skill |
 | `/rewind`, `/undo` | Continue from an earlier prompt in a new session |
 | `/export [filename]` | Copy/save Markdown; `.zip` exports logs, descendants, and attachments |
@@ -72,8 +72,9 @@ unless `--force` is explicit. Headless formats are `plain`, `json`,
 | `Enter` in a block viewer | Quote the selection into the draft |
 
 Paste or drag PNG, JPEG, WebP, or GIF images when the model supports image input.
-Completed child transcripts remain readable after restart. Reminder delivery
-requires the owning session to be open. Session ZIP export refuses existing files.
+Completed child transcripts remain readable after restart. A reminder is
+delivered while its session is open; one that falls due while it is closed
+arrives when the session next opens. Session ZIP export refuses existing files.
 Native `present` deliveries appear as file links and survive transcript replay;
 links open the current source file. `/feedback <text>` records native feedback
 without a model turn and may share session context under DSH's telemetry policy.
@@ -89,8 +90,9 @@ Minimal follows DSH's shell-only configuration. See the
 native DeepSeek-V41-Flash setup and platform/UI limits.
 
 The browser is off by default. `/browser on --origin https://example.com` gives
-new sessions a private headless Chrome or Chromium that may open only the listed
-origins; `/browser origins add <origin>` extends the list for new sessions.
+open and new sessions a private headless Chrome or Chromium that may open only
+the listed origins; `/browser origins add <origin>` extends the list for browsers
+started afterwards.
 Every browser action asks for your approval and shows what it will do, so
 always-approve mode refuses browser actions. It is not an OS network or host
 sandbox; see the [browser notes](docs/upgrade-strategy.md#browser) for browser

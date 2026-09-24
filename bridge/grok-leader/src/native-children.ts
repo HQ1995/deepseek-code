@@ -7,11 +7,11 @@ import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionInspection, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { SubagentRuntime, SubagentPromptRequestId } from '@deepseek-ai/dsh-subagent'
 import { invalidParams, internalError, paramRecord, sessionIdParam } from './acp.ts'
-import { nonEmpty } from './guards.ts'
+import { errorMessage, nonEmpty } from './guards.ts'
 import { ChildHistoryIndex, CHILD_HISTORY_PAGE_SIZE, type ChildEventReader } from './child-history.ts'
 import { workflowUpdates, type WorkflowHistory, type LiveWorkflow } from './workflows.ts'
 import { parsePrompt } from './prompt-content.ts'
-import { imageOffloadCount, imageOffloadNotes, sessionEventToUpdates, textBlocks, type GrokSessionUpdate, type ProjectedUpdate } from './projection.ts'
+import { sessionEventToUpdates, systemNotes, textBlocks, type GrokSessionUpdate, type ProjectedUpdate } from './projection.ts'
 import type { SessionOutput } from './session-output.ts'
 
 interface ChildSession {
@@ -87,7 +87,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       throw new AggregateError(failures, 'native child subscription setup failed')
     }
   }
-  type ChildRow = { kind: 'child' | 'diagnostic'; id: string; mode?: 'continuable' | 'one-shot'; label?: string; parentId?: string; activity?: 'running' | 'inactive' }
+  type ChildRow = { kind: 'child' | 'diagnostic'; id: string; mode?: 'continuable' | 'one-shot'; label?: string; parentId?: string; activity?: 'running' | 'inactive'; reason?: string }
   const liveWorkflows = new Map<string, LiveWorkflow>()
   const emitWorkflows = (record: S, replay = false, runId?: string): void => {
     if (!isLive(record)) return
@@ -150,8 +150,18 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       ...settled && start !== undefined ? { durationMs: runLength(start, end) } : {},
     }
   }
-  const listChildRows = (service: SubagentsLike, record: S, scope: SessionOperation) =>
-    service.listDescendants(record.agent.session.id, AbortSignal.any([scope.signal, shutdown.signal]))
+  /** DSH 0.1.7-rc.2 walks parent catalogs: when the root's own catalog cannot
+   * be read the whole listing rejects (a SessionQueryError, where rc.1 listed
+   * nothing). Say so plainly instead of passing the raw native error on. */
+  const listChildRows = async (service: SubagentsLike, record: S, scope: SessionOperation): Promise<ChildRow[]> => {
+    try {
+      return await service.listDescendants(record.agent.session.id, AbortSignal.any([scope.signal, shutdown.signal]))
+    } catch (error) {
+      if (!isLive(record) || shutdown.signal.aborted) throw invalidParams('session closed')
+      scope.assertActive()
+      throw internalError('could not list the subagents of this session (' + errorMessage(error) + '); reopen the session and try again')
+    }
+  }
   const childLogs = new WeakMap<S, Map<string, { source?: object; index: ChildHistoryIndex; tail: Promise<unknown> }>>()
   const withChildLog = async <T>(record: S, id: string, scope: SessionOperation,
     action: (index: ChildHistoryIndex, meta: SessionInspection['meta'], read: ChildEventReader, status?: Agent['status']) => Promise<T> | T,
@@ -354,9 +364,14 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     const record = owned(clientId, sessionId)
     if (record === undefined) throw invalidParams('unknown session: ' + sessionId)
     return record.work.read(async scope => {
-      const rows = await subagentsService(record)?.listDescendants(record.agent.session.id, AbortSignal.any([scope.signal, shutdown.signal]))
+      const service = subagentsService(record)
+      const rows = service === undefined ? [] : await listChildRows(service, record, scope)
       if (!isLive(record)) throw invalidParams('session closed')
-      if (!rows?.some(row => row.kind === 'child' && row.id === p.childSessionId)) throw invalidParams('unknown subagent')
+      if (!rows.some(row => row.kind === 'child' && row.id === p.childSessionId)) {
+        const unreadable = rows.find(row => row.kind === 'diagnostic' && row.id === p.childSessionId)
+        throw invalidParams(unreadable === undefined ? 'unknown subagent'
+          : 'subagent ' + p.childSessionId + ' cannot be shown: its session is ' + (unreadable.reason ?? 'unavailable'))
+      }
       const after = p.after ?? 0
       if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0) throw invalidParams('invalid child history cursor')
       scope.assertActive()
@@ -374,8 +389,8 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
           const updates = hasToolImages(event) ? await host.projectImages(event, mapped) : mapped
           scope.assertActive()
           for (const update of updates) entries.push({ update, meta: { isReplay: true, agentTimestampMs: event.time, turnStartMs, streamStartMs: turnStartMs } })
-          const offloadCount = imageOffloadCount(event)
-          if (offloadCount !== undefined) entries.push({ imageNotes: imageOffloadNotes(offloadCount) })
+          const notes = systemNotes(event)
+          if (notes !== undefined) entries.push({ imageNotes: notes })
           if (event.type === 'turn/end') entries.push({ turnEnded: true })
         }
         if (!isLive(record)) throw invalidParams('unknown session')

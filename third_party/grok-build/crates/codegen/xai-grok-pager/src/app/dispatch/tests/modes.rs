@@ -445,10 +445,9 @@ fn set_yolo_mode_off_to_on_emits_persist_with_rollback() {
     }
 }
 
-/// Enabling always-approve while plan mode is active must warn that the
-/// plan-mode edit gate stays binding — the standard "all tool actions
-/// auto-run" toast would overpromise (the shell rejects non-plan-file edits
-/// in plan mode regardless of yolo).
+/// Enabling always-approve while plan mode is active gets the plan-aware
+/// toast. DSH plan mode is guidance only, so the toast must not claim that
+/// plan mode blocks edits.
 #[test]
 fn set_yolo_mode_on_under_plan_uses_plan_aware_toast() {
     let mut app = test_app_with_agent();
@@ -462,6 +461,11 @@ fn set_yolo_mode_on_under_plan_uses_plan_aware_toast() {
         .map(|(s, _)| s.clone())
         .expect("toast must be set");
     assert_eq!(toast, YOLO_ON_UNDER_PLAN_TOAST);
+    assert!(
+        !toast.contains("blocks file edits"),
+        "DSH plan mode never blocks edits: {toast}"
+    );
+    assert!(toast.contains("does not block edits"), "{toast}");
 
     // Pending (optimistic) plan state counts too — same as the flag renderer.
     let mut app = test_app_with_agent();

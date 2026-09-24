@@ -732,8 +732,11 @@ and real TUI Queue/Edit/Remove/Steer/Clear/Stop/Resume with a held parent stream
 `/inbox` and `/reminders`. Child Tasks rows open their queue with `q`; reminder
 rows open the Schedule list. Responses are scoped to the owning session and
 modal request. Failed edits retain their draft; failed cancellation retains the
-reminder row. `/loop` requests native `schedule_create` with `every_seconds` and
-the official five-minute minimum, independent of Grok's detached-loop setting.
+reminder row. The add editor lists every reminder form the bridge parses
+(after/every/at plus DSH 0.1.7-rc.2's daily/weekly/cron), wrapped over as many
+rows as the width needs. `/loop` requests native `schedule_create` with a title,
+`every_seconds` and the official one-minute minimum (DSH 0.1.7-rc.2),
+independent of Grok's detached-loop setting.
 
 The bridge feeds non-consuming collected subprocess snapshots into the existing
 Tasks stdout store and viewer. Completed output is not repeatedly rescanned.
@@ -841,6 +844,10 @@ auto-approves it on arrival nor drains it when turned on, and the prompt offers
 no Ctrl+O always-approve hint. The leader also sends the call's planned
 arguments as `rawInput` and, for browser actions, a title such as "the browser
 to open https://…", which the existing MCP argument display renders.
+When DSH gives a reason for asking, the leader appends it to the tool title
+("bash — <reason>"). Execute prompts are titled from the command's own
+description, so such a title (anything but Grok's "Execute `…`") becomes the
+first line under the command instead of being dropped (class: feature).
 
 ### Preset change after history opens a new session
 
@@ -880,3 +887,44 @@ label and the action, like `Fetch:`, rather than as a shell command after
 content-addressed attachment store (`…/objects/<xx>/<sha256>`, a browser
 screenshot) shows a caption on its path row; Open and copy-path still target
 the file.
+
+### Plan mode is guidance
+
+Turning always-approve on under plan mode toasts that every tool now runs
+automatically and that plan mode guides the model without blocking edits:
+DSH plan mode is a prompt section, not an edit gate (class: behavior).
+
+### Truncated replies
+
+A turn that ends with `max_tokens` pushes "Output token limit reached; the
+reply was cut off — send "continue" to resume." before "Worked for" on every
+turn-end path: a normal end, the viewer, lost-response recovery and wake turns
+(class: feature).
+
+### Two-press task stop
+
+In the Tasks pane, `x` and the `[✗]` control arm first and stop the task on a
+second press within 3 s, like the DSH job list (class: behavior).
+
+### Tool input and result fallbacks
+
+A non-shell execute card (such as `run_code`) shows its content on success as
+well as on failure. Execute cards without a `command`, and generic other cards,
+show their capped (40-line) `rawInput` when expanded (class: feature).
+
+### Structured question answers
+
+A DSH question result (`{"answers":[…]}`) renders as question → answer pairs,
+matching answer ids to the questions in the call's `rawInput` by shape, not by
+tool name (class: feature).
+
+### No session delete in /resume
+
+Both /resume pickers drop `d delete`: DSH has no session delete, only archive
+(class: behavior). The dashboard's own delete remains upstream's.
+
+### dscode sessions
+
+`dscode sessions list [--all]` and `search` query the leader
+(`x.ai/session/list`, `x.ai/session/search`) instead of grok's session
+storage; `delete` is hidden and refuses with an explanation (class: behavior).

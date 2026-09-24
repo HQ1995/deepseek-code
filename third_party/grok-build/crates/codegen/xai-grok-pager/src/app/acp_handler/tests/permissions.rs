@@ -44,6 +44,39 @@
         }
     }
 
+    /// DIVERGENCE(dscode): an execute prompt keeps the command's own
+    /// description as its title, and a leader-supplied tool title (DSH's
+    /// approval reason, "bash — <reason>") leads the lines under the command.
+    /// Grok's "Execute `…`" title only repeats the command and stays hidden.
+    #[test]
+    fn execute_prompt_shows_leader_title_as_first_description_line() {
+        let raw = serde_json::json!({"command": "rm -rf build", "description": "Clean the build"});
+        let display = |title: Option<&str>| {
+            let mut req = permission_req_with_raw_input(Some(raw.clone()));
+            req.tool_call.fields.title = title.map(str::to_string);
+            build_permission_display(&req, None, false)
+        };
+        let (title, description, command) = display(Some("bash — Command writes outside the workspace"));
+        assert_eq!(title, "Clean the build");
+        assert_eq!(description, vec!["bash — Command writes outside the workspace".to_string()]);
+        assert_eq!(command.as_deref(), Some("rm -rf build"));
+        for missing in [None, Some(""), Some("   "), Some("Execute `rm -rf build`")] {
+            let (title, description, command) = display(missing);
+            assert_eq!(title, "Clean the build", "{missing:?}");
+            assert!(description.is_empty(), "{missing:?}: {description:?}");
+            assert_eq!(command.as_deref(), Some("rm -rf build"), "{missing:?}");
+        }
+        // Other prompts already read "Allow <title>?"; their lines stay the planned arguments.
+        let mut req = permission_req_with_raw_input(Some(serde_json::json!({
+            "variant": "MCPTool", "tool_name": "mcp__fixture__probe", "tool_input": {"k": 1},
+        })));
+        req.tool_call.fields.title = Some("mcp__fixture__probe — Reviewer asked".into());
+        let (title, description, command) = build_permission_display(&req, None, false);
+        assert!(title.starts_with("Allow ") && title.contains("Reviewer asked"), "{title}");
+        assert!(!description.iter().any(|line| line.contains("Reviewer asked")), "{description:?}");
+        assert!(command.is_none());
+    }
+
     /// A `tool_input` that is missing or JSON null renders nothing rather
     /// than a misleading `null`.
     #[test]

@@ -4,9 +4,9 @@ import type { SettingsLike } from '../src/native-seams.ts'
 import type { PluginRows } from '../src/plugin-rows.ts'
 import { navigationPolicy } from '../browser/policy.mjs'
 
-function fixture(options: { executable?: string } = {}) {
+function fixture(options: { executable?: string; startOpen?: boolean } = {}) {
   let enabled = false
-  const config: Record<string, unknown> = {}
+  const config: Record<string, unknown> = {}, order: string[] = []
   const rows: PluginRows = {
     enabled: vi.fn(async () => enabled),
     set: vi.fn(async (_row, next: boolean) => { enabled = next }),
@@ -14,6 +14,7 @@ function fixture(options: { executable?: string } = {}) {
   const settings: SettingsLike = {
     mutate: vi.fn(async (ns: string, ops: unknown) => {
       expect(ns).toBe('dscode-browser')
+      order.push('settings')
       for (const op of ops as Array<{ op: string; path: string[]; value?: unknown }>) {
         if (op.op === 'unset') delete config[op.path[0]!]
         else config[op.path[0]!] = op.value
@@ -25,8 +26,9 @@ function fixture(options: { executable?: string } = {}) {
     sandbox: config.sandbox !== false, anyOrigin: config.anyOrigin === true,
     origins: (config.navigationOrigins as string[] | undefined) ?? [], sessions: 0,
   } : undefined
-  const control = createBrowserControl({ rows, settings: () => settings, status })
-  return { control, rows, settings, config, isEnabled: () => enabled }
+  const startOpen = vi.fn(async () => { order.push('start open sessions') })
+  const control = createBrowserControl({ rows, settings: () => settings, status, ...options.startOpen === false ? {} : { startOpen } })
+  return { control, rows, settings, config, order, startOpen, isEnabled: () => enabled }
 }
 
 describe('/browser', () => {
@@ -36,7 +38,9 @@ describe('/browser', () => {
     const report = await f.control.execute('/browser on --origin https://example.com --origin https://example.com')
     expect(f.isEnabled()).toBe(true)
     expect(f.config).toEqual({ navigationOrigins: ['https://example.com'] })
-    expect(report).toContain('Browser turned on for new sessions. Start one with /new.')
+    // The row reaches running sessions too, so no /new is needed.
+    expect(report).toContain('Browser turned on. Open sessions get the browser tools at their next step, and new sessions start with them.')
+    expect(report).not.toContain('/new')
     expect(report).toContain('\n- executable: /opt/chrome (discovered)\n')
     expect(report).toContain('- allowed origins: https://example.com')
     expect(report).toContain('it is not a network sandbox')
@@ -53,8 +57,24 @@ describe('/browser', () => {
     // A bare <word> is raw HTML in Markdown; placeholders stay inside code spans.
     expect(help).not.toMatch(/<[a-z]+>/)
     expect(help).toMatch(/^Usage:\n- `\/browser` shows the status\.\n- `\/browser on /)
+    expect(help).toContain('turns it on for open and new sessions.')
+    expect(help).not.toMatch(/on for new sessions/)
     await expect(f.control.execute('/browser on --bogus')).rejects.toThrow('Unknown /browser on option "--bogus".\n\nUsage:\n- ')
     expect(await f.control.execute('/browser on')).toContain('- allowed origins: none, so every page is blocked. Add one with `/browser origins add URL`')
+  })
+
+  it('starts open sessions\' browsers only after writing the settings they launch with', async () => {
+    const f = fixture({ executable: '/opt/chrome' })
+    await f.control.execute('/browser on --executable /opt/chrome --origin https://example.com')
+    // The row loads first (settings need it), then the settings, then the open sessions' browsers.
+    expect(f.order).toEqual(['settings', 'start open sessions'])
+    await f.control.execute('/browser on')
+    expect(f.startOpen).toHaveBeenCalledTimes(2)
+    await f.control.execute('/browser origins add https://example.org')
+    await f.control.execute('/browser off')
+    expect(f.startOpen).toHaveBeenCalledTimes(2)
+    // A host without the hook still turns the browser on; open sessions then catch up at their next step.
+    expect(await fixture({ startOpen: false }).control.execute('/browser on')).toContain('Browser turned on.')
   })
 
   it('shows why the requested sandbox may not start', () => {
@@ -73,7 +93,9 @@ describe('/browser', () => {
     for (const origin of ['https://good.example;evil', 'https://good.example;*', 'https://a.example,b']) {
       await expect(f.control.execute('/browser origins add ' + origin)).rejects.toThrow('plain host name')
     }
-    expect(await f.control.execute('/browser origins add https://example.org')).toContain('Added https://example.org for new sessions. Start one with /new')
+    // An open browser keeps its launch origins; the reply names both ways to a fresh one.
+    expect(await f.control.execute('/browser origins add https://example.org'))
+      .toContain('Added https://example.org for new sessions. Start one with /new to open it, or restart the open browsers with /browser off and /browser on.')
     expect(await f.control.execute('/browser origins remove https://example.org')).toContain('No session can navigate to it any more')
     expect(describeBrowser({ executable: '/opt/c', sandbox: true, anyOrigin: false, origins: ['https://example.com'], sessions: 2 }))
       .toContain('- open sessions keep the origins their browser started with')

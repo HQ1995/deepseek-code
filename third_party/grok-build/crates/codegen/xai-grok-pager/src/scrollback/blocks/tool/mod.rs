@@ -49,6 +49,27 @@ use std::fmt;
 /// using one id across tool kinds keeps multi-line drag/copy grouping simple.
 pub(crate) const TOOL_HEADER_RANGE: u16 = 0;
 
+/// DIVERGENCE(dscode): the expanded view's tool-input section (a card's
+/// capped, pre-rendered rawInput; see `acp::tracker::raw_input_display`):
+/// a blank separator, then the input as muted, word-wrapped lines.
+pub(crate) fn push_tool_input_lines(
+    lines: &mut Vec<crate::scrollback::types::BlockLine>,
+    input: &str,
+    theme: &crate::theme::Theme,
+    width: usize,
+) {
+    use crate::scrollback::types::BlockLine;
+    use ratatui::text::{Line, Span};
+    lines.push(BlockLine::separator(Line::from("")));
+    let styled: Vec<Line<'static>> = input
+        .lines()
+        .map(|line| Line::from(Span::styled(line.to_string(), theme.muted())))
+        .collect();
+    for line in crate::render::wrapping::word_wrap_lines(styled, width.saturating_sub(2).max(20)) {
+        lines.push(BlockLine::styled(line));
+    }
+}
+
 /// 1-based inclusive line range for display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineRange {

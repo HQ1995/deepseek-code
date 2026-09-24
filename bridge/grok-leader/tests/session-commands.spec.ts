@@ -32,7 +32,7 @@ function fixture(disposalError?: string) {
     preset: vi.fn(async (_record: TestSession, _text: string) => 'preset done'),
     children: { command: vi.fn(async (_clientId: number, _params: unknown) => ({ result: { kind: 'success', text: 'children done' } })) },
     goals: { goal: vi.fn(async (_clientId: number, _params: unknown) => ({ result: { kind: 'success', text: 'goal done' } })) },
-    on: vi.fn((name: 'commands/change' | 'skills/change', listener: () => void) => {
+    on: vi.fn((name: 'commands/change' | 'skills/change' | 'tools/change', listener: () => void) => {
       events.set(name, listener)
       const unsubscribe = vi.fn(() => { events.delete(name) }); unsubscribes.push(unsubscribe); return unsubscribe
     }), logger: { warn: vi.fn() },
@@ -158,6 +158,48 @@ describe('owned session commands', () => {
     await f.commands.refresh(f.record); await tick()
     expect(notify).toHaveBeenCalledTimes(2)
     expect(notify.mock.calls[1]![1].update.availableCommands.at(-1).name).toBe('new')
+  })
+
+  it('follows tools enabled mid-session: one capability refresh per burst, none when capabilities stay put', async () => {
+    const f = fixture(), notify = f.clients.get(1)!.notify, other = f.add('other', 2)
+    await f.commands.refresh(f.record); await f.commands.refresh(other)
+    expect(notify).toHaveBeenCalledOnce()
+    // A registration that leaves every capability alone publishes nothing.
+    f.emit('tools/change'); f.emit('tools/change'); await tick()
+    expect(notify).toHaveBeenCalledOnce(); expect(f.skills).toHaveBeenCalledTimes(2)
+    // Tools added one at a time (an MCP server, a native plugin) coalesce into one advertisement.
+    f.host.capabilities.mockImplementation((record: TestSession) => record === f.record ? ['skills', 'subagents', 'jobs'] : ['skills', 'subagents'])
+    f.emit('tools/change'); f.emit('tools/change'); f.emit('tools/change'); await tick()
+    expect(notify).toHaveBeenCalledTimes(2)
+    expect(notify.mock.calls[1]![1].update.meta).toEqual({ capabilities: ['skills', 'subagents', 'jobs'] })
+    expect(f.clients.get(2)!.notify).toHaveBeenCalledOnce()
+    f.emit('tools/change'); await tick()
+    expect(notify).toHaveBeenCalledTimes(2)
+    await other.work.dispose()
+  })
+
+  it('rereads a refresh that tools change under and skips sessions that are no longer owned', async () => {
+    const f = fixture(), gate = Promise.withResolvers<Awaited<ReturnType<NativeSkills['list']>>>(), entered = Promise.withResolvers<void>()
+    f.skills.mockImplementationOnce(() => { entered.resolve(); return gate.promise })
+    const first = f.commands.refresh(f.record); await entered.promise
+    f.host.capabilities.mockReturnValue(['skills'])
+    f.emit('tools/change'); await tick()
+    gate.resolve([]); await first
+    const notify = f.clients.get(1)!.notify
+    expect(notify).toHaveBeenCalledOnce()
+    expect(notify.mock.calls[0]![1].update.meta).toEqual({ capabilities: ['skills'] })
+    expect(f.skills).toHaveBeenCalledTimes(2)
+    // A record still listed after another took over its session is not checked or refreshed.
+    const current = f.add('one')
+    f.sessions.set(SessionId('closing'), f.record)
+    f.host.capabilities.mockClear(); f.host.capabilities.mockReturnValue(['plan'])
+    f.emit('tools/change'); await tick()
+    expect(f.host.capabilities).toHaveBeenCalled()
+    expect(f.host.capabilities.mock.calls.every(([record]) => record === current)).toBe(true)
+    expect(notify).toHaveBeenCalledTimes(2)
+    expect(notify.mock.calls[1]![1].update.meta).toEqual({ capabilities: ['plan'] })
+    expect(f.record.output.update).not.toHaveBeenCalled()
+    await current.work.dispose()
   })
 
   it('isolates failed refreshes and allows later native change events to retry', async () => {

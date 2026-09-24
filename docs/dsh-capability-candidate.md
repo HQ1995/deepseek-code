@@ -267,6 +267,8 @@ the owned presets.
 - rc.1 enforces exact `@deepseek-ai/dsh*` peers: a bundle still pinned to
   alpha.2 is refused by `dsh plugin add` and skipped at boot. Every experiment
   now pins `0.1.7-rc.1`. Beyond that pin, rc.1 needed no change here.
+- At the `0.1.7-rc.2` pin the experiments pin rc.2, and the messages smoke
+  mounts the renamed `llm-deepseek-api-key` row.
 
 ### Verification (macOS arm64)
 

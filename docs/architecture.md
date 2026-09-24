@@ -4,7 +4,7 @@ dscode has three layers: the vendored Rust TUI (`third_party/grok-build`), the
 TypeScript bridge `bridge/grok-leader` (published as `@hqzhao95/dscode`), and
 the managed install/release tooling. The TUI speaks the leader wire protocol
 ([grok-leader-protocol.md](grok-leader-protocol.md)) to the bridge, a DSH
-plugin that drives the DSH runtime pinned at `0.1.7-rc.1`.
+plugin that drives the DSH runtime pinned at `0.1.7-rc.2`.
 
 The TUI keeps core interaction only, with no per-plugin code. Features ride
 generic rails: dsh's command registry (`session-commands`), the llm service's
@@ -79,9 +79,11 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `native-children` | Workflow membership, child views, bounded history, `/subagents` controls |
 | `child-history` | Append-only child tool/turn metadata index; no transcript copy |
 | `workflows` | Read-only projection of tool-workflow durable records (`dscodeWorkflows`) |
-| `native-tasks` | Task controls, reminder projection, passive job-output snapshots; no own timer |
+| `native-tasks` | Task controls, reminder views from `ctx.schedule`, passive job-output snapshots; no own timer |
 | `job-output` | Job-output snapshots and patches from the non-consuming native ring |
-| `reminders` | Reminder input parsing; validation and mutation stay in dsh-schedule |
+| `reminders` | Reminder input parsing, titles and display; validation and mutation stay in dsh-schedule |
+| `session-controller` | `sessionController` for Schedule delivery into sessions open in dscode |
+| `legacy-reminders` | Projection of rc.1 session-event reminders and their one-time notice |
 | `native-session-status` | Goal, activity and context observations; reads never arm a goal |
 | `native-interactions` | Permission modes and approvals, user questions, reverse-request admission |
 | `native-execution` | Runtime doctor and persistent-terminal controls |
@@ -96,6 +98,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `profile-plugins` | `/dsh` plugin commands: bundle patch audit, install/remove, version trust |
 | `plugin-rows` | Toggles one shipped-disabled profile row through the plugin manager |
 | `package-location` | Package provenance; lazy updater resolution and profile lock |
+| `guards` | Leaf value guards shared across the bridge; no imports |
 
 ## Dependency gate
 
@@ -108,7 +111,7 @@ and `session-export`; a runtime dependency only in `native-tasks`,
 `session-migration`, `terminal-signal` and `preset-catalog`; absent elsewhere. The entry builds no maps, sets, abort controllers or timers
 and imports no `node:net`. `dsh-session-projection` and `zod` stay host peers.
 Each `.ts`/`.mjs` file in `src/`, `bin/` and `tests/` is capped at 800 lines;
-on 2026-09-24 none exceeds it (largest: `tests/leader-queue.spec.ts`, 763).
+on 2026-09-24 none exceeds it (largest: `src/projection.ts`, 795).
 `browser/`, `ssh/` and `shared/` are not scanned; their files are under 100.
 
 ## Remaining candidates

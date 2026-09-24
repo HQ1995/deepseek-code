@@ -9,7 +9,8 @@ function fixture() {
   const flush = vi.fn(async (_session: Agent['session']) => {})
   const cancelRequests = vi.fn()
   const warn = vi.fn()
-  const registry = createSessionRegistry<OwnedSession>({ clientIsLive: id => live.has(id), flush, cancelRequests, logger: { warn } })
+  const unblocked = vi.fn((_record: OwnedSession) => {})
+  const registry = createSessionRegistry<OwnedSession>({ clientIsLive: id => live.has(id), flush, cancelRequests, unblocked, logger: { warn } })
   const record = (id = 'session', clientId = 1): OwnedSession => ({
     clientId,
     // The registry consumes identity and lifecycle, not an agent runtime.
@@ -19,7 +20,7 @@ function fixture() {
     mcpInitTimer: undefined,
     dispose: vi.fn(async () => {}),
   })
-  return { live, flush, cancelRequests, warn, registry, record }
+  return { live, flush, cancelRequests, warn, unblocked, registry, record }
 }
 
 describe('owned session registry', () => {
@@ -195,14 +196,18 @@ describe('owned session registry', () => {
     await expect(reload).resolves.toBe('complete prefix')
     expect(before).toEqual({ owned: record, ready: false, disposals: 0 })
     expect(record.dispose).toHaveBeenCalledOnce()
+    expect(f.unblocked).not.toHaveBeenCalled()
     await f.registry.dispose()
   })
 
-  it('reopens admission after async capture rejects without retiring the native owner', async () => {
-    const f = fixture(), record = f.record(), failure = new Error('read failed')
+  it('reopens admission after async capture rejects without retiring the native owner, and reports it', async () => {
+    const f = fixture(), record = f.record(), failure = new Error('read failed'), admitted: boolean[] = []
+    f.unblocked.mockImplementation(unblocked => { admitted.push(f.registry.acceptsInput(unblocked)) })
     await f.registry.publish(record.agent.session.id, record)
     await expect(f.registry.reload(record, async () => { await Promise.resolve(); throw failure })).rejects.toBe(failure)
     expect(f.registry.acceptsInput(record)).toBe(true)
+    expect(f.unblocked).toHaveBeenCalledExactlyOnceWith(record)
+    expect(admitted).toEqual([true])
     expect(record.dispose).not.toHaveBeenCalled()
     await f.registry.dispose()
   })
@@ -223,6 +228,7 @@ describe('owned session registry', () => {
     expect(disposedEarly).toBe(0)
     expect(record.dispose).toHaveBeenCalledOnce()
     expect(f.registry.records.size).toBe(0)
+    expect(f.unblocked).not.toHaveBeenCalled()
     await f.registry.dispose()
   })
 

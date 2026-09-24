@@ -1,5 +1,66 @@
 # DSH 0.1.7 adaptation — 2026-09-22
 
+## 0.1.7-rc.2 — 2026-09-24
+
+Branch `feat/dsh-0.1.7-rc.2` pins official revision
+`477b4f420553e8a52c2fbccc464d7561b239c443`, release `0.1.7-rc.2` (committed
+2026-09-24T13:39:59Z). Its GitHub prerelease was published at 14:10:21Z and npm
+published `@deepseek-ai/dsh@0.1.7-rc.2` at 14:18:11Z; the npm tags were then
+`next=0.1.7-rc.2`, `alpha=0.1.7-alpha.2` and `latest=0.1.5-rc.3`. It supersedes
+the rc.1 pin below.
+
+Changes, audited over every package, service, event, bundle row and CLI flag
+the bridge uses:
+
+- The whole `dsh-*` family moves to `0.1.7-rc.2`. `dsh-schedule` now depends on
+  `dsh-api-session-controller`, which brings the API gateway into the closure:
+  the lockfile adds 12 `dsh-*` packages plus `ws`, `mime-types`, `mime-db`,
+  `@js-temporal/polyfill` and `jsbi`.
+- Schedules move from session events to a Host service with its own storage:
+  daily, weekly and cron kinds, `schedule_update`, required titles, a 60 s
+  minimum interval and `schedule/changed`; the `schedule` projection is gone.
+  Delivery goes through a host-provided `sessionController.resolveAgent`, which
+  the bridge now provides for sessions open in dscode. rc.1 session-event
+  reminders are not migrated; each open names them once.
+- The source backport is rebased with one addition: Schedule's
+  `requestDelivery()`, which the bridge calls when a session becomes ready, so a
+  reminder due while its session was closed or busy is delivered once it can be
+  (see [patches](../patches/README.md)). `sourcePatchSha256` becomes
+  `27385698…`.
+- The native DeepSeek row is now `@deepseek-ai/dsh-llm-deepseek-api-key`
+  (API key only); the new `llm-deepseek-account` row is on in the base layer and
+  disabled by dscode's patch. `/dsh add` treats it, `deepseek-account` and
+  `authorization` as credential rows.
+- Approval requests carry a localized `displayReason`, which prompts now show.
+- Tool-registry changes inside a conversation are recorded as developer
+  messages; the next step carries the tools, `/browser on` reaches running
+  Sessions, and the TUI shows the change as a system line.
+- The subagent catalog walk uses `listDescendants`; listing failures name the
+  session instead of reporting an unknown subagent.
+- The `dsh-ssh` helper and `dsh-ptc-runtime-node` bootstrap are byte-identical
+  to rc.1 (`42373bff…`, `1a5631d2…`), so remote hosts deployed for rc.1 keep
+  working without a redeploy.
+
+### Local gates
+
+On swoop (Ubuntu 24.04.3 LTS, Linux x86_64), under `nice -n 15`, against the
+source-built runtime (`dscode-runtime-linux-x86_64.tar.gz`, 404983214 bytes,
+`7519ad562bf12da90229b3382956547e4f7062a9b4ae401e290f595b849fd986`) and a
+plugin built from the final tree:
+
+| Gate | Result |
+| --- | --- |
+| Patched Schedule package suite | 847 passed |
+| `scripts/check.sh` and script tests | Passed; 47 script tests |
+| Bridge `tsc` and vitest against the runtime | 76 files, 1,177 passed |
+| TUI and Rust (`scripts/check-rust.sh`) | Passed |
+| Installed: native provider, Teams (negative control fails as required), browser (installed and SDK), Inspector | Passed |
+| SSH smoke and integrity, remote install and remote TUI (isolated sshd) | Passed |
+| Managed update, update channels (17 checks), prompt acknowledgement | Passed |
+| Full installed TUI E2E | Run 2444341 and provider-manage run 2516502 passed |
+
+macOS acceptance for rc.2 has not run yet.
+
 ## 0.1.7-rc.1 — 2026-09-23
 
 Branch `dsh-0.1.7-rc.1` (`b362cbc9`) pins official revision

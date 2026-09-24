@@ -1854,15 +1854,7 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
                 if let Some(desc) = description {
                     block = block.with_description(desc);
                 }
-                if !success {
-                    let text = content_text(tc);
-                    let error_msg = if text.is_empty() {
-                        "Command failed".to_string()
-                    } else {
-                        text
-                    };
-                    block = block.with_error(error_msg);
-                }
+                fill_non_shell_execute(&mut block, tc, success);
                 RenderBlock::ToolCall(ToolCallBlock::Execute(block))
             }
         }
@@ -2230,14 +2222,7 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
                 if let Some(desc) = extract_raw_field(tc, "description") {
                     block = block.with_description(desc);
                 }
-                if !success {
-                    let text = content_text(tc);
-                    block = block.with_error(if text.is_empty() {
-                        "Command failed".to_string()
-                    } else {
-                        text
-                    });
-                }
+                fill_non_shell_execute(&mut block, tc, success);
                 return RenderBlock::ToolCall(ToolCallBlock::Execute(block));
             }
             let name = tool_call_title(tc);
@@ -2264,6 +2249,7 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
                 (name.into_owned(), ToolCallBlock::Other)
             };
             let mut block = OtherToolCallBlock::new(label, summary);
+            block.input = raw_input_display(tc, &[]);
             let ct = content_text(tc);
             if !success {
                 block.error = Some(if ct.is_empty() {
@@ -2272,12 +2258,151 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
                     ct.clone()
                 });
             }
+            if success && let Some(pairs) = answered_questions(tc, &ct) {
+                // The questions are in the pairs; the raw input would repeat them.
+                block.qa_pairs = Some(pairs);
+                block.input = None;
+            }
             if !ct.is_empty() {
                 block.set_output_text(ct);
             }
             RenderBlock::ToolCall(ctor(block))
         }
     }
+}
+/// Body of an execute card without a Bash-shaped `rawOutput`: the failure
+/// text on error, otherwise the result content.
+///
+/// DIVERGENCE(dscode): upstream read the content only on failure, so a
+/// successful non-shell execute tool (a code runner such as `run_code`, or a
+/// backgrounded command) rendered a card with no output at all. When the call
+/// has no shell `command`, its input (e.g. the code) is kept for the expanded
+/// view too, since the header then shows only the tool name.
+fn fill_non_shell_execute(block: &mut ExecuteToolCallBlock, tc: &acp::ToolCall, success: bool) {
+    let text = content_text(tc);
+    if !success {
+        block.error = Some(if text.is_empty() {
+            "Command failed".to_string()
+        } else {
+            text
+        });
+    } else if !text.is_empty() {
+        block.output = Some(text);
+    }
+    if raw_input_command(tc).is_none() {
+        block.input = raw_input_display(tc, &["description"]);
+    }
+}
+/// Most rawInput lines an expanded card shows before `… +N lines`.
+const RAW_INPUT_MAX_LINES: usize = 40;
+/// Longest non-string value printed inline after its `key:`.
+const RAW_INPUT_INLINE_MAX_CHARS: usize = 80;
+/// DIVERGENCE(dscode): a tool call's `rawInput` as capped, readable text for
+/// an expanded card that otherwise shows only a tool name. Generic over every
+/// tool: top-level fields print as `key: value`, a multi-line string as an
+/// indented block under `key:` (so code reads as code, not an escaped JSON
+/// string), and other values as JSON (pretty-printed when long). Fields in
+/// `skip` are already on the card. `None` when nothing is left to show.
+fn raw_input_display(tc: &acp::ToolCall, skip: &[&str]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    let mut push = |line: String| {
+        total += 1;
+        if lines.len() < RAW_INPUT_MAX_LINES {
+            lines.push(line);
+        }
+    };
+    match tc.raw_input.as_ref()? {
+        serde_json::Value::Null => return None,
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                if skip.contains(&key.as_str()) {
+                    continue;
+                }
+                match value {
+                    serde_json::Value::Null => {}
+                    serde_json::Value::String(text) if !text.contains('\n') => {
+                        push(format!("{key}: {text}"));
+                    }
+                    serde_json::Value::String(text) => {
+                        push(format!("{key}:"));
+                        text.lines().for_each(|line| push(format!("  {line}")));
+                    }
+                    other => {
+                        let compact = other.to_string();
+                        if compact.chars().count() <= RAW_INPUT_INLINE_MAX_CHARS {
+                            push(format!("{key}: {compact}"));
+                        } else {
+                            push(format!("{key}:"));
+                            serde_json::to_string_pretty(other)
+                                .unwrap_or(compact)
+                                .lines()
+                                .for_each(|line| push(format!("  {line}")));
+                        }
+                    }
+                }
+            }
+        }
+        other => serde_json::to_string_pretty(other)
+            .ok()?
+            .lines()
+            .for_each(|line| push(line.to_string())),
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    if total > lines.len() {
+        lines.push(format!("\u{2026} +{} lines", total - lines.len()));
+    }
+    Some(lines.join("\n"))
+}
+/// DIVERGENCE(dscode): `(question, answer)` pairs of an answered question
+/// tool, from its structured result rather than grok's text formats: the call's
+/// `rawInput.questions[] {id, question}` matched by id to a result
+/// `{"answers": [{id, selected: [..], custom?}]}`. Keyed on that generic
+/// question/answer shape, never a tool name. `None` when the result is not
+/// that shape or answers none of the questions, so the card renders as usual.
+fn answered_questions(tc: &acp::ToolCall, result: &str) -> Option<Vec<(String, String)>> {
+    use serde_json::Value;
+    let questions = tc.raw_input.as_ref()?.get("questions")?.as_array()?;
+    let result: Value = serde_json::from_str(result.trim()).ok()?;
+    let answers = result.get("answers")?.as_array()?;
+    let text = |value: &Value, key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    let mut matched = false;
+    let mut pairs = Vec::with_capacity(questions.len());
+    for question in questions {
+        let id = question.get("id").and_then(Value::as_str)?;
+        let asked = text(question, "question")
+            .or_else(|| text(question, "header"))
+            .unwrap_or_else(|| id.to_owned());
+        let answer = answers
+            .iter()
+            .find(|answer| answer.get("id").and_then(Value::as_str) == Some(id));
+        matched |= answer.is_some();
+        let reply = answer
+            .map(|answer| {
+                let mut parts: Vec<String> = answer
+                    .get("selected")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect();
+                parts.extend(text(answer, "custom"));
+                parts.join(", ")
+            })
+            .unwrap_or_default();
+        pairs.push((asked, reply));
+    }
+    matched.then_some(pairs)
 }
 /// Display title for a tool call: its title, or the kind name when empty.
 fn tool_call_title(tc: &acp::ToolCall) -> Cow<'_, str> {

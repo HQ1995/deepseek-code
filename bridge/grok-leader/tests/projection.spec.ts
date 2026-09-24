@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import * as GrokLeader from '../src/index.ts'
-import { assistantEventUsage, contextInfoFromProjection, goalUpdateFromView, type NativeGoalView } from '../src/projection.ts'
+import { assistantEventUsage, contextInfoFromProjection, goalUpdateFromView, systemNotes, toolRegistryChange, type NativeGoalView } from '../src/projection.ts'
 
 describe('native assistant settlement projection', () => {
   it('renders native deliveries live and on replay in the viewed workspace, including nested tool declarations', () => {
@@ -53,6 +53,46 @@ describe('native assistant settlement projection', () => {
     ] }
     expect(assistantEventUsage({ type: 'assistant/attempt', data } as never)).toEqual(latest)
     expect(assistantEventUsage({ type: 'assistant/message', data: { ...data, usage: { inputTokens: 20, outputTokens: 4 } } } as never)).toEqual({ inputTokens: 20, outputTokens: 4 })
+  })
+})
+
+describe('tool-change notices', () => {
+  const developer = (source: unknown, content: unknown[], seq = 4) => ({ seq, time: 1, type: 'developer/message',
+    data: { turn: 1, step: 2, message: { id: 'm', role: 'developer', source, content } } }) as unknown as SessionEvent
+  const tool = (type: string, toolName: unknown) => ({ type, toolName })
+
+  it('shows DSH tool-registry updates as one generic system line, never as assistant or ACP stream output', () => {
+    const event = developer({ kind: 'tool-registry' }, [tool('tool-addition', 'mcp__docs__search'), tool('tool-addition', 'web_fetch'), tool('tool-removal', 'bash')])
+    expect(toolRegistryChange(event)).toEqual({ added: ['mcp__docs__search', 'web_fetch'], removed: ['bash'] })
+    expect(systemNotes(event)).toEqual(['Tools added: mcp__docs__search, web_fetch · removed: bash'])
+    // Child history pages parse every stream update as ACP; notices stay off that path.
+    expect(GrokLeader.sessionEventToUpdates(event, { replay: false })).toEqual([])
+    expect(GrokLeader.sessionEventToUpdates(event, { replay: true })).toEqual([])
+    expect(systemNotes(developer({ kind: 'tool-registry' }, [tool('tool-removal', 'a')]))).toEqual(['Tools removed: a'])
+  })
+
+  it('keeps a long change compact and drops malformed blocks and other developer messages', () => {
+    const names = Array.from({ length: 13 }, (_, index) => 'tool_' + index)
+    expect(systemNotes(developer({ kind: 'tool-registry' }, names.map(name => tool('tool-addition', name)))))
+      .toEqual(['Tools added: tool_0, tool_1, tool_2, tool_3, tool_4, tool_5 and 7 more'])
+    expect(systemNotes(developer({ kind: 'tool-registry' }, [tool('tool-addition', 'a\u001b[31mb\n'), tool('tool-addition', 3), null, tool('text', 'x')])))
+      .toEqual(['Tools added: a[31mb'])
+    for (const event of [
+      developer({ kind: 'tool-registry' }, []),
+      developer({ kind: 'tool-registry' }, [{ type: 'text', text: 'hidden' }]),
+      developer({ kind: 'context-injection' }, [tool('tool-addition', 'a')]),
+      developer(undefined, [tool('tool-addition', 'a')]),
+      { seq: 1, time: 1, type: 'developer/message', data: null } as unknown as SessionEvent,
+      { seq: 1, time: 1, type: 'user/message', data: { source: { kind: 'tool-registry' }, content: [tool('tool-addition', 'a')] } } as unknown as SessionEvent,
+    ]) {
+      expect(systemNotes(event)).toBeUndefined()
+      expect(GrokLeader.sessionEventToUpdates(event, { replay: true })).toEqual([])
+    }
+  })
+
+  it('keeps the image offload notice on the same path', () => {
+    const offload = { seq: 1, time: 1, type: 'image/offload', data: { targets: [{ seq: 0, imageIndexes: [0] }] } } as unknown as SessionEvent
+    expect(systemNotes(offload)).toEqual([expect.stringContaining('1 older image occurrence(s) omitted')])
   })
 })
 

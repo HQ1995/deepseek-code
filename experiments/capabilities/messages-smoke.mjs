@@ -62,7 +62,8 @@ try {
   await mount(ctx, 'session-log-deepseek', { enabled: false })
   await mount(ctx, 'plugin-package-inventory-deepseek', { enabled: false })
   await mount(ctx, 'compaction-image-offload')
-  await mount(ctx, 'llm-deepseek', { apiKeyEnv: 'DSCODE_NATIVE_DEEPSEEK_API_KEY',
+  // 0.1.7-rc.2: the `llm-deepseek` row loads this API-key route; dsh-llm-deepseek is its protocol library.
+  await mount(ctx, 'llm-deepseek-api-key', { apiKeyEnv: 'DSCODE_NATIVE_DEEPSEEK_API_KEY',
     baseURL: `http://127.0.0.1:${server.address().port}/anthropic`, maxImagesPerRequest: 1, imageOffloadCountQuantum: 1, filesApiTimeoutMs: 1000 })
   await mount(ctx, 'agent-loop', { agents: [] })
   let owner = await ctx.agents.create({ sessionId: 'native-images', meta: { cwd: root },

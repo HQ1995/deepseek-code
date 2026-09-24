@@ -1406,11 +1406,16 @@ pub(super) fn handle_prompt_response(
                 elapsed.unwrap_or_default(),
             )),
             (Ok(_), false) if agent.bash_turn => None,
-            (Ok(_), false) => Some(SessionEvent::TurnCompleted {
-                // Legacy copy on purpose: unknown elapsed keeps the "in 0.0s"
-                // form here — only wake markers use the honest `None` form.
-                elapsed: Some(elapsed.unwrap_or_default()),
-            }),
+            (Ok(pr), false) => {
+                if pr.stop_reason == acp::StopReason::MaxTokens {
+                    crate::app::turn_completion::push_output_limit_notice(agent);
+                }
+                Some(SessionEvent::TurnCompleted {
+                    // Legacy copy on purpose: unknown elapsed keeps the "in 0.0s"
+                    // form here — only wake markers use the honest `None` form.
+                    elapsed: Some(elapsed.unwrap_or_default()),
+                })
+            }
             (Err(_), _) if dedicated_ux_shown => None,
             // `err` is already banner-formatted by `format_acp_error` at the
             // producer — the single formatting owner. Don't re-format here.

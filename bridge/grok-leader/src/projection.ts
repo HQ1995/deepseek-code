@@ -51,6 +51,47 @@ export const imageOffloadNotes = (count: number): string[] => [
   `Image context: ${count} older image occurrence(s) omitted from future model requests. Originals remain in history. Switching models or resuming will not restore them; attach or read the image again if needed.`,
 ]
 
+/** Tool names one native tool-registry developer message added and removed.
+ * DSH appends it when a step's tool list differs from the previous request:
+ * a plugin or MCP server enabled or disabled while the session runs. Every
+ * other developer message stays off the TUI. */
+export function toolRegistryChange(event: SessionEvent): { added: string[]; removed: string[] } | undefined {
+  if (String(event.type) !== 'developer/message') return undefined
+  const message = (event.data as { message?: { source?: { kind?: unknown }; content?: unknown } } | null)?.message
+  if (message?.source?.kind !== 'tool-registry' || !Array.isArray(message.content)) return undefined
+  const added: string[] = [], removed: string[] = []
+  for (const block of message.content as Array<{ type?: unknown; toolName?: unknown } | null>) {
+    const name = typeof block?.toolName === 'string' ? block.toolName.replace(/[\x00-\x1f\x7f]/g, '') : ''
+    if (name === '') continue
+    if (block!.type === 'tool-addition') added.push(name)
+    else if (block!.type === 'tool-removal') removed.push(name)
+  }
+  return added.length + removed.length === 0 ? undefined : { added, removed }
+}
+
+/** Names a tool notice spells out per list; the rest are counted. */
+const TOOL_NOTICE_NAMES = 6
+/** Shared one-line system notice for a tool change, e.g. `Tools added: a, b · removed: c`. */
+export const toolRegistryNotes = (change: { added: readonly string[]; removed: readonly string[] }): string[] => {
+  const names = (list: readonly string[]) => list.slice(0, TOOL_NOTICE_NAMES).join(', ')
+    + (list.length > TOOL_NOTICE_NAMES ? ` and ${list.length - TOOL_NOTICE_NAMES} more` : '')
+  const parts = [
+    ...change.added.length > 0 ? ['added: ' + names(change.added)] : [],
+    ...change.removed.length > 0 ? ['removed: ' + names(change.removed)] : [],
+  ]
+  return parts.length === 0 ? [] : ['Tools ' + parts.join(' · ')]
+}
+
+/** The neutral system notice one durable event carries, if any: an image
+ * offload or a tool change. Live, replayed and child history show the same
+ * lines; the TUI renders them as plain system text, never assistant output. */
+export function systemNotes(event: SessionEvent): string[] | undefined {
+  const offloaded = imageOffloadCount(event)
+  if (offloaded !== undefined) return imageOffloadNotes(offloaded)
+  const tools = toolRegistryChange(event)
+  return tools === undefined ? undefined : toolRegistryNotes(tools)
+}
+
 /** Released token-meter values: usage is cumulative; pressure is next-request occupancy. */
 export interface ContextProjectionValues {
   tokenUsage?: { uncachedInputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }
@@ -401,6 +442,8 @@ export function sessionEventToUpdates(
     }
     default:
       // Other durable events belong to native state projections or diagnostics.
+      // Tool-registry developer messages are system notices (toolRegistryChange),
+      // not ACP stream updates: child history pages parse only the latter.
       return []
   }
 }

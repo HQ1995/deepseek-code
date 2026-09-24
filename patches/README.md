@@ -12,7 +12,7 @@ installed-package matching. Unpatched and differently patched consumers are not
 reusable, even if their DSH versions and upstream commits match. To regenerate
 a consumer, select a new `--consumer` directory; do not relabel an old one.
 
-The current `46a7f68b...` backport reads macOS kernel process observations
+The current `477b4f42...` (`0.1.7-rc.2`) backport reads macOS kernel process observations
 through the existing Koffi dependency instead of spawning `ps`. Full tree scans
 remain fresh; identity and foreground queries select one PID. Failed/partial
 reads throw, and pre-signal checks retain second-precision identities without a
@@ -40,15 +40,27 @@ The results are identical: removing a config key an entry's patches do not
 carry leaves the patch list unchanged. A settings test pins the composition
 count; the existing inheritance, reset, group and secret tests cover values.
 
+The Schedule change is dscode's own. rc.2's Schedule service delivers through
+`sessionController.resolveAgent`; the bridge provides one that resolves only
+Sessions a TUI has open and ready, so a reminder due while its Session is
+closed, still opening, reloading or changing preset fails and drops out of the
+timer until the next task write or restart. The backport adds a public
+`ScheduleService.requestDelivery()` that asks for a new drive; the bridge calls
+it whenever a Session becomes ready and when the service appears, so the
+reminder is delivered then, and `resolveAgent` itself never waits inside
+Schedule's serialized queue. A schedule test fails without it; the package
+README pair records the extra retry trigger.
+
 Earlier revisions also carried a Linux scope-settlement correction; it is
 upstream since `0.1.6-alpha.2`, so the backport no longer touches Linux. The
-patch moved from `0.1.7-alpha.1` through `0.1.7-alpha.2` to `46a7f68b...`
-(`0.1.7-rc.1`) with no source, test or decision-note changes (only README
-context); the rc.1 bytes, and so `sourcePatchSha256`, equal alpha.2's. Settings readiness, the macOS
-kernel process table, the JSONL helper extraction and the shared config-editor
-composition are still not upstream. The rc.1 Linux acceptance is recorded in
-[the DSH 0.1.7 adaptation](../docs/dsh-upstream-refresh-2026-09-22.md#linux-acceptance)
-and is re-run for every payload that bumps the runtime.
+patch moved from `0.1.7-alpha.1` through `0.1.7-rc.1` without source, test or
+decision-note changes. For `0.1.7-rc.2` upstream switched README and note
+translation records to per-section hashes, so the four records the patch
+touches were regenerated with upstream's `verify-translation-pairing --write`;
+source and test hunks are unchanged, and the patched packages' suites pass on
+rc.2. Settings readiness, the macOS kernel process table, the JSONL helper
+extraction and the shared config-editor composition are still not upstream.
+Linux acceptance is re-run for every payload that bumps the runtime.
 
 When upgrading the upstream source, review whether the change is already
 included. Remove the patch digest if it is; otherwise rebase the source change,

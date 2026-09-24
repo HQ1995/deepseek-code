@@ -13,14 +13,17 @@ import { createPresetCatalog } from './preset-catalog.ts'
 import { createSessionPresets } from './session-presets.ts'
 import { presetHistoryProjection } from './preset-history.ts'
 import { workflowProjection } from './workflows.ts'
+import { legacyRemindersProjection } from './legacy-reminders.ts'
+import { createSessionController, provideSessionController, type ScheduleDeliveryLike } from './session-controller.ts'
 import { createSessionModels } from './session-models.ts'
 // Keep durable event augmentations reachable through the published type entry.
 export type {} from './session-models.ts'
 export type {} from './preset-history.ts'
 export type {} from './workflows.ts'
+export type {} from './legacy-reminders.ts'
 import { createNativeSessionStatus, type NativeStatusProjections, type NativeGoalAuthority } from './native-session-status.ts'
 import { createNativeChildren } from './native-children.ts'
-import { createNativeTasks } from './native-tasks.ts'
+import { createNativeTasks, type ScheduleServiceLike } from './native-tasks.ts'
 import { createSessionRegistry } from './session-registry.ts'
 import { PACKAGE_VERSION } from './package-location.ts'
 import { createProfilePlugins, inspectPluginRuntime } from './profile-plugins.ts'
@@ -73,7 +76,6 @@ import { RpcError } from './protocol.ts'
 import { jobOutputSnapshot } from './job-output.ts'
 import { createImageOutputProjector } from './image-output.ts'
 import { exportSessionArchive } from './session-export.ts'
-import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 
 export { cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, sessionEventToUpdates, type GrokSessionUpdate, type ToolResultContentBlock } from './projection.ts'
 
@@ -150,6 +152,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const agents = ctx.agents
   ctx.sessionProjections.register(presetHistoryProjection)
   ctx.sessionProjections.register(workflowProjection)
+  ctx.sessionProjections.register(legacyRemindersProjection)
   protectTerminalSignals(ctx)
   const jobOutput = jobOutputSnapshot
   const projectImages = createImageOutputProjector(ctx)
@@ -194,6 +197,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     clientIsLive: id => connections.get(id)?.closed === false,
     flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),
     cancelRequests: (clientId, sessionId) => interactions.cancel(clientId, sessionId),
+    unblocked: record => { sessionController.deliverable(record) },
     logger,
   })
   const sessions = registry.records
@@ -206,6 +210,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (state === undefined) throw internalError('preset history projection is unavailable')
       return state
     },
+    unblocked: record => { sessionController.deliverable(record) },
   })
   const transport = createLeaderTransport({
     socketPath: config.socketPath ?? DEFAULT_SOCKET_PATH,
@@ -269,6 +274,19 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     planMode: record => presetServiceFor(record, 'planMode') as { set(agent: Agent, active: boolean): unknown } | undefined,
     on: (name, listener, options) => ctx.on(name as never, listener as never, options), logger,
   })
+  // DSH's Host Schedule service delivers reminders through `sessionController`,
+  // which only the Web app provides. dscode delivers into a session a TUI has
+  // open and ready here; the registry, presets and lifecycle report each session
+  // that becomes ready, and a reminder that fell due meanwhile is retried then.
+  const sessionReady = (record: SessionRecord): boolean => {
+    if (!registry.acceptsInput(record) || connections.get(record.clientId)?.closed !== false || agents.get(record.agent.id) !== record.agent) return false
+    try { lifecycle.assertReady(record); return true } catch { return false }
+  }
+  const sessionController = createSessionController<SessionRecord>({
+    record: id => sessions.get(id), ready: sessionReady,
+    schedule: () => ctx.get('schedule') as ScheduleDeliveryLike | undefined, logger,
+  })
+  provideSessionController(ctx, sessionController, logger)
   const discovery = createSessionDiscovery({
     persistence, query: () => ctx.get('sessionQuery') as SessionQueryLike | undefined,
     projectionCache: () => ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined,
@@ -285,6 +303,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     queue: { combineQueued, followUpSteer },
     permissions: interactions,
     contextValues: record => nativeStatus.contextValues(record), projectImages, logger,
+    unblocked: record => { sessionController.deliverable(record) },
     views: {
       status: (record, replay) => nativeStatus.snapshot(record, replay),
       children: (record, replay) => children.snapshot(record, replay),
@@ -310,7 +329,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const record = sessions.get(session.header.id)
     if (record === undefined || record.agent.session !== session) return
     nativeStatus.refresh(record)
-    tasks.observe(record, event)
     const conn = connections.get(record.clientId)
     if (conn === undefined) return
     try {
@@ -409,6 +427,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     browser: createBrowserControl({
       rows: pluginRows, settings,
       status: () => (ctx.get('dscodeBrowser') as { status(): BrowserStatus } | undefined)?.status(),
+      startOpen: async () => { await (ctx.get('dscodeBrowser') as { startOpen?(): Promise<void> } | undefined)?.startOpen?.() },
     }),
     children: { command: (clientId, params) => children.command(clientId, params) },
     goals: { goal: (clientId, params) => nativeStatus.goal(clientId, params) },
@@ -588,13 +607,20 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   const tasks = createNativeTasks({
     sessions, owned: ownedRecord,
-    discovery, flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),
     jobs: record => presetServiceFor(record, 'jobs'),
-    tools: record => {
-      const runtime = record.agent.ctx.get('tools') as ToolRuntime | undefined
-      return runtime === undefined ? undefined : { runtime, names: nativeCapabilities.toolNames(record) }
-    },
+    toolNames: record => record.agent.ctx.get('tools') === undefined ? undefined : nativeCapabilities.toolNames(record),
+    schedule: () => ctx.get('schedule') as ScheduleServiceLike | undefined,
+    legacyReminders: record => ctx.sessionProjections.stateOf(record.agent.session, 'dscodeLegacyReminders'),
+    ready: sessionReady,
     output: jobOutput, logger,
+  })
+  ctx.on('schedule/changed', () => { tasks.scheduleChanged() })
+  // The socket accepts sessions before the Schedule service is up, and
+  // `schedule/changed` fires only on writes: a session opened earlier gets its
+  // Tasks rows, and its due reminders their delivery, once the service appears.
+  ctx.inject(['schedule'], () => {
+    tasks.scheduleChanged()
+    sessionController.deliverable()
   })
   const children = createNativeChildren({
     sessions, owned: ownedRecord, agent: id => agents.get(id),
@@ -628,7 +654,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const leaderHost = createLeaderLifecycle({
     sessions: registry, catalog: models, transport,
     owners: [discovery, sessionCommands, execution, asides, artifacts, input, interactions,
-      sessionPresets, sessionModels, profilePlugins, children, nativeStatus, tasks],
+      sessionPresets, sessionModels, profilePlugins, children, nativeStatus, tasks, sessionController],
     pollers: [tasks, children, nativeStatus],
     // A leader whose remote connection is gone exits at once, so restarting dscode reconnects.
     idleExitMs: () => remoteProblem() === undefined ? config.idleExitMs ?? 2000 : 0,

@@ -1,7 +1,8 @@
 /** dscode's opt-in browser: an isolated headless Chromium per top-level
  * Session through Playwright MCP, a reviewed operation allowlist, native
  * approval for every call and cleanup on cancellation. Shipped disabled;
- * `/browser on` enables the row. It does not confine network or host access. */
+ * `/browser on` enables the row for running and new Sessions alike. It does
+ * not confine network or host access. */
 import Schema from '@deepseek-ai/schemastery'
 import { importRuntime, playwrightMcpCli } from '../shared/runtime-modules.mjs'
 import { browserLaunchArgs, browserServerEnv, resolveBrowserExecutable, sandboxRestriction } from './executable.mjs'
@@ -71,6 +72,9 @@ export async function apply(ctx, config) {
         ...lastError === undefined ? {} : { lastError },
       }
     },
+    /** Start browsers for open Sessions that have none, with the current
+     * settings: `/browser on` calls it once its settings are written. */
+    startOpen: () => browsers?.startOpen() ?? Promise.resolve(),
   }))
   await ctx.plugin(BrowserUse)
   await ctx.plugin({ name: 'dscode-browser-sessions', inject: ['browserUse', 'agents', 'tools', 'systemPrompt'], async apply(owner) {

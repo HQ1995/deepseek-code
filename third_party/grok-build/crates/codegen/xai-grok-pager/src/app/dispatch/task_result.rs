@@ -1147,20 +1147,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             after,
         } => {
             use crate::app::actions::AfterSessionDelete;
-            remove_session_from_pickers(
-                app,
-                &source,
-                &session_id,
-                after != AfterSessionDelete::Stay,
-            );
-            if after == AfterSessionDelete::Stay {
-                app.dashboard_local_sessions
-                    .retain(|entry| entry.session_id != session_id);
-                app.leader_roster
-                    .retain(|entry| entry.session_id != session_id);
-                app.show_toast("Session deleted");
-                return vec![];
-            }
+            tracing::debug!(source, session_id = %session_id, ?after, "session deleted");
+            remove_session_from_pickers(app, &session_id);
             let sid = acp::SessionId::new(session_id.clone());
             let to_remove: Vec<_> = app
                 .agents

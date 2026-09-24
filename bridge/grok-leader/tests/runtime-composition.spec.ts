@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { load } from 'js-yaml'
 import { describe, expect, it } from 'vitest'
 
@@ -23,7 +24,10 @@ const flatten = (rows: readonly Row[], acc: Row[] = []): Row[] => {
   }
   return acc
 }
-const rows = (path: string): Row[] => flatten(load(readFileSync(new URL(path, import.meta.url), 'utf8').replace(/!!js\b/g, '')) as Row[])
+const parse = (text: string): Row[] => flatten(load(text.replace(/!!js\b/g, '')) as Row[])
+const rows = (path: string): Row[] => parse(readFileSync(new URL(path, import.meta.url), 'utf8'))
+/** The base layer of the installed runtime, which dscode's patch applies over. */
+const baseRows = (): Row[] => parse(readFileSync(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-base/cordis.patch.yml'), 'utf8'))
 
 describe('0.1.7 runtime composition', () => {
   it('inherits the base PTC provider and keeps workflow execution preset-owned', () => {
@@ -38,7 +42,16 @@ describe('0.1.7 runtime composition', () => {
     const patch = rows('../cordis.patch.yml')
     expect(patch.find(row => row.id === 'agent-default-model')?.config).toEqual({ provider: '', model: '' })
     expect(patch.find(row => row.id === 'llm-deepseek')).toMatchObject({ disabled: true })
+    // 0.1.7-rc.2's account route ships on and registers "DeepSeek Account".
+    expect(patch.find(row => row.id === 'llm-deepseek-account')).toMatchObject({ disabled: true })
     expect(patch.find(row => row.id === 'session-log-deepseek')?.config).toEqual({ enabled: false })
+  })
+
+  it('leaves no native DeepSeek route of the installed base switched on', () => {
+    const disabled = new Set(rows('../cordis.patch.yml').filter(row => row.id !== undefined && row.disabled === true).map(row => row.id))
+    const native = baseRows().filter(row => row.name?.startsWith('@deepseek-ai/dsh-llm-deepseek') === true && row.disabled !== true)
+    expect(native.map(row => row.id).sort()).toEqual(['llm-deepseek', 'llm-deepseek-account'])
+    expect(native.filter(row => !disabled.has(row.id))).toEqual([])
   })
 
   it.each(['history', 'lsp', 'terminal'])('keeps %s workflows inside their own realm', preset => {

@@ -7,7 +7,7 @@ import { createNativeChildren } from '../src/native-children.ts'
 import { createSessionWork } from '../src/session-work.ts'
 import { workflowProjection } from '../src/workflows.ts'
 
-type Row = { kind: 'child' | 'diagnostic'; id: string; mode: 'continuable' | 'one-shot'; label?: string; parentId?: string; activity?: 'running' | 'inactive' }
+type Row = { kind: 'child' | 'diagnostic'; id: string; mode?: 'continuable' | 'one-shot'; label?: string; parentId?: string; activity?: 'running' | 'inactive'; reason?: string }
 function fixture() {
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
   const stops: Array<ReturnType<typeof vi.fn>> = []
@@ -306,6 +306,38 @@ describe('native child/workflow ownership', () => {
     expect(f.service.interrupt).not.toHaveBeenCalled()
     expect(f.service.prompt).not.toHaveBeenCalled()
     expect(f.store.open).not.toHaveBeenCalled()
+    await f.children.dispose()
+  })
+
+  it('names an unreadable root catalog instead of passing the raw native listing error on', async () => {
+    const f = fixture(); f.add('child')
+    // 0.1.7-rc.2 rejects the whole listing when the root catalog read fails.
+    f.service.listDescendants.mockRejectedValue(Object.assign(new Error('failed to project session "root": torn log'), { name: 'SessionQueryError', code: 'SESSION_QUERY_CORRUPT_SESSION' }))
+    const clear = 'could not list the subagents of this session (failed to project session "root": torn log); reopen the session and try again'
+    await expect(f.children.history(1, { sessionId: 'root', childSessionId: 'child' })).rejects.toMatchObject({ code: -32603, message: clear })
+    await expect(f.children.cancel(1, { sessionId: 'root', subagentId: 'child' })).rejects.toMatchObject({ code: -32603, message: clear })
+    await expect(f.children.inbox(1, { sessionId: 'root' })).rejects.toMatchObject({ code: -32603, message: clear })
+    await expect(f.command('/subagents list')).resolves.toMatchObject({ result: { kind: 'error', text: expect.stringContaining(clear) } })
+    expect(f.service.interrupt).not.toHaveBeenCalled()
+    expect(f.store.open).not.toHaveBeenCalled()
+    // A child whose own catalog is unreadable is known, not unknown.
+    f.service.listDescendants.mockResolvedValue([{ kind: 'diagnostic', id: 'child', reason: 'corrupt' }])
+    await expect(f.children.history(1, { sessionId: 'root', childSessionId: 'child' })).rejects.toThrow('subagent child cannot be shown: its session is corrupt')
+    await expect(f.children.history(1, { sessionId: 'root', childSessionId: 'ghost' })).rejects.toThrow('unknown subagent')
+    await f.children.dispose()
+  })
+
+  it('reports a listing cancelled by session closure as a closed session', async () => {
+    const f = fixture(), lookup = Promise.withResolvers<Row[]>()
+    f.service.listDescendants.mockImplementationOnce(async (_id, signal) => {
+      await lookup.promise
+      if (signal?.aborted) throw Object.assign(new Error('subagent listing was cancelled'), { code: 'CANCELLED' })
+      return []
+    })
+    const history = f.children.history(1, { sessionId: 'root', childSessionId: 'child' })
+    await vi.waitFor(() => expect(f.service.listDescendants).toHaveBeenCalledOnce())
+    f.root.work.cancel(); lookup.resolve([])
+    await expect(history).rejects.toThrow('session closed')
     await f.children.dispose()
   })
 

@@ -1,8 +1,21 @@
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { load } from 'js-yaml'
 import { describe, expect, it, vi } from 'vitest'
 import { createModelCatalog } from '../src/model-catalog.ts'
-import { createNativeProviders, nativeProviderForm, NATIVE_DEEPSEEK_API, NATIVE_DEEPSEEK_PROVIDER } from '../src/native-provider.ts'
+import { createNativeProviders, nativeProviderForm, NATIVE_DEEPSEEK_API, NATIVE_DEEPSEEK_PROVIDER, NATIVE_DEEPSEEK_ROW } from '../src/native-provider.ts'
 import { createPluginRows, type PluginManagerLike } from '../src/plugin-rows.ts'
 import type { LlmLike, SettingsLike } from '../src/native-seams.ts'
+
+/** The installed runtime's base rows, as the plugin manager reports them
+ * (`patchId` = row id, `moduleName` = row name). */
+const baseRows = (load(readFileSync(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-base/cordis.patch.yml'), 'utf8')
+  .replace(/!!js\b/g, '')) as Array<{ insert?: Array<{ id?: string; name?: string }> }>).flatMap(entry => entry.insert ?? [])
+const runtimeModule = (id: string): string => {
+  const name = baseRows.find(row => row.id === id)?.name
+  if (name === undefined) throw new Error('the installed dsh-base has no ' + id + ' row')
+  return name
+}
 
 function fixture(options: { enabled?: boolean; application?: string; errorCode?: string; noManager?: boolean; noCredentials?: boolean; hmr?: boolean } = {}) {
   let enabled = options.enabled ?? false
@@ -16,7 +29,8 @@ function fixture(options: { enabled?: boolean; application?: string; errorCode?:
   const manager: PluginManagerLike = {
     listPlugins: vi.fn(async () => [
       { entryId: 'e-other', moduleName: '@deepseek-ai/dsh-llm-pi-ai', enabled: true, patchId: 'llm-pi-ai' },
-      { entryId: 'e-deepseek', moduleName: '@deepseek-ai/dsh-llm-deepseek', enabled, patchId: 'llm-deepseek' },
+      { entryId: 'e-deepseek', moduleName: runtimeModule('llm-deepseek'), enabled, patchId: 'llm-deepseek' },
+      { entryId: 'e-account', moduleName: runtimeModule('llm-deepseek-account'), enabled: false, patchId: 'llm-deepseek-account' },
     ]),
     // dscode runs without hmr: the manager saves the row and asks for a restart.
     setPluginEnabled: vi.fn(async (_id: string, next: boolean) => {
@@ -47,6 +61,13 @@ function fixture(options: { enabled?: boolean; application?: string; errorCode?:
 }
 
 describe('native DeepSeek provider', () => {
+  it('addresses the row the installed runtime ships, by patch id and module', () => {
+    // 0.1.7-rc.2 moved the API-key route to its own module; a stale name makes
+    // every /provider add, edit and remove of this route fail to find its row.
+    expect(NATIVE_DEEPSEEK_ROW).toMatchObject({ id: 'llm-deepseek', module: runtimeModule('llm-deepseek') })
+    expect(NATIVE_DEEPSEEK_ROW.module).toBe('@deepseek-ai/dsh-llm-deepseek-api-key')
+  })
+
   it('validates the form before any write', () => {
     expect(nativeProviderForm({ apiKeyEnv: ' MY_KEY ', apiKey: ' sk ', baseURL: 'https://gateway.example/anthropic' }))
       .toEqual({ apiKeyEnv: 'MY_KEY', apiKey: 'sk', baseURL: 'https://gateway.example/anthropic' })

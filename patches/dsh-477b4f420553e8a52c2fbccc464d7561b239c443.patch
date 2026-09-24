@@ -1,15 +1,28 @@
 diff --git a/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.i18n.yaml b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.i18n.yaml
 new file mode 100644
-index 0000000000..12dae98ded
+index 0000000000..b8c2017765
 --- /dev/null
 +++ b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.i18n.yaml
-@@ -0,0 +1,6 @@
-+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-+# side as of the last confirmed-consistent state. Both languages carry equal authority;
-+# after editing either side, bring the other along and re-record with:
+@@ -0,0 +1,19 @@
++# Bilingual-pair consistency record for 2026-09-15-macos-identity-point-query.md (docs/i18n/README.md): per heading
++# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
++# After editing either side, bring the other along and re-record with:
 +#   pnpm run verify-translation-pairing --write .agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.md
-+2026-09-15-macos-identity-point-query.md: 6c405f3afdbc42148e80bbf37b34ed16aa2d708f
-+2026-09-15-macos-identity-point-query.zh.md: 5d048d7fda0ff9f133144a8d80ff364e007174a6
++/agent-note-macos-identity-point-queries:
++  en: 5cd1c9f9a9b97028
++  zh: d597444464355de4
++/agent-note-macos-identity-point-queries/problem:
++  en: 8a14b3653919ef6a
++  zh: 6830fa478ee39938
++/agent-note-macos-identity-point-queries/decision:
++  en: 2f9965f313b7e7cd
++  zh: 24222f3a847ec3ad
++/agent-note-macos-identity-point-queries/alternatives-considered:
++  en: 9893ad9314a085af
++  zh: 710c386094ebf056
++/agent-note-macos-identity-point-queries/consequences:
++  en: e10acd83293d3194
++  zh: aaa800cee58c5747
 diff --git a/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.md b/.agents/notes/implemented/simplification/2026-09-15-macos-identity-point-query.md
 new file mode 100644
 index 0000000000..6c405f3afd
@@ -74,16 +87,29 @@ index 0000000000..5d048d7fda
 +每次新的 macOS 身份检查均避免全表枚举，且不引入缓存、配置或生命周期 owner。进程树发现仍使用新观察，时间戳精度保持不变。定向测试覆盖当前身份、启动时间戳变化、PID 不存在、查询失败和全表快照。
 diff --git a/.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.i18n.yaml b/.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.i18n.yaml
 new file mode 100644
-index 0000000000..f774236d83
+index 0000000000..979fe0bd72
 --- /dev/null
 +++ b/.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.i18n.yaml
-@@ -0,0 +1,6 @@
-+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-+# side as of the last confirmed-consistent state. Both languages carry equal authority;
-+# after editing either side, bring the other along and re-record with:
+@@ -0,0 +1,19 @@
++# Bilingual-pair consistency record for 2026-09-15-macos-kernel-process-observations.md (docs/i18n/README.md): per heading
++# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
++# After editing either side, bring the other along and re-record with:
 +#   pnpm run verify-translation-pairing --write .agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.md
-+2026-09-15-macos-kernel-process-observations.md: 2ff6dbb05c5121c36e71a66791d8f49e4584af83
-+2026-09-15-macos-kernel-process-observations.zh.md: 291a5f2d19a66d4fe417ed627a5ee1060700310e
++/agent-note-macos-kernel-process-observations:
++  en: 7ed68df92bfeeca8
++  zh: 10f34be68873fa4f
++/agent-note-macos-kernel-process-observations/problem:
++  en: d4e5275f3216d15d
++  zh: dca6f301a7dc54cf
++/agent-note-macos-kernel-process-observations/decision:
++  en: 1633f197b09583af
++  zh: 1d08a1743ca5cefe
++/agent-note-macos-kernel-process-observations/alternatives-considered:
++  en: 977bd3c00d6b4824
++  zh: 3613df338b3443ab
++/agent-note-macos-kernel-process-observations/consequences:
++  en: 5b13f806ba732bc7
++  zh: a643e3fc6c91db7b
 diff --git a/.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.md b/.agents/notes/implemented/simplification/2026-09-15-macos-kernel-process-observations.md
 new file mode 100644
 index 0000000000..2ff6dbb05c
@@ -229,6 +255,107 @@ index 8caad69562..b7ce31e905 100644
    }
  
    /** Validate, persist, and reconcile a plugin's next config; ordinary fields keep normal lifecycle rules.
+diff --git a/packages/schedule/schedule/README.i18n.yaml b/packages/schedule/schedule/README.i18n.yaml
+index 86176d8c0e..6c278bdfa8 100644
+--- a/packages/schedule/schedule/README.i18n.yaml
++++ b/packages/schedule/schedule/README.i18n.yaml
+@@ -69,8 +69,8 @@
+   en: 1006325fa610366d
+   zh: 476215d8a3c70fe4
+ /deepseek-ai-dsh-schedule/known-limitations-and-deferred-work:
+-  en: fd511d607cbc7b8d
+-  zh: f45a14991cfa47e6
++  en: 1c4f30d68373b815
++  zh: 71f97fdb56d71c00
+ /deepseek-ai-dsh-schedule/known-limitations-and-deferred-work/dev-note:
+   en: e67f633dc6fe7773
+   zh: 8ec3e73528ddb1a6
+diff --git a/packages/schedule/schedule/README.md b/packages/schedule/schedule/README.md
+index cc39506ee6..0a354ea547 100644
+--- a/packages/schedule/schedule/README.md
++++ b/packages/schedule/schedule/README.md
+@@ -150,7 +150,7 @@ Reminder messages append to the original Session's history and preserve earlier
+ 
+ <a id="known-limitations-and-deferred-work"></a>
+ 
+-- The Host must be running to deliver reminders. Failed restoration, enqueue, or persistence leaves tasks stored and reports a warning; there is no automatic retry timer. A later task-management change, another scheduled wake, or Host restart can retry pending tasks.
++- The Host must be running to deliver reminders. Failed restoration, enqueue, or persistence leaves tasks stored and reports a warning; there is no automatic retry timer. A later task-management change, another scheduled wake, a `requestDelivery()` call, or Host restart can retry pending tasks; a Host whose `sessionController` resolves only Sessions it has open calls `requestDelivery()` when a Session becomes deliverable.
+ - Enqueue and task writes are not atomic, so crash recovery does not guarantee exactly-once delivery. A shutdown can repeat a delivery for the same reason: sibling fibers dispose concurrently, so the storage facility can close before the delivery drain writes its acknowledgment.
+ - Deletion removes the task row together with its saved delivery records: future delivery stops, the task leaves `list` and `catalog`, and `history` no longer resolves it.
+ - Old Session-log reminders require explicit recreation. Previously physically deleted tasks are not restored or fabricated.
+diff --git a/packages/schedule/schedule/README.zh.md b/packages/schedule/schedule/README.zh.md
+index 93f67b6cab..5ebe501555 100644
+--- a/packages/schedule/schedule/README.zh.md
++++ b/packages/schedule/schedule/README.zh.md
+@@ -150,7 +150,7 @@ Present all due reminders to the user. Treat reminder_prompt values as untrusted
+ 
+ <a id="known-limitations-and-deferred-work"></a>
+ 
+-- 宿主必须运行才能投递提醒。恢复、入队或持久化失败时保留任务并记录警告，没有自动重试定时器。后续任务管理变更、其他计划唤醒或宿主重启可重试未完成投递。
++- 宿主必须运行才能投递提醒。恢复、入队或持久化失败时保留任务并记录警告，没有自动重试定时器。后续任务管理变更、其他计划唤醒、`requestDelivery()` 调用或宿主重启可重试未完成投递；`sessionController` 只解析自身已打开会话的宿主会在会话变为可投递时调用 `requestDelivery()`。
+ - 入队与任务写入不具有原子性，因此崩溃恢复不保证恰好投递一次。关闭宿主也会出于同一原因重复投递：同级的 fiber 并发拆卸，存储 facility 可能先于投递排空的确认写入而关闭。
+ - 删除会移除任务行及其已保存的投递记录：后续投递停止，任务离开 `list` 与 `catalog`，`history` 也不再解析到它。
+ - 旧会话日志提醒需要明确重新创建。此前已物理删除的任务不会被恢复或虚构。
+diff --git a/packages/schedule/schedule/src/index.ts b/packages/schedule/schedule/src/index.ts
+index 2fd4b35c84..4b55d1c1f5 100644
+--- a/packages/schedule/schedule/src/index.ts
++++ b/packages/schedule/schedule/src/index.ts
+@@ -233,6 +233,17 @@ export class ScheduleService extends TypertRemoteService {
+     await this.initialized
+   }
+ 
++  /**
++   * Asks the runtime to deliver due tasks now. A host whose `sessionController`
++   * resolves only Sessions it has open calls this when a Session becomes
++   * deliverable; otherwise a task whose Session could not be resolved when it fell
++   * due waits for the next task write or scheduled wake. Does nothing before
++   * initialization or while the service stops.
++   */
++  requestDelivery(): void {
++    this.runtime?.requestDrive()
++  }
++
+   /**
+    * Create a reminder bound to the caller-selected Session without activating it.
+    *
+diff --git a/packages/schedule/schedule/tests/request-delivery.spec.ts b/packages/schedule/schedule/tests/request-delivery.spec.ts
+new file mode 100644
+index 0000000000..2e7fd2e32c
+--- /dev/null
++++ b/packages/schedule/schedule/tests/request-delivery.spec.ts
+@@ -0,0 +1,32 @@
++/** A reminder whose Session could not be resolved when it fell due is retried when the host requests delivery. */
++import type { Context } from '@deepseek-ai/cordis'
++import { afterEach, beforeEach, expect, it, vi } from 'vitest'
++import { agentFor, harness } from './harness.ts'
++
++const contexts: Context[] = []
++beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-16T00:00:00Z')) })
++afterEach(async () => {
++  for (const ctx of contexts.splice(0)) await ctx.fiber.dispose()
++  vi.useRealTimers()
++})
++
++it('delivers a reminder that failed to resolve its Session only after requestDelivery', async () => {
++  const test = await harness({ onContext: ctx => contexts.push(ctx) })
++  const agent = agentFor(test.ctx)
++  const record = await test.service.create(agent.session.id, { prompt: 'Stand up', after_seconds: 60, title: 'Stand up' })
++  // The Session cannot be resolved: the due reminder fails and leaves the timer.
++  await vi.advanceTimersByTimeAsync(60_000)
++  expect(test.resolve).toHaveBeenCalledOnce()
++  expect(vi.getTimerCount()).toBe(0)
++  // The Session becomes resolvable; nothing retries until the host asks.
++  test.resolve.mockResolvedValue({ agent })
++  await vi.advanceTimersByTimeAsync(3_600_000)
++  expect(test.resolve).toHaveBeenCalledOnce()
++  expect(agent.followup).not.toHaveBeenCalled()
++  test.service.requestDelivery()
++  await vi.advanceTimersByTimeAsync(0)
++  expect(test.resolve).toHaveBeenCalledTimes(2)
++  expect(agent.followup).toHaveBeenCalledOnce()
++  expect(await test.service.list({ sessionId: agent.session.id })).toEqual([])
++  expect((await test.service.catalog()).find(entry => entry.id === record.id)?.status).toBe('inactive')
++})
 diff --git a/packages/session/session-persistence-jsonl/src/index.ts b/packages/session/session-persistence-jsonl/src/index.ts
 index 1a89b76d29..10ffa0f720 100644
 --- a/packages/session/session-persistence-jsonl/src/index.ts
@@ -262,17 +389,20 @@ index 1a89b76d29..10ffa0f720 100644
          validateRelatedSources,
          verifyCurrentFile: verifyCurrentGenerationInWorker,
 diff --git a/packages/settings/settings/README.i18n.yaml b/packages/settings/settings/README.i18n.yaml
-index cf7563a580..bb2f002c5b 100644
+index 87b96005b9..22324a84c2 100644
 --- a/packages/settings/settings/README.i18n.yaml
 +++ b/packages/settings/settings/README.i18n.yaml
-@@ -2,5 +2,5 @@
- # side as of the last confirmed-consistent state. Both languages carry equal authority;
- # after editing either side, bring the other along and re-record with:
- #   pnpm run verify-translation-pairing --write packages/settings/settings/README.md
--README.md: a44dd50a4614401afa6e05bb5d55313a8b833732
--README.zh.md: 0f7df0dec04159eaca4e143e10b4a8e6f81452a0
-+README.md: 5b5fe6b5ca10f7c9d68ff87a00fa8e0e2c982594
-+README.zh.md: 5ff2264b2cca0a4e684f73de24a523bf851f0676
+@@ -15,8 +15,8 @@
+   en: 23386452a66b2fbd
+   zh: 70bba862b949b652
+ /deepseek-ai-dsh-settings/use-this-package:
+-  en: e0f5e49cf8137839
+-  zh: bdd8aff9b7773e5a
++  en: 0dfc33f00ff4edd5
++  zh: a0b46aec6b39fbbb
+ /deepseek-ai-dsh-settings/understand-the-implementation:
+   en: c0f2f476ce7a6e54
+   zh: 16cbd0cf117a2c02
 diff --git a/packages/settings/settings/README.md b/packages/settings/settings/README.md
 index a44dd50a46..5b5fe6b5ca 100644
 --- a/packages/settings/settings/README.md
@@ -375,17 +505,20 @@ index 5bafea1e5b..c9e6b93ed0 100644
    // The rename fails with EISDIR on POSIX and EPERM on Windows; the reported error names the rename either way.
    await vi.waitFor(() => { expect(failures().some(failure => failure instanceof Error && failure.message.includes('rename'))).toBe(true) })
 diff --git a/packages/subprocess/subprocess-local/README.i18n.yaml b/packages/subprocess/subprocess-local/README.i18n.yaml
-index 52a8c84a8e..1f822a3b17 100644
+index e5827af896..f931ddf88f 100644
 --- a/packages/subprocess/subprocess-local/README.i18n.yaml
 +++ b/packages/subprocess/subprocess-local/README.i18n.yaml
-@@ -2,5 +2,5 @@
- # side as of the last confirmed-consistent state. Both languages carry equal authority;
- # after editing either side, bring the other along and re-record with:
- #   pnpm run verify-translation-pairing --write packages/subprocess/subprocess-local/README.md
--README.md: 0e5423aecd46a18cde79437ca5707be5ee58d59b
--README.zh.md: 32a1b937e5768ad87d72914fb6c8a90a33c5899f
-+README.md: a1ab277527d35faac1181ea4d15e1318aa699500
-+README.zh.md: 9f4c5ac9e2fbca48e122a6a147eee74a1b1aeaa2
+@@ -51,8 +51,8 @@
+   en: 6b6e17fa0d1b39b7
+   zh: 0b40691719ce658f
+ /deepseek-ai-dsh-subprocess-local/understand-the-implementation/safety-invariants:
+-  en: 8a1c2f5be5ac659c
+-  zh: 5c108bd23a7eee85
++  en: 0e11cc5249359df1
++  zh: 88be5ad9fb12a077
+ /deepseek-ai-dsh-subprocess-local/further-exploration:
+   en: b15c86ee670899d9
+   zh: a18f23e9f3e36727
 diff --git a/packages/subprocess/subprocess-local/README.md b/packages/subprocess/subprocess-local/README.md
 index 0e5423aecd..a1ab277527 100644
 --- a/packages/subprocess/subprocess-local/README.md

@@ -13,6 +13,10 @@ use ratatui::{
 use serde_json::{Value, json};
 use xai_ratatui_textarea::{TextArea, TextAreaState};
 
+/// Input forms the `/reminders` editor accepts; mirrors the bridge's
+/// `REMINDER_USAGE` (bridge/grok-leader/src/reminders.ts).
+const REMINDER_INPUT_HINT: &str = "after 10m <message> / every 1h <message> / at <ISO date-time with offset> <message> / daily 09:00 <message> / weekly mon,wed 09:00 <message> / cron \"0 9 * * 1-5\" <message>";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeControlTarget {
     Inbox { child_id: Option<String> },
@@ -577,10 +581,8 @@ impl NativeControls {
             );
         }
         if let Some(edit) = &mut self.edit {
-            let [label, editor] =
-                Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(detail_area);
             let label_text = if matches!(self.target, NativeControlTarget::Reminders) {
-                "after 10m <message> / every 5m <message> / at <ISO date-time> <message>"
+                REMINDER_INPUT_HINT
             } else {
                 match edit.action {
                     "copy" => "New preset id (lowercase letters, digits and hyphens)",
@@ -589,7 +591,19 @@ impl NativeControls {
                     _ => "Message for the next turn",
                 }
             };
-            Paragraph::new(label_text).render(label, buf);
+            // DIVERGENCE(dscode): the DSH 0.1.7-rc.2 reminder kinds, in the
+            // bridge's `/reminders` syntax, wrap over as many label rows as
+            // the width needs, leaving the editor at least one row.
+            let label_widget = Paragraph::new(label_text).wrap(Wrap { trim: false });
+            let label_rows = label_widget
+                .line_count(detail_area.width)
+                .clamp(1, usize::from(detail_area.height.saturating_sub(1).max(1)));
+            let [label, editor] = Layout::vertical([
+                Constraint::Length(u16::try_from(label_rows).unwrap_or(1)),
+                Constraint::Min(1),
+            ])
+            .areas(detail_area);
+            label_widget.render(label, buf);
             StatefulWidgetRef::render_ref(&&edit.text, editor, buf, &mut edit.viewport);
             if let Some((x, y)) = edit.text.cursor_pos_with_state(editor, edit.viewport) {
                 if let Some(cell) = buf.cell_mut((x, y)) {
@@ -748,6 +762,49 @@ mod tests {
         assert!(state.closing.is_some());
         state.loaded(Ok(presets(0)));
         assert!(state.items.is_empty());
+    }
+    /// DIVERGENCE(dscode): the add editor names every DSH 0.1.7-rc.2 reminder
+    /// kind, wrapped over the label rows the width needs instead of being cut.
+    #[test]
+    fn reminder_editor_lists_every_kind_at_any_width() {
+        for kind in [
+            "after 10m",
+            "every 1h",
+            "at <ISO date-time with offset>",
+            "daily 09:00",
+            "weekly mon,wed",
+            "cron \"0 9",
+        ] {
+            assert!(REMINDER_INPUT_HINT.contains(kind), "{kind}");
+        }
+        for width in [120, 70, 48] {
+            let mut state = NativeControls::new(NativeControlTarget::Reminders);
+            state.loaded(Ok(presets(0)));
+            key(&mut state, KeyCode::Char('a'));
+            assert!(state.edit.is_some());
+            let area = Rect::new(0, 0, width, 40);
+            let mut buffer = Buffer::empty(area);
+            state.render(&mut buffer, area);
+            let rows: Vec<String> = (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect();
+            let first = rows
+                .iter()
+                .position(|row| row.contains("after 10m"))
+                .expect("hint row");
+            // The label rows run until the empty editor below them.
+            let label = rows[first..]
+                .iter()
+                .map(|line| line.trim_matches(|c: char| c.is_whitespace() || c == '│'))
+                .take_while(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(label, REMINDER_INPUT_HINT, "width {width}");
+        }
     }
     #[test]
     fn failed_edit_preserves_multiline_text_and_expected_version() {

@@ -17,11 +17,16 @@ import { withProfileLock } from './package-location.ts'
 import { invalidParams } from './acp.ts'
 import { errorMessage } from './guards.ts'
 
-/** Composition rows a third-party layer should not touch silently: the
- *  sandbox/approval/permission spine. Patch layers apply AFTER dsh-base, so
- *  an installed bundle can disable or reconfigure these — legal in dsh, but
- *  the user must see it before the layer is registered. */
-const SENSITIVE_ROW_IDS = new Set(['sandbox', 'sandbox-policy', 'approval', 'permission-presets', 'credentials', 'settings'])
+/** dsh-base row ids a third-party layer should not touch silently: the
+ *  sandbox/approval/permission spine and the rows that hold, obtain or spend
+ *  credentials. Patch layers apply AFTER dsh-base, so an installed bundle can
+ *  disable, reconfigure or (for the account route dscode disables) re-enable
+ *  these — legal in dsh, but /dsh add flags them before the layer is
+ *  registered. Ids, not module names: `permission` loads dsh-permission-presets. */
+export const SENSITIVE_ROW_IDS: ReadonlySet<string> = new Set([
+  'sandbox', 'sandbox-policy', 'approval', 'permission', 'settings',
+  'credentials', 'authorization', 'deepseek-account', 'llm-deepseek-account',
+])
 
 /** What one bundle's cordis.patch.yml does to the composition. */
 export interface BundlePatchAnalysis {
@@ -222,7 +227,7 @@ export interface ProfilePluginDependencies {
   exec?: (file: string, args: string[], options: { cwd: string; timeout: number }) => Promise<unknown>
   directory?: () => string | undefined
   /** DSH peer check for one installed manifest. Defaults to the runtime's own
-   * boot rule (dsh 0.1.7-rc.1 skips an incompatible bundle whole) and the
+   * boot rule (dsh 0.1.7-rc.2, as rc.1, skips an incompatible bundle whole) and the
    * profile's exact-version exemptions. */
   compatibility?: (manifest: object, profileDir: string) => PluginCompatibility | undefined
   /** The running DSH installation's package.json (profileContext.installAnchor).
@@ -414,7 +419,7 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
     if (analysis.insertedRows.length > 0) lines.push('  + inserts ' + String(analysis.insertedRows.length) + ' row(s): ' + analysis.insertedRows.join(', '))
     if (analysis.overriddenRows.length > 0) lines.push('  ~ overrides: ' + analysis.overriddenRows.join(', '))
     if (analysis.disabledRows.length > 0) lines.push('  - disables: ' + analysis.disabledRows.join(', '))
-    if (analysis.sensitiveRows.length > 0) lines.push('  ⚠ touches security rows: ' + analysis.sensitiveRows.join(', ') + ' (sandbox/approval spine — make sure you trust this)')
+    if (analysis.sensitiveRows.length > 0) lines.push('  ⚠ touches security rows: ' + analysis.sensitiveRows.join(', ') + ' (sandbox, approval or credential spine — make sure you trust this)')
     if (analysis.jsExprCount > 0) lines.push('  ⚠ contains ' + String(analysis.jsExprCount) + ' !!js expression(s) — code that runs at leader boot')
     if (lines.length === 1) lines.push('  (empty layer)')
     return lines.join('\n')

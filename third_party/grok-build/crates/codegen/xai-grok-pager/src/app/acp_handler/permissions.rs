@@ -266,7 +266,7 @@ fn resolve_subagent_label(agent: &AgentView, session_id: &acp::SessionId) -> Opt
 /// Falls back to ACP-level `title`/`kind` fields when deserialization fails.
 ///
 /// Returns `(title, description, bash_command_raw)`.
-fn build_permission_display(
+pub(super) fn build_permission_display(
     req: &acp::RequestPermissionRequest,
     bash_highlights: Option<&BashCommandHighlights>,
     session_local_workspace: bool,
@@ -338,7 +338,22 @@ fn build_permission_display(
     };
 
     let title = qualify_permission_title_for_local_workspace(title, session_local_workspace);
-    let description = permission_description_lines(req);
+    let mut description = permission_description_lines(req);
+    // DIVERGENCE(dscode): an execute prompt is titled from the command's own
+    // description, so a leader-supplied tool title ("bash — <why DSH asks>")
+    // leads the lines under the command instead of being dropped. Grok's own
+    // "Execute `…`" title only repeats the command.
+    if is_execute
+        && let Some(reason) = req
+            .tool_call
+            .fields
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty() && !t.starts_with("Execute `"))
+    {
+        description.insert(0, reason.to_string());
+    }
     let bash_cmd = if is_execute { raw_command } else { None };
     (title, description, bash_cmd)
 }

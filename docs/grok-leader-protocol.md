@@ -99,15 +99,19 @@ The bridge also implements the `x.ai/*` surfaces required by this TUI:
   to …"}}`. Publication is atomic and refuses an existing file or symlink.
   Client disconnect aborts the stream. The TUI always selects its current root
   session, including when invoked from a child view. Export bypasses model calls.
-- `x.ai/scheduler/list`, `create`, and `delete` use the official Schedule tools.
-  Native changes feed Tasks reminders; delivery resumes with the owning session.
-  Snapshots prefer native `schedule` state, including deleted IDs. If this
-  optional projection is absent, the bridge flushes the live source and selects
-  only its own Schedule changes from storage pages of at most 256 events, then
-  uses the official fold. Observed cursors are serialized; inherited changes
-  are excluded. A native projection appearing during the read takes precedence.
-  Initialization waits for fallback reads and handle cleanup; close cancels and
-  drains accepted reads without publishing late reminders.
+- `x.ai/scheduler/list`, `create`, and `delete` call the Host Schedule service
+  (`ctx.schedule`); `create` titles a reminder with its first line. The bridge
+  provides `sessionController.resolveAgent`, which answers at once, only for
+  sessions a TUI has open and ready here. A reminder that falls due while its
+  session is closed or busy is retried when the session becomes ready: opening,
+  a rolled-back reload and a finished preset change each call the patched
+  Schedule `requestDelivery`.
+  `schedule/changed` feeds the Tasks pane (`scheduled_task_created`;
+  `scheduled_task_deleted` with reason `completed` or `deleted`, both with
+  `_meta.nativeSchedule`). Lists include ended reminders until deleted. A failed
+  Schedule read is logged and never fails a session open. rc.1 session-event
+  reminders are not migrated: each open sends one `image_dropped` system note
+  naming them (`_meta.legacySchedule`).
 
 Extension notifications use the `_x.ai/*` wire spelling expected by the ACP
 decoder. `session/update` remains the normal unprefixed ACP notification.
@@ -302,6 +306,10 @@ For validation commands, see [Upgrade and release](upgrade-strategy.md#validatio
 `x.ai/skills/list` requires an owned `sessionId`; discovery uses that agent scope
 and cwd. `x.ai/commands/list` and ambient `available_commands_update` merge
 user-invocable skills after native commands, preserving collision precedence.
+The ambient update is re-sent on `commands/change`, `skills/change`, and on
+`tools/change` when a session's capabilities change. A tool-registry change
+inside a conversation reaches the TUI as an `image_dropped` system note
+(`Tools added: …` / `Tools removed: …`), live and on replay.
 The TUI inserts a native `/name` mention into the draft and DSH loads it through
 its own user-invocation pre-step. No skill body is loaded by Rust.
 

@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import { load } from 'js-yaml'
 import { getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
-import { createProfilePlugins } from '../src/profile-plugins.ts'
+import { analyzeBundlePatch, createProfilePlugins, SENSITIVE_ROW_IDS } from '../src/profile-plugins.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -88,12 +91,26 @@ describe('profile plugin operations', () => {
     expect(report).toContain('inserts 2 row(s): my-tool, sandbox-policy')
     expect(report).toContain('overrides: system-prompt, sandbox, hmr')
     expect(report).toContain('disables: approval')
-    expect(report).toContain('security rows: sandbox-policy, approval, sandbox')
+    expect(report).toContain('security rows: sandbox-policy, approval, sandbox (sandbox, approval or credential spine')
     expect(report).toContain('2 !!js expression(s)')
     expect(await readFile(join(f.root, 'package.json'), 'utf8')).toBe(before)
     expect(f.exec).toHaveBeenCalledTimes(1)
     expect(await f.plugins.execute('/dsh add --trust plugin')).toContain('Installed or updated test-plugin')
     expect((await f.read()).dsh.profile.bundles).toEqual(['@hqzhao95/dscode', 'test-plugin'])
+  })
+
+  it('flags security rows by the ids the installed base ships, not by their module names', () => {
+    const base = load(readFileSync(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-base/cordis.patch.yml'), 'utf8')
+      .replace(/!!js\b/g, '')) as Array<{ insert?: Array<{ id?: string }> }>
+    const ids = new Set(base.flatMap(entry => entry.insert ?? []).map(row => row.id))
+    // A stale id (like `permission-presets`, the module of row `permission`) never matches anything.
+    expect([...SENSITIVE_ROW_IDS].filter(id => !ids.has(id))).toEqual([])
+    const analysis = analyzeBundlePatch([
+      '- id: permission', '  config: {}', '- id: llm-deepseek-account', '  disabled: false',
+      '- id: permission-presets', '  disabled: true', '- insert:', '    - id: deepseek-account',
+    ].join('\n'))
+    expect(analysis.sensitiveRows).toEqual(['permission', 'llm-deepseek-account', 'deepseek-account'])
+    expect(analysis.overriddenRows).toEqual(['permission', 'llm-deepseek-account'])
   })
 
   it('refuses a package whose dsh peers the runtime does not satisfy before profile mutation', async () => {

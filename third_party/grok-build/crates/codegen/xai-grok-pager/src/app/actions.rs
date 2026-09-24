@@ -802,14 +802,6 @@ pub enum Action {
         session_id: String,
         cwd: String,
     },
-    /// Delete a session from history (local + remote). Fired from the
-    /// session picker: `d` arms delete confirmation on the focused row,
-    /// then `y` confirms (or `n`/other cancels).
-    DeleteSession {
-        source: String,
-        session_id: String,
-        cwd: String,
-    },
     /// Trigger a deep content search for sessions matching the picker query.
     TriggerDeepSearch,
     /// Force an immediate deep content search, skipping the debounce.
@@ -1443,8 +1435,6 @@ pub struct DoctorFixTarget {
 /// Aftermath of a successful session delete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AfterSessionDelete {
-    /// Picker delete — stay put.
-    Stay,
     /// `/delete` from a standalone agent — return to welcome.
     Welcome,
     /// `/delete` from a dashboard-attached agent, or dashboard row delete.

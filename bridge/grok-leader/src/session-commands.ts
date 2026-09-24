@@ -46,7 +46,7 @@ interface CommandHost<S extends CommandSession> {
   preset(record: S, text: string): Promise<string>
   children: { command(clientId: number, params: unknown): Promise<CommandResult> }
   goals: { goal(clientId: number, params: unknown): Promise<CommandResult> }
-  on(name: 'commands/change' | 'skills/change', listener: () => void): () => void
+  on(name: 'commands/change' | 'skills/change' | 'tools/change', listener: () => void): () => void
   logger: { warn(message: string): void }
 }
 interface AdvertisedCommand {
@@ -57,6 +57,7 @@ interface AdvertisedCommand {
 }
 const skillScope = (skill: NativeSkillSummary) => skill.source?.startsWith('project-') ? 'repo'
   : skill.source?.startsWith('user-') ? 'user' : skill.source === 'bundled' ? 'bundled' : 'plugin'
+const capabilityKey = (capabilities: readonly string[]) => JSON.stringify(capabilities)
 const skillPath = (skill: NativeSkillSummary) => skill.path ?? skill.resourceBase?.path ?? ''
 const skillDescription = (skill: NativeSkillSummary) => (skill.invocation?.modelInvocable === false ? 'User only · ' : '') + skill.description
 const unsupported: Record<string, string> = {
@@ -75,6 +76,8 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
   const shutdown = new AbortController(), pending = new Set<Promise<unknown>>()
   const subscriptions: Array<() => void> = [], disposalFailures: unknown[] = []
   const refreshes = new WeakMap<S, { dirty: boolean; promise: Promise<void> }>()
+  /** Capabilities last advertised per session, so a tool change that leaves them alone publishes nothing. */
+  const advertised = new WeakMap<S, string>()
   const assertOpen = () => { if (closed) throw internalError('session commands have been disposed') }
   const accepted = <T>(operation: () => Promise<T>): Promise<T> => {
     if (closed) return Promise.reject(internalError('session commands have been disposed'))
@@ -157,6 +160,7 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
             if (client === undefined || client.closed) return
             client.notify('session/update', { sessionId: record.agent.session.id,
               update: { sessionUpdate: 'available_commands_update', availableCommands, meta: { capabilities } } })
+            advertised.set(record, capabilityKey(capabilities))
           } while (state.dirty)
         } finally { if (refreshes.get(record) === state) refreshes.delete(record) }
       })
@@ -239,9 +243,28 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
       return undefined
     }))
   }
+  // Tools change whenever a Session, child or MCP server mounts or unmounts a
+  // scope, often one registration at a time, and only capabilities follow
+  // them. One check per burst; a session refreshes only when its capabilities
+  // moved (or a refresh is already reading, which then reads again).
+  let toolCheck = false
+  const toolsChanged = () => {
+    if (toolCheck) return
+    toolCheck = true
+    queueMicrotask(() => {
+      toolCheck = false
+      if (!ready || closed) return
+      for (const record of host.sessions.values()) {
+        if (host.owned(record.clientId, record.agent.session.id) !== record) continue
+        let moved: boolean
+        try { moved = refreshes.has(record) || advertised.get(record) !== capabilityKey(host.capabilities(record)) } catch (error) { warn(error); continue }
+        if (moved) void refresh(record)
+      }
+    })
+  }
   try {
-    for (const event of ['commands/change', 'skills/change'] as const) {
-      subscriptions.push(host.on(event, () => {
+    for (const event of ['commands/change', 'skills/change', 'tools/change'] as const) {
+      subscriptions.push(host.on(event, event === 'tools/change' ? toolsChanged : () => {
         if (ready && !closed) for (const record of host.sessions.values()) void refresh(record)
       }))
     }

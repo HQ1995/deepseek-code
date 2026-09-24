@@ -40,6 +40,7 @@ function fixture() {
     history: (record: { agent: Agent }) => { const source = histories.get(record.agent)!; return presetHistory(source.header, source.events) },
     isLive: (record: { agent: Agent }) => sessions.get(record.agent.session.id) === record,
     owned: (clientId: number, id: SessionId | undefined) => { const record = sessions.get(String(id)); return record?.clientId === clientId ? record : undefined },
+    unblocked: vi.fn((_record: { clientId: number; agent: Agent; queue: { busy: boolean } }) => {}),
   }
   const presets = createSessionPresets(host)
   function add(id = 'root', preset = 'standard', events: SessionEvent[] = []) {
@@ -182,8 +183,9 @@ describe('session preset ownership', () => {
     f.presets.assertReady(record)
   })
 
-  it('reserves a transition before async lookup and isolates simultaneous sessions', async () => {
-    const f = fixture(), a = f.add('a'), b = f.add('b'), lookup = Promise.withResolvers<void>()
+  it('reserves a transition before async lookup, isolates simultaneous sessions, and reports each ended change', async () => {
+    const f = fixture(), a = f.add('a'), b = f.add('b'), lookup = Promise.withResolvers<void>(), ready: boolean[] = []
+    f.host.unblocked.mockImplementation(record => { ready.push((() => { try { f.presets.assertReady(record); return true } catch { return false } })()) })
     f.roster.resolve.mockImplementationOnce(async () => { await lookup.promise; return { id: 'minimal', name: 'Minimal', trust: 'system' } })
     const first = f.presets.command(a.record, '/preset minimal')
     expect(() => f.presets.assertReady(a.record)).toThrow('in progress')
@@ -192,6 +194,9 @@ describe('session preset ownership', () => {
     await expect(f.presets.command(b.record, '/preset minimal')).resolves.toContain('Switched')
     lookup.resolve(); await first
     f.presets.assertReady(a.record)
+    // Refused attempts never held the session; each change that ran reports its end once, already ready.
+    expect(f.host.unblocked.mock.calls.map(([record]) => record)).toEqual([b.record, a.record])
+    expect(ready).toEqual([true, true])
   })
 
   it('does not recompose a retired owner after lookup and drains the accepted request', async () => {

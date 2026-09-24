@@ -1,7 +1,8 @@
 /** `/browser`: turn dscode's isolated browser on or off and edit its settings.
- * The browser row ships disabled; its settings are volatile. A session's
- * browser keeps the origins, executable and sandbox it started with; removing
- * an origin also stops navigation there at once. Replies are Markdown. */
+ * The browser row ships disabled; turning it on or off reaches open sessions
+ * at their next model step as well as new ones. Its settings are volatile. A
+ * session's browser keeps the origins, executable and sandbox it started with;
+ * removing an origin also stops navigation there at once. Replies are Markdown. */
 import { invalidParams, internalError } from './acp.ts'
 import { errorMessage } from './guards.ts'
 import type { SettingsLike } from './native-seams.ts'
@@ -29,12 +30,15 @@ export interface BrowserControlDependencies {
   rows: PluginRows
   settings(): SettingsLike | undefined
   status(): BrowserStatus | undefined
+  /** The plugin's `dscodeBrowser.startOpen()`: start browsers for open sessions that have none,
+   * with the settings just written. Without it they start at their next step, for the step after. */
+  startOpen?(): Promise<void>
 }
 
 // Code spans keep placeholders literal: a bare <word> is raw HTML in Markdown.
 const BROWSER_USAGE = 'Usage:\n'
   + '- `/browser` shows the status.\n'
-  + '- `/browser on [--origin URL]... [--any-origin] [--executable PATH] [--sandbox | --no-sandbox --accept-risk]` turns it on for new sessions.\n'
+  + '- `/browser on [--origin URL]... [--any-origin] [--executable PATH] [--sandbox | --no-sandbox --accept-risk]` turns it on for open and new sessions.\n'
   + '- `/browser origins add URL` and `/browser origins remove URL` edit the allowed origins.\n'
   + '- `/browser off` turns it off and closes open browsers.'
 
@@ -125,7 +129,11 @@ export function createBrowserControl(dependencies: BrowserControlDependencies) {
     if (request.sandbox === false) ops.push({ op: 'set', path: ['sandbox'], value: false })
     if (request.sandbox === true) ops.push({ op: 'unset', path: ['sandbox'] })
     if (ops.length > 0) await settings().mutate(BROWSER_ROW.id, ops)
-    return 'Browser turned on for new sessions. Start one with /new.\n\n' + describeBrowser(dependencies.status()) + '\n\n' + SECURITY
+    // Enabling the row must precede the settings write (settings need the
+    // loaded plugin), so open sessions' browsers start only now, with them.
+    await dependencies.startOpen?.()
+    return 'Browser turned on. Open sessions get the browser tools at their next step, and new sessions start with them.\n\n'
+      + describeBrowser(dependencies.status()) + '\n\n' + SECURITY
   }
   const origins = async (words: string[]): Promise<string> => {
     const [action, value, ...rest] = words
@@ -136,7 +144,8 @@ export function createBrowserControl(dependencies: BrowserControlDependencies) {
     const next = action === 'add' ? [...new Set([...current, origin])] : current.filter(item => item !== origin)
     await settings().mutate(BROWSER_ROW.id, [{ op: 'set', path: ['navigationOrigins'], value: next }])
     return (action === 'add'
-      ? 'Added ' + origin + ' for new sessions. Start one with /new to open it.'
+      // A running browser keeps its launch origins; only a fresh browser reads this list.
+      ? 'Added ' + origin + ' for new sessions. Start one with /new to open it, or restart the open browsers with /browser off and /browser on.'
       : 'Removed ' + origin + '. No session can navigate to it any more.') + '\n\n' + describeBrowser(dependencies.status())
   }
   return {

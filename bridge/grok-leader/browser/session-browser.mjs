@@ -12,14 +12,18 @@ import { hiddenTool, OUTPUT_PREFIX, prefix, serverName, withoutAnsi } from './po
 const { BrowserUseProviderName } = await importRuntime('@deepseek-ai/dsh-browser-use/brand')
 const { SessionResources } = await importRuntime('@deepseek-ai/dsh-experimental-browser-use-runtime')
 
-/** Subagents and forks share their parent's tools but never start a browser. */
-const topLevel = agent => agent.session?.header?.parentSession === undefined
+/** A subagent shares its parent's tools and never starts a browser. A forked
+ * or rewound Session records its source as `parentSession` yet runs as its own
+ * top-level agent, so it gets one. */
+const topLevel = (ctx, agent) => ctx.agents.roots().includes(agent)
 
 /**
  * @param options.launch - per-open `{ args, policy }` from the live config; throws a user-facing error.
  * @param options.onChange - observes the live session count.
  * @param options.onError - receives why a Session's browser could not start.
- * @returns `launched(agent)`: the origin policy that agent's open browser started with.
+ * @returns `launched(agent)`: the origin policy that agent's open browser started with;
+ *   `startOpen()`: starts a browser, with the current settings, for every open top-level
+ *   Session that has none, settling once each started or reported its failure.
  */
 export function mountBrowserSessions(ctx, options) {
   const clients = new Map()
@@ -69,13 +73,29 @@ export function mountBrowserSessions(ctx, options) {
   }, 'dscode-browser.sessions')
   // A browser that cannot start must not fail Session creation: the Session
   // keeps working without browser tools and the reason is reported.
-  ctx.on('agent/created', async ({ agent, signal }) => {
-    if (!topLevel(agent)) return
+  const attach = async (agent, signal) => {
+    if (!topLevel(ctx, agent)) return
     try { await resources.get(agent, signal) } catch (error) {
       if (signal?.aborted) throw error
+      // A Session that closed while its browser started needs no report.
+      if (ctx.agents.get(agent.id) !== agent) return
       options.onError?.(error instanceof Error ? error.message : String(error))
     }
-  }, { prepend: true })
+  }
+  ctx.on('agent/created', ({ agent, signal }) => attach(agent, signal), { prepend: true })
+  // Turning the browser on also reaches Sessions that are already running: the
+  // agent loop rereads its tools at every step, so a browser started before
+  // the next step puts its tools in that request (and DSH records the addition
+  // in the conversation). `/browser on` enables this row before it writes its
+  // settings, so it starts them through startOpen afterwards. A Session no
+  // command started gets its browser at its next step, for the step after:
+  // the step's tools are fixed when its prompt is assembled.
+  const waiting = new WeakSet(ctx.agents.list())
+  const startOpen = async () => {
+    const open = ctx.agents.list()
+    for (const agent of open) waiting.delete(agent)
+    await Promise.all(open.map(agent => attach(agent)))
+  }
   ctx.on('tools/execute', async (exec, next) => {
     if (!exec.name.startsWith(prefix)) return next()
     const agent = exec.agent
@@ -88,6 +108,7 @@ export function mountBrowserSessions(ctx, options) {
   })
   // The model sees only the reviewed operations; a closed browser drops its instructions.
   ctx.on('system-prompt/assemble', async (_assembly, { agent }, next) => {
+    if (agent !== undefined && waiting.delete(agent)) void attach(agent)
     const assembly = await next()
     const closed = agent !== undefined && clients.get(agent)?.closed === true
     if (!closed && !assembly.tools.some(tool => hiddenTool(tool.name))) return assembly
@@ -95,5 +116,5 @@ export function mountBrowserSessions(ctx, options) {
       sections: closed ? assembly.sections.filter(section => section.name !== 'mcp:playwright-mcp') : assembly.sections,
       tools: assembly.tools.filter(tool => !hiddenTool(tool.name)) }
   })
-  return { launched: agent => clients.get(agent)?.policy }
+  return { launched: agent => clients.get(agent)?.policy, startOpen }
 }
