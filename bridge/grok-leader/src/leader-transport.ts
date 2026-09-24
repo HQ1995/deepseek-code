@@ -42,6 +42,161 @@ const normalizeMethod = (method: string, params: unknown): string => {
   return typeof nested?.method === 'string' ? nested.method : method.slice(1)
 }
 
+interface PendingRequest { sessionId?: string; resolve(value: unknown): void; reject(error: Error): void }
+
+/** One accepted socket. `registered` is shared and mutable: the frame handler
+ * sets it, the socket's timeout and close handlers read it. */
+interface Connection {
+  readonly clientId: number
+  readonly socket: Socket
+  readonly client: LeaderClient
+  readonly pending: Map<string, PendingRequest>
+  registered: boolean
+  send(message: ServerMessage): void
+  sendAcp(value: unknown): void
+}
+
+/** What every connection's frame handler shares with its transport. */
+interface TransportEnv {
+  readonly options: LeaderTransportOptions
+  readonly clients: Map<number, LeaderClient>
+  readonly textDecoder: InstanceType<typeof TextDecoder>
+  trace(direction: string, value: unknown, max: number): void
+}
+
+/** The feature-facing handle of one socket. `isClosed` reads the transport's
+ * live closed flag; reverse requests are numbered per client. */
+function leaderClient(clientId: number, socket: Socket, disconnected: AbortSignal, pending: Map<string, PendingRequest>,
+  isClosed: () => boolean, sendAcp: (value: unknown) => void): LeaderClient {
+  let requestId = 0
+  const client: LeaderClient = {
+    clientId,
+    get closed() { return isClosed() || socket.destroyed },
+    signal: disconnected,
+    drain: () => socket.writableNeedDrain ? waitForDrain(socket) : undefined,
+    notify(method, params) {
+      // ACP extensions require the '_' prefix; session/update is typed.
+      const wire = method === 'session/update' || method.startsWith('_') ? method : '_' + method
+      sendAcp({ jsonrpc: '2.0', method: wire, params })
+    },
+    request<T>(method: string, params: unknown, sessionId?: string, timeoutMs = 60_000, signal?: AbortSignal): Promise<T> {
+      if (client.closed) return Promise.reject(new Error('grok client disconnected'))
+      if (signal?.aborted) return Promise.reject(internalError('client request cancelled'))
+      const id = requestId++
+      return new Promise<T>((resolve, reject) => {
+        const clean = () => {
+          clearTimeout(timer)
+          signal?.removeEventListener('abort', cancel)
+          pending.delete(String(id))
+        }
+        const cancel = () => { clean(); reject(internalError('client request cancelled')) }
+        const timer = Number.isFinite(timeoutMs) ? setTimeout(() => {
+          clean()
+          reject(internalError('client did not answer ' + method + ' within ' + timeoutMs + 'ms'))
+        }, timeoutMs) : undefined
+        pending.set(String(id), {
+          sessionId,
+          resolve(value) { clean(); resolve(value as T) },
+          reject(error) { clean(); reject(error) },
+        })
+        signal?.addEventListener('abort', cancel, { once: true })
+        try { sendAcp({ jsonrpc: '2.0', id, method, params }) }
+        catch (error) { clean(); reject(error) }
+      })
+    },
+    rejectSessionRequests(sessionId) {
+      for (const [id, request] of pending) {
+        if (request.sessionId !== sessionId) continue
+        pending.delete(id)
+        request.reject(internalError('session ' + sessionId + ' is no longer active'))
+      }
+    },
+  }
+  return client
+}
+
+/** One ACP payload: a reply to a reverse request, a notification, or a request
+ * answered with its result or a JSON-RPC error. */
+async function handleAcp(conn: Connection, env: TransportEnv, raw: string): Promise<void> {
+  const { options } = env
+  let value: unknown
+  try { value = JSON.parse(raw.trimEnd()) } catch (error) {
+    options.logger.warn('grok-leader: dropping unparseable acp payload: ' + String(error))
+    return
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    options.logger.warn('grok-leader: dropping non-object acp payload')
+    return
+  }
+  const message = value as Record<string, unknown>
+  if (typeof message.method !== 'string') {
+    const response = message as { id?: unknown; result?: unknown; error?: { code: number; message: string } }
+    const request = conn.pending.get(String(response.id))
+    if (request === undefined) return
+    conn.pending.delete(String(response.id))
+    if (response.error !== undefined) request.reject(new RpcError(response.error.code, response.error.message))
+    else request.resolve(response.result)
+    return
+  }
+  const method = normalizeMethod(message.method, message.params)
+  if (message.id === undefined) {
+    options.notification(conn.clientId, method, message.params)
+    return
+  }
+  try {
+    const result = await options.request(conn.clientId, method, message.params)
+    conn.sendAcp({ jsonrpc: '2.0', id: message.id, result })
+  } catch (error) {
+    const rpc = error instanceof RpcError ? error : internalError(errorMessage(error))
+    // A refusal is final: `data.message` lets the TUI show it as is, not as a retryable failure.
+    conn.sendAcp({ jsonrpc: '2.0', id: message.id, error: { code: rpc.code, message: rpc.message,
+      ...rpc.code === JSONRPC_INVALID_PARAMS ? { data: { message: rpc.message } } : {} } })
+  }
+}
+
+/** The handshake and frame loop of one connection: registration first, then
+ * ping, ACP, control and disconnect frames. */
+function frameHandler(conn: Connection, env: TransportEnv): (frame: Uint8Array) => Promise<void> {
+  const { options, clients } = env
+  const { clientId, socket, client, send } = conn
+  return async (frame: Uint8Array): Promise<void> => {
+    if (client.closed) return
+    let value: unknown
+    try { value = JSON.parse(env.textDecoder.decode(frame)) } catch {
+      send({ type: 'error', code: -32700, message: 'invalid JSON frame' })
+      socket.destroy(); return
+    }
+    let message: ClientMessage
+    try { message = decodeClientMessage(value) } catch (error) {
+      send({ type: 'error', code: -32600, message: errorMessage(error) })
+      socket.destroy(); return
+    }
+    env.trace('in', message, 400)
+    if (!conn.registered && message.type !== 'register') {
+      send({ type: 'error', code: 1, message: 'Expected Register message' }); return
+    }
+    switch (message.type) {
+      case 'register':
+        if (conn.registered) { send({ type: 'error', code: 2, message: 'Already registered' }); return }
+        conn.registered = true
+        clients.set(clientId, client)
+        options.registered(clientId)
+        socket.setTimeout(0)
+        send({ type: 'registered', clientId, ready: true, leaderProtocolVersion: LEADER_PROTOCOL_VERSION,
+          leaderBinaryVersion: options.version,
+          leaderCapabilities: { controlV1: false, workspaceExposure: false, relaunchV1: false } })
+        return
+      case 'ping': send({ type: 'pong' }); return
+      case 'acp': await handleAcp(conn, env, message.payload); return
+      case 'control':
+        send({ type: 'controlResult', requestId: message.requestId,
+          result: { Err: { code: 'internal_error', message: 'control commands are not implemented by this leader' } } })
+        return
+      case 'disconnect': socket.end(); return
+    }
+  }
+}
+
 export function createLeaderTransport(options: LeaderTransportOptions) {
   const textDecoder = new TextDecoder()
   const clients = new Map<number, LeaderClient>()
@@ -56,6 +211,7 @@ export function createLeaderTransport(options: LeaderTransportOptions) {
   const trace = (direction: string, value: unknown, max: number): void => {
     if (debug) process.stderr.write('grok-leader wire ' + direction + ': ' + JSON.stringify(value).slice(0, max) + '\n')
   }
+  const env: TransportEnv = { options, clients, textDecoder, trace }
   const removeSocketFile = (): void => {
     if (!bound) return // Never remove another leader's path after EADDRINUSE.
     bound = false
@@ -72,8 +228,7 @@ export function createLeaderTransport(options: LeaderTransportOptions) {
     if (closed) { socket.destroy(); return }
     sockets.add(socket)
     const clientId = ++sequence, abort = new AbortController(), decoder = new FrameDecoder()
-    const pending = new Map<string, { sessionId?: string; resolve(value: unknown): void; reject(error: Error): void }>()
-    let registered = false, requestId = 0
+    const pending = new Map<string, PendingRequest>()
     const send = (message: ServerMessage): void => {
       trace('out', message, 200)
       if (!socket.destroyed) writeJsonFrame(socket, encodeServerMessage(message))
@@ -82,126 +237,13 @@ export function createLeaderTransport(options: LeaderTransportOptions) {
       trace('out acp', value, 400)
       if (!socket.destroyed) writeJsonFrame(socket, { type: 'acp', payload: JSON.stringify(value) })
     }
-    const client: LeaderClient = {
-      clientId,
-      get closed() { return closed || socket.destroyed },
-      signal: abort.signal,
-      drain: () => socket.writableNeedDrain ? waitForDrain(socket) : undefined,
-      notify(method, params) {
-        // ACP extensions require the '_' prefix; session/update is typed.
-        const wire = method === 'session/update' || method.startsWith('_') ? method : '_' + method
-        sendAcp({ jsonrpc: '2.0', method: wire, params })
-      },
-      request<T>(method: string, params: unknown, sessionId?: string, timeoutMs = 60_000, signal?: AbortSignal): Promise<T> {
-        if (client.closed) return Promise.reject(new Error('grok client disconnected'))
-        if (signal?.aborted) return Promise.reject(internalError('client request cancelled'))
-        const id = requestId++
-        return new Promise<T>((resolve, reject) => {
-          const clean = () => {
-            clearTimeout(timer)
-            signal?.removeEventListener('abort', cancel)
-            pending.delete(String(id))
-          }
-          const cancel = () => { clean(); reject(internalError('client request cancelled')) }
-          const timer = Number.isFinite(timeoutMs) ? setTimeout(() => {
-            clean()
-            reject(internalError('client did not answer ' + method + ' within ' + timeoutMs + 'ms'))
-          }, timeoutMs) : undefined
-          pending.set(String(id), {
-            sessionId,
-            resolve(value) { clean(); resolve(value as T) },
-            reject(error) { clean(); reject(error) },
-          })
-          signal?.addEventListener('abort', cancel, { once: true })
-          try { sendAcp({ jsonrpc: '2.0', id, method, params }) }
-          catch (error) { clean(); reject(error) }
-        })
-      },
-      rejectSessionRequests(sessionId) {
-        for (const [id, request] of pending) {
-          if (request.sessionId !== sessionId) continue
-          pending.delete(id)
-          request.reject(internalError('session ' + sessionId + ' is no longer active'))
-        }
-      },
-    }
-
-    async function handleAcp(raw: string): Promise<void> {
-      let value: unknown
-      try { value = JSON.parse(raw.trimEnd()) } catch (error) {
-        options.logger.warn('grok-leader: dropping unparseable acp payload: ' + String(error))
-        return
-      }
-      if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-        options.logger.warn('grok-leader: dropping non-object acp payload')
-        return
-      }
-      const message = value as Record<string, unknown>
-      if (typeof message.method !== 'string') {
-        const response = message as { id?: unknown; result?: unknown; error?: { code: number; message: string } }
-        const request = pending.get(String(response.id))
-        if (request === undefined) return
-        pending.delete(String(response.id))
-        if (response.error !== undefined) request.reject(new RpcError(response.error.code, response.error.message))
-        else request.resolve(response.result)
-        return
-      }
-      const method = normalizeMethod(message.method, message.params)
-      if (message.id === undefined) {
-        options.notification(clientId, method, message.params)
-        return
-      }
-      try {
-        const result = await options.request(clientId, method, message.params)
-        sendAcp({ jsonrpc: '2.0', id: message.id, result })
-      } catch (error) {
-        const rpc = error instanceof RpcError ? error : internalError(errorMessage(error))
-        // A refusal is final: `data.message` lets the TUI show it as is, not as a retryable failure.
-        sendAcp({ jsonrpc: '2.0', id: message.id, error: { code: rpc.code, message: rpc.message,
-          ...rpc.code === JSONRPC_INVALID_PARAMS ? { data: { message: rpc.message } } : {} } })
-      }
-    }
-
-    async function handleFrame(frame: Uint8Array): Promise<void> {
-      if (client.closed) return
-      let value: unknown
-      try { value = JSON.parse(textDecoder.decode(frame)) } catch {
-        send({ type: 'error', code: -32700, message: 'invalid JSON frame' })
-        socket.destroy(); return
-      }
-      let message: ClientMessage
-      try { message = decodeClientMessage(value) } catch (error) {
-        send({ type: 'error', code: -32600, message: errorMessage(error) })
-        socket.destroy(); return
-      }
-      trace('in', message, 400)
-      if (!registered && message.type !== 'register') {
-        send({ type: 'error', code: 1, message: 'Expected Register message' }); return
-      }
-      switch (message.type) {
-        case 'register':
-          if (registered) { send({ type: 'error', code: 2, message: 'Already registered' }); return }
-          registered = true
-          clients.set(clientId, client)
-          options.registered(clientId)
-          socket.setTimeout(0)
-          send({ type: 'registered', clientId, ready: true, leaderProtocolVersion: LEADER_PROTOCOL_VERSION,
-            leaderBinaryVersion: options.version,
-            leaderCapabilities: { controlV1: false, workspaceExposure: false, relaunchV1: false } })
-          return
-        case 'ping': send({ type: 'pong' }); return
-        case 'acp': await handleAcp(message.payload); return
-        case 'control':
-          send({ type: 'controlResult', requestId: message.requestId,
-            result: { Err: { code: 'internal_error', message: 'control commands are not implemented by this leader' } } })
-          return
-        case 'disconnect': socket.end(); return
-      }
-    }
+    const conn: Connection = { clientId, socket, pending, registered: false, send, sendAcp,
+      client: leaderClient(clientId, socket, abort.signal, pending, () => closed, sendAcp) }
+    const handleFrame = frameHandler(conn, env)
 
     socket.setTimeout(options.registrationTimeoutMs ?? 30_000)
     socket.on('timeout', () => {
-      if (!registered) { send({ type: 'error', code: 3, message: 'Registration timeout' }); socket.destroy() }
+      if (!conn.registered) { send({ type: 'error', code: 3, message: 'Registration timeout' }); socket.destroy() }
     })
     socket.on('error', error => { options.logger.debug('grok-leader: socket error: ' + String(error)) })
     socket.on('data', chunk => {
@@ -220,7 +262,7 @@ export function createLeaderTransport(options: LeaderTransportOptions) {
       abort.abort()
       for (const request of pending.values()) request.reject(new Error('grok client disconnected'))
       pending.clear()
-      if (registered) options.disconnected(clientId)
+      if (conn.registered) options.disconnected(clientId)
     })
   }
 
