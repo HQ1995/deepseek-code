@@ -20,6 +20,12 @@ export const Config = SshConnection.Config
 const FAILURE = Symbol.for('dscode.ssh.failure')
 
 const message = error => error instanceof Error ? error.message : String(error)
+/** The finding alone: the session refusal already names the host, and
+ * `dscode doctor --runtime` repeats the check with the fix spelled out. */
+const finding = text => {
+  const end = text.indexOf('. ')
+  return (end === -1 ? text : text.slice(0, end)).replace(/\.$/, '').replace(/^ssh \S+ failed: /, '')
+}
 
 /** dsh-ssh drops ssh's own stderr, so its error only says the helper went
  * away. One probe run the way `dscode remote status --check` runs it names the
@@ -28,7 +34,7 @@ const message = error => error instanceof Error ? error.message : String(error)
 export async function explainFailure(config, error, probe = sshProbeAsync) {
   let result
   try { result = await probe(config) } catch { return message(error) }
-  try { checkRemote(config, { probe: () => result }) } catch (cause) { return message(cause) }
+  try { checkRemote(config, { probe: () => result }) } catch (cause) { return finding(message(cause)) }
   return message(error)
 }
 

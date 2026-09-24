@@ -63,10 +63,10 @@ describe('SSH plugin module', () => {
     const answered = (result: object) => async () => result
     await expect(explainFailure(config, lost, answered({ status: 255, stdout: '',
       stderr: 'ssh: Could not resolve hostname build: nodename nor servname provided, or not known\n' })))
-      .resolves.toMatch(/^ssh build failed: ssh: Could not resolve hostname build: .* and a known host key\.$/)
+      .resolves.toBe('ssh: Could not resolve hostname build: nodename nor servname provided, or not known')
     await expect(explainFailure(config, lost, answered({ status: 0, stderr: '',
       stdout: JSON.stringify({ node: 'v24.1.0', workspace: false, digests: ['a'.repeat(64), 'b'.repeat(64)] }) })))
-      .resolves.toBe('/w is not a directory on build; create it first.')
+      .resolves.toBe('/w is not a directory on build; create it first')
     // The host checks out, or the probe itself broke: what dsh-ssh saw stands.
     await expect(explainFailure(config, lost, answered({ status: 0, stderr: '',
       stdout: JSON.stringify({ node: 'v24.1.0', workspace: true, digests: ['a'.repeat(64), 'b'.repeat(64)] }) })))
