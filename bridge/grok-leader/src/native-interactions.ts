@@ -51,7 +51,8 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
   const remember: InteractionEvents['tools/pre-execute'] = (exec, next) => {
     if (typeof exec.callId === 'string') {
       calls.delete(exec.callId)
-      calls.set(exec.callId, exec)
+      // Only what the prompt shows: the live execution must not outlive its call.
+      calls.set(exec.callId, { callId: exec.callId, name: exec.name, arguments: exec.arguments })
       if (calls.size > RECENT_CALLS) calls.delete(calls.keys().next().value!)
     }
     return next()
