@@ -320,7 +320,18 @@ const installBinary = async (release, asset) => {
 
 export const healLauncherLink = (options = {}) => repairLauncherLink({ profile: profileDir, packageName: pkg.name, sourceBin: here, ...options })
 
-export const ownedLauncherTarget = target => [profileLauncher, join(profileDir, 'dscode.mjs')].some(path => resolve(target) === resolve(path))
+const canonicalPath = path => {
+  try { return realpathSync(path) } catch { return resolve(path) }
+}
+
+/** Whether `target` is one of `owned`, spelled the same or reached through a
+ *  symlinked directory (a home under /home -> /data/home, say). */
+export const launcherTargetIn = (target, owned) => {
+  const actual = canonicalPath(target)
+  return owned.some(path => resolve(target) === resolve(path) || actual === canonicalPath(path))
+}
+
+export const ownedLauncherTarget = target => launcherTargetIn(target, [profileLauncher, join(profileDir, 'dscode.mjs')])
 
 const profileIsOwned = () => {
   const installed = readJsonFile(pluginManifestPath)

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -8,6 +8,7 @@ import {
   TUI_ASSETS,
   dshRuntimeBin,
   nodeVersionSupported,
+  launcherTargetIn,
   ownedLauncherTarget,
   packageNeedsInstall,
   parseCliVersion,
@@ -124,5 +125,22 @@ describe('installation lifecycle', () => {
     expect(ownedLauncherTarget(profileLauncher)).toBe(true)
     expect(ownedLauncherTarget(`${profileLauncher}.foreign`)).toBe(false)
     expect(ownedLauncherTarget('/tmp/other/node_modules/@hqzhao95/dscode/bin/dscode.mjs')).toBe(false)
+  })
+
+  it('recognizes the owned launcher through a symlinked directory', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dscode-link-'))
+    try {
+      mkdirSync(join(root, 'real'))
+      writeFileSync(join(root, 'real', 'dscode.mjs'), '')
+      writeFileSync(join(root, 'real', 'other.mjs'), '')
+      symlinkSync(join(root, 'real'), join(root, 'alias'))
+      const owned = [join(root, 'real', 'dscode.mjs')]
+      expect(launcherTargetIn(join(root, 'alias', 'dscode.mjs'), owned)).toBe(true)
+      expect(launcherTargetIn(join(root, 'real', 'dscode.mjs'), [join(root, 'alias', 'dscode.mjs')])).toBe(true)
+      expect(launcherTargetIn(join(root, 'alias', 'other.mjs'), owned)).toBe(false)
+      expect(launcherTargetIn(join(root, 'missing', 'dscode.mjs'), owned)).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
