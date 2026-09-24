@@ -71,6 +71,24 @@ pub async fn run(args: SessionsArgs) -> Result<()> {
     if let SessionsCommand::Delete { .. } = args.command {
         anyhow::bail!(DELETE_UNSUPPORTED);
     }
+    // No profile, no leader to start and no session it could have recorded.
+    if let Some(dir) = missing_profile(crate::dsh_leader::dsh_profile_dir()) {
+        eprintln!(
+            "note: no dscode profile at {}; run dscode once to install it",
+            dir.display()
+        );
+        match &args.command {
+            SessionsCommand::List { limit, all } => {
+                print!(
+                    "{}",
+                    format_session_list(&[], (!all).then_some(cwd.as_str()), *limit)
+                );
+            }
+            SessionsCommand::Search { query, .. } => print!("{}", format_search_hits(&[], query)),
+            SessionsCommand::Delete { .. } => unreachable!("refused above"),
+        }
+        return Ok(());
+    }
 
     let cancel = CancellationToken::new();
     let _stop_bridge = cancel.clone().drop_guard();
@@ -119,6 +137,12 @@ pub async fn run(args: SessionsArgs) -> Result<()> {
         SessionsCommand::Delete { .. } => unreachable!("refused before connecting"),
     }
     Ok(())
+}
+
+/// The profile directory when it holds no profile manifest: the launcher has
+/// not installed dscode there, so no leader can start for it.
+fn missing_profile(dir: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    dir.filter(|dir| !dir.join("package.json").is_file())
 }
 
 /// One ACP extension request to the leader, bounded by
@@ -432,6 +456,18 @@ mod tests {
         let error = run(args).await.unwrap_err().to_string();
         assert!(error.contains("cannot delete sessions"), "{error}");
         assert!(error.contains("archive"), "{error}");
+    }
+
+    #[test]
+    fn sessions_cmd_skips_the_leader_without_a_profile_manifest() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let dir = home.path().join("profiles").join("dscode");
+        assert_eq!(missing_profile(Some(dir.clone())), Some(dir.clone()));
+        std::fs::create_dir_all(&dir).expect("profile dir");
+        assert_eq!(missing_profile(Some(dir.clone())), Some(dir.clone()));
+        std::fs::write(dir.join("package.json"), "{}").expect("manifest");
+        assert_eq!(missing_profile(Some(dir)), None);
+        assert_eq!(missing_profile(None), None);
     }
 
     #[test]
