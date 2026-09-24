@@ -93,7 +93,7 @@ try {
     assert.ok(i < 100, 'remote disconnect probe did not start')
     await new Promise(resolve => setTimeout(resolve, 50))
   }
-  const { stdout: localPs } = await execute('ps', ['-axo', 'pid,ppid,command'])
+  const { stdout: localPs } = await execute('ps', ['-axo', 'pid,ppid,command'], { maxBuffer: 64 * 1024 * 1024 })
   const masters = localPs.split('\n').map(line => line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(row => row && Number(row[2]) === process.pid && row[3].startsWith('ssh -T -M -S ') && row[3].includes(config.helper))
   assert.equal(masters.length, 1, 'must identify exactly one owned SSH master')
   process.kill(Number(masters[0][1]), 'SIGKILL')

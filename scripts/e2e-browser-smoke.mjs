@@ -55,7 +55,8 @@ const call = (agent, name, args = {}, signal = AbortSignal.timeout(25_000)) => c
 })
 const text = result => result.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
 const success = result => { assert.equal(result.isError, false, text(result)); return result }
-const table = () => execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,args='], { encoding: 'utf8' })
+// A busy host's full process table outgrows execFileSync's 1 MiB default.
+const table = () => execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,args='], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
 const children = () => {
   const rows = table().split('\n').map(line => line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean)
   const pids = new Set([process.pid])
