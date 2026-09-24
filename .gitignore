@@ -5,8 +5,8 @@
 .subagent-session.jsonl
 *.subagent-session.jsonl
 
-# Node / bridge build artifacts
-node_modules/
+# Node / bridge build artifacts (no slash: CI links node_modules to a runtime)
+node_modules
 lib/
 *.tsbuildinfo
 pnpm-debug.log

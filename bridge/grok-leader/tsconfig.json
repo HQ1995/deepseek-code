@@ -11,7 +11,9 @@
     "types": ["node"],
     "declaration": true,
     "composite": true,
-    "tsBuildInfoFile": "node_modules/.cache/dscode/tsconfig.tsbuildinfo",
+    // Not under node_modules: CI and source handoffs link the runtime's
+    // node_modules here, and a build must not write into that shared tree.
+    "tsBuildInfoFile": "tsconfig.tsbuildinfo",
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
     "rootDir": "src",
