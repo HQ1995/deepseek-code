@@ -588,6 +588,15 @@ refuses removing the in-use provider), `a` opens the add form. The typed
 typing surface, not a management surface — picking/editing providers wants
 a highlighted list ("上下选到哪个就指向哪个").
 
+### Native DeepSeek provider template
+
+The add-provider form lists a "DeepSeek (native Messages API)" template (class:
+feature). It uses provider id `deepseek-official`, the `DEEPSEEK_API_KEY`
+variable and the default base URL `https://api.deepseek.com/anthropic`. Its API
+value `deepseek-native` is not a pi-ai protocol but a marker. The bridge
+enables the official `llm-deepseek` adapter for it instead of writing a pi-ai
+route. The API picker lists the marker beside the pi-ai protocols.
+
 ### Provider form: arrows move fields; presets are a chooser row
 
 Up/Down in the add/edit provider form previously cycled PRESETS — every
