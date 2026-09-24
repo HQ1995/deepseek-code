@@ -112,7 +112,7 @@ export const resolveRelease = async ({ channel, version }, fetcher = fetch) => {
   if (!versions.length) throw new Error(`no release available for ${channel}`)
   return versions.at(-1)
 }
-const json = path => JSON.parse(readFileSync(path, 'utf8'))
+export const json = path => JSON.parse(readFileSync(path, 'utf8'))
 const run = (command, args, options = {}) => {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout: 600000, maxBuffer: 64 * 1024 * 1024, ...options })
   if (result.error || result.status !== 0) throw new Error(`${command} failed: ${result.error?.message ?? result.stderr ?? result.status}`)
