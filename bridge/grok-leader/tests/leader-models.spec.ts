@@ -1,7 +1,7 @@
 /** Leader socket spec: leader model catalog and selection. */
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { collectIds, collidingLlm, mockDefaultModel, mockSessionsStore, register, sendRequest, useLeaderHarness, waitFor } from './support/leader-harness.ts'
+import { collectIds, collidingLlm, mockDefaultModel, mockLlm, mockSessionsStore, register, sendRequest, useLeaderHarness, waitFor } from './support/leader-harness.ts'
 
 describe('leader model catalog and selection', () => {
   const start = useLeaderHarness()
@@ -16,6 +16,27 @@ describe('leader model catalog and selection', () => {
     const switched = await c.request(2, 'session/set_model', { sessionId, modelId: 'pi-code' })
     expect(switched.error).toBeUndefined()
     expect(mockDefaultModel.saved.at(-1)).toEqual({ provider: 'pi', model: 'pi-code' })
+  })
+
+  it('initializes and lists models while one provider cannot list its own', async () => {
+    const llm = { ...mockLlm, listModels: async (provider: string) => {
+      if (provider === 'pi') throw new Error('login expired')
+      return mockLlm.listModels(provider)
+    } }
+    const { client: c } = await start({ llm: llm as never })
+    register(c)
+    await c.next()
+    const initialized = await c.request(0, 'initialize', { protocolVersion: 1, clientCapabilities: {} })
+    expect(initialized.error).toBeUndefined()
+    const state = (initialized.result as { _meta: { modelState: {
+      availableModels: Array<{ modelId: string }>; _meta: { providers: Array<Record<string, unknown>> }
+    } } })._meta.modelState
+    expect(state.availableModels.map(model => model.modelId)).toEqual(['deepseek-chat', 'deepseek-reasoner'])
+    expect(state._meta.providers).toEqual([{ id: 'deepseek', name: 'DeepSeek' }, { id: 'pi', name: 'Pi AI', note: 'could not list models: login expired' }])
+    const listed = await c.request(1, 'x.ai/models/list', {})
+    expect(listed.error).toBeUndefined()
+    const created = await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    expect(created.error).toBeUndefined()
   })
 
   it('raw model names containing their provider prefix retain the full name', async () => {

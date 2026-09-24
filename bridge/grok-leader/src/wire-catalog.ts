@@ -87,11 +87,22 @@ export function modelSelectionFromRequest(
   return { provider, model, ...reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(reasoningEffort) } }
 }
 
-/** Display-only provider status: the native configuration error, or a generic
- * pointer for an empty provider (the TUI relays notes verbatim, and the bridge
- * carries no plugin-specific knowledge of which login or key it wants). */
-export const providerNote = (configurationError: string | undefined, modelCount: number): string | undefined =>
-  configurationError ?? (modelCount > 0 ? undefined
+/** Longest listing failure a note carries; the TUI shows notes on one row. */
+const NOTE_ERROR_LIMIT = 200
+
+/** One provider's model listing failure as a single display line. */
+const listingFailureNote = (error: string): string => {
+  const line = error.replace(/\s+/g, ' ').trim()
+  const text = line.length > NOTE_ERROR_LIMIT ? line.slice(0, NOTE_ERROR_LIMIT - 1) + '…' : line
+  return 'could not list models: ' + (text === '' ? 'unknown error' : text)
+}
+
+/** Display-only provider status: the native configuration error, the error
+ * its model listing failed with, or a generic pointer for an empty provider
+ * (the TUI relays notes verbatim, and the bridge carries no plugin-specific
+ * knowledge of which login or key it wants). */
+export const providerNote = (configurationError: string | undefined, modelCount: number, listingError?: string): string | undefined =>
+  configurationError ?? (listingError !== undefined ? listingFailureNote(listingError) : modelCount > 0 ? undefined
     : 'no models yet — the provider may need a login or API key (its plugin may register a /login command)')
 
 /** One advertised row. Exact metadata without reasoning (or none resolved)

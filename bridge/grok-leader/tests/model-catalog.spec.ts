@@ -174,14 +174,37 @@ describe('model catalog module', () => {
     await f.catalog.dispose()
   })
 
-  it('keeps parallel native reads owned after a sibling causes a fail-fast refresh rejection', async () => {
-    const f = fixture(), held = Promise.withResolvers<Array<{ id: string; name: string }>>(), primary = new Error('first provider failed')
-    f.llm.listModels = vi.fn(async provider => { if (provider === 'alpha') throw primary; return held.promise })
-    await expect(f.catalog.refresh()).rejects.toBe(primary)
+  it('keeps parallel native reads owned while a failed sibling waits in the refresh', async () => {
+    const f = fixture(), held = Promise.withResolvers<Array<{ id: string; name: string }>>()
+    f.llm.listModels = vi.fn(async provider => { if (provider === 'alpha') throw new Error('first provider failed'); return held.promise })
+    const refresh = f.catalog.refresh(), rejected = expect(refresh).rejects.toThrow('disposed')
+    await tick()
     const closing = f.catalog.dispose(); let finished = false
     void closing.then(() => { finished = true }); await tick(); expect(finished).toBe(false)
-    held.resolve([{ id: 'late', name: 'Late' }]); await closing
+    held.resolve([{ id: 'late', name: 'Late' }]); await rejected; await closing
     expect(f.catalog.peek()).toBeUndefined(); expect(f.changed).not.toHaveBeenCalled()
+  })
+
+  it('keeps a provider whose listing throws visible with its error, and the rest of the catalog working', async () => {
+    const f = fixture()
+    f.llm.listModels = vi.fn(async (provider: string) => {
+      if (provider === 'beta') throw new Error('401 Unauthorized:\n  token expired')
+      return [{ id: 'shared', name: 'Shared model' }]
+    })
+    const initial = await f.catalog.initialize()
+    expect(initial.providers).toEqual([{ id: 'alpha' }, { id: 'beta', note: 'could not list models: 401 Unauthorized: token expired' }])
+    expect(initial.availableModels.map(model => model.modelId)).toEqual(['shared'])
+    expect(initial.currentProviderId).toBe('alpha')
+    expect(f.deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining('could not list models for provider beta'))
+    const listed = await f.catalog.list() as { _meta: { providers: Array<{ id: string; note?: string }> } }
+    expect(listed._meta.providers.find(provider => provider.id === 'beta')?.note).toContain('token expired')
+    // Provider writes publish a roster even while a sibling cannot list.
+    const added = await f.catalog.add({ id: 'custom', displayName: 'Custom' })
+    expect(added.providers.map(provider => provider.id)).toEqual(['alpha', 'beta', 'custom'])
+    expect((await f.catalog.update({ providerId: 'custom', displayName: 'Renamed' })).providers.find(provider => provider.id === 'custom'))
+      .toMatchObject({ displayName: 'Renamed' })
+    expect(f.changed).toHaveBeenCalledTimes(2)
+    await f.catalog.dispose()
   })
 
   it('drains removal through unshared credential cleanup and does not publish after close', async () => {

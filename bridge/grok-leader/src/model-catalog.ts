@@ -38,6 +38,8 @@ export interface ModelCatalogDependencies {
 
 type Profile = Record<string, unknown>
 type ProviderRoster = { providers: CatalogProvider[]; currentProviderId: string }
+/** One provider's listing, or why the llm service could not list it. */
+type ProviderListing = ProviderModels & { failure?: string }
 
 /** Own cached catalogs, accepted native reads/discoveries and provider writes.
  * Disposal closes admission/publication immediately and drains real work,
@@ -132,10 +134,20 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
   }
 
   /** One provider's models (a background discovery overrides the static
-   * listing) and their exact metadata, read sequentially inside the drain. */
-  const readProviderModels = (llmService: LlmLike, provider: string): Promise<ProviderModels> => track(async () => {
+   * listing) and their exact metadata, read sequentially inside the drain.
+   * A provider whose listing throws (an expired login, a bad endpoint) keeps
+   * its roster row with no models and the error as its `failure`, like DSH's
+   * own catalog: one broken provider never fails the whole catalog. */
+  const readProviderModels = (llmService: LlmLike, provider: string): Promise<ProviderListing> => track(async () => {
     assertOpen()
-    const listed = await llmService.listModels(provider)
+    let listed: Awaited<ReturnType<LlmLike['listModels']>>
+    try {
+      listed = await llmService.listModels(provider)
+    } catch (error) {
+      assertOpen()
+      logger.warn('grok-leader: could not list models for provider ' + provider + ': ' + errorMessage(error))
+      return { provider, models: [], metadata: new Map(), failure: errorMessage(error) }
+    }
     const native = dependencies.native?.owns(provider) === true
     const staticModels = native ? listed.map(model => model.description !== undefined || NATIVE_MODEL_DESCRIPTIONS[model.id] === undefined
       ? model : { ...model, description: NATIVE_MODEL_DESCRIPTIONS[model.id] }) : listed
@@ -179,8 +191,8 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
   })
 
   /** Rebuild the flattened wire catalog plus the provider ownership the bare
-   * ids hide. Every provider branch stays in the accepted-work drain, even
-   * when a sibling rejects early. */
+   * ids hide. Every provider branch stays in the accepted-work drain; a
+   * provider whose listing fails is reported in its note, not thrown. */
   const refreshCatalog = async (): Promise<ModelCatalog> => {
     assertOpen()
     const llmService = llm()
@@ -194,9 +206,11 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     }
     const rows = llmService === undefined ? [] : await Promise.all(activeProviders.map(provider => readProviderModels(llmService, provider.id)))
     assertOpen()
-    const modelCount = new Map(rows.map(row => [row.provider, row.models.length]))
-    const providers = await Promise.all([...rosterRows.values()].map(row =>
-      describeProvider(row, userSection, providerNote(configured.get(row.id)?.error, modelCount.get(row.id) ?? 0))))
+    const listings = new Map(rows.map(row => [row.provider, row]))
+    const providers = await Promise.all([...rosterRows.values()].map(row => {
+      const listing = listings.get(row.id)
+      return describeProvider(row, userSection, providerNote(configured.get(row.id)?.error, listing?.models.length ?? 0, listing?.failure))
+    }))
     assertOpen()
     const assembled = assembleCatalog({
       rows, providers, config,
