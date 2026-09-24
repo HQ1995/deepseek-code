@@ -1912,10 +1912,12 @@ fn available_commands_refreshed_empty_is_noop() {
     );
 }
 
-// -- Session deletion from the /resume picker -----------------------
+// -- A completed session deletion prunes the open /resume pickers ----
 
+/// A completed delete (`/delete` or a dashboard row; the /resume picker has
+/// no delete) prunes every row of that id from both open pickers.
 #[test]
-fn delete_session_complete_removes_only_matching_source_and_id() {
+fn delete_session_complete_prunes_the_id_from_both_pickers() {
     use crate::views::modal::ActiveModal;
     let mut app = test_app_with_agent();
     let mut foreign_same_id = make_picker_entry("s1", "/r");
@@ -1941,23 +1943,11 @@ fn delete_session_complete_removes_only_matching_source_and_id() {
         make_picker_entry("s1", "/r"),
         welcome_remote,
     ]);
-    if let Some(ActiveModal::SessionPicker { pending_delete, .. }) = get_active_agent_mut(&mut app)
-        .unwrap()
-        .active_modal
-        .as_mut()
-    {
-        *pending_delete = Some(crate::views::session_picker::PendingDelete {
-            source: "local".into(),
-            session_id: "s1".into(),
-            cwd: "/r".into(),
-        });
-    }
-
     let _ = dispatch_task_result(
         TaskResult::DeleteSessionComplete {
             source: "local".into(),
             session_id: "s1".into(),
-            after: crate::app::actions::AfterSessionDelete::Stay,
+            after: crate::app::actions::AfterSessionDelete::Welcome,
         },
         &mut app,
     );
@@ -1965,7 +1955,6 @@ fn delete_session_complete_removes_only_matching_source_and_id() {
     let agent = get_active_agent(&app).expect("active agent");
     let Some(ActiveModal::SessionPicker {
         entries: Some(list),
-        pending_delete,
         ..
     }) = agent.active_modal.as_ref()
     else {
@@ -1975,19 +1964,7 @@ fn delete_session_complete_removes_only_matching_source_and_id() {
         .iter()
         .map(|entry| (entry.source.as_str(), entry.id.as_str()))
         .collect();
-    assert_eq!(
-        identities,
-        vec![
-            ("local", "s0"),
-            ("codex", "s1"),
-            ("remote", "s1"),
-            ("local", "s2"),
-        ]
-    );
-    assert!(
-        pending_delete.is_none(),
-        "pending_delete must be cleared after deletion completes"
-    );
+    assert_eq!(identities, vec![("local", "s0"), ("local", "s2")]);
     let welcome_identities: Vec<_> = app
         .session_picker_entries
         .as_ref()
@@ -1995,7 +1972,7 @@ fn delete_session_complete_removes_only_matching_source_and_id() {
         .iter()
         .map(|entry| (entry.source.as_str(), entry.id.as_str()))
         .collect();
-    assert_eq!(welcome_identities, vec![("codex", "s1"), ("remote", "s1")]);
+    assert!(welcome_identities.is_empty(), "{welcome_identities:?}");
 }
 
 #[test]
@@ -2038,7 +2015,7 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
         TaskResult::DeleteSessionComplete {
             source: "both".into(),
             session_id: "shared".into(),
-            after: crate::app::actions::AfterSessionDelete::Stay,
+            after: crate::app::actions::AfterSessionDelete::Welcome,
         },
         &mut app,
     );
@@ -2053,13 +2030,7 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
     else {
         panic!("expected modal picker");
     };
-    assert_eq!(
-        modal_entries
-            .iter()
-            .map(|entry| (entry.source.as_str(), entry.id.as_str()))
-            .collect::<Vec<_>>(),
-        vec![("codex", "shared")]
-    );
+    assert!(modal_entries.is_empty(), "every row of the id goes");
     assert!(modal_hits.is_empty());
     let modal_map = build_entry_map(
         Some(modal_entries),
@@ -2079,13 +2050,7 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
 
     let welcome_entries = app.session_picker_entries.as_deref().unwrap();
     let welcome_hits = app.session_picker_content_results.as_deref().unwrap();
-    assert_eq!(
-        welcome_entries
-            .iter()
-            .map(|entry| (entry.source.as_str(), entry.id.as_str()))
-            .collect::<Vec<_>>(),
-        vec![("codex", "shared")]
-    );
+    assert!(welcome_entries.is_empty(), "every row of the id goes");
     assert!(welcome_hits.is_empty());
     let welcome_map = build_entry_map(
         Some(welcome_entries),
@@ -2136,7 +2101,7 @@ fn delete_remote_session_clears_modal_and_welcome_content_hits() {
         TaskResult::DeleteSessionComplete {
             source: "remote".into(),
             session_id: "remote-only".into(),
-            after: crate::app::actions::AfterSessionDelete::Stay,
+            after: crate::app::actions::AfterSessionDelete::Welcome,
         },
         &mut app,
     );

@@ -56,6 +56,11 @@ pub enum SessionEvent {
         /// Wall-clock elapsed time before the turn was halted.
         elapsed: Duration,
     },
+    /// DIVERGENCE(dscode): the turn ended at the model's output-token limit
+    /// (`stopReason: max_tokens`), so the reply above is cut off. Pushed just
+    /// before the turn's "Worked for" marker, which alone would read as a
+    /// finished reply.
+    OutputTokenLimit,
     /// Agent turn failed with an error.
     TurnFailed {
         /// Error description.
@@ -184,6 +189,9 @@ impl SessionEvent {
                     format_duration(*elapsed)
                 )
             }
+            SessionEvent::OutputTokenLimit => "Output token limit reached; the reply was cut off \
+                 \u{2014} send \"continue\" to resume."
+                .to_string(),
             SessionEvent::TurnFailed {
                 error,
                 elapsed: Some(elapsed),
@@ -318,6 +326,7 @@ impl SessionEvent {
                 | SessionEvent::RequestFailed { .. }
                 | SessionEvent::RetryFailed { .. }
                 | SessionEvent::TurnFailed { .. }
+                | SessionEvent::OutputTokenLimit
         )
     }
 

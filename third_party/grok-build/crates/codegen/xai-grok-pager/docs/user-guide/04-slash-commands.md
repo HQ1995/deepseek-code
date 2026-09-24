@@ -90,7 +90,7 @@ Leave the current session and return to the welcome screen. Alias: `/welcome`.
 
 Delete the current session's history. Confirms first. Stops any running turn, background tasks, and subagents before wiping history. Returns to the welcome screen, or to the dashboard when you opened the session from the dashboard.
 
-To delete a session you are not in, open `/resume` or the welcome session list and press `d` then `y`. On the dashboard, press `Ctrl+X` twice or click `[✗]`.
+To delete a session you are not in, press `Ctrl+X` twice on the dashboard or click `[✗]`. The `/resume` picker and the welcome session list do not delete sessions.
 
 ### `/rename`
 

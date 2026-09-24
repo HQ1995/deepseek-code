@@ -673,9 +673,14 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
                     pending.agent_result.as_deref(),
                     elapsed,
                 ),
-                _ => Some(SessionEvent::TurnCompleted {
-                    elapsed: Some(elapsed),
-                }),
+                reason => {
+                    if reason == Some(crate::app::turn_completion::MAX_TOKENS_STOP_REASON) {
+                        crate::app::turn_completion::push_output_limit_notice(agent);
+                    }
+                    Some(SessionEvent::TurnCompleted {
+                        elapsed: Some(elapsed),
+                    })
+                }
             }
         };
         crate::app::turn_completion::push_turn_terminal_marker(

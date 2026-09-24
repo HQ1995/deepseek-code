@@ -709,7 +709,6 @@ pub struct WelcomeRenderParams<'a> {
     pub session_picker_grouped: bool,
     /// Source filter for the session picker.
     pub session_picker_source_filter: crate::views::session_picker::SourceFilter,
-    pub session_picker_pending_delete: bool,
     /// Process-wide `--chat`: the picker lists backend conversations only, so
     /// the source filter and local deep search are hidden.
     pub chat_mode: bool,
@@ -1940,7 +1939,6 @@ fn render_welcome_done(
                 tick: p.welcome_tick,
                 grouped: p.session_picker_grouped,
                 source_filter: p.session_picker_source_filter,
-                pending_delete: p.session_picker_pending_delete,
                 chat_mode: p.chat_mode,
                 cwd: p.cwd,
             },
@@ -2342,7 +2340,6 @@ pub(crate) struct SessionPickerRenderCtx<'a> {
     pub(crate) grouped: bool,
     /// Source filter for filtering session entries.
     pub(crate) source_filter: crate::views::session_picker::SourceFilter,
-    pub(crate) pending_delete: bool,
     /// Process-wide `--chat`: hides the source-filter chip and the
     /// deep-search/filter footer hints (see `WelcomeRenderParams::chat_mode`).
     pub(crate) chat_mode: bool,
@@ -2539,34 +2536,12 @@ pub(crate) fn render_session_picker(
         description: None,
         pinned: false,
     });
-    if ctx.pending_delete {
-        default_shortcuts.clear();
-        default_shortcuts.push(HintItem {
-            keys: vec![],
-            label: "confirm delete".into(),
-            custom_display: Some("y"),
-            description: None,
-            pinned: false,
-        });
-        default_shortcuts.push(HintItem {
-            keys: vec![],
-            label: "cancel".into(),
-            custom_display: Some("n"),
-            description: None,
-            pinned: false,
-        });
-    } else if !ctx.chat_mode {
+    // DIVERGENCE(dscode): no `d delete` hint (DSH has no session delete).
+    if !ctx.chat_mode {
         default_shortcuts.push(HintItem {
             keys: vec![],
             label: "filter".into(),
             custom_display: Some("f"),
-            description: None,
-            pinned: false,
-        });
-        default_shortcuts.push(HintItem {
-            keys: vec![],
-            label: "delete".into(),
-            custom_display: Some("d"),
             description: None,
             pinned: false,
         });
@@ -2588,11 +2563,7 @@ pub(crate) fn render_session_picker(
         filter_key_hint: (!ctx.chat_mode).then_some("f"),
         filter_active: !ctx.chat_mode && ctx.source_filter.is_active(),
         header_note: hidden_hint.as_deref(),
-        action_keys: if ctx.chat_mode || ctx.pending_delete {
-            &[]
-        } else {
-            &[('d', "delete")]
-        },
+        action_keys: &[],
         disable_search: false,
         compact_bottom_bar: false,
         search_only_on_slash: false,
@@ -3013,7 +2984,6 @@ mod tests {
             subscription_tier: None,
             session_picker_grouped: false,
             session_picker_source_filter: crate::views::session_picker::SourceFilter::default(),
-            session_picker_pending_delete: false,
             chat_mode: false,
             cwd: std::path::Path::new("/repo"),
             credit_balance: None,
@@ -3195,7 +3165,6 @@ mod tests {
                     tick: 0,
                     grouped: false,
                     source_filter: crate::views::session_picker::SourceFilter::default(),
-                    pending_delete: false,
                     chat_mode: true,
                 },
             );
@@ -3271,7 +3240,6 @@ mod tests {
                     tick: 0,
                     grouped: false,
                     source_filter: crate::views::session_picker::SourceFilter::default(),
-                    pending_delete: false,
                     chat_mode,
                 },
             );
@@ -3307,6 +3275,53 @@ mod tests {
             !chat.contains("external session"),
             "chat mode must not render the hidden-external hint:\n{chat}"
         );
+    }
+
+    /// DIVERGENCE(dscode): the welcome /resume picker offers no `d delete`
+    /// (DSH has no session delete); its footer keeps the filter hint.
+    #[test]
+    fn session_picker_footer_offers_no_delete() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = crate::theme::Theme::default();
+        let area = Rect::new(0, 0, 100, 20);
+        let entries = vec![make_entry("s1", "Fix auth", "repo")];
+        let mut buf = Buffer::empty(area);
+        let mut state = PickerState::default();
+        render_session_picker(
+            area,
+            &mut buf,
+            &theme,
+            &mut SessionPickerRenderCtx {
+                state: &mut state,
+                sessions: Some(&entries),
+                cwd: std::path::Path::new("/repo"),
+                loading: false,
+                pending_hint: None,
+                shortcuts_area: None,
+                content_results: None,
+                content_loading: false,
+                entries_query: None,
+                tick: 0,
+                grouped: false,
+                source_filter: crate::views::session_picker::SourceFilter::default(),
+                chat_mode: false,
+            },
+        );
+        let screen = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| {
+                        buf.cell((x, y))
+                            .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("filter"), "{screen}");
+        assert!(!screen.contains("delete"), "{screen}");
     }
 
     #[test]

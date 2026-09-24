@@ -2370,9 +2370,15 @@ fn main() {
 }
 fn configure_dsh_launch(args: &mut PagerArgs) -> Result<()> {
     // Preserve the user's update preference when selecting the DSH backend.
-    // Dashboard is a session-producing TUI launch: it still needs the DSH
-    // leader, unlike standalone subcommands (login, completions, wrap).
-    if args.command.is_none() || matches!(args.command, Some(Command::Dashboard)) {
+    // Dashboard is a session-producing TUI launch and `sessions` reads the
+    // leader's session store: both need the DSH leader, unlike standalone
+    // subcommands (login, completions, wrap).
+    if args.command.is_none()
+        || matches!(
+            args.command,
+            Some(Command::Dashboard | Command::Sessions(_))
+        )
+    {
         if args.no_leader {
             anyhow::bail!("dscode requires the DSH backend; --no-leader is unsupported");
         }
@@ -2569,9 +2575,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             Command::Sessions(sessions_args) => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                let agent_config = xai_grok_shell::config::load_agent_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                return xai_grok_pager::sessions_cmd::run(sessions_args, &agent_config).await;
+                return xai_grok_pager::sessions_cmd::run(sessions_args).await;
             }
             Command::Share(ref share_args) => {
                 init_tracing_simple("cli");
@@ -3602,6 +3606,23 @@ mod tests {
         );
     }
 
+    /// `dscode sessions` reads the DSH leader's session store, so it gets the
+    /// leader socket like a session launch; other subcommands stay standalone.
+    #[test]
+    fn dsh_launch_points_sessions_at_the_leader() {
+        use clap::Parser as _;
+        let mut args = PagerArgs::try_parse_from(["dscode", "sessions", "list"]).unwrap();
+        configure_dsh_launch(&mut args).unwrap();
+        assert!(args.leader);
+        assert!(args.leader_socket.is_some());
+        assert!(matches!(args.command, Some(Command::Sessions(_))));
+        let mut no_leader =
+            PagerArgs::try_parse_from(["dscode", "--no-leader", "sessions", "list"]).unwrap();
+        assert!(configure_dsh_launch(&mut no_leader).is_err());
+        let mut standalone = PagerArgs::try_parse_from(["dscode", "models"]).unwrap();
+        configure_dsh_launch(&mut standalone).unwrap();
+        assert!(!standalone.leader && standalone.leader_socket.is_none());
+    }
     #[test]
     fn dsh_launch_preserves_update_opt_in_and_opt_out() {
         for flags in [vec!["dscode"], vec!["dscode", "--no-auto-update"]] {

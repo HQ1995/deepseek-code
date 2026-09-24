@@ -887,3 +887,44 @@ label and the action, like `Fetch:`, rather than as a shell command after
 content-addressed attachment store (`…/objects/<xx>/<sha256>`, a browser
 screenshot) shows a caption on its path row; Open and copy-path still target
 the file.
+
+### Plan mode is guidance
+
+Turning always-approve on under plan mode toasts that every tool now runs
+automatically and that plan mode guides the model without blocking edits:
+DSH plan mode is a prompt section, not an edit gate (class: behavior).
+
+### Truncated replies
+
+A turn that ends with `max_tokens` pushes "Output token limit reached; the
+reply was cut off — send "continue" to resume." before "Worked for" on every
+turn-end path: a normal end, the viewer, lost-response recovery and wake turns
+(class: feature).
+
+### Two-press task stop
+
+In the Tasks pane, `x` and the `[✗]` control arm first and stop the task on a
+second press within 3 s, like the DSH job list (class: behavior).
+
+### Tool input and result fallbacks
+
+A non-shell execute card (such as `run_code`) shows its content on success as
+well as on failure. Execute cards without a `command`, and generic other cards,
+show their capped (40-line) `rawInput` when expanded (class: feature).
+
+### Structured question answers
+
+A DSH question result (`{"answers":[…]}`) renders as question → answer pairs,
+matching answer ids to the questions in the call's `rawInput` by shape, not by
+tool name (class: feature).
+
+### No session delete in /resume
+
+Both /resume pickers drop `d delete`: DSH has no session delete, only archive
+(class: behavior). The dashboard's own delete remains upstream's.
+
+### dscode sessions
+
+`dscode sessions list [--all]` and `search` query the leader
+(`x.ai/session/list`, `x.ai/session/search`) instead of grok's session
+storage; `delete` is hidden and refuses with an explanation (class: behavior).

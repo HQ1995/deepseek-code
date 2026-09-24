@@ -259,7 +259,6 @@ fn test_app() -> AppView {
         session_picker_lanes: Default::default(),
         session_picker_detail_generation: 0,
         session_picker_entries_query: None,
-        session_picker_pending_delete: None,
         welcome_tick: 0,
         welcome_shimmer_frame: 0,
         startup_warnings: Vec::new(),
@@ -841,7 +840,6 @@ fn open_session_picker_with(
         deep_search_seq: 0,
         entries_query: None,
         source_filter: crate::views::session_picker::SourceFilter::default(),
-        pending_delete: None,
     });
 }
 /// Toast strings match the expected format and contain on/off

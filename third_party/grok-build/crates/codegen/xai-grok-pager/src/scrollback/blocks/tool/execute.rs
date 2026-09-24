@@ -35,6 +35,10 @@ pub struct ExecuteToolCallBlock {
     pub bash_mode: bool,
     /// Peeled display form for the header; `command` stays the full source of truth.
     pub header_display: Option<String>,
+    /// DIVERGENCE(dscode): the call's input, pre-rendered and capped, for an
+    /// execute tool that has no shell `command` (e.g. a code runner). Shown
+    /// under the header when the card is expanded.
+    pub input: Option<String>,
 }
 impl ExecuteToolCallBlock {
     /// Create a new execute block.
@@ -52,6 +56,7 @@ impl ExecuteToolCallBlock {
             elapsed_ms: None,
             bash_mode: false,
             header_display: None,
+            input: None,
         }
     }
 
@@ -534,6 +539,10 @@ impl ExecuteToolCallBlock {
             true, // include $ command when expanded/truncated
         );
 
+        if let Some(input) = &self.input {
+            super::push_tool_input_lines(&mut lines, input, theme, width);
+        }
+
         if self.output.is_none()
             && let Some(error) = &self.error
             && !error.is_empty()
@@ -725,7 +734,10 @@ impl BlockContent for ExecuteToolCallBlock {
         // (and output/error when present). Use Label-style stripping so a bare
         // "Run"/"Running" description (stripped to empty) does not claim a
         // fold when collapsed and expanded headers are identical.
-        self.description_display(true).is_some() || self.output.is_some() || self.error.is_some()
+        self.description_display(true).is_some()
+            || self.output.is_some()
+            || self.error.is_some()
+            || self.input.is_some()
     }
 
     /// Minimum fold mode used by collapse + the running expand chevron.
