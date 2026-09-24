@@ -11,7 +11,7 @@ import { once } from 'node:events'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import * as Browser from '../bridge/grok-leader/browser/index.mjs'
 import { releaseSdk } from './release-sdk.mjs'
 import { allowedTools, prefix } from '../bridge/grok-leader/browser/policy.mjs'
@@ -19,7 +19,7 @@ import { allowedTools, prefix } from '../bridge/grok-leader/browser/policy.mjs'
 const runtime = resolve(process.argv[2])
 const executablePath = process.argv[3]
 assert.ok(executablePath?.startsWith('/'), 'Pass an absolute Chromium executable path')
-const { sdk } = releaseSdk(runtime)
+const { sdk } = releaseSdk(runtime, { modulesOf: fileURLToPath(new URL('../bridge/grok-leader', import.meta.url)) })
 const { Context } = await sdk('@deepseek-ai/cordis')
 const { LlmAdapter, ToolCallId } = await sdk('@deepseek-ai/dsh-llm')
 const root = await mkdtemp(join(tmpdir(), 'dscode-browser-smoke-'))

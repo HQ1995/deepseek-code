@@ -2,10 +2,11 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
+import { fileURLToPath } from 'node:url'
 import { releaseSdk } from '../../scripts/release-sdk.mjs'
 import * as Inspector from './index.mjs'
 
-const { sdk } = releaseSdk(process.argv[2])
+const { sdk } = releaseSdk(process.argv[2], { modulesOf: fileURLToPath(new URL('.', import.meta.url)) })
 const { Context } = await sdk('@deepseek-ai/cordis')
 const originalFetch = globalThis.fetch
 const server = createServer((request, response) => { request.resume(); response.end('inspector fixture response') })

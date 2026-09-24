@@ -8,12 +8,13 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { releaseSdk } from './release-sdk.mjs'
 // The shipped adapter; its runtime packages resolve beside the bridge's node_modules.
 import * as Remote from '../bridge/grok-leader/ssh/index.mjs'
 
-const { sdk, mount } = releaseSdk(process.argv[2])
+const { sdk, mount } = releaseSdk(process.argv[2], { modulesOf: fileURLToPath(new URL('../bridge/grok-leader', import.meta.url)) })
 const { Context } = await sdk('@deepseek-ai/cordis')
 const config = JSON.parse(await readFile(process.argv[3], 'utf8'))
 const ctx = new Context()
