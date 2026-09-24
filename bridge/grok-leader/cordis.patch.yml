@@ -21,6 +21,8 @@
   disabled: true
 
 # Enabling a native model route does not opt into uploading raw Session events.
+# The row has no hostname allowlist, so a custom native gateway would receive
+# that field too.
 - id: session-log-deepseek
   config:
     enabled: false
