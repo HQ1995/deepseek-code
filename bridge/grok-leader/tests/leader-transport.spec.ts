@@ -65,6 +65,19 @@ it('owns registration, framing, ACP normalization and notification encoding with
   expect(await c.nextAcp()).toMatchObject({ method: 'session/update' })
 })
 
+it('marks refusals final so the TUI shows them without a retry hint', async () => {
+  const { RpcError } = await import('../src/protocol.ts')
+  const request = vi.fn(async (_client: number, method: string) => {
+    throw method === 'refuse' ? new RpcError(-32602, '/btw needs subagents') : new Error('boom')
+  })
+  const f = await fixture({ request }), c = await f.connect()
+  c.send(register); await c.next()
+  c.acp({ id: 1, method: 'refuse', params: {} })
+  expect(await c.nextAcp()).toEqual({ jsonrpc: '2.0', id: 1, error: { code: -32602, message: '/btw needs subagents', data: { message: '/btw needs subagents' } } })
+  c.acp({ id: 2, method: 'fail', params: {} })
+  expect(await c.nextAcp()).toEqual({ jsonrpc: '2.0', id: 2, error: { code: -32603, message: 'boom' } })
+})
+
 it('binds the socket owner-only without ever changing the process umask', async () => {
   const root = mkdtempSync('/tmp/dscode-umask-')
   cleanup.push(async () => rmSync(root, { recursive: true, force: true }))

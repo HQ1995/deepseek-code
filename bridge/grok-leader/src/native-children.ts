@@ -123,7 +123,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     const service = host.subagents(record) as SubagentsLike | undefined
     return typeof service?.listDescendants === 'function' && typeof service.interrupt === 'function' ? service : undefined
   }
-  type ChildState = { agent?: Agent; label: string; status: string; attemptId: string; output?: string }
+  type ChildState = { agent?: Agent; label: string; status: string; attemptId: string; output?: string; durationMs?: number }
   const childStates = new WeakMap<S, Map<string, ChildState>>()
   // Workflow workers publish membership before their child reaches the native
   // session corpus; scoped child events need not reach this host listener.
@@ -134,16 +134,20 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
   // Only interruption reads need the latest turn arriving across their await.
   // This is transient control state, not another retained history projection.
   const turnWatches = new Map<Agent['session'], Set<{ latest?: SessionEvent<'turn/start'> }>>()
+  const turnStarts = new WeakMap<Agent['session'], SessionEvent<'turn/start'>>()
+  const runLength = (start: SessionEvent, end: SessionEvent): number => Math.max(0, end.time - start.time)
   const childTerminalStatus = (kind: string): string => kind === 'completed' || kind === 'max-tokens' ? 'completed'
     : kind === 'aborted' || kind === 'interrupted' ? 'cancelled' : 'failed'
-  const childOverview = (id: string, events: readonly SessionEvent[], status?: Agent['status'], activity?: ChildRow['activity']): Pick<ChildState, 'attemptId' | 'status'> => {
+  const childOverview = (id: string, events: readonly SessionEvent[], status?: Agent['status'], activity?: ChildRow['activity']): Pick<ChildState, 'attemptId' | 'status' | 'durationMs'> => {
     const start = events.findLast(event => event.type === 'turn/start')
     const end = events.findLast(event => event.type === 'turn/end')
+    const settled = end?.type === 'turn/end' && (start?.type !== 'turn/start' || end.data.turn === start.data.turn)
     return {
       attemptId: id + ':' + String(start?.type === 'turn/start' ? start.data.turn : 'pending'),
       status: status === 'running' || activity === 'running' ? 'running'
-        : end?.type === 'turn/end' && (start?.type !== 'turn/start' || end.data.turn === start.data.turn)
-          ? childTerminalStatus(end.data.reason.kind) : 'cancelled',
+        : settled ? childTerminalStatus(end.data.reason.kind) : 'cancelled',
+      // The last run's length, so a settled child stops counting up after a restart too.
+      ...settled && start !== undefined ? { durationMs: runLength(start, end) } : {},
     }
   }
   const listChildRows = (service: SubagentsLike, record: S, scope: SessionOperation) =>
@@ -229,9 +233,10 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     cached.tail = work.catch(() => {})
     return work
   }
-  const emitChildFinished = (record: S, id: string, status: string, output?: unknown, attemptId?: string): void => {
+  const emitChildFinished = (record: S, id: string, status: string, output?: unknown, attemptId?: string, durationMs?: number): void => {
     const state = childStates.get(record)?.get(id)
     if (state === undefined || (attemptId !== undefined && state.attemptId !== attemptId)) return
+    if (durationMs !== undefined) state.durationMs = durationMs
     if (state.agent !== undefined) for (const settle of childSettlements.get(state.agent) ?? []) settle(status)
     const text = output === undefined ? undefined : typeof output === 'string' ? output : textBlocks(output).map(block => block.text).join('\n')
     if (state.status === status && (text === undefined || text === state.output)) return
@@ -241,7 +246,9 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     record.output.notify('x.ai/session_notification', { update: {
         sessionUpdate: 'subagent_finished', subagent_id: id, child_session_id: id, status,
         ...state.output === undefined ? {} : { output: state.output },
-      } }, { subagentMetricsAvailable: false, nativeAttemptId: state.attemptId })
+        ...state.durationMs === undefined ? {} : { duration_ms: state.durationMs },
+      } }, { subagentMetricsAvailable: false, ...state.durationMs === undefined ? {} : { subagentDurationAvailable: true },
+      nativeAttemptId: state.attemptId })
   }
   const emitChildrenForRecord = async (record: S, scope: SessionOperation): Promise<void> => {
     const service = subagentsService(record)
@@ -264,13 +271,13 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       const child = host.agent(SessionId(row.id))
       const previous = known.get(row.id)
       if (previous !== undefined && previous.agent === child && previous.attemptId === overview.attemptId) {
-        if (overview.status !== 'running') emitChildFinished(record, row.id, overview.status, undefined, overview.attemptId)
+        if (overview.status !== 'running') emitChildFinished(record, row.id, overview.status, undefined, overview.attemptId, overview.durationMs)
         continue
       }
       known.set(row.id, { agent: child, label: row.label ?? '', status: 'running', attemptId: overview.attemptId })
       const member = team?.find(item => item.id === row.id)
       record.output.notify('x.ai/session_notification', { update: { sessionUpdate: 'subagent_spawned', subagent_id: row.id, child_session_id: row.id, parent_session_id: row.parentId ?? record.agent.session.id, subagent_type: row.mode ?? 'continuable', description: row.label ?? '', ...member === undefined ? {} : { persona: member.name, role: 'teammate' }, ...previous === undefined ? {} : { effective_context_source: 'resumed', resumed_from: row.id } } }, { nativeChildHistory: true, nativeAttemptId: overview.attemptId })
-      if (overview.status !== 'running') emitChildFinished(record, row.id, overview.status, undefined, overview.attemptId)
+      if (overview.status !== 'running') emitChildFinished(record, row.id, overview.status, undefined, overview.attemptId, overview.durationMs)
     }
     if (discoveredWorkflowChild) emitWorkflows(record)
   }
@@ -298,7 +305,10 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     return state.promise
   }
   on('session/event', (session, event: SessionEvent) => {
-    if (event.type === 'turn/start') for (const watch of turnWatches.get(session) ?? []) watch.latest = event
+    if (event.type === 'turn/start') {
+      turnStarts.set(session, event)
+      for (const watch of turnWatches.get(session) ?? []) watch.latest = event
+    }
     const record = host.sessions.get(session.header.id)
     if (record !== undefined && record.agent.session === session) {
       if (String(event.type).startsWith('tool-workflow/')) {
@@ -318,7 +328,11 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
         host.notify(record, 'x.ai/subagent/history_changed', {
           sessionId: record.agent.session.id, childSessionId: session.id, nextSeq: event.seq + 1,
         })
-        if (event.type === 'turn/end') emitChildFinished(record, session.id, childTerminalStatus(event.data.reason.kind), undefined, session.id + ':' + String(event.data.turn))
+        if (event.type === 'turn/end') {
+          const start = turnStarts.get(session)
+          emitChildFinished(record, session.id, childTerminalStatus(event.data.reason.kind), undefined, session.id + ':' + String(event.data.turn),
+            start?.type === 'turn/start' && start.data.turn === event.data.turn ? runLength(start, event) : undefined)
+        }
       }
       if (event.type === 'turn/start' && session !== record.agent.session) refreshChildren(record)
     }
@@ -503,17 +517,20 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     if (match === null) throw invalidParams('x.ai/subagents requires a /subagents invocation')
     return record.work.run(async scope => {
       const [, verb = 'list', selector, body = ''] = match
-      const usage = 'Usage: /subagents list\n/subagents pending <child>\n/subagents queue|steer <child> <text>\n/subagents edit <child> <message> <text>\n/subagents remove <child> <message>\n/subagents steer-queued <child> <message|all>\n/subagents clear|stop <child>\nChild and message IDs accept unique prefixes. Stop preserves queued input.'
+      const usage = 'Usage: /subagents list\n/subagents pending <child>\n/subagents queue|steer <child> <text>\n/subagents edit <child> <message> <text>\n/subagents remove <child> <message>\n/subagents steer-queued <child> <message|all>\n/subagents clear|stop <child>\nChild and message IDs accept unique prefixes; Agent Team members also accept their names. Stop preserves queued input.'
       const success = (text: string) => ({ result: { kind: 'success' as const, text } })
       const service = subagentsService(record)
       if (service === undefined) throw new Error('Subagents are unavailable in this preset.')
       const rows = (await listChildRows(service, record, scope)).filter(row => row.kind === 'child')
       if (owned(clientId, record.agent.session.id) !== record) throw new Error('The owning session was closed.')
       scope.assertActive()
+      const members = host.teamMembers?.(record) ?? []
       if (verb === 'list' && selector === undefined) {
         return success((rows.length === 0 ? 'No child conversations.' : rows.map(row => {
           const child = host.agent(SessionId(row.id))
-          return `${row.id}  ${child?.status === 'running' ? 'running' : 'idle'}  ${row.mode ?? 'unknown'}  ${row.label ?? ''}`
+          const name = members.find(member => member.id === row.id)?.name
+          const label = name === undefined ? row.label ?? '' : name + ' (teammate)' + (row.label ? ' · ' + row.label : '')
+          return `${row.id}  ${child?.status === 'running' ? 'running' : 'idle'}  ${row.mode ?? 'unknown'}  ${label}`
         }).join('\n')) + '\n\n' + usage)
       }
       if (selector === undefined || !['pending', 'queue', 'steer', 'edit', 'remove', 'steer-queued', 'clear', 'stop'].includes(verb)) throw new Error(usage)
@@ -524,11 +541,13 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
         if (matches.length !== 1) throw new Error(`${matches.length === 0 ? 'Unknown' : 'Ambiguous'} ${label}: ${id}`)
         return matches[0]!
       }
-      const row = resolvePrefix(rows, selector, 'child')
+      // /team names teammates, so a teammate's name selects its child conversation.
+      const named = members.find(member => member.name === selector)
+      const row = rows.find(item => item.id === named?.id) ?? resolvePrefix(rows, selector, 'child')
       if (row.mode !== 'continuable') throw new Error('Only continuable children accept these controls.')
       // Queued Team messages carry mailbox receipts; changing them here would
       // desynchronize the Team's delivery bookkeeping.
-      const member = host.teamMembers?.(record)?.find(item => item.id === row.id)
+      const member = members.find(item => item.id === row.id)
       if (member !== undefined && ['edit', 'remove', 'clear', 'steer-queued'].includes(verb)) {
         throw new Error(`${member.name} is an Agent Team member; its queued input is Team mailbox delivery. Message it through the Lead, or stop it.`)
       }

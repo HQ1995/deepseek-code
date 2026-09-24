@@ -49,8 +49,43 @@ export function browserDenial(exec, policy) {
     if (url === undefined || !['http:', 'https:'].includes(url.protocol)) return 'Direct navigation requires an absolute HTTP(S) URL.'
     if (url.username || url.password) return 'Direct navigation URLs may not carry credentials.'
     if (!policy.any && !policy.origins.has(url.origin)) {
-      return 'Direct navigation to ' + url.origin + ' is outside the allowed origins; add it with /browser origins add ' + url.origin + '.'
+      return 'Direct navigation to ' + url.origin + ' is outside the allowed origins. The user can allow it with'
+        + ' /browser origins add ' + url.origin + ' and then start a new session with /new.'
     }
   }
   return undefined
+}
+
+/** Playwright filters page requests with the origins a session's browser
+ * started with, so an origin added later would fail there with a bare
+ * net::ERR_BLOCKED_BY_CLIENT. Say why instead. */
+export function launchDenial(exec, launched) {
+  if (launched === undefined || launched.any || exec.name !== prefix + 'browser_navigate') return undefined
+  let url
+  try { url = new URL(exec.arguments?.url) } catch { return undefined }
+  if (launched.origins.has(url.origin)) return undefined
+  return url.origin + ' was allowed after this session\'s browser started, so its pages stay blocked here.'
+    + ' The user can start a new session with /new to use it.'
+}
+
+/** Whether a model-facing tool is a browser operation dscode always refuses. */
+export function hiddenTool(name) {
+  return name.startsWith(prefix) && !allowedTools.has(name.slice(prefix.length))
+}
+
+/** Prefix of each Session's private output directory (see session-browser.mjs). */
+export const OUTPUT_PREFIX = 'dscode-browser-'
+/** Terminal colour codes Playwright leaves in its error text. */
+const ansi = /\u001b\[[0-9;]*[A-Za-z]/g
+/** Playwright names snapshot and screenshot files relative to the workspace,
+ * which for a private temp directory reads `../../../../var/folders/…`. */
+const outputPath = new RegExp('[^\\s()`\'"]*' + OUTPUT_PREFIX + '[A-Za-z0-9]+/', 'g')
+/** A tool result without terminal escapes or private directory paths, as a new object. */
+export function withoutAnsi(result) {
+  if (result === null || typeof result !== 'object' || !Array.isArray(result.content)) return result
+  const clean = value => typeof value === 'string' ? value.replace(ansi, '').replace(outputPath, '') : value
+  const content = result.content.map(block => block?.type === 'text' ? { ...block, text: clean(block.text) } : block)
+  const error = result.error !== null && typeof result.error === 'object' && typeof result.error.message === 'string'
+    ? { ...result.error, message: clean(result.error.message) } : result.error
+  return { ...result, content, ...result.error === undefined ? {} : { error } }
 }

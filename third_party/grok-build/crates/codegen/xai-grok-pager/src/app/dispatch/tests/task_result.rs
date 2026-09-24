@@ -3195,3 +3195,24 @@ fn session_list_nonempty_partial_modal_toasts_in_chat_mode_only() {
         "Build-mode modal non-empty degraded list stays silent"
     );
 }
+
+/// DIVERGENCE(dscode): the first provider leaves no model selected, so the
+/// confirmation says where to choose one.
+#[test]
+fn first_provider_added_points_to_the_model_picker() {
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().session.models.current = None;
+    let provider = crate::acp::model_state::ProviderInfo { id: "deepseek".into(), ..Default::default() };
+    dispatch_task_result(
+        TaskResult::AddProviderComplete { agent_id: AgentId(0), providers: vec![provider.clone()], error: None },
+        &mut app,
+    );
+    assert_eq!(read_toast(&app), "Provider added. Choose a model with /model");
+    app.agents.get_mut(&AgentId(0)).unwrap().session.models.current =
+        Some(agent_client_protocol::ModelId::new(std::sync::Arc::from("m")));
+    dispatch_task_result(
+        TaskResult::AddProviderComplete { agent_id: AgentId(0), providers: vec![provider], error: None },
+        &mut app,
+    );
+    assert_eq!(read_toast(&app), "Provider added");
+}

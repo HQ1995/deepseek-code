@@ -119,8 +119,9 @@ describe('native DeepSeek provider', () => {
     expect(f.stored.get('DEEPSEEK_API_KEY')).toBe('sk-fixture')
     expect(JSON.stringify(added)).toContain(NATIVE_DEEPSEEK_PROVIDER)
     const roster = (await catalog.current()).providers.find(provider => provider.id === NATIVE_DEEPSEEK_PROVIDER)
-    expect(roster).toMatchObject({ api: NATIVE_DEEPSEEK_API, apiKeyEnv: 'DEEPSEEK_API_KEY', credential: { configured: true } })
-    await expect(catalog.add({ id: NATIVE_DEEPSEEK_PROVIDER })).rejects.toThrow('already enabled')
+    // Named apart from a pi-ai "DeepSeek" route in /provider and /model.
+    expect(roster).toMatchObject({ name: 'DeepSeek (native API)', api: NATIVE_DEEPSEEK_API, apiKeyEnv: 'DEEPSEEK_API_KEY', credential: { configured: true } })
+    await expect(catalog.add({ id: NATIVE_DEEPSEEK_PROVIDER })).rejects.toThrow('DeepSeek (native API) is already added. Edit it from /provider')
     await catalog.update({ providerId: NATIVE_DEEPSEEK_PROVIDER, baseURL: 'https://gateway.example/anthropic' })
     expect(f.section).toEqual({ baseURL: 'https://gateway.example/anthropic' })
     liveProvider = NATIVE_DEEPSEEK_PROVIDER

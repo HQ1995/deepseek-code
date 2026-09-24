@@ -1907,6 +1907,30 @@ fn preset_selection_still_loads_an_idle_session() {
     assert_eq!(app.persona_override.as_deref(), Some("minimal"));
     assert!(matches!(effects.as_slice(), [Effect::LoadSession { .. }]));
 }
+/// DIVERGENCE(dscode): a session with history keeps its preset (the leader
+/// refuses the reload), so picking a preset opens a new session with it.
+#[test]
+fn preset_selection_after_history_opens_a_new_session() {
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let session_id = agent.session.session_id.clone();
+    agent
+        .scrollback
+        .push_block(crate::scrollback::RenderBlock::user_prompt("hello"));
+    let effects = dispatch(Action::SelectPersona("teams".into()), &mut app);
+    assert_eq!(app.persona_override.as_deref(), Some("teams"));
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::LoadSession { .. })),
+        "the session with history is not reloaded: {effects:?}"
+    );
+    assert_eq!(app.agents[&AgentId(0)].session.session_id, session_id);
+    let ActiveView::Agent(active) = app.active_view else {
+        panic!("a new session view is active");
+    };
+    assert_ne!(active, AgentId(0));
+    let toast = app.agents[&active].toast.as_ref().map(|(text, _)| text.clone());
+    assert!(toast.is_some_and(|text| text.starts_with("Preset teams starts a new session")));
+}
 /// End-to-end regression test for the "always re-asks" requirement.
 ///
 /// Drives the full user-visible production pipeline twice, with no

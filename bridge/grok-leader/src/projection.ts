@@ -12,6 +12,7 @@ import { parseExitStatus } from '@deepseek-ai/dsh-shell'
 import type {} from '@deepseek-ai/dsh-tool-present/types'
 import { isAbsolute, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { browserCardTitle } from './browser-actions.ts'
 
 /** The grok StopReason vocabulary (agent.rs StopReason). */
 export type StopReasonWire = 'end_turn' | 'max_tokens' | 'cancelled'
@@ -305,7 +306,7 @@ function deliveredFiles(files: ReadonlyArray<{ path: string; description?: strin
 
 /** One tool card opening. Native calls and PTC sub-calls share this vocabulary. */
 function toolCallStarted(toolCallId: string, name: string, args: unknown): GrokSessionUpdate {
-  return { sessionUpdate: 'tool_call', toolCallId, title: name, kind: toolKindForName(name, args), status: 'in_progress', rawInput: rawInputForTool(name, args) }
+  return { sessionUpdate: 'tool_call', toolCallId, title: browserCardTitle(name, args) ?? name, kind: toolKindForName(name, args), status: 'in_progress', rawInput: rawInputForTool(name, args) }
 }
 
 /** One tool card settlement: rendered content, typed raw output and the native error identity. */

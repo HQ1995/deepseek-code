@@ -190,15 +190,21 @@ give every session Team tools, and `/doctor` warns about any host-level Team
 tools row.
 
 Team tools attach when an agent is created, so the preset is chosen as a
-session opens. The TUI picker reopens the session with it, while an in-place
-`/preset` switch into or out of `teams` is refused. Copying it with
-`/preset manage` is refused too: mounting a copy while dscode runs would reach
-every open session. Teammates are continuable children labelled with their
-names. `/team` shows the roster and task board. Hand edits, removals and clears
-of a teammate's queued input are refused, because those are Team mailbox
+session opens. Before a session has history the TUI picker reopens it with the
+chosen preset; afterwards the leader refuses any preset change, so the picker
+opens a new session with it instead. An in-place `/preset` switch into or out
+of `teams` is refused. Copying it with `/preset manage` is refused too:
+mounting a copy while dscode runs would reach every open session. Teammates are
+continuable children labelled with their names. `/team` shows the roster (with
+each teammate's short id) and the task board, and `/subagents` accepts a
+teammate's name as well as its id. Hand edits, removals and clears of a
+teammate's queued input are refused, because those are Team mailbox
 deliveries; viewing, new messages and stopping still work. `/btw` is off in
-Teams. All members share one checkout: write scopes are advisory, not locks.
-Reopening a `teams` session needs this dscode version or later.
+Teams and says so. Teammate and subagent sessions stay out of `/resume` and the
+dashboard; an exact id still resumes one. A settled child reports how long its
+last run took, so its `/tasks` row stops counting. All members share one
+checkout: write scopes are advisory, not locks. Reopening a `teams` session
+needs this dscode version or later.
 
 `scripts/e2e-teams-installed.mjs <runtime> <home>` checks an installed leader
 over ACP against a loopback Messages fixture: preset isolation (also across a
@@ -239,17 +245,28 @@ Chrome for Testing renderer was measured running in its own user namespace
 under a seccomp-bpf filter.
 
 `browser_navigate` must target an allowed origin (exact HTTP(S), a plain host
-name or IP address, no credentials) unless `--any-origin` was chosen. Origin
-edits apply to the next call. Unless any origin is allowed, Playwright also
-refuses page requests outside the allowed origins and blocks service workers.
-That filter is fixed when a Session starts: a Session started with no origins
-loads nothing until it is resumed after adding one. It is request routing
-inside the browser, not an OS network sandbox. DSH cannot restrict per-Session
-MCP tools, so the whole 24-tool catalog is advertised. A guard refuses
-everything outside 13 reviewed operations: no code evaluation, uploads, tab
-management, MCP resource reads, or `filename`, `paths` and `_meta` arguments.
-Every call asks for approval, also in always-approve mode. Cancelling a running call closes that
-Session's browser and waits for cleanup; resume the Session for a fresh one.
+name or IP address, no credentials) unless `--any-origin` was chosen. Unless any
+origin is allowed, Playwright also refuses page requests outside the allowed
+origins and blocks service workers. That filter is fixed when a Session's
+browser starts, so a removed origin is refused at once while an added one
+applies to new Sessions: navigating to it from an older Session is refused
+with that explanation rather than Playwright's bare `net::ERR_BLOCKED_BY_CLIENT`.
+It is request routing inside the browser, not an OS network sandbox. DSH cannot
+restrict per-Session MCP tools, so the plugin drops the refused operations from
+the model's tool list at prompt assembly, and a guard still refuses everything
+outside 13 reviewed operations: no code evaluation, uploads, tab management,
+MCP resource reads, or `filename`, `paths` and `_meta` arguments. Results name
+snapshot and screenshot files without their private directory, and terminal
+colour codes are stripped from them.
+
+Every call asks for approval. The prompt names the action ("Allow the browser
+to open https://…?") and lists its arguments, and tool cards read
+"Browser: open …". DSH's always-approve preset (`danger-full-access`) sets the
+approval policy to `never`, which rejects every ask without a prompt, so in that
+mode the plugin refuses browser calls with an explanation. The TUI never
+auto-approves a browser prompt nor offers always-approve on it
+(`_meta.dscodeAlwaysAsks`). Cancelling a running call closes that Session's
+browser and waits for cleanup; resume the Session for a fresh one.
 
 `scripts/e2e-browser-smoke.mjs <runtime> <chrome>` drives real Chromium through
 the SDK: catalog, approvals, origin filtering, cancellation cleanup and unload.
@@ -276,10 +293,18 @@ entries survive. The leader socket is per profile, so local and remote sessions
 never share a leader. `dscode remote remove` restores a local home.
 
 The host needs the helper and PTC bootstrap from the same DSH release,
-installed outside the workspace, plus an absolute Node path. For example:
-`npm install @deepseek-ai/dsh-ssh@<release> @deepseek-ai/dsh-ptc-runtime-node@<release>`,
-then take the SHA-256 of `dsh-ssh/lib/helper.js` and
-`dsh-ptc-runtime-node/lib/process.js`. The connection runs
+installed outside the workspace, plus an absolute path to Node 22 or newer.
+`--dsh DIR` names the remote directory where
+`npm install @deepseek-ai/dsh-ssh@<release> @deepseek-ai/dsh-ptc-runtime-node@<release>`
+ran (`--helper` and `--bootstrap` name the files instead). The pinned digests
+default to this dscode's own runtime copies of `dsh-ssh/lib/helper.js` and
+`dsh-ptc-runtime-node/lib/process.js`, which are byte-identical to the
+release's; `--helper-hash` and `--bootstrap-hash` override them. Before writing
+anything, `init` connects the way the leader will and checks the remote Node,
+the workspace and both digests, naming the fix and the exact `npm install`
+command when a file is missing or different; `--no-check` skips it.
+`dscode remote status --check` and `dscode doctor --runtime` repeat the check.
+The connection runs
 `ssh -T -M -o BatchMode=yes -o StrictHostKeyChecking=yes <alias>`, so the alias
 must already connect non-interactively with a known host key. Digest mismatches
 refuse the connection.
@@ -290,7 +315,8 @@ connected or not, so a failed connection never looks local. Inside that world:
   directory inside it). The bridge refuses any other cwd and any ACP stdio MCP
   server.
 - **Session paths:** the TUI never links, opens, highlights from disk, previews
-  or `@`-completes them. It does not scan agent text for local images or videos,
+  or `@`-completes them; the first `@` says so once. The header reads
+  `ssh HOST:PATH` and never shows this computer's directory. It does not scan agent text for local images or videos,
   or discover git in a local directory with the same name.
 - **Local context:** it does not use this directory's MCP config, persona files,
   worktrees or location changes, and asks no folder-trust question for it. It
@@ -298,6 +324,12 @@ connected or not, so a failed connection never looks local. Inside that world:
 - **Exports:** relative `.zip` exports land in the home directory on this computer.
 - **`/doctor`:** it names the host, workspace and helper digest, and reports
   ERROR while disconnected.
+- **Disconnected:** a profile whose SSH row did not connect, or whose
+  connection was lost, refuses new sessions and turns; slash commands still
+  work. A lost connection says to restart dscode, and the leader then exits as
+  soon as its last client leaves so the restart reconnects. A connection that
+  never came up points to `dscode doctor --runtime`, because the helper does not
+  keep ssh's own error.
 
 Transcripts, attachments and credentials stay on this computer.
 

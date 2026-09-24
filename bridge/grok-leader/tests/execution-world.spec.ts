@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { assertMcpTransports, configuredRemote, executionWorld, sessionCwd, SSH_MODULE } from '../src/execution-world.ts'
+import { assertMcpTransports, configuredRemote, executionWorld, remoteUnavailable, sessionCwd, SSH_MODULE } from '../src/execution-world.ts'
 
 describe('execution world', () => {
+  it('explains a remote workspace that cannot take sessions', () => {
+    const remote = { kind: 'ssh' as const, host: 'swoop', workspace: '/w' }
+    expect(remoteUnavailable(undefined, { state: 'failed' })).toBeUndefined()
+    expect(remoteUnavailable(remote, { state: 'connected' })).toBeUndefined()
+    expect(remoteUnavailable(remote, { state: 'lost', reason: 'SSH helper disconnected.' }))
+      .toBe('Lost the connection to ssh swoop:/w (SSH helper disconnected). Quit and restart dscode to reconnect.')
+    expect(remoteUnavailable(remote, { state: 'failed' }))
+      .toBe('Could not connect to ssh swoop:/w. Run `dscode doctor --runtime` in a shell to see why, then restart dscode.')
+  })
+
+
   it('is local without a remote adapter and normalizes the remote workspace', () => {
     expect(executionWorld(undefined)).toEqual({ kind: 'local' })
     expect(executionWorld({ kind: 'ssh', host: 'swoop', workspace: '/home/u/work/', helperHash: 'x' })).toEqual({ kind: 'ssh', host: 'swoop', workspace: '/home/u/work' })
@@ -31,5 +42,13 @@ describe('execution world', () => {
     expect(() => assertMcpTransports({ kind: 'local' }, configs)).not.toThrow()
     expect(() => assertMcpTransports({ kind: 'ssh', host: 'h', workspace: '/w' }, configs)).toThrow('(a)')
     expect(() => assertMcpTransports({ kind: 'ssh', host: 'h', workspace: '/w' }, configs.slice(1))).not.toThrow()
+  })
+})
+
+describe('SSH plugin module', () => {
+  it('loads as the plugin row imports it', async () => {
+    const plugin = await import('../ssh/index.mjs')
+    expect(plugin.name).toBe('dscode-ssh')
+    expect(typeof plugin.apply).toBe('function')
   })
 })

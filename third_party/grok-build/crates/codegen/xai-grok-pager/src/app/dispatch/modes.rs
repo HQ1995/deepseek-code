@@ -302,8 +302,15 @@ pub(super) fn set_yolo_mode_inner(app: &mut AppView, new: bool) {
         // YOLO ON: auto-approve all queued permissions. Drain runs
         // even on idempotent re-dispatch. Prefers `AllowOnce`; falls
         // back to `Cancelled` (never `AllowAlways`).
+        // DIVERGENCE(dscode): always-asking prompts stay queued for an
+        // explicit answer.
         agent.last_permission_click = None;
-        for perm in agent.permission_queue.drain(..) {
+        let (kept, drained): (std::collections::VecDeque<_>, std::collections::VecDeque<_>) = agent
+            .permission_queue
+            .drain(..)
+            .partition(|perm| perm.always_asks());
+        agent.permission_queue = kept;
+        for perm in drained {
             if let Some(allow) = perm
                 .options
                 .iter()
@@ -326,7 +333,9 @@ pub(super) fn set_yolo_mode_inner(app: &mut AppView, new: bool) {
                     .ok();
             }
         }
-        super::permissions::restore_permission_stashes(agent);
+        if agent.permission_queue.is_empty() {
+            super::permissions::restore_permission_stashes(agent);
+        }
     }
 
     // Telemetry + tracing guarded on real state change only.

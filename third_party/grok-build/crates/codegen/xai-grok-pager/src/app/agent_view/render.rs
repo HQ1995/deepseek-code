@@ -260,7 +260,9 @@ impl AgentView {
                     hints.push(HintItem::new(key!('e'), "edit pattern"));
                 }
                 hints.extend(ctrl_f_hint);
-                hints.push(HintItem::new(key!('o', CONTROL), "always-approve"));
+                if !perm.always_asks() {
+                    hints.push(HintItem::new(key!('o', CONTROL), "always-approve"));
+                }
                 hints.push(HintItem::new(key!('c', CONTROL), "cancel"));
                 hints.push(self.card_esc_hint());
                 hints
@@ -959,7 +961,14 @@ impl AgentView {
             .session
             .models
             .current_model_name()
-            .unwrap_or_else(|| "No model · /provider".to_string());
+            // DIVERGENCE(dscode): with a provider in place, the next step is /model.
+            .unwrap_or_else(|| {
+                if self.session.models.providers.is_empty() {
+                    "No model · /provider".to_string()
+                } else {
+                    "No model · /model".to_string()
+                }
+            });
         let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
         let casual_commenting = self.is_casual_commenting();
         let prompt_focused = if self.plan_approval_view.is_some() {
@@ -1588,13 +1597,11 @@ impl AgentView {
         self.hit_credits.rect = areas.get("credits").copied();
         self.hit_plan_button.rect = areas.get("plan").copied();
         let home = std::env::var("HOME").ok();
-        let display = self.session.cwd.display().to_string();
-        let short = match &home {
-            Some(h) if display.starts_with(h.as_str()) => {
-                format!("~{}", &display[h.len()..])
-            }
-            _ => display,
-        };
+        let short = header_path(
+            &crate::execution_world::execution_world(),
+            &self.session.cwd,
+            home.as_deref(),
+        );
         let cwd_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
         use unicode_width::UnicodeWidthStr;
         let mut parts: Vec<Span> = Vec::new();
@@ -5198,5 +5205,39 @@ mod status_line_draw_tests {
             agent.last_status_line_size, painted,
             "a frame with no row must not export a width the script would read as the 80-column fallback"
         );
+    }
+}
+
+/// DIVERGENCE(dscode): the header's path. A remote profile names its host and
+/// never shows this computer's directory (a view without a session still
+/// holds it); only a local path abbreviates this computer's home.
+fn header_path(
+    world: &crate::execution_world::ExecutionWorld,
+    cwd: &std::path::Path,
+    home: Option<&str>,
+) -> String {
+    let display = world.session_cwd(cwd).display().to_string();
+    match (world, home) {
+        (crate::execution_world::ExecutionWorld::Remote { host, .. }, _) => {
+            format!("ssh {host}:{display}")
+        }
+        (_, Some(h)) if display.starts_with(h) => format!("~{}", &display[h.len()..]),
+        _ => display,
+    }
+}
+
+#[cfg(test)]
+mod header_path_tests {
+    use super::header_path;
+    use crate::execution_world::ExecutionWorld;
+    use std::path::Path;
+
+    #[test]
+    fn remote_header_names_the_host_and_never_a_local_directory() {
+        let remote = ExecutionWorld::Remote { host: "swoop".into(), workspace: "/home/u/work".into() };
+        assert_eq!(header_path(&remote, Path::new("/home/u/work/src"), Some("/home/u")), "ssh swoop:/home/u/work/src");
+        assert_eq!(header_path(&remote, Path::new("/Users/me/project"), Some("/Users/me")), "ssh swoop:/home/u/work");
+        assert_eq!(header_path(&ExecutionWorld::Local, Path::new("/Users/me/project"), Some("/Users/me")), "~/project");
+        assert_eq!(header_path(&ExecutionWorld::Local, Path::new("/srv/x"), Some("/Users/me")), "/srv/x");
     }
 }

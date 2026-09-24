@@ -49,6 +49,8 @@ pub struct ProviderPreset {
     pub api: &'static str,
     pub base_url: &'static str,
     pub default_base_url: &'static str,
+    /// DIVERGENCE(dscode): what sets this template apart, shown before its URL.
+    pub note: &'static str,
 }
 
 /// Preset order is the dropdown order; PRESETS.len() indexes Custom.
@@ -61,6 +63,20 @@ pub const PRESETS: &[ProviderPreset] = &[
         api: "",
         base_url: "",
         default_base_url: "https://api.deepseek.com",
+        note: "OpenAI-compatible API",
+    },
+    // DIVERGENCE(dscode): the official DeepSeek adapter: Messages API, Files
+    // API image reuse and native reasoning. Its models appear under provider
+    // deepseek-official; the bridge names it "DeepSeek (native API)".
+    ProviderPreset {
+        label: "DeepSeek (native)",
+        id: "deepseek-official",
+        display_name: "DeepSeek (native API)",
+        api_key_env: "DEEPSEEK_API_KEY",
+        api: NATIVE_DEEPSEEK_API,
+        base_url: "",
+        default_base_url: "https://api.deepseek.com/anthropic",
+        note: "native Messages API, images",
     },
     ProviderPreset {
         label: "OpenCodex",
@@ -70,6 +86,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         api: "openai-responses",
         base_url: "http://127.0.0.1:10100/v1",
         default_base_url: "http://127.0.0.1:10100/v1",
+        note: "",
     },
     ProviderPreset {
         label: "OpenAI",
@@ -79,6 +96,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         api: "",
         base_url: "",
         default_base_url: "https://api.openai.com/v1",
+        note: "",
     },
     ProviderPreset {
         label: "Anthropic",
@@ -88,6 +106,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         api: "",
         base_url: "",
         default_base_url: "https://api.anthropic.com",
+        note: "",
     },
     ProviderPreset {
         label: "OpenRouter",
@@ -97,17 +116,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         api: "",
         base_url: "",
         default_base_url: "https://openrouter.ai/api/v1",
-    },
-    // The official DeepSeek adapter: Messages API, Files API image reuse and
-    // native reasoning. Its models appear under provider deepseek-official.
-    ProviderPreset {
-        label: "DeepSeek (native Messages API)",
-        id: "deepseek-official",
-        display_name: "DeepSeek",
-        api_key_env: "DEEPSEEK_API_KEY",
-        api: NATIVE_DEEPSEEK_API,
-        base_url: "",
-        default_base_url: "https://api.deepseek.com/anthropic",
+        note: "",
     },
 ];
 
@@ -382,8 +391,19 @@ impl AddProviderModalState {
         }
     }
 
+    /// DIVERGENCE(dscode): the native DeepSeek route has a fixed id, name and
+    /// protocol; the bridge would ignore edits to them.
+    fn is_native(&self) -> bool {
+        APIS.get(self.api_idx) == Some(&NATIVE_DEEPSEEK_API)
+    }
+
+    fn fixed(&self, field: Field) -> bool {
+        (self.editing.is_some() && field == Field::Id)
+            || (self.is_native() && matches!(field, Field::Id | Field::DisplayName | Field::Api))
+    }
+
     fn focusable(&self, field: Field) -> bool {
-        if self.editing.is_some() && field == Field::Id {
+        if self.fixed(field) {
             return false;
         }
         self.credential_source != CredentialSource::Environment || field != Field::ApiKey
@@ -480,7 +500,11 @@ pub fn handle_add_provider_key(
             KeyCode::End => state.template_cursor = last,
             KeyCode::Enter | KeyCode::Tab => {
                 state.choosing_preset = false;
-                state.field = Field::Id;
+                state.field = if state.focusable(Field::Id) {
+                    Field::Id
+                } else {
+                    state.next_field(Field::Id)
+                };
                 return AddProviderOutcome::Changed;
             }
             _ => return AddProviderOutcome::Unchanged,
@@ -644,6 +668,7 @@ fn row_specs(state: &AddProviderModalState) -> Vec<RowSpec> {
         .map(|field| {
             let focused = state.field == *field;
             let (value, cursor_col) = match field {
+                Field::Api if state.is_native() => ("DeepSeek native Messages API".to_string(), 0),
                 Field::Api => (
                     APIS.get(state.api_idx)
                         .map_or(String::new(), |value| (*value).to_string()),
@@ -685,6 +710,11 @@ fn row_specs(state: &AddProviderModalState) -> Vec<RowSpec> {
                 }
             } else {
                 None
+            };
+            let value = if state.is_native() && state.fixed(*field) && !value.is_empty() {
+                format!("{value}  (fixed)")
+            } else {
+                value
             };
             RowSpec {
                 field: *field,
@@ -805,25 +835,37 @@ pub fn render_add_provider_modal(buf: &mut Buffer, area: Rect, state: &mut AddPr
         ];
         let count = state.templates.len();
         let available = content.height.saturating_sub(lines.len() as u16) as usize;
+        // The label column fits the longest label, so a label never runs into its URL.
+        let label_width = state
+            .templates
+            .iter()
+            .map(|index| unicode_width::UnicodeWidthStr::width(preset_label(*index)))
+            .max()
+            .unwrap_or(0)
+            + 2;
         for position in centered_window(count, state.template_cursor, available.min(7)) {
             let index = state.templates[position];
             let selected = position == state.template_cursor;
             let label = preset_label(index);
             let detail = PRESETS
                 .get(index)
-                .map(|preset| preset.default_base_url)
+                .map(|preset| match (preset.note, preset.default_base_url) {
+                    ("", url) => url.to_string(),
+                    (note, "") => note.to_string(),
+                    (note, url) => format!("{note} · {url}"),
+                })
                 .filter(|value| !value.is_empty())
-                .unwrap_or("blank form");
+                .unwrap_or_else(|| "blank form".to_string());
             lines.push(Line::from(vec![
                 Span::styled(
                     if selected { "› " } else { "  " },
                     Style::default().fg(theme.accent_user),
                 ),
                 Span::styled(
-                    format!("{label:<20}"),
+                    format!("{label:<label_width$}"),
                     if selected { focused_style } else { value_style },
                 ),
-                Span::styled(detail.to_string(), dim),
+                Span::styled(detail, dim),
             ]));
         }
         Paragraph::new(lines).render(content, buf);
@@ -946,7 +988,7 @@ mod tests {
         assert_eq!(state.form().api_key_env, "DEEPSEEK_API_KEY");
         assert_eq!(state.form().api, "");
 
-        state.apply_preset(1);
+        state.apply_preset(2);
         assert_eq!(state.form().id, "ocx");
         assert_eq!(state.form().display_name, "OpenCodex");
         assert_eq!(state.form().api_key_env, "OCX_API_KEY");
@@ -992,9 +1034,28 @@ mod tests {
             "deepseek".to_string(),
             "openai".to_string(),
         ]);
-        assert_eq!(state.templates, vec![1, 3, 4, 5, PRESETS.len()]);
+        assert_eq!(state.templates, vec![1, 2, 4, 5, PRESETS.len()]);
         assert_eq!(state.preset, 1);
-        assert_eq!(state.form().id, "ocx");
+        assert_eq!(state.form().id, "deepseek-official");
+    }
+
+    /// DIVERGENCE(dscode): the native route's id, name and protocol are fixed,
+    /// so the form skips them and says so instead of accepting ignored edits.
+    #[test]
+    fn native_deepseek_form_marks_its_fixed_fields() {
+        let mut state = AddProviderModalState::new();
+        assert_eq!(PRESETS[1].id, "deepseek-official", "native sits beside the other DeepSeek template");
+        state.template_cursor = 1;
+        state.apply_preset(1);
+        handle_add_provider_key(&mut state, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!state.choosing_preset);
+        assert!(!matches!(state.field, Field::Id | Field::DisplayName | Field::Api));
+        let rows = row_specs(&state);
+        let value = |field: Field| rows.iter().find(|row| row.field == field).unwrap().value.clone();
+        assert_eq!(value(Field::Api), "DeepSeek native Messages API  (fixed)");
+        assert_eq!(value(Field::Id), "deepseek-official  (fixed)");
+        assert_eq!(value(Field::DisplayName), "DeepSeek (native API)  (fixed)");
+        assert!(!value(Field::ApiKeyEnv).contains("fixed"));
     }
 
     #[test]
@@ -1003,7 +1064,7 @@ mod tests {
         assert_eq!(state.preset, 0);
         handle_add_provider_key(&mut state, &key(KeyCode::Down));
         assert_eq!(state.preset, 1);
-        assert_eq!(state.form().id, "ocx");
+        assert_eq!(state.form().id, "deepseek-official");
         handle_add_provider_key(&mut state, &key(KeyCode::Up));
         assert_eq!(state.preset, 0);
         handle_add_provider_key(&mut state, &key(KeyCode::Up));
@@ -1018,7 +1079,7 @@ mod tests {
     #[test]
     fn tab_cycles_fields_and_left_right_cycles_protocol() {
         let mut state = AddProviderModalState::new();
-        state.apply_preset(1);
+        state.apply_preset(2);
         state.choosing_preset = false;
         assert_eq!(state.field, Field::Id);
         handle_add_provider_key(&mut state, &key(KeyCode::Tab));
@@ -1151,7 +1212,7 @@ mod tests {
     #[test]
     fn empty_catalog_endpoint_is_a_display_hint_not_a_submitted_override() {
         let mut state = AddProviderModalState::new();
-        state.apply_preset(2);
+        state.apply_preset(3);
         state.choosing_preset = false;
         let base = row_specs(&state)
             .into_iter()

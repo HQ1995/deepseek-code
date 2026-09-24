@@ -19,7 +19,8 @@ interface LeaderHost {
   pollers: readonly { poll(): void }[]
   appExit(): ((code: number) => void) | undefined
   logger: { warn(message: string): void }
-  idleExitMs?: number
+  /** Grace before exiting with no clients; a function is read at each disconnect. */
+  idleExitMs?: number | (() => number)
 }
 
 /** Host grace/heartbeat and shutdown coordination. Feature owners retain their
@@ -96,7 +97,7 @@ export function createLeaderLifecycle(host: LeaderHost) {
             if (exit === undefined) host.logger.warn('grok-leader: the host exposes no appExit; the leader will stay up with no clients')
             else exit(0)
           })().catch(error => { warn('idle exit failed', error) })
-        }, host.idleExitMs ?? 2000)
+        }, typeof host.idleExitMs === 'function' ? host.idleExitMs() : host.idleExitMs ?? 2000)
       }
       host.sessions.disconnect(clientId)
     },

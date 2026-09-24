@@ -7,8 +7,8 @@
       name: '@deepseek-ai/dsh-agent-preset'
       config:
         id: teams
-        name: Teams (experimental)
-        description: Explicitly requested teammates with durable messaging and a shared task board. Shared checkout; no automatic merge or file locks.
+        name: Teams mode (experimental)
+        description: Teammates you ask for work in this same checkout (no automatic merge or file locks), with messages and a shared task board.
         order: 8
         plugins:
           # The `teams` agent preset: the coding agent, mounted once per process.

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { describeBrowser, type BrowserStatus } from './browser-control.ts'
+import { browserFacts, type BrowserStatus } from './browser-control.ts'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -123,7 +123,8 @@ export function createNativeExecution<S extends ExecutionSession>(host: Executio
         active(record, scope)
         const browser = host.browser?.()
         if (browser !== undefined) findings.push({ status: browser.executable === undefined || !browser.sandbox || browser.sandboxWarning !== undefined ? 'WARN' : 'OK', name: 'Browser',
-          detail: describeBrowser(browser).replace(/^Browser: /, '').split('\n').map(line => line.trim().replace(/\.$/, '')).join('; ') + '. Browser state is isolated; network and host access are not confined.' })
+          detail: ['on (' + String(browser.sessions) + ' open)', ...browserFacts(browser).map(fact => fact.replace(/\.$/, ''))].join('; ')
+            + '. Browser state is isolated; network and host access are not confined.' })
         const remote = host.remote?.()
         if (remote !== undefined) findings.push({ status: remote.connected ? 'INFO' : 'ERROR', name: 'Remote workspace', detail: `ssh ${remote.host}:${remote.workspace}`
           + (remote.helperHash === undefined ? '' : `; helper sha256 ${remote.helperHash}`)

@@ -47,6 +47,7 @@ pub(super) fn handle_permission_request(
     //    `enqueue_permission` even in YOLO mode (won't pick
     //    `AllowAlways` by default).
     if agent.session.is_yolo()
+        && !crate::views::permission_view::request_always_asks(&perm.request)
         && let Some(allow) = perm
             .request
             .options

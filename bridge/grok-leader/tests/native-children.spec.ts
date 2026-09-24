@@ -117,6 +117,28 @@ describe('native child/workflow ownership', () => {
     await f.children.dispose()
   })
 
+  it('reports how long a settled run took, live and when rebuilt from the log', async () => {
+    const f = fixture(), child = f.add('child')
+    await f.children.snapshot(f.root)
+    Object.assign(child, { status: 'running' })
+    f.append(child, 'turn/start', { turn: 1 }, 5000)
+    f.append(child, 'turn/end', { turn: 1, reason: { kind: 'completed' } }, 9200)
+    Object.assign(child, { status: 'idle' })
+    await vi.waitFor(() => expect(f.notes()).toContainEqual(expect.objectContaining({ sessionUpdate: 'subagent_finished', duration_ms: 4200 })))
+    const meta = f.root.output.notify.mock.calls.find(call => (call[1] as { update: { sessionUpdate: string } }).update.sessionUpdate === 'subagent_finished')![2]
+    expect(meta).toMatchObject({ subagentMetricsAvailable: false, subagentDurationAvailable: true })
+    // A fresh view (after a restart) derives the same length from the durable log.
+    const g = fixture(), settled = g.add('child')
+    g.logs.get('child')!.push(
+      { seq: 0, time: 1000, type: 'turn/start', data: { turn: 0 } } as SessionEvent,
+      { seq: 1, time: 3500, type: 'turn/end', data: { turn: 0, reason: { kind: 'completed' } } } as SessionEvent,
+    )
+    Object.assign(settled, { status: 'idle' })
+    await g.children.snapshot(g.root)
+    expect(g.notes()).toContainEqual(expect.objectContaining({ sessionUpdate: 'subagent_finished', status: 'completed', duration_ms: 2500 }))
+    await f.children.dispose(); await g.children.dispose()
+  })
+
   it('cancels descendant listing with the session and host shutdown signals', async () => {
     const f = fixture(), listing = deferred<Row[]>()
     let seen: AbortSignal | undefined
@@ -519,6 +541,10 @@ describe('native child/workflow ownership', () => {
     // Viewing, a new message and stopping stay available.
     await expect(f.command('/subagents pending mate')).resolves.toMatchObject({ result: { kind: 'success' } })
     await expect(f.command('/subagents queue mate hello')).resolves.toMatchObject({ result: { kind: 'success' } })
+    // /team shows names, so the name selects the teammate too, and the list names it.
+    await expect(f.command('/subagents queue reviewer hello')).resolves.toMatchObject({ result: { kind: 'success', text: expect.stringContaining('Queued child mate') } })
+    await expect(f.command('/subagents clear reviewer')).resolves.toMatchObject({ result: { kind: 'error', text: expect.stringContaining('reviewer is an Agent Team member') } })
+    await expect(f.command('/subagents list')).resolves.toMatchObject({ result: { kind: 'success', text: expect.stringContaining('mate  running  continuable  reviewer (teammate) · worker mate') } })
     await f.children.dispose()
   })
 

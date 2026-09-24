@@ -15,6 +15,10 @@ use crate::scrollback::block::RenderBlock;
 use crate::views::prompt_widget::PromptEvent;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+/// Shown once when `@` is typed in a remote workspace.
+pub(crate) const REMOTE_MENTION_HINT: &str =
+    "File completion is off in a remote workspace: type the path, and the model reads it there";
+
 impl AgentView {
     pub fn prompt_history_loading(&self) -> bool {
         self.session.prompt_history_loading && self.prompt.text().is_empty()
@@ -100,6 +104,32 @@ impl AgentView {
     // minimal's prompt is conceptually always focused, but `active_pane` can be
     // Scrollback, whose `When::AgentScreen` promotion would misroute the chord
     // to `ToggleYolo`.
+    /// DIVERGENCE(dscode): `@` completion walks this computer's disk, so it is
+    /// off in a remote workspace. Say so once instead of showing nothing.
+    fn hint_remote_mentions(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static SHOWN: AtomicBool = AtomicBool::new(false);
+        if !crate::execution_world::is_remote() || SHOWN.load(Ordering::Relaxed) {
+            return;
+        }
+        let cursor = self.prompt.cursor();
+        if crate::views::file_search::context::detect(self.prompt.text(), cursor).is_none() {
+            return;
+        }
+        // A tip, not a toast: toasts clear on the next keypress.
+        let dim = ratatui::style::Style::default().fg(crate::theme::Theme::current().gray);
+        let tip = crate::tips::EphemeralTip {
+            ticks_remaining: 300,
+            ..crate::tips::EphemeralTip::new(
+                "remote_mention_tip",
+                ratatui::text::Line::from(ratatui::text::Span::styled(REMOTE_MENTION_HINT, dim)),
+            )
+        };
+        if self.show_ephemeral_tip(tip, &mut std::collections::HashMap::new()) {
+            SHOWN.store(true, Ordering::Relaxed);
+        }
+    }
+
     pub(in crate::app) fn handle_prompt_key(
         &mut self,
         key: &KeyEvent,
@@ -860,6 +890,7 @@ impl AgentView {
                     == Some(crate::tips::clear_detector::UNDO_TIP_KEY);
             match self.prompt.handle_key(key) {
                 PromptEvent::Edited => {
+                    self.hint_remote_mentions();
                     if undo_tip_accepted {
                         xai_grok_telemetry::session_ctx::log_event(
                             xai_grok_telemetry::events::ContextualTip {
@@ -2236,5 +2267,28 @@ mod queue_recall_tests {
 
         assert_eq!(agent.active_pane, AgentPane::Prompt);
         assert_eq!(agent.prompt.text(), "an older prompt");
+    }
+}
+
+#[cfg(test)]
+mod remote_mention_tests {
+    use super::*;
+    use crate::execution_world::{ExecutionWorld, with_test_world};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    /// DIVERGENCE(dscode): `@` in a remote workspace explains why no file
+    /// list appears, in a tip that survives the next keystrokes.
+    #[test]
+    fn at_sign_in_a_remote_workspace_explains_missing_completion() {
+        let mut agent = super::test_fixtures::make_agent();
+        agent.last_terminal_size = (120, 40);
+        let registry = ActionRegistry::defaults();
+        let remote = ExecutionWorld::Remote { host: "swoop".into(), workspace: "/srv/w".into() };
+        with_test_world(remote, || {
+            agent.handle_prompt_key(&KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE), &registry, false);
+            agent.handle_prompt_key(&KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &registry, false);
+        });
+        assert_eq!(agent.prompt.text(), "@s");
+        assert_eq!(agent.ephemeral_tip.current_key(), Some("remote_mention_tip"));
     }
 }

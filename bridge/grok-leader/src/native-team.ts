@@ -37,24 +37,35 @@ export interface NativeTeamHost<S> {
 
 export const TEAM_USAGE = 'Usage: /team'
 
+const STATUS: Record<string, string> = { running: 'running', inactive: 'idle', provisioning: 'starting' }
+const CONTEXT: Record<string, string> = { fresh: 'new context', fork: 'forked context' }
+const TASK_STATUS: Record<string, string> = { in_progress: 'in progress' }
+
+/** Markdown: the TUI joins single line breaks, so items are list entries. */
 export function describeTeam(members: ReadonlyArray<TeamMemberRow>, tasks: ReadonlyArray<TeamTaskRow>): string {
-  const lines = ['Agent Team', 'Members:']
+  const lines = ['Agent Team', '', 'Members:']
   for (const member of members) {
-    const facts = [member.role, member.status, member.context, member.model, member.description].filter(fact => fact !== undefined && fact !== '')
-    lines.push('  ' + member.name + ' · ' + facts.join(' · '))
-    for (const diagnostic of member.diagnostics) lines.push('    ! ' + diagnostic)
+    // A teammate's short id is the child conversation /subagents controls.
+    const who = member.role === 'lead' ? member.name + ' (lead)' : member.name + ' (teammate ' + member.id.slice(0, 8) + ')'
+    const facts = [STATUS[member.status] ?? member.status, member.context === undefined ? undefined : CONTEXT[member.context] ?? member.context,
+      member.model === undefined || member.model === '' ? undefined : 'model ' + member.model, member.description]
+      .filter((fact): fact is string => fact !== undefined && fact !== '')
+    lines.push('- ' + who + ' · ' + facts.join(' · '))
+    for (const diagnostic of member.diagnostics) lines.push('  - ! ' + diagnostic)
   }
-  if (!members.some(member => member.role === 'teammate')) lines.push('  (no teammates yet; they start only when you ask for them)')
-  lines.push('Tasks:')
-  if (tasks.length === 0) lines.push('  none')
+  if (!members.some(member => member.role === 'teammate')) lines.push('- no teammates yet; they start only when you ask for them')
+  lines.push('', 'Tasks:')
+  if (tasks.length === 0) lines.push('- none')
   for (const task of tasks) {
-    const facts = [task.status + (task.ready || task.status !== 'pending' ? '' : ', blocked'),
+    const facts = [(TASK_STATUS[task.status] ?? task.status) + (task.ready || task.status !== 'pending' ? '' : ', blocked'),
       ...task.ownerName === undefined ? [] : ['owner ' + task.ownerName],
       ...task.blockedBy.length === 0 ? [] : ['after ' + task.blockedBy.join(', ')],
       ...task.writeScopes.length === 0 ? [] : ['writes ' + task.writeScopes.join(', ')]]
-    lines.push('  ' + task.id + ' ' + task.subject + ' · ' + facts.join(' · '))
-    for (const warning of task.writeScopeWarnings) lines.push('    ! ' + warning)
+    lines.push('- ' + task.id + ' ' + task.subject + ' · ' + facts.join(' · '))
+    for (const warning of task.writeScopeWarnings) lines.push('  - ! ' + warning)
   }
+  const teammate = members.find(member => member.role === 'teammate')
+  if (teammate !== undefined) lines.push('', '`/subagents` controls a teammate by name, for example `/subagents stop ' + teammate.name + '`.')
   return lines.join('\n')
 }
 

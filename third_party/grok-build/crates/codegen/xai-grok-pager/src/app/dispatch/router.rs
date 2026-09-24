@@ -1070,7 +1070,23 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 app.show_toast("Cannot change preset while the session is busy");
                 return vec![];
             }
-            app.persona_override = Some(name);
+            // DIVERGENCE(dscode): the leader refuses to change the preset of a
+            // session that has history, and a refused reload would leave an
+            // empty transcript. Such a session keeps its preset; the picked one
+            // opens a new session instead.
+            let has_history = get_active_agent(app).is_some_and(|agent| {
+                agent.scrollback.iter_entries().any(|(_, entry)| {
+                    matches!(entry.block, crate::scrollback::RenderBlock::UserPrompt(_))
+                })
+            });
+            app.persona_override = Some(name.clone());
+            if has_history {
+                let effects = dispatch_new_session(app);
+                app.show_toast(&format!(
+                    "Preset {name} starts a new session; the previous one keeps its preset and stays in /resume"
+                ));
+                return effects;
+            }
             // Apply immediately: reload a live session so the transcript
             // replays under the picked preset. The leader overrides the
             // persisted header preset when session/load carries an explicit

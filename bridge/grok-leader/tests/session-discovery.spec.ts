@@ -101,6 +101,20 @@ describe('owned session discovery', () => {
     expect((await f.picker({ cwd: '/work', query: 'FOREIGN' })).map(row => row.sessionId)).toEqual(['foreign'])
   })
 
+  it('lists conversations the user started, not subagent or teammate children, which still resume by exact id', async () => {
+    const f = fixture()
+    f.add('lead', '/work', [prompt('lead prompt')])
+    const child = f.add('child', '/work', [prompt('<system-reminder> You are teammate')])
+    f.headers.set('child', { ...child, parentSession: SessionId('lead'), origin: 'subagent', delegationDepth: 1 })
+    const fork = f.add('fork', '/work', [prompt('forked prompt')])
+    f.headers.set('fork', { ...fork, parentSession: SessionId('lead'), isSeeded: true })
+    expect((await f.picker({ cwd: '/work' })).map(row => row.sessionId).sort()).toEqual(['fork', 'lead'])
+    expect((await f.roster()).map(row => row.sessionId).sort()).toEqual(['fork', 'lead'])
+    // Its log is not even opened for the listing.
+    expect(f.open.mock.calls.map(call => call[0])).not.toContain('child')
+    expect((await f.picker({ cwd: '/work', query: 'child' })).map(row => row.sessionId)).toEqual(['child'])
+  })
+
   it('preserves both legacy list payloads without opening logs', async () => {
     const f = fixture(), a = f.add('a', '/work', [], 10), b = f.add('b', null, [], 20)
     await expect(f.discovery.list('session/list')).resolves.toEqual({ sessions: [{ sessionId: 'a', cwd: '/work', updatedAt: new Date(10).toISOString() }] })

@@ -33,7 +33,7 @@ import { createPluginRows, type PluginManagerLike } from './plugin-rows.ts'
 import { createBrowserControl, type BrowserStatus } from './browser-control.ts'
 import { createNativeTeam, type TeamServiceLike } from './native-team.ts'
 import { TEAM_TOOLS_MODULE } from './team-presets.ts'
-import { configuredRemote, executionWorld, type ConfigEntryLike, type RemoteLike } from './execution-world.ts'
+import { configuredRemote, executionWorld, remoteUnavailable, SSH_FAILURE, type ConfigEntryLike, type RemoteConnection, type RemoteLike } from './execution-world.ts'
 import type { LlmLike, SettingsLike, CredentialsLike, AgentDefaultModelLike } from './native-seams.ts'
 export { providerUserSection, providerUserProfile, hasUserProviderRoute, knownRouteBaseUrls } from './provider-profile.ts'
 /**
@@ -161,6 +161,17 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   // The configured SSH row decides the world, connected or not.
   const remote = (): RemoteLike | undefined => configuredRemote((ctx.get('configEditor') as { entries(): Iterable<ConfigEntryLike> } | undefined)?.entries() ?? [])
   const world = () => executionWorld(remote())
+  // dsh-ssh keeps a lost connection's error on the service (`failure`); it never
+  // reconnects. A connection that never came up leaves no service at all.
+  const sshState = (): RemoteConnection => {
+    const ssh = ctx.get('ssh') as { failure?: unknown } | undefined
+    if (ssh === undefined) {
+      const failure = (globalThis as Record<symbol, unknown>)[SSH_FAILURE]
+      return { state: 'failed', ...typeof failure === 'string' ? { reason: failure } : {} }
+    }
+    return ssh.failure instanceof Error ? { state: 'lost', reason: ssh.failure.message } : { state: 'connected' }
+  }
+  const remoteProblem = () => remoteUnavailable(remote(), sshState())
   // Build provenance banner: three caches can pin stale bridge code (the
   // profile's node_modules copy, a live leader process, a stale lib build),
   // and "which build is actually serving" has been unanswerable from logs.
@@ -259,7 +270,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     client: id => connections.get(id),
     permissionPresets: () => ctx.get('permissionPresets') as { set(session: Agent['session'], preset: string): void } | undefined,
     planMode: record => presetServiceFor(record, 'planMode') as { set(agent: Agent, active: boolean): unknown } | undefined,
-    on: (name, listener) => ctx.on(name as never, listener as never), logger,
+    on: (name, listener, options) => ctx.on(name as never, listener as never, options), logger,
   })
   const discovery = createSessionDiscovery({
     persistence, query: () => ctx.get('sessionQuery') as SessionQueryLike | undefined,
@@ -271,6 +282,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   })
   const lifecycle = createSessionLifecycle({
     agents, registry, models: sessionModels, presets: sessionPresets, persistence, discovery, world,
+    remoteUnavailable: remoteProblem,
     flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),
     client: id => connections.get(id),
     queue: { combineQueued, followUpSteer },
@@ -418,13 +430,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     notify: (record, method, params) => connections.get(record.clientId)?.notify(method, params),
     cancelHuman: interactions.cancel,
     goal: { pauseGoal: record => nativeStatus.pauseGoal(record), refresh: record => nativeStatus.refresh(record) },
+    remoteUnavailable: remoteProblem,
   })
 
   const execution = createNativeExecution<SessionRecord>({
     owned: ownedRecord, profileDirectory: profilePlugins.directory,
     inspector: () => ctx.get('dscodeInspector') as { url: string; captureFetch: boolean } | undefined,
     browser: () => (ctx.get('dscodeBrowser') as { status(): BrowserStatus } | undefined)?.status(),
-    remote: () => { const configured = remote(); return configured === undefined ? undefined : { ...configured, connected: ctx.get('ssh') !== undefined } },
+    remote: () => { const configured = remote(); return configured === undefined ? undefined : { ...configured, connected: sshState().state === 'connected' } },
     hostTeamRows: async () => (await (ctx.get('pluginManager') as PluginManagerLike | undefined)?.listPlugins() ?? [])
       .filter(row => row.enabled && row.moduleName === TEAM_TOOLS_MODULE).map(row => row.patchId ?? row.entryId),
     terminals: record => presetServiceFor(record, 'terminals') as NativeTerminals | undefined,
@@ -624,7 +637,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     sessions: registry, catalog: models, transport,
     owners: [discovery, sessionCommands, execution, asides, artifacts, input, interactions,
       sessionPresets, sessionModels, profilePlugins, children, nativeStatus, tasks],
-    pollers: [tasks, children, nativeStatus], idleExitMs: config.idleExitMs,
+    pollers: [tasks, children, nativeStatus],
+    // A leader whose remote connection is gone exits at once, so restarting dscode reconnects.
+    idleExitMs: () => remoteProblem() === undefined ? config.idleExitMs ?? 2000 : 0,
     appExit: () => ctx.get('appExit') as ((code: number) => void) | undefined, logger,
   })
   // Register cleanup before listen can fail synchronously.

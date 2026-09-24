@@ -59,7 +59,29 @@ describe('native interaction ownership', () => {
     const browser = f.emit<string>('approval/request', { agent: f.root.agent, callId: 'call', toolName: 'mcp__playwright-mcp__browser_navigate' }, async () => 'fallback')
     await expect(browser).resolves.toBe('allowed-once')
     expect(f.request).toHaveBeenCalledOnce()
-    expect(f.request.mock.calls[0]![1]).toMatchObject({ toolCall: { displayName: 'mcp__playwright-mcp__browser_navigate' } })
+    expect(f.request.mock.calls[0]![1]).toMatchObject({ toolCall: { displayName: 'mcp__playwright-mcp__browser_navigate' }, _meta: { dscodeAlwaysAsks: true } })
+  })
+
+  it('shows what an approval would run: the planned arguments and, for the browser, the action', async () => {
+    const f = fixture()
+    // The recorder runs first in the pre-execute chain and always delegates.
+    expect(f.host.on).toHaveBeenCalledWith('tools/pre-execute', expect.any(Function), { prepend: true })
+    const preExecute = (callId: string, name: string, args: unknown) => f.emit('tools/pre-execute', { callId, name, arguments: args }, async () => ({ kind: 'ask' }))
+    await expect(preExecute('nav', 'mcp__playwright-mcp__browser_navigate', { url: 'http://127.0.0.1:3000/a' })).resolves.toEqual({ kind: 'ask' })
+    await f.emit('approval/request', { agent: f.root.agent, callId: 'nav', toolName: 'mcp__playwright-mcp__browser_navigate' }, async () => 'fallback')
+    expect(f.request.mock.calls[0]![1]).toMatchObject({ toolCall: { toolCallId: 'nav', title: 'the browser to open http://127.0.0.1:3000/a',
+      rawInput: { variant: 'MCPTool', tool_name: 'mcp__playwright-mcp__browser_navigate', tool_input: { url: 'http://127.0.0.1:3000/a' } } } })
+    await preExecute('sh', 'bash', { command: 'ls', description: 'List files' })
+    await f.emit('approval/request', { agent: f.root.agent, callId: 'sh', toolName: 'bash' }, async () => 'fallback')
+    expect(f.request.mock.calls[1]![1]).toEqual(expect.objectContaining({ toolCall: { toolCallId: 'sh', displayName: 'bash', rawInput: { command: 'ls', description: 'List files' } } }))
+    expect(f.request.mock.calls[1]![1]).not.toHaveProperty('_meta')
+    // A consumed or mismatched call shows no stale arguments.
+    await preExecute('x', 'bash', { command: 'rm' })
+    await f.emit('approval/request', { agent: f.root.agent, callId: 'x', toolName: 'other' }, async () => 'fallback')
+    await f.emit('approval/request', { agent: f.root.agent, callId: 'sh', toolName: 'bash' }, async () => 'fallback')
+    expect(f.request.mock.calls[2]![1]).toMatchObject({ toolCall: { toolCallId: 'x', displayName: 'other' } })
+    expect((f.request.mock.calls[2]![1] as { toolCall: object }).toolCall).not.toHaveProperty('rawInput')
+    expect((f.request.mock.calls[3]![1] as { toolCall: object }).toolCall).not.toHaveProperty('rawInput')
   })
 
   it('routes one-shot approvals to the exact owner and preserves unbounded human waits', async () => {

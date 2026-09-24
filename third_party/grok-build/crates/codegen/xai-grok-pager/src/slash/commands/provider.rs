@@ -146,6 +146,13 @@ impl SlashCommand for ProviderCommand {
                 .unwrap_or_default();
             return CommandResult::Error(format!("Provider {provider} has no models{note}"));
         };
+        // DIVERGENCE(dscode): re-picking the active provider says so instead of
+        // closing silently.
+        if ctx.models.current.as_ref() == Some(&model_id) {
+            return CommandResult::Message(format!(
+                "{provider} is already the active provider; use /model to change its model."
+            ));
+        }
         CommandResult::Action(Action::SetDefaultModel(model_id))
     }
 }
@@ -425,6 +432,17 @@ mod tests {
                 assert_eq!(id.0.as_ref(), "pi-code");
             }
             other => panic!("expected SetDefaultModel(pi-code), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repicking_the_active_provider_says_so() {
+        let state = sample();
+        let current = state.provider_for(state.current.as_ref().unwrap()).to_string();
+        let mut ctx = exec_ctx(&state);
+        match ProviderCommand.run(&mut ctx, &current) {
+            CommandResult::Message(text) => assert!(text.contains("is already the active provider"), "{text}"),
+            other => panic!("expected a message, got {other:?}"),
         }
     }
 

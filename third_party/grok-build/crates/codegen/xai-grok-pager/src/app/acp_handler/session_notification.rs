@@ -881,8 +881,17 @@ pub(super) fn handle_session_notification_with_origin(
                 .and_then(|meta| meta.get("subagentMetricsAvailable"))
                 .and_then(serde_json::Value::as_bool)
                 != Some(false);
+            // DIVERGENCE(dscode): the leader knows a native child's run length
+            // without its other metrics; without one a settled row keeps counting.
+            let duration_available = metrics_available
+                || session_notif
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("subagentDurationAvailable"))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true);
             let elapsed_dur =
-                metrics_available.then(|| std::time::Duration::from_millis(duration_ms));
+                duration_available.then(|| std::time::Duration::from_millis(duration_ms));
             let info_ref = agent.subagent_sessions.get(&child_session_id);
             let entry_id = info_ref.and_then(|s| s.scrollback_entry_id);
             let is_background = info_ref.is_some_and(|s| s.is_background);
@@ -985,7 +994,7 @@ pub(super) fn handle_session_notification_with_origin(
                 info.finished = true;
                 info.status = Some(Arc::from(status));
                 info.error = error.map(Arc::from);
-                info.duration_ms = metrics_available.then_some(duration_ms);
+                info.duration_ms = duration_available.then_some(duration_ms);
                 info.tool_calls = metrics_available.then_some(tool_calls);
                 info.turns = metrics_available.then_some(turns);
                 if !metrics_available {

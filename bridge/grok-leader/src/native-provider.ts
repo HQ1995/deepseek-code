@@ -10,6 +10,8 @@ import type { PluginRows } from './plugin-rows.ts'
 export const NATIVE_DEEPSEEK_PROVIDER = 'deepseek-official'
 /** Wire marker for the add-provider form; never a pi-ai `api` value. */
 export const NATIVE_DEEPSEEK_API = 'deepseek-native'
+/** How /provider and /model name this route beside a pi-ai "DeepSeek" route. */
+export const NATIVE_DEEPSEEK_NAME = 'DeepSeek (native API)'
 const ROW_ID = 'llm-deepseek'
 const MODULE = '@deepseek-ai/dsh-llm-deepseek'
 const DEFAULT_KEY_ENV = 'DEEPSEEK_API_KEY'

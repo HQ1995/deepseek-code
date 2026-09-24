@@ -98,6 +98,12 @@ fn process_cwd() -> PathBuf {
 /// raw cwd path with `~` collapsed; the worktree suffix fills in once the
 /// probe lands.
 fn format_cwd_display(cwd: &Path, info: Option<&git_info::CwdGitInfo>) -> String {
+    // DIVERGENCE(dscode): a remote profile names its host and workspace,
+    // never this computer's launch directory.
+    let world = crate::execution_world::execution_world();
+    if let crate::execution_world::ExecutionWorld::Remote { host, .. } = &world {
+        return format!("ssh {host}:{}", world.session_cwd(cwd).display());
+    }
     let display = collapse_home(cwd);
     let main_repo = info.and_then(|i| i.main_repo.as_deref());
     format_cwd_parts(&display, main_repo)
@@ -126,6 +132,14 @@ fn collapse_home(dir: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_welcome_names_the_host_workspace() {
+        use crate::execution_world::{ExecutionWorld, with_test_world};
+        let remote = ExecutionWorld::Remote { host: "swoop".into(), workspace: "/srv/w".into() };
+        let shown = with_test_world(remote, || format_cwd_display(Path::new("/Users/me/project"), None));
+        assert_eq!(shown, "ssh swoop:/srv/w");
+    }
 
     #[test]
     fn format_cwd_plain_repo() {

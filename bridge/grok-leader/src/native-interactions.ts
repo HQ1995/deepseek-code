@@ -6,10 +6,13 @@ import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalRequestEvent } from '@deepseek-ai/dsh-user-approval/types'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 import { internalError, invalidParams, paramRecord } from './acp.ts'
+import { browserAction, isBrowserTool } from './browser-actions.ts'
 import type { LeaderClient } from './leader-transport.ts'
 
 interface InteractionSession { agent: Agent; clientId: number; yolo: boolean; queue: { cancel(): void }; work: { cancel(): void } }
+interface PendingCall { readonly callId?: string; readonly name: string; readonly arguments: unknown }
 interface InteractionEvents {
+  'tools/pre-execute': (exec: PendingCall, next: () => Promise<unknown>) => Promise<unknown>
   'approval/request': (request: ApprovalRequestEvent, next: () => Promise<ApprovalOutcome>) => Promise<ApprovalOutcome>
   'user-questions/request': (request: AskUserQuestionRequest, next: () => Promise<AskUserQuestionAnswer>) => Promise<AskUserQuestionAnswer>
 }
@@ -20,7 +23,7 @@ interface InteractionHost<S extends InteractionSession> {
   client(id: number): Pick<LeaderClient, 'closed' | 'request' | 'rejectSessionRequests'> | undefined
   permissionPresets(): { set(session: Agent['session'], preset: string): void } | undefined
   planMode(record: S): { set(agent: Agent, active: boolean): unknown } | undefined
-  on<K extends keyof InteractionEvents>(name: K, listener: InteractionEvents[K]): () => void
+  on<K extends keyof InteractionEvents>(name: K, listener: InteractionEvents[K], options?: { prepend?: boolean }): () => void
   logger: { warn(message: string): void }
 }
 type Meta = Record<string, unknown> | null | undefined
@@ -28,6 +31,8 @@ const permissionModes = new Set(['default', 'ask', 'workspace-write', 'plan', 'b
 const object = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined
 const cancelledQuestion = () => new UserQuestionError('the user cancelled ask_user_question', 'ASK_CANCELLED')
+/** Calls whose arguments an approval prompt may still show. */
+const RECENT_CALLS = 64
 
 /** Native policy and human answerers share exact-session ownership. This module
  * owns subscriptions and accepted reverse requests, not the transport engine.
@@ -39,6 +44,32 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
   const pending = new Map<AbortController, { record: S; promise: Promise<unknown> }>()
   const inconsistent = new WeakSet<S>()
   const unsubscribes: Array<() => void> = []
+  // Approval requests name only the call. Its arguments come from the
+  // pre-execute pass that runs just before; a bounded window keeps an ask that
+  // never reaches an answerer from pinning them.
+  const calls = new Map<string, PendingCall>()
+  const remember: InteractionEvents['tools/pre-execute'] = (exec, next) => {
+    if (typeof exec.callId === 'string') {
+      calls.delete(exec.callId)
+      calls.set(exec.callId, exec)
+      if (calls.size > RECENT_CALLS) calls.delete(calls.keys().next().value!)
+    }
+    return next()
+  }
+  /** The TUI shows the planned arguments and, for browser calls, what they do. */
+  const permissionToolCall = (callId: string, toolName: string) => {
+    const call = calls.get(callId)
+    calls.delete(callId)
+    const args = call?.name === toolName ? call.arguments : undefined
+    const action = browserAction(toolName, args)
+    return {
+      toolCallId: callId, displayName: toolName,
+      ...action === undefined ? {} : { title: 'the browser to ' + action },
+      ...args === undefined ? {} : {
+        rawInput: toolName.startsWith('mcp__') ? { variant: 'MCPTool', tool_name: toolName, tool_input: args } : args,
+      },
+    }
+  }
   const assertReady = (record: S): void => {
     if (closed) throw internalError('native interactions have been disposed')
     if (inconsistent.has(record)) throw invalidParams('session permission state is inconsistent; close or reload the session')
@@ -80,21 +111,25 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
   const approval: InteractionEvents['approval/request'] = (request, next) => {
     if (closed) return Promise.resolve('cancelled')
     const record = host.ownedAgent(request.agent)
-    if (record === undefined || request.callId === undefined) return next()
+    const callId = request.callId
+    if (record === undefined || callId === undefined) return next()
     const client = host.client(record.clientId)
     if (client === undefined) return next()
     return accepted(record, request.signal, async signal => {
       if (signal.aborted || !live(record)) return 'cancelled'
       // Browser actions reach arbitrary hosts; always-approve never covers them.
-      if (record.yolo && request.toolName?.startsWith('mcp__playwright-mcp__') !== true) return 'allowed-once'
+      const browser = isBrowserTool(request.toolName)
+      if (record.yolo && !browser) { calls.delete(callId); return 'allowed-once' }
       try {
         const response = await client.request<unknown>('session/request_permission', {
           sessionId: record.agent.session.id,
-          toolCall: { toolCallId: request.callId, displayName: request.toolName },
+          toolCall: permissionToolCall(callId, request.toolName),
           options: [
             { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
             { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
           ],
+          // The TUI neither auto-approves nor offers always-approve for these.
+          ...browser ? { _meta: { dscodeAlwaysAsks: true } } : {},
         }, record.agent.session.id, Infinity, signal)
         if (signal.aborted || !live(record)) return 'cancelled'
         const outcome = object(object(response)?.outcome)
@@ -218,6 +253,8 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
     return disposal
   }
   try {
+    // First in the chain, so a policy that answers without delegating still leaves the arguments.
+    unsubscribes.push(host.on('tools/pre-execute', remember, { prepend: true }))
     unsubscribes.push(host.on('approval/request', approval))
     unsubscribes.push(host.on('user-questions/request', question))
   } catch (error) {

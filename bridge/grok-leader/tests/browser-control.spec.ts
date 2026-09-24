@@ -35,16 +35,30 @@ describe('/browser', () => {
     const report = await f.control.execute('/browser on --origin https://example.com --origin https://example.com')
     expect(f.isEnabled()).toBe(true)
     expect(f.config).toEqual({ navigationOrigins: ['https://example.com'] })
-    expect(report).toContain('applies to new or resumed Sessions')
-    expect(report).toContain('executable: /opt/chrome (discovered)')
-    expect(report).toContain('allowed origins: https://example.com')
-    expect(report).toContain('not an OS network or host sandbox')
-    expect(await f.control.execute('/browser status')).toContain('sandbox: on')
+    expect(report).toContain('Browser turned on for new sessions. Start one with /new.')
+    expect(report).toContain('\n- executable: /opt/chrome (discovered)\n')
+    expect(report).toContain('- allowed origins: https://example.com')
+    expect(report).toContain('it is not a network sandbox')
+    const status = await f.control.execute('/browser status')
+    expect(status).toContain('- sandbox: on')
+    // The security note belongs to on and help, not every status check.
+    expect(status).not.toContain('network sandbox')
+    expect(await f.control.execute('/browser help')).toContain('network sandbox')
+  })
+
+  it('writes Markdown the TUI renders line by line, with literal placeholders', async () => {
+    const f = fixture({ executable: '/opt/chrome' })
+    const help = await f.control.execute('/browser help')
+    // A bare <word> is raw HTML in Markdown; placeholders stay inside code spans.
+    expect(help).not.toMatch(/<[a-z]+>/)
+    expect(help).toMatch(/^Usage:\n- `\/browser` shows the status\.\n- `\/browser on /)
+    await expect(f.control.execute('/browser on --bogus')).rejects.toThrow('Unknown /browser on option "--bogus".\n\nUsage:\n- ')
+    expect(await f.control.execute('/browser on')).toContain('- allowed origins: none, so every page is blocked. Add one with `/browser origins add URL`')
   })
 
   it('shows why the requested sandbox may not start', () => {
     const text = describeBrowser({ executable: '/opt/c', sandbox: true, sandboxWarning: 'this host restricts user namespaces', anyOrigin: false, origins: [], sessions: 0 })
-    expect(text).toContain('  sandbox: on\n  sandbox may not start: this host restricts user namespaces')
+    expect(text).toContain('- sandbox: on\n- sandbox may not start: this host restricts user namespaces')
   })
 
   it('edits origins live and refuses them while the browser is off', async () => {
@@ -58,7 +72,10 @@ describe('/browser', () => {
     for (const origin of ['https://good.example;evil', 'https://good.example;*', 'https://a.example,b']) {
       await expect(f.control.execute('/browser origins add ' + origin)).rejects.toThrow('plain host name')
     }
-    expect(await f.control.execute('/browser origins add https://example.org')).toContain('page-request filtering changes for Sessions started after this')
+    expect(await f.control.execute('/browser origins add https://example.org')).toContain('Added https://example.org for new sessions. Start one with /new')
+    expect(await f.control.execute('/browser origins remove https://example.org')).toContain('No session can navigate to it any more')
+    expect(describeBrowser({ executable: '/opt/c', sandbox: true, anyOrigin: false, origins: ['https://example.com'], sessions: 2 }))
+      .toContain('- open sessions keep the origins their browser started with')
   })
 
   it('requires explicit risk acceptance to drop the sandbox and restores it with --sandbox', async () => {

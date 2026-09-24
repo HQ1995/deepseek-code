@@ -423,13 +423,13 @@ export const main = async () => {
   // Diagnostics must work even when provisioning/tuple validation would fail.
   if (args[0] === 'doctor' && args.includes('--runtime')) {
     if (args.some(arg => !['doctor', '--runtime', '--json'].includes(arg))) throw new Error('Usage: dscode doctor --runtime [--json]')
-    const findings = installationReport({ profile: profileDir })
+    const findings = installationReport({ profile: profileDir, remote: true })
     console.log(args.includes('--json') ? JSON.stringify(findings) : formatInstallationReport(findings))
     process.exitCode = findings.some(finding => finding.status === 'ERROR') ? 1 : 0
     return
   }
   const updateIndex = updateCommandIndex(args)
-  if (updateIndex === -1 && (args.includes('--help') || args.includes('-h'))) {
+  if (updateIndex === -1 && args[0] !== 'remote' && (args.includes('--help') || args.includes('-h'))) {
     if (existsSync(binPath)) spawnAndExit(binPath, args, process.env)
     else console.log('Usage: dscode [OPTIONS] [PROMPT]\n       dscode update [--stable | --beta | --alpha] [--version VERSION] [--check] [--json] [--force-reinstall]\n       dscode remote init|status|remove\n       dscode uninstall')
     return
@@ -488,10 +488,12 @@ export const main = async () => {
   }
   if (args[0] === 'remote') {
     const { remoteCommand } = await import('./remote.mjs')
+    const { localHelpers } = await import('./remote-check.mjs')
     // Only an explicitly chosen home may become remote; ~/.dsh keeps local workspaces.
     const defaultProfile = join(homedir(), '.dsh', 'profiles', PROFILE_NAME)
     await remoteCommand(args.slice(1), {
       profileDir, dedicatedHome: resolve(profileDir) !== resolve(defaultProfile),
+      local: localHelpers(process.env.DSH_BIN || dshRuntimeBin),
       withLock: async action => {
         try { return await withProfileLock(profileDir, action) } catch (error) {
           // Without an installed runtime no leader can run in this home, so

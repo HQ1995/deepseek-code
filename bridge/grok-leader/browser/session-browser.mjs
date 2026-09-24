@@ -7,7 +7,7 @@ import { importRuntime } from '../shared/runtime-modules.mjs'
 import * as McpClient from '@deepseek-ai/dsh-mcp-client'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { browserOperation } from './operation.mjs'
-import { prefix, serverName } from './policy.mjs'
+import { hiddenTool, OUTPUT_PREFIX, prefix, serverName, withoutAnsi } from './policy.mjs'
 
 const { BrowserUseProviderName } = await importRuntime('@deepseek-ai/dsh-browser-use/brand')
 const { SessionResources } = await importRuntime('@deepseek-ai/dsh-experimental-browser-use-runtime')
@@ -16,9 +16,10 @@ const { SessionResources } = await importRuntime('@deepseek-ai/dsh-experimental-
 const topLevel = agent => agent.session?.header?.parentSession === undefined
 
 /**
- * @param options.launch - per-open launch arguments from the live config; throws a user-facing error.
+ * @param options.launch - per-open `{ args, policy }` from the live config; throws a user-facing error.
  * @param options.onChange - observes the live session count.
  * @param options.onError - receives why a Session's browser could not start.
+ * @returns `launched(agent)`: the origin policy that agent's open browser started with.
  */
 export function mountBrowserSessions(ctx, options) {
   const clients = new Map()
@@ -29,7 +30,7 @@ export function mountBrowserSessions(ctx, options) {
       label: 'dscode-browser', exclusive: false,
       async open(agent, signal) {
         const scope = createScope(ctx, agent)
-        const outputDir = await mkdtemp(join(tmpdir(), 'dscode-browser-'))
+        const outputDir = await mkdtemp(join(tmpdir(), OUTPUT_PREFIX))
         let closing
         // One cleanup: the MCP scope (and its browser), then the private artifacts.
         const state = { closed: false, close: () => closing ??= (async () => {
@@ -39,9 +40,12 @@ export function mountBrowserSessions(ctx, options) {
         signal.addEventListener('abort', cancel, { once: true })
         try {
           signal.throwIfAborted()
+          const { args, policy } = options.launch(outputDir)
+          state.policy = policy
+          // The private output directory is also the server's working and file root.
           await scope.ctx.plugin(McpClient, McpClient.Config({
             transport: 'stdio', serverName, command: process.execPath,
-            args: options.launch(outputDir), env: options.env, cwd: agent.session.header.cwd,
+            args, env: options.env, cwd: outputDir,
             toolCallTimeoutMs: options.toolCallTimeoutMs,
             failOnStartupError: true, reconnect: { enabled: false },
           }))
@@ -73,15 +77,20 @@ export function mountBrowserSessions(ctx, options) {
     if (!exec.name.startsWith(prefix)) return next()
     const agent = exec.agent
     if (!agent || !clients.has(agent)) throw new Error('Browser tool belongs to another live Session')
-    return resources.run(agent, exec.signal, (state, signal) => browserOperation(state, signal, async combined => {
+    return withoutAnsi(await resources.run(agent, exec.signal, (state, signal) => browserOperation(state, signal, async combined => {
       const original = exec.signal
       exec.signal = combined
       try { return await next() } finally { exec.signal = original }
-    }, options.toolCallTimeoutMs))
+    }, options.toolCallTimeoutMs)))
   })
+  // The model sees only the reviewed operations; a closed browser drops its instructions.
   ctx.on('system-prompt/assemble', async (_assembly, { agent }, next) => {
     const assembly = await next()
-    if (!agent || !clients.get(agent)?.closed) return assembly
-    return { ...assembly, sections: assembly.sections.filter(section => section.name !== 'mcp:playwright-mcp') }
+    const closed = agent !== undefined && clients.get(agent)?.closed === true
+    if (!closed && !assembly.tools.some(tool => hiddenTool(tool.name))) return assembly
+    return { ...assembly,
+      sections: closed ? assembly.sections.filter(section => section.name !== 'mcp:playwright-mcp') : assembly.sections,
+      tools: assembly.tools.filter(tool => !hiddenTool(tool.name)) }
   })
+  return { launched: agent => clients.get(agent)?.policy }
 }

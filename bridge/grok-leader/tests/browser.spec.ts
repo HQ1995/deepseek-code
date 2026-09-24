@@ -5,7 +5,8 @@ import { setImmediate } from 'node:timers/promises'
 import { describe, expect, it } from 'vitest'
 import { NO_ORIGIN, browserCandidates, browserLaunchArgs, resolveBrowserExecutable, sandboxRestriction } from '../browser/executable.mjs'
 import { browserOperation } from '../browser/operation.mjs'
-import { browserDenial, navigationPolicy, prefix } from '../browser/policy.mjs'
+import { browserDenial, hiddenTool, launchDenial, navigationPolicy, prefix, withoutAnsi } from '../browser/policy.mjs'
+import { browserAction, browserCardTitle } from '../src/browser-actions.ts'
 
 const policy = navigationPolicy(['http://127.0.0.1:3456'])
 const deny = (name: string, args: unknown = {}, current = policy) => browserDenial({ name: prefix + name, arguments: args }, current)
@@ -42,7 +43,7 @@ describe('browser policy', () => {
 
   it('checks direct navigation against exact origins, or any HTTP(S) origin when chosen', () => {
     expect(deny('browser_navigate', { url: 'http://127.0.0.1:3456/path?q=1' })).toBeUndefined()
-    expect(deny('browser_navigate', { url: 'https://example.com' })).toContain('/browser origins add https://example.com')
+    expect(deny('browser_navigate', { url: 'https://example.com' })).toContain('/browser origins add https://example.com and then start a new session with /new')
     for (const url of ['file:///tmp/a', 'javascript:alert(1)', 'blob:http://127.0.0.1:3456/id', 'http://user@127.0.0.1:3456/', '//127.0.0.1:3456/', null]) {
       expect(typeof deny('browser_navigate', { url })).toBe('string')
     }
@@ -50,6 +51,56 @@ describe('browser policy', () => {
     expect(deny('browser_navigate', { url: 'https://example.com/x' }, any)).toBeUndefined()
     expect(deny('browser_navigate', { url: 'file:///etc/passwd' }, any)).toMatch(/HTTP\(S\)/)
     expect(deny('browser_navigate', { url: 'https://a:b@example.com' }, any)).toMatch(/credentials/)
+  })
+})
+
+describe('browser session limits', () => {
+  it('names an origin added after the session\'s browser started instead of a bare ERR_BLOCKED_BY_CLIENT', () => {
+    const navigate = (url: string) => ({ name: prefix + 'browser_navigate', arguments: { url } })
+    const launched = navigationPolicy(['http://127.0.0.1:3456'])
+    expect(launchDenial(navigate('http://127.0.0.1:3456/a'), launched)).toBeUndefined()
+    expect(launchDenial(navigate('https://example.com/'), launched)).toBe('https://example.com was allowed after this session\'s browser started,'
+      + ' so its pages stay blocked here. The user can start a new session with /new to use it.')
+    expect(launchDenial(navigate('https://example.com/'), navigationPolicy([], true))).toBeUndefined()
+    expect(launchDenial(navigate('https://example.com/'), undefined)).toBeUndefined()
+    expect(launchDenial({ name: prefix + 'browser_click', arguments: {} }, launched)).toBeUndefined()
+  })
+
+  it('hides only the refused operations from the model', () => {
+    expect(hiddenTool(prefix + 'browser_evaluate')).toBe(true)
+    expect(hiddenTool(prefix + 'browser_navigate')).toBe(false)
+    expect(hiddenTool('list_mcp_resources')).toBe(false)
+  })
+
+  it('removes terminal colour codes from results without mutating them', () => {
+    const result = { isError: true, content: [{ type: 'text', text: 'Call log:\u001b[2m  - navigating\u001b[22m' }, { type: 'image', data: 'x' }],
+      error: { message: 'failed \u001b[31mred\u001b[39m' } }
+    const clean = withoutAnsi(result)
+    expect(clean).toEqual({ isError: true, content: [{ type: 'text', text: 'Call log:  - navigating' }, { type: 'image', data: 'x' }], error: { message: 'failed red' } })
+    expect(result.content[0]!.text).toContain('\u001b[2m')
+    expect(withoutAnsi(undefined)).toBeUndefined()
+    // Private output paths shrink to their file names.
+    const shot = withoutAnsi({ content: [{ type: 'text', text: 'Snapshot (../../../../var/folders/f5/x/T/dscode-browser-gbNWdR/page-1.yml) and /tmp/dscode-browser-Ab12/page-2.png' }] })
+    expect(shot.content[0].text).toBe('Snapshot (page-1.yml) and page-2.png')
+  })
+})
+
+describe('browser wording', () => {
+  it('says what each call does for cards and approvals', () => {
+    expect(browserCardTitle(prefix + 'browser_navigate', { url: 'http://127.0.0.1:3456/page' })).toBe('Browser: open http://127.0.0.1:3456/page')
+    expect(browserAction(prefix + 'browser_click', { element: 'Submit button', ref: 'e3' })).toBe('click Submit button')
+    expect(browserAction(prefix + 'browser_click', { ref: 'e3', doubleClick: true })).toBe('double-click element e3')
+    expect(browserAction(prefix + 'browser_type', { element: 'Search', text: 'secret', submit: true })).toBe('type into Search and submit')
+    expect(browserAction(prefix + 'browser_fill_form', { fields: [{}, {}] })).toBe('fill 2 form fields')
+    expect(browserAction(prefix + 'browser_select_option', { element: 'Size', values: ['L'] })).toBe('choose "L" in Size')
+    expect(browserAction(prefix + 'browser_press_key', { key: 'Enter' })).toBe('press Enter')
+    expect(browserAction(prefix + 'browser_wait_for', { textGone: 'Loading' })).toBe('wait for "Loading" to disappear')
+    expect(browserAction(prefix + 'browser_resize', { width: 800, height: 600 })).toBe('resize the window to 800×600')
+    expect(browserAction(prefix + 'browser_snapshot', {})).toBe('read the page')
+    expect(browserAction(prefix + 'browser_evaluate', {})).toBe('run evaluate')
+    // Model text never breaks the card: control characters fold and long values clip.
+    expect(browserAction(prefix + 'browser_navigate', { url: 'https://x.test/\n' + 'a'.repeat(200) })).toMatch(/^open https:\/\/x\.test\/ a+…$/)
+    expect(browserAction('bash', { command: 'ls' })).toBeUndefined()
   })
 })
 
@@ -148,5 +199,14 @@ describe('browser executable', () => {
       .toEqual(['--allowed-origins', 'https://a.example;http://127.0.0.1:3000', '--block-service-workers'])
     // The request filter is fixed at launch: no origins yet means nothing loads, not everything.
     expect(browserLaunchArgs({ ...base, sandbox: true }).slice(-3)).toEqual(['--allowed-origins', NO_ORIGIN, '--block-service-workers'])
+  })
+})
+
+describe('browser plugin module', () => {
+  it('loads as the plugin row imports it', async () => {
+    const plugin = await import('../browser/index.mjs')
+    expect(plugin.name).toBe('dscode-browser')
+    expect(typeof plugin.apply).toBe('function')
+    expect(plugin.ALWAYS_APPROVE).toContain('always-approve mode')
   })
 })

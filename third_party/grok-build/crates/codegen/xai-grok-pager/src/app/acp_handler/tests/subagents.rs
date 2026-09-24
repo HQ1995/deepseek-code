@@ -145,6 +145,33 @@
     }
 
     #[test]
+    fn native_subagent_run_length_settles_without_other_metrics() {
+        // DIVERGENCE(dscode): the leader reports a settled child's run length
+        // on its own, so the finished row stops counting up.
+        let mut app = make_app_with_agent("sess-parent");
+        handle(make_ext_session_notification_with_method(
+            "sess-parent", "x.ai/session/update",
+            test_subagent_spawned("sess-parent", "child-native"),
+        ), &mut app);
+        let payload = serde_json::json!({
+            "sessionId": "sess-parent",
+            "_meta": { "subagentMetricsAvailable": false, "subagentDurationAvailable": true },
+            "update": {
+                "sessionUpdate": "subagent_finished", "subagent_id": "child-native",
+                "child_session_id": "child-native", "status": "completed", "duration_ms": 4200
+            }
+        });
+        let notification = acp::ExtNotification::new("x.ai/session/update",
+            std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()));
+        handle_ext_notification(&notification, &mut app);
+        let info = &app.agents[&AgentId(0)].subagent_sessions["child-native"];
+        assert!(info.finished);
+        assert_eq!(info.duration_ms, Some(4200));
+        assert_eq!(info.display_elapsed(), std::time::Duration::from_millis(4200));
+        assert_eq!(info.turns, None, "other metrics stay unknown");
+    }
+
+    #[test]
     fn native_subagent_terminal_unknown_metrics_and_output_enrichment() {
         use crate::scrollback::block::BlockContent;
         use crate::scrollback::types::{BlockContext, DisplayMode};

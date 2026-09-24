@@ -290,6 +290,32 @@
     }
 
     #[test]
+    fn always_asking_permission_waits_for_an_answer_even_in_yolo() {
+        // DIVERGENCE(dscode): browser actions carry `dscodeAlwaysAsks`; YOLO
+        // must queue them instead of approving on the user's behalf.
+        let mut app = make_app_with_agent("sess-A");
+        app.agents.get_mut(&AgentId(0)).unwrap().session.yolo_mode = true;
+        let (msg, mut rx) = make_permission_message("sess-A");
+        let msg = match msg {
+            AcpClientMessage::RequestPermission(mut args) => {
+                let mut meta = serde_json::Map::new();
+                meta.insert("dscodeAlwaysAsks".into(), serde_json::json!(true));
+                args.request.meta = Some(meta);
+                AcpClientMessage::RequestPermission(args)
+            }
+            _ => unreachable!(),
+        };
+        handle(msg, &mut app);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(agent.permission_queue.len(), 1, "must be queued for the user");
+        assert!(agent.permission_queue[0].always_asks());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
     fn permission_for_unknown_session_id_is_cancelled() {
         // No agent owns the session and the active agent already has a
         // session_id (so the race-window fallback does not fire). The

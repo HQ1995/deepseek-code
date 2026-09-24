@@ -28,6 +28,23 @@ export function configuredRemote(entries: Iterable<ConfigEntryLike>): RemoteLike
   return undefined
 }
 
+/** Where the SSH row records why it did not connect (it runs as a separate plugin). */
+export const SSH_FAILURE = Symbol.for('dscode.ssh.failure')
+
+/** A remote workspace's connection: up, lost after it worked, or never made. */
+export type RemoteConnection = { state: 'connected' } | { state: 'lost' | 'failed'; reason?: string }
+
+/** Why a configured remote workspace cannot take sessions, or undefined when it can.
+ * A lost connection needs a restart; one that never came up needs the host checked. */
+export function remoteUnavailable(remote: RemoteLike | undefined, connection: RemoteConnection): string | undefined {
+  if (remote === undefined || connection.state === 'connected') return undefined
+  const where = 'ssh ' + remote.host + ':' + remote.workspace
+  const reason = connection.reason === undefined || connection.reason.trim() === '' ? '' : ' (' + connection.reason.trim().replace(/\.$/, '') + ')'
+  return connection.state === 'lost'
+    ? 'Lost the connection to ' + where + reason + '. Quit and restart dscode to reconnect.'
+    : 'Could not connect to ' + where + reason + '. Run `dscode doctor --runtime` in a shell to see why, then restart dscode.'
+}
+
 export function executionWorld(remote: RemoteLike | undefined): ExecutionWorld {
   return remote === undefined ? { kind: 'local' } : { kind: 'ssh', host: remote.host, workspace: trimSlash(posix.normalize(remote.workspace)) }
 }

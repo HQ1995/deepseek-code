@@ -27,6 +27,8 @@ interface InputHost<S extends InputSession> {
   notify(record: S, method: string, params: unknown): void
   cancelHuman(clientId: number, sessionId: SessionId): void
   goal: { pauseGoal(record: S): void; refresh(record: S): void }
+  /** Why a remote workspace cannot run a turn (its SSH connection is down). */
+  remoteUnavailable?(): string | undefined
 }
 
 /** Composer input validation/routing and cancellation, not a second queue.
@@ -88,6 +90,9 @@ export function createSessionInput<S extends InputSession>(host: InputHost<S>) {
             host.assertReady(record)
           }
           request.controller.signal.throwIfAborted()
+          // Commands above still work; a turn would only fail on its first tool.
+          const unavailable = host.remoteUnavailable?.()
+          if (unavailable !== undefined) throw invalidParams(unavailable)
           if (record.model.current === undefined) throw invalidParams('no model selected; use /provider to add or choose a provider first')
           request.queued = true
           return await record.queue.submit(requestParams, text, async admission => {

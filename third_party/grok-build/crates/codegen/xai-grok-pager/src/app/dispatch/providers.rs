@@ -222,10 +222,13 @@ pub(super) fn handle_add_provider_complete(
         Some(ActiveModal::AddProvider { state }) if state.editing.is_some()
     );
     agent.active_modal = None;
-    app.show_toast(if updated {
-        "Provider updated"
-    } else {
-        "Provider added"
+    // DIVERGENCE(dscode): a first provider leaves no model selected; say
+    // where to pick one instead of leaving the footer at "No model".
+    let no_model = agent.session.models.current.is_none();
+    app.show_toast(match (updated, no_model) {
+        (true, _) => "Provider updated",
+        (false, true) => "Provider added. Choose a model with /model",
+        (false, false) => "Provider added",
     });
     vec![]
 }

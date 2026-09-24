@@ -245,9 +245,12 @@ export function createSessionDiscovery(host: DiscoveryHost) {
         sessionId: header.id, cwd: header.cwd, updatedAt: new Date(header.createdAt).toISOString(),
       })) }
     }
+    // Subagent and teammate children belong to their parent's /subagents and
+    // /tasks views; the pager's session lists show conversations the user started.
+    const started = snapshots.filter(({ header }) => header.origin !== 'subagent')
     if (method === 'x.ai/sessions/list') {
       const cache = host.projectionCache()
-      return { result: { sessions: snapshots.map(({ header }) => {
+      return { result: { sessions: started.map(({ header }) => {
         const title = cachedTitle(cache, header)
         return {
           sessionId: header.id, cwd: header.cwd ?? '', isWorktree: false, yolo: false,
@@ -260,9 +263,10 @@ export function createSessionDiscovery(host: DiscoveryHost) {
     const cwd = typeof p.cwd === 'string' ? p.cwd : undefined
     const requested = typeof p.limit === 'number' && p.limit > 0 ? Math.floor(p.limit) : 50
     const limit = Math.min(requested, 50)
-    // Filter before opening logs; retain exact-id cross-cwd resume.
-    const candidates = cwd === undefined ? snapshots : snapshots.filter(({ header }) => header.cwd === cwd
-      || (query !== undefined && header.id.toLowerCase() === query))
+    // Filter before opening logs; retain exact-id resume, across cwds and of a child.
+    const exact = (id: string) => query !== undefined && id.toLowerCase() === query
+    const candidates = snapshots.filter(({ header }) => exact(header.id)
+      || (header.origin !== 'subagent' && (cwd === undefined || header.cwd === cwd)))
     // One pass over the candidates must stay resident: a cap below the pass
     // size evicts its own earliest entries and every later list re-reads them.
     projectionIndex.retainFirstPrompts(candidates.length)

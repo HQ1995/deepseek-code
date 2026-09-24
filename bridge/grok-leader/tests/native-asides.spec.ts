@@ -52,7 +52,7 @@ describe('one-shot native aside ownership', () => {
     await expect(f.asides.btw(1, null)).rejects.toThrow('params')
     await expect(f.btw({ question: '  ' })).rejects.toThrow('empty btw')
     f.ready.value = false; await expect(f.btw()).rejects.toThrow('initializing'); f.ready.value = true
-    f.host.canDelegate.mockReturnValue(false); await expect(f.btw()).rejects.toThrow('/btw is not available')
+    f.host.canDelegate.mockReturnValue(false); await expect(f.btw()).rejects.toThrow('/btw needs subagents')
     f.host.canDelegate.mockReturnValue(true); f.host.subagents.mockReturnValue(undefined)
     await expect(f.btw()).rejects.toThrow('subagents are not available')
     f.host.subagents.mockReturnValue({ start: f.runtime.start })

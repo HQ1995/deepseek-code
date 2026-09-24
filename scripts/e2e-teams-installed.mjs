@@ -173,7 +173,7 @@ try {
   assert.ok(commands.availableCommands.some(item => item.name === 'team'))
   assert.equal(commands.meta.capabilities.includes('subagents'), false, '/btw stays off in Teams')
   const board = await command(host, team, '/team')
-  assert.match(board, /reviewer · teammate/)
+  assert.match(board, /^- reviewer \(teammate [0-9a-f]{8}\) · /m)
   assert.match(board, /Check notes · (pending|in_progress)/)
   checks.push('teams: nine Team tools and policy, task and teammate created, persona on the child row, /team board, no /btw')
 
@@ -205,7 +205,7 @@ try {
   await host.rpc('session/load', { sessionId: team, cwd: workspace, mcpServers: [] })
   await nativeModel(host, team)
   assert.equal((await prompt(host, team, 'team-again')).stopReason, 'end_turn')
-  assert.match(await command(host, team, '/team'), /reviewer · teammate/)
+  assert.match(await command(host, team, '/team'), /^- reviewer \(teammate [0-9a-f]{8}\) · /m)
   checks.push('a restarted leader reloads the Team session with its tools and durable roster')
   assert.doesNotMatch(host.diagnostics, /failed to import|duplicate service|unresolved|did not activate/i)
   if (failure) throw failure

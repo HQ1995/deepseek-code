@@ -46,3 +46,22 @@ it('diagnoses a broken installation before startup without provisioning or requi
     expect(result.stderr).not.toMatch(/installing|upgrading/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+it('checks a remote profile\'s connection only when asked, and says what to fix', async () => {
+  const { installationReport } = await import('../bin/doctor.mjs')
+  const { remoteBlock } = await import('../bin/remote.mjs')
+  const { writeFileSync } = await import('node:fs')
+  const profile = mkdtempSync(join(tmpdir(), 'dscode-doctor-remote-'))
+  try {
+    writeFileSync(join(profile, 'cordis.patch.yml'), remoteBlock({ host: 'swoop', workspace: '/w', node: '/n/node', helper: '/h.js',
+      helperHash: 'a'.repeat(64), bootstrapPath: '/b.js', bootstrapHash: 'b'.repeat(64) }))
+    const remote = (findings: Array<{ status: string; name: string; detail: string }>) => findings.find(finding => finding.name === 'Remote workspace')
+    const failing = () => ({ status: 255, stdout: '', stderr: 'ssh: connect to host swoop port 22: Connection refused' })
+    expect(remote(installationReport({ profile, dshBin: '/nonexistent/dsh', optional: false, probe: failing }))).toBeUndefined()
+    expect(remote(installationReport({ profile, dshBin: '/nonexistent/dsh', optional: false, remote: true, probe: failing }))).toEqual({
+      status: 'ERROR', name: 'Remote workspace', detail: expect.stringMatching(/^ssh swoop:\/w: ssh swoop failed: ssh: connect to host swoop port 22: Connection refused\. .*`dscode remote status --check`/),
+    })
+    const healthy = () => ({ status: 0, stderr: '', stdout: JSON.stringify({ node: 'v24.0.0', workspace: true, digests: ['a'.repeat(64), 'b'.repeat(64)] }) })
+    expect(remote(installationReport({ profile, dshBin: '/nonexistent/dsh', optional: false, remote: true, probe: healthy }))).toMatchObject({ status: 'OK', detail: expect.stringContaining('Node v24.0.0') })
+  } finally { rmSync(profile, { recursive: true, force: true }) }
+})

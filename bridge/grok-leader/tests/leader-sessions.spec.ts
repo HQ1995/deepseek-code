@@ -53,9 +53,9 @@ describe('leader session ownership, history and discovery', () => {
     register(c)
     await c.next()
     const badCwd = await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: 'relative', mcpServers: [] })
-    expect(badCwd.error).toEqual({ code: -32602, message: 'cwd must be an absolute path: relative' })
+    expect(badCwd.error).toMatchObject({ code: -32602, message: 'cwd must be an absolute path: relative' })
     const badMcp = await c.request(2, 'session/load', { sessionId: 'persisted-session', cwd: process.cwd(), mcpServers: { name: 'fs' } })
-    expect(badMcp.error).toEqual({ code: -32602, message: 'mcpServers must be an array' })
+    expect(badMcp.error).toMatchObject({ code: -32602, message: 'mcpServers must be an array' })
     const loaded = await c.request(3, 'session/load', { sessionId: 'persisted-session', cwd: process.cwd(), mcpServers: [] })
     expect(loaded.error).toBeUndefined()
     expect(loaded.result).toEqual({})
@@ -83,7 +83,7 @@ describe('leader session ownership, history and discovery', () => {
       mcpServers: [],
       _meta: { sessionId: 'persisted-session' },
     })
-    expect(duplicate.error).toEqual({
+    expect(duplicate.error).toMatchObject({
       code: -32602,
       message: 'session id is already in use: persisted-session',
     })
@@ -102,11 +102,11 @@ describe('leader session ownership, history and discovery', () => {
     const denied = { code: -32602, message: 'unknown session: ' + sessionId }
 
     // Every session-scoped request reads as unknown to the foreign client.
-    expect((await other.request(10, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'steal' }] })).error).toEqual(denied)
-    expect((await other.request(11, 'session/set_model', { sessionId, modelId: 'pi-code' })).error).toEqual(denied)
-    expect((await other.request(12, 'x.ai/prompt_history', { filter_session_id: sessionId })).error).toEqual(denied)
-    expect((await other.request(13, 'x.ai/session/info', { sessionId })).error).toEqual(denied)
-    expect((await other.request(14, 'session/close', { sessionId })).error).toEqual(denied)
+    expect((await other.request(10, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'steal' }] })).error).toMatchObject(denied)
+    expect((await other.request(11, 'session/set_model', { sessionId, modelId: 'pi-code' })).error).toMatchObject(denied)
+    expect((await other.request(12, 'x.ai/prompt_history', { filter_session_id: sessionId })).error).toMatchObject(denied)
+    expect((await other.request(13, 'x.ai/session/info', { sessionId })).error).toMatchObject(denied)
+    expect((await other.request(14, 'session/close', { sessionId })).error).toMatchObject(denied)
 
     // Foreign notifications must not reach the owned session either.
     const agent = registry.byId.get(sessionId)!
@@ -150,7 +150,7 @@ describe('leader session ownership, history and discovery', () => {
     // A live foreign owner is never displaced; the id reads as unknown so the
     // session's existence does not leak.
     const stolen = await other.request(2, 'session/load', { sessionId, cwd: process.cwd(), mcpServers: [] })
-    expect(stolen.error).toEqual({ code: -32602, message: 'unknown session: ' + sessionId })
+    expect(stolen.error).toMatchObject({ code: -32602, message: 'unknown session: ' + sessionId })
     expect(agent.internals.disposed).toBe(false)
     expect(registry.byId.get(sessionId)).toBe(agent)
     expect(mockSessionsStore.flushed).not.toContain(agent.session)
@@ -280,7 +280,7 @@ describe('leader session ownership, history and discovery', () => {
       newSessionId: '22222222-2222-4222-8222-222222222222',
       newCwd: process.cwd(),
     })
-    expect(forked.error).toEqual({ code: -32602, message: 'cannot fork while a turn is open' })
+    expect(forked.error).toMatchObject({ code: -32602, message: 'cannot fork while a turn is open' })
     expect(registry.created).toHaveLength(1)
     expect(registry.byId.has(sessionId)).toBe(true)
   })
@@ -604,7 +604,7 @@ describe('leader session ownership, history and discovery', () => {
       mcpServers: [],
       _meta: { noReplay: 'yes' },
     })
-    expect(loaded.error).toEqual({ code: -32602, message: '_meta.noReplay must be a boolean' })
+    expect(loaded.error).toMatchObject({ code: -32602, message: '_meta.noReplay must be a boolean' })
   })
 
   it('emits a first projected event whose seq is 0 (lastSeq starts at -1)', async () => {

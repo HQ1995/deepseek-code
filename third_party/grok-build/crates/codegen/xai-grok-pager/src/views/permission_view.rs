@@ -296,7 +296,24 @@ pub const REJECT_ALWAYS_COMMAND_OPTION_ID: &str = "reject-always-command";
 /// MCP prompts.
 pub const ALLOW_ALWAYS_MCP_OPTION_ID: &str = "allow-always-mcp";
 
+/// DIVERGENCE(dscode): whether the agent marked a request as one that only an
+/// explicit answer may settle (browser actions): always-approve neither
+/// auto-approves it nor is offered on it.
+pub fn request_always_asks(request: &acp::RequestPermissionRequest) -> bool {
+    request
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("dscodeAlwaysAsks"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
 impl PermissionViewState {
+    /// See [`request_always_asks`].
+    pub fn always_asks(&self) -> bool {
+        request_always_asks(&self.request.request)
+    }
+
     /// Whether the scope selector (← → arrows) is meaningful for this prompt.
     ///
     /// True when:

@@ -13,7 +13,7 @@ afterEach(async () => {
   await Promise.allSettled(stops.splice(0).map(stop => Promise.resolve().then(stop)))
   vi.useRealTimers()
 })
-function fixture() {
+function fixture(idleExitMs: number | (() => number) = 20) {
   const order: string[] = [], clients = { size: 0 }
   const sessions = { closed: false, disconnect: vi.fn((_id: number) => {}), drain: vi.fn(async () => {}),
     dispose: vi.fn(async () => { order.push('sessions'); sessions.closed = true }) }
@@ -24,7 +24,7 @@ function fixture() {
   const pollers = ['tasks', 'children', 'status'].map(name => ({ poll: vi.fn(() => { order.push(name) }) }))
   const exit = vi.fn((_code: number) => {}), appExit = vi.fn<() => ((code: number) => void) | undefined>(() => exit)
   const logger = { warn: vi.fn((_message: string) => {}) }
-  const leader = createLeaderLifecycle({ sessions, catalog, transport, owners, pollers, appExit, logger, idleExitMs: 20 })
+  const leader = createLeaderLifecycle({ sessions, catalog, transport, owners, pollers, appExit, logger, idleExitMs })
   stops.push(leader.dispose)
   return { leader, sessions, catalog, transport, owners, pollers, clients, exit, appExit, logger, order }
 }
@@ -54,6 +54,16 @@ describe('leader host lifecycle ownership', () => {
     expect(f.sessions.dispose).toHaveBeenCalledOnce(); expect(f.exit).not.toHaveBeenCalled()
     owner.resolve(); await tick(); expect(f.exit).toHaveBeenCalledWith(0)
     await f.leader.dispose(); expect(f.sessions.dispose).toHaveBeenCalledOnce()
+  })
+
+  it('reads the grace at each disconnect, so a broken remote leader can leave at once', async () => {
+    let grace = 1000
+    const f = fixture(() => grace); f.leader.start()
+    f.leader.disconnected(1); await vi.advanceTimersByTimeAsync(20)
+    expect(f.exit).not.toHaveBeenCalled()
+    f.leader.registered(2); grace = 0
+    f.leader.disconnected(2); await vi.advanceTimersByTimeAsync(0)
+    expect(f.exit).toHaveBeenCalledWith(0)
   })
 
   it('does not schedule exit while other registered clients remain', async () => {

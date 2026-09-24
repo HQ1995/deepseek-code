@@ -4,7 +4,7 @@ import { createServer, type Socket } from 'node:net'
 import { dirname, join, sep } from 'node:path'
 import { writeJsonFrame, waitForDrain, FrameDecoder } from './codec.ts'
 import { LEADER_PROTOCOL_VERSION, RpcError, decodeClientMessage, encodeServerMessage, type ClientMessage, type ServerMessage } from './protocol.ts'
-import { internalError } from './acp.ts'
+import { JSONRPC_INVALID_PARAMS, internalError } from './acp.ts'
 
 export interface LeaderClient {
   readonly clientId: number
@@ -155,7 +155,9 @@ export function createLeaderTransport(options: LeaderTransportOptions) {
         sendAcp({ jsonrpc: '2.0', id: message.id, result })
       } catch (error) {
         const rpc = error instanceof RpcError ? error : internalError(error instanceof Error ? error.message : String(error))
-        sendAcp({ jsonrpc: '2.0', id: message.id, error: { code: rpc.code, message: rpc.message } })
+        // A refusal is final: `data.message` lets the TUI show it as is, not as a retryable failure.
+        sendAcp({ jsonrpc: '2.0', id: message.id, error: { code: rpc.code, message: rpc.message,
+          ...rpc.code === JSONRPC_INVALID_PARAMS ? { data: { message: rpc.message } } : {} } })
       }
     }
 

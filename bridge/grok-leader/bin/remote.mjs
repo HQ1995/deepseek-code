@@ -9,37 +9,63 @@
  * runtime; a running leader keeps its configuration until it exits. */
 import { existsSync, readFileSync } from 'node:fs'
 import { posix } from 'node:path'
+import { checkRemote, installedPaths } from './remote-check.mjs'
 
 const BEGIN = '# >>> dscode remote workspace (managed by `dscode remote`; edit with care)'
 const END = '# <<< dscode remote workspace'
 const HASH = /^[0-9a-f]{64}$/
 
-export const REMOTE_USAGE = `Usage: DSH_HOME=<dedicated home> dscode remote init --host <ssh alias> --workspace <remote dir>
-         --node <remote node> --helper <remote helper> --helper-hash <sha256>
-         --bootstrap <remote PTC bootstrap> --bootstrap-hash <sha256>
-       DSH_HOME=<dedicated home> dscode remote status
-       DSH_HOME=<dedicated home> dscode remote remove`
+export const REMOTE_USAGE = `Usage: DSH_HOME=DIR dscode remote init --host ALIAS --workspace DIR --node PATH --dsh DIR [--no-check]
+       DSH_HOME=DIR dscode remote status [--check]
+       DSH_HOME=DIR dscode remote remove
 
-const FLAGS = { '--host': 'host', '--workspace': 'workspace', '--node': 'node', '--helper': 'helper', '--helper-hash': 'helperHash',
+  --host       an OpenSSH alias that connects with \`ssh -o BatchMode=yes ALIAS\` and a known host key
+  --workspace  the remote directory every session works in
+  --node       absolute path to Node 22 or newer on the host
+  --dsh        the remote directory where @deepseek-ai/dsh-ssh and @deepseek-ai/dsh-ptc-runtime-node
+               of this dscode's DSH release are npm-installed (or give --helper and --bootstrap)
+  --helper-hash, --bootstrap-hash
+               digests to pin; they default to this dscode's own copies of those files
+  --no-check   write the profile without connecting to the host first`
+
+const FLAGS = { '--host': 'host', '--workspace': 'workspace', '--node': 'node', '--dsh': 'dshDir', '--helper': 'helper', '--helper-hash': 'helperHash',
   '--bootstrap': 'bootstrapPath', '--bootstrap-hash': 'bootstrapHash' }
 
-/** Parse and validate `init` flags; every value is required. */
-export function remoteConfig(args) {
+const absolute = value => {
+  if (!posix.isAbsolute(value) || /[\0\n\r]/.test(value)) throw new Error(`remote paths must be absolute POSIX paths: ${value}`)
+  return posix.normalize(value)
+}
+
+/** Parse and validate `init` flags. `--dsh` names the remote npm directory of
+ * both packages; digests default to `local` (this dscode's runtime copies). */
+export function remoteConfig(args, local) {
   const config = {}
-  for (let index = 0; index < args.length; index += 2) {
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] === '--no-check') continue
     const key = FLAGS[args[index]]
     const value = args[index + 1]
-    if (key === undefined || value === undefined || value.startsWith('--')) throw new Error(REMOTE_USAGE)
+    if (key === undefined) throw new Error(`unknown option ${args[index]}\n${REMOTE_USAGE}`)
+    if (value === undefined || value.startsWith('--')) throw new Error(`${args[index]} needs a value\n${REMOTE_USAGE}`)
     if (config[key] !== undefined) throw new Error(`${args[index]} was given twice`)
     config[key] = value
+    index++
   }
-  for (const [flag, key] of Object.entries(FLAGS)) if (config[key] === undefined) throw new Error(`${flag} is required\n${REMOTE_USAGE}`)
+  if (config.dshDir !== undefined) {
+    if (config.helper !== undefined || config.bootstrapPath !== undefined) throw new Error('give either --dsh or --helper and --bootstrap, not both')
+    Object.assign(config, installedPaths(absolute(config.dshDir).replace(/(.)\/$/, '$1')))
+    delete config.dshDir
+  }
+  config.helperHash ??= local?.helperHash
+  config.bootstrapHash ??= local?.bootstrapHash
+  const missing = ['--host', '--workspace', '--node'].filter(flag => config[FLAGS[flag]] === undefined)
+  if (config.helper === undefined || config.bootstrapPath === undefined) missing.push('--dsh (or --helper and --bootstrap)')
+  if (config.helperHash === undefined || config.bootstrapHash === undefined) {
+    missing.push('--helper-hash and --bootstrap-hash (this home has no DSH runtime to take them from)')
+  }
+  if (missing.length > 0) throw new Error(`missing ${missing.join(', ')}\n${REMOTE_USAGE}`)
   // An alias is passed to ssh as one argument; it must not read as an option.
   if (!/^[A-Za-z0-9._@-]+$/.test(config.host) || config.host.startsWith('-')) throw new Error(`--host must be an OpenSSH alias: ${config.host}`)
-  for (const key of ['workspace', 'node', 'helper', 'bootstrapPath']) {
-    if (!posix.isAbsolute(config[key]) || /[\0\n\r]/.test(config[key])) throw new Error(`remote paths must be absolute POSIX paths: ${config[key]}`)
-    config[key] = posix.normalize(config[key])
-  }
+  for (const key of ['workspace', 'node', 'helper', 'bootstrapPath']) config[key] = absolute(config[key])
   if (config.workspace.length > 1 && config.workspace.endsWith('/')) config.workspace = config.workspace.slice(0, -1)
   for (const key of ['helperHash', 'bootstrapHash']) {
     config[key] = config[key].toLowerCase()
@@ -96,33 +122,56 @@ export function removeRemote(text) {
   return { text: entryLines(base).length === 0 ? base.replace(/\n*$/, '\n') + '[]\n' : base, removed: true }
 }
 
-/** The managed configuration, when this profile is remote. */
+/** The managed configuration's identity, when this profile is remote. */
 export function remoteStatus(text) {
+  const settings = remoteSettings(text)
+  return settings === undefined ? undefined : { host: settings.host, workspace: settings.workspace, helperHash: settings.helperHash }
+}
+
+/** Every configured value, for a connection check of an existing profile. */
+export function remoteSettings(text) {
   const start = markerLine(text, BEGIN), end = markerLine(text, END)
   if (start === -1 || end < start) return undefined
   const block = text.slice(start, end)
   const value = key => { const match = new RegExp(`^ {8}${key}: (".*")$`, 'm').exec(block); return match === null ? undefined : JSON.parse(match[1]) }
-  return { host: value('host'), workspace: value('workspace'), helperHash: value('helperHash') }
+  return Object.fromEntries(['host', 'workspace', 'node', 'helper', 'helperHash', 'bootstrapPath', 'bootstrapHash'].map(key => [key, value(key)]))
 }
 
-/** Run `dscode remote <init|status|remove>` against one profile directory. */
-export async function remoteCommand(args, { profileDir, dedicatedHome, withLock, scaffold, write, log }) {
+/**
+ * Run `dscode remote <init|status|remove>` against one profile directory.
+ * @param options.local - this dscode's helper digests and DSH version, when a runtime is installed.
+ * @param options.probe - the SSH probe (tests replace it).
+ */
+export async function remoteCommand(args, { profileDir, dedicatedHome, withLock, scaffold, write, log, local, probe }) {
   const [verb, ...rest] = args
   const patchPath = `${profileDir}/cordis.patch.yml`
-  if (verb === 'status' && rest.length === 0) {
-    const status = existsSync(patchPath) ? remoteStatus(readFileSync(patchPath, 'utf8')) : undefined
+  if (verb === undefined || ['help', '--help', '-h'].includes(verb)) {
+    log(REMOTE_USAGE)
+    return
+  }
+  const install = dir => local === undefined ? undefined : { dir, version: local.version }
+  const connected = (config, dir) => {
+    const node = checkRemote(config, { install: install(dir), ...probe === undefined ? {} : { probe } })
+    return `Checked ssh ${config.host}: Node ${node}, the workspace, and a helper and bootstrap matching this dscode.`
+  }
+  if (verb === 'status' && (rest.length === 0 || (rest.length === 1 && rest[0] === '--check'))) {
+    const text = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : ''
+    const status = remoteStatus(text)
     log(status === undefined ? `${profileDir}: local workspace profile` : `${profileDir}: remote workspace ssh ${status.host}:${status.workspace} (helper sha256 ${status.helperHash})`)
+    if (status !== undefined && rest[0] === '--check') log(connected(remoteSettings(text)))
     return
   }
   if (verb === 'init' && rest[0] === '--print') {
-    log(remoteBlock(remoteConfig(rest.slice(1))))
+    log(remoteBlock(remoteConfig(rest.slice(1), local)))
     return
   }
   if (!dedicatedHome) {
     throw new Error('use a dedicated DSH_HOME for each remote workspace (for example DSH_HOME=~/.dsh-remote/<name>); the default home keeps local workspaces')
   }
   if (verb === 'init') {
-    const config = remoteConfig(rest)
+    const config = remoteConfig(rest, local)
+    // Fail here, where the fix is obvious, rather than at the first session.
+    if (!rest.includes('--no-check')) log(connected(config, rest.includes('--dsh') ? rest[rest.indexOf('--dsh') + 1] : undefined))
     await withLock(async () => {
       scaffold()
       write(patchPath, applyRemote(readFileSync(patchPath, 'utf8'), config))

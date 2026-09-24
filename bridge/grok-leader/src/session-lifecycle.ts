@@ -56,6 +56,8 @@ interface LifecycleHost {
   queue: { combineQueued: boolean; followUpSteer: boolean }
   /** Where this profile's tools run; remote sessions stay in the remote workspace. */
   world(): ExecutionWorld
+  /** Why a remote workspace cannot take sessions (its SSH row did not connect). */
+  remoteUnavailable?(): string | undefined
   permissions: Pick<ReturnType<typeof createNativeInteractions<SessionRecord>>, 'validateMeta' | 'apply' | 'assertReady'>
   contextValues(record: SessionRecord): ContextProjectionValues
   projectImages: SessionOutputHost['projectImages']
@@ -233,6 +235,9 @@ export function createSessionLifecycle(host: LifecycleHost) {
     const requested = p.cwd
     if (typeof requested !== 'string' || !isAbsolute(requested)) throw invalidParams('cwd must be an absolute path: ' + String(requested))
     const world = host.world(), cwd = sessionCwd(world, requested)
+    // Without its SSH providers a session would fail later with bare tool diagnostics.
+    const unavailable = host.remoteUnavailable?.()
+    if (unavailable !== undefined) throw invalidParams(unavailable)
     try {
       const mcpConfigs = await resolveAcpMcpConfigs(p.mcpServers, cwd)
       assertMcpTransports(world, mcpConfigs)

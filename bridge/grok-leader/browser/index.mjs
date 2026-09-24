@@ -5,7 +5,7 @@
 import Schema from '@deepseek-ai/schemastery'
 import { importRuntime, playwrightMcpCli } from '../shared/runtime-modules.mjs'
 import { browserLaunchArgs, resolveBrowserExecutable, sandboxRestriction } from './executable.mjs'
-import { browserDenial, navigationPolicy, prefix } from './policy.mjs'
+import { browserDenial, launchDenial, navigationPolicy, prefix } from './policy.mjs'
 import { mountBrowserSessions } from './session-browser.mjs'
 
 export const name = 'dscode-browser'
@@ -20,16 +20,27 @@ export const Config = Schema.object({
   toolCallTimeoutMs: Schema.number().min(1).max(2_147_483_647).default(30_000),
 })
 
+/** Why a browser call cannot be approved: DSH's always-approve preset answers every ask with "rejected". */
+export const ALWAYS_APPROVE = 'The browser is unavailable in always-approve mode: every browser action needs the user\'s'
+  + ' approval, and this mode refuses approval prompts. The user can switch the permission mode with Shift+Tab.'
+
 export async function apply(ctx, config) {
   /** An invalid saved origin denies navigation instead of disabling the plugin. */
   const policy = () => {
     try { return { policy: navigationPolicy(config.navigationOrigins.get() ?? [], config.anyOrigin.get()) } }
     catch (error) { return { error: error.message } }
   }
+  let browsers
   const denial = exec => {
     const current = policy()
-    if (current.error === undefined) return browserDenial(exec, current.policy)
+    if (current.error === undefined) {
+      return browserDenial(exec, current.policy) ?? (exec.agent === undefined ? undefined : launchDenial(exec, browsers?.launched(exec.agent)))
+    }
     return browserDenial(exec, navigationPolicy()) ?? (exec.name.startsWith(prefix) ? current.error : undefined)
+  }
+  const approvalRefused = agent => {
+    const approval = ctx.get('approval')
+    return (approval?.overrideOf?.(agent.session) ?? approval?.config?.policy) === 'never'
   }
   ctx.tools.guard(denial)
   ctx.on('tools/pre-execute', async (exec, next) => {
@@ -37,7 +48,8 @@ export async function apply(ctx, config) {
     if (!exec.name.startsWith(prefix) || decision.kind !== 'allow') return decision
     const reason = denial(exec)
     if (reason !== undefined) return { kind: 'deny', reason }
-    return { kind: 'ask', reason: 'Browser action. Browser state is isolated per Session; network and host access are not confined.' }
+    if (exec.agent !== undefined && approvalRefused(exec.agent)) return { kind: 'deny', reason: ALWAYS_APPROVE }
+    return { kind: 'ask', reason: 'Browser action. Browser state is isolated per session; network and host access are not confined.' }
   }, { prepend: true })
   const cli = playwrightMcpCli()
   const { default: BrowserUse } = await importRuntime('@deepseek-ai/dsh-browser-use')
@@ -62,14 +74,14 @@ export async function apply(ctx, config) {
   }))
   await ctx.plugin(BrowserUse)
   await ctx.plugin({ name: 'dscode-browser-sessions', inject: ['browserUse', 'agents', 'tools', 'systemPrompt'], async apply(owner) {
-    mountBrowserSessions(owner, {
+    browsers = mountBrowserSessions(owner, {
       launch: outputDir => {
         const found = executable()
         if (found.error !== undefined) throw new Error(found.error)
         // Validated again here: a hand-edited profile value never reaches Playwright unchecked.
         const current = navigationPolicy(config.navigationOrigins.get() ?? [], config.anyOrigin.get())
-        return browserLaunchArgs({ cli, executablePath: found.path, sandbox: config.sandbox.get(), outputDir,
-          origins: [...current.origins], anyOrigin: current.any })
+        return { policy: current, args: browserLaunchArgs({ cli, executablePath: found.path, sandbox: config.sandbox.get(), outputDir,
+          origins: [...current.origins], anyOrigin: current.any }) }
       },
       env, toolCallTimeoutMs: config.toolCallTimeoutMs,
       onChange: count => { sessions = count; if (count > 0) lastError = undefined },

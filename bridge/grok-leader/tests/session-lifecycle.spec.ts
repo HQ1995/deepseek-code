@@ -143,6 +143,10 @@ describe('session lifecycle ownership', () => {
     expect(f.agents.create).not.toHaveBeenCalled()
     await f.lifecycle.new(1, { cwd: '/home/u/work/sub/../pkg/', mcpServers: [{ type: 'http', name: 'remote', url: 'https://mcp.example/x', headers: [] }], _meta: { sessionId: 'remote' } })
     expect(f.agents.create).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'remote', meta: expect.objectContaining({ cwd: '/home/u/work/pkg' }) }))
+    // A disconnected workspace says why instead of failing on its tools.
+    Object.assign(f.host, { remoteUnavailable: () => 'The remote workspace ssh swoop:/home/u/work is not connected: ssh exited 255.' })
+    await expect(f.lifecycle.new(1, { cwd: '/home/u/work', mcpServers: [] })).rejects.toThrow('ssh swoop:/home/u/work is not connected: ssh exited 255')
+    expect(f.agents.create).toHaveBeenCalledOnce()
   })
 
   it('answers one pinned durable id with a point query instead of listing the store', async () => {

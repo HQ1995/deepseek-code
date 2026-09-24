@@ -15,9 +15,16 @@ export const name = 'dscode-ssh'
 export const inject = ['sandboxPolicy']
 export const Config = SshConnection.Config
 
+/** Why the connection failed; the leader shows it when a session cannot start. */
+const FAILURE = Symbol.for('dscode.ssh.failure')
+
 export async function apply(ctx, config) {
   if (!config.bootstrapPath || !config.bootstrapHash) throw new Error('dscode SSH requires a preinstalled, digest-pinned remote PTC bootstrap')
-  await ctx.plugin(SshConnection, config)
+  try { await ctx.plugin(SshConnection, config) } catch (error) {
+    globalThis[FAILURE] = error instanceof Error ? error.message : String(error)
+    throw error
+  }
+  delete globalThis[FAILURE]
   await ctx.plugin(SshFileSystem)
   await ctx.plugin(SshSubprocessRuntime)
   await ctx.plugin(SshSandboxProvider)

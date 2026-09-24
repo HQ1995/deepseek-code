@@ -28,11 +28,14 @@ describe('/team', () => {
 
   it('renders the roster and the task board', () => {
     const text = describeTeam(members, tasks)
-    expect(text).toContain('  reviewer · teammate · inactive · fresh · deepseek-flash · Review the parser\n    ! last turn failed')
-    expect(text).toContain('  t1 Parse input · in_progress · owner reviewer · writes src/parse.ts')
-    expect(text).toContain('  t2 Write docs · pending, blocked · after t1\n    ! overlaps t1')
-    expect(describeTeam(members.slice(0, 1), [])).toContain('no teammates yet; they start only when you ask for them')
-    expect(describeTeam(members.slice(0, 1), [])).toContain('Tasks:\n  none')
+    expect(text.startsWith('Agent Team\n\nMembers:\n- lead (lead) · running\n')).toBe(true)
+    expect(text).toContain('\n- reviewer (teammate child) · idle · new context · model deepseek-flash · Review the parser\n  - ! last turn failed\n')
+    expect(text).toContain('\n\nTasks:\n- t1 Parse input · in progress · owner reviewer · writes src/parse.ts\n')
+    expect(text).toContain('- t2 Write docs · pending, blocked · after t1\n  - ! overlaps t1')
+    expect(text.endsWith('\n\n`/subagents` controls a teammate by name, for example `/subagents stop reviewer`.')).toBe(true)
+    expect(describeTeam(members.slice(0, 1), [])).toContain('- no teammates yet; they start only when you ask for them')
+    expect(describeTeam(members.slice(0, 1), [])).toContain('Tasks:\n- none')
+    expect(describeTeam(members.slice(0, 1), [])).not.toContain('/subagents')
   })
 
   it('reads the Lead agent only for Team sessions and refuses arguments', () => {

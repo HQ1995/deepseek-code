@@ -21,6 +21,14 @@ describe('native assistant settlement projection', () => {
     expect(project(true, '/parent')).not.toEqual(project(true, '/child'))
   })
 
+  it('titles browser tool cards by what they do and keeps other tools by name', () => {
+    const call = (name: string, args: unknown) => GrokLeader.sessionEventToUpdates({ type: 'tool/call',
+      data: { turn: 1, step: 1, callId: ToolCallId('c-' + name), name, arguments: JSON.stringify(args) } } as SessionEvent, { replay: false })
+    expect(call('mcp__playwright-mcp__browser_navigate', { url: 'https://example.com/' })).toEqual([expect.objectContaining({
+      sessionUpdate: 'tool_call', title: 'Browser: open https://example.com/', rawInput: { url: 'https://example.com/' } })])
+    expect(call('bash', { command: 'ls' })).toEqual([expect.objectContaining({ title: 'bash' })])
+  })
+
   it('preserves interrupted reasoning and whitespace from the embedded stream, not only safe message blocks', () => {
     const event = { type: 'assistant/message', data: {
       turn: 0, step: 0, interrupted: true,

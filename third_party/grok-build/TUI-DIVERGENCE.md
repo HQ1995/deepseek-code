@@ -590,12 +590,18 @@ a highlighted list ("上下选到哪个就指向哪个").
 
 ### Native DeepSeek provider template
 
-The add-provider form lists a "DeepSeek (native Messages API)" template (class:
-feature). It uses provider id `deepseek-official`, the `DEEPSEEK_API_KEY`
+The add-provider form lists a "DeepSeek (native)" template right after the
+OpenAI-compatible "DeepSeek" one (class: feature). Each template row shows a
+short note before its URL, and the label column fits the longest label. The
+native template uses provider id `deepseek-official`, the `DEEPSEEK_API_KEY`
 variable and the default base URL `https://api.deepseek.com/anthropic`. Its API
 value `deepseek-native` is not a pi-ai protocol but a marker. The bridge
 enables the official `llm-deepseek` adapter for it instead of writing a pi-ai
-route. The API picker lists the marker beside the pi-ai protocols.
+route and names it "DeepSeek (native API)". The form shows its id, name and
+protocol as fixed and skips them, since the bridge would ignore edits.
+
+Adding a provider while no model is selected says to choose one with `/model`,
+and re-picking the active provider says so instead of closing silently.
 
 ### Provider form: arrows move fields; presets are a chooser row
 
@@ -757,3 +763,30 @@ In a remote world the pager:
 
 Bridge-written tool images stay local and open as before. Unit tests cover the
 parse, the session cwd rule and each refusal.
+
+In a remote world the header reads `ssh HOST:PATH` and never shows the launch
+directory a view without a session still holds, and the first `@` shows a tip
+that completion is off there.
+
+### Always-asking approvals
+
+A permission request with `_meta.dscodeAlwaysAsks: true` (dscode's browser
+actions) waits for an explicit answer (class: feature). Always-approve neither
+auto-approves it on arrival nor drains it when turned on, and the prompt offers
+no Ctrl+O always-approve hint. The leader also sends the call's planned
+arguments as `rawInput` and, for browser actions, a title such as "the browser
+to open https://…", which the existing MCP argument display renders.
+
+### Preset change after history opens a new session
+
+The leader refuses to change the preset of a session that has history. Picking
+a preset for such a session (any user prompt in its scrollback) therefore opens
+a new session with that preset and says so, instead of reloading the old one
+into an empty transcript (class: behavior). A session without history still
+reloads with the picked preset.
+
+### Native child run length
+
+`subagent_finished` with `_meta.subagentDurationAvailable: true` supplies the
+child's settled run length even when its other metrics are unavailable, so a
+finished row stops counting up (class: feature).

@@ -43,6 +43,76 @@ fn dispatch_confirm_reset_setting_reset_dispatches_set_permission_mode_for_permi
     );
 }
 
+/// DIVERGENCE(dscode): turning YOLO on drains ordinary prompts but leaves an
+/// always-asking one (a browser action) queued for an explicit answer.
+#[test]
+fn set_yolo_mode_on_keeps_always_asking_prompts_queued() {
+    use crate::views::permission_view::{PermissionFocus, PermissionViewState};
+    use std::sync::Arc;
+
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let mut receivers = Vec::new();
+    for (id, always_asks) in [(1, true), (2, false)] {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        receivers.push(response_rx);
+        let mut request = acp::RequestPermissionRequest::new(
+            acp::SessionId::new(Arc::from("test-sess")),
+            acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(Arc::from(format!("tc-{id}"))),
+                acp::ToolCallUpdateFields::default(),
+            ),
+            vec![acp::PermissionOption::new(
+                acp::PermissionOptionId::new(Arc::from("allow-once")),
+                "Allow once",
+                acp::PermissionOptionKind::AllowOnce,
+            )],
+        );
+        if always_asks {
+            let mut meta = serde_json::Map::new();
+            meta.insert("dscodeAlwaysAsks".into(), serde_json::json!(true));
+            request.meta = Some(meta);
+        }
+        let options = request.options.clone();
+        agent.permission_queue.push_back(PermissionViewState {
+            request: xai_acp_lib::AcpArgs { request, response_tx },
+            id,
+            focus: PermissionFocus::Options,
+            options,
+            active_idx: 0,
+            bash_highlights: None,
+            bash_selection_count: 0,
+            bash_deny_selection_count: 0,
+            bash_command_raw: None,
+            mcp_scope: None,
+            title: "test".to_string(),
+            description: vec![],
+            args_expanded: false,
+            desc_scroll: 0,
+            subagent_label: None,
+            options_area_height: 0,
+            options_scroll_offset: 0,
+        });
+    }
+
+    let _ = dispatch(Action::SetYoloMode(true), &mut app);
+
+    let queue = &app.agents[&AgentId(0)].permission_queue;
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].id, 1, "the always-asking prompt stays");
+    assert!(matches!(
+        receivers[0].try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        receivers[1].try_recv(),
+        Ok(Ok(acp::RequestPermissionResponse {
+            outcome: acp::RequestPermissionOutcome::Selected(_),
+            ..
+        }))
+    ));
+}
+
 /// **Security-critical:** YOLO ON must drain the per-agent
 /// `permission_queue` with `AllowOnce` responses. If this drain
 /// path regresses (e.g., the setter falls back to `Cancelled`

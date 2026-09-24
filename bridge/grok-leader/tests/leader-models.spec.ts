@@ -164,7 +164,7 @@ describe('leader model catalog and selection', () => {
       mcpServers: [],
       _meta: { provider: 'pi', model: 'deepseek-chat' },
     })
-    expect(created.error).toEqual({
+    expect(created.error).toMatchObject({
       code: -32602,
       message: 'requested provider/model is not in the catalog: pi/deepseek-chat',
     })
@@ -223,7 +223,7 @@ describe('leader model catalog and selection', () => {
       ],
     })
 
-    expect(result.error).toEqual({
+    expect(result.error).toMatchObject({
       code: -32602,
       message: 'selected model does not support image input: deepseek/deepseek-chat',
     })
@@ -263,7 +263,7 @@ describe('leader model catalog and selection', () => {
       modelId: 'deepseek-v4-flash',
       _meta: { reasoningEffort: 'max' },
     })
-    expect(invalid.error).toEqual({
+    expect(invalid.error).toMatchObject({
       code: -32602,
       message: 'reasoningEffort "max" is not supported by model deepseek-v4-flash',
     })
@@ -424,7 +424,7 @@ describe('leader model catalog and selection', () => {
     mockDefaultModel.saved.length = 0
     mockDefaultModel.current = undefined
     const bad = await c.request(2, 'session/set_model', { sessionId, modelId: 'no-such-model' })
-    expect(bad.error).toEqual({ code: -32602, message: 'modelId is not in the catalog: no-such-model' })
+    expect(bad.error).toMatchObject({ code: -32602, message: 'modelId is not in the catalog: no-such-model' })
     // The unresolvable selection was never persisted as the default.
     expect(mockDefaultModel.saved).toEqual([])
   })
@@ -579,6 +579,6 @@ describe('leader model catalog and selection', () => {
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
     const switched = await c.request(2, 'session/set_model', { sessionId, modelId: 'shared', _meta: { reasoningEffort: 'quantum' } })
-    expect(switched.error).toEqual({ code: -32602, message: 'reasoningEffort "quantum" is not supported by model shared' })
+    expect(switched.error).toMatchObject({ code: -32602, message: 'reasoningEffort "quantum" is not supported by model shared' })
   })
 })

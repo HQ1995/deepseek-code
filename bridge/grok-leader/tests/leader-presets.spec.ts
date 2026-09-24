@@ -149,7 +149,7 @@ describe('leader preset selection and composition', () => {
       sessionId, cwd: process.cwd(), mcpServers: [],
       _meta: { agentProfile: preset, rememberAgentPreset: true },
     })
-    expect(loaded.error).toEqual({ code: -32602, message: 'agent-preset-locked: cannot change preset while a turn is running' })
+    expect(loaded.error).toMatchObject({ code: -32602, message: 'agent-preset-locked: cannot change preset while a turn is running' })
     expect(registry.byId.get(sessionId)).toBe(agent)
     expect(agent.internals.cancelCalls).toBe(0)
     expect(agent.internals.disposed).toBe(false)
@@ -256,7 +256,7 @@ describe('leader preset selection and composition', () => {
     register(c)
     await c.next()
     const loaded = await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [], _meta: { agentProfile: 'minimal' } })
-    expect(loaded.error).toEqual({
+    expect(loaded.error).toMatchObject({
       code: -32602,
       message: 'agent-preset-locked: a preset can only be changed before the session has produced history',
     })
@@ -426,11 +426,11 @@ describe('leader preset selection and composition', () => {
     const unknown = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'grok-build-plan' } })
     expect(unknown.error).toBeUndefined()
     const objectProfile = await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: { name: 'custom' } } })
-    expect(objectProfile.error).toEqual({ code: -32602, message: '_meta.agentProfile JSON definitions are not supported; send a preset id string' })
+    expect(objectProfile.error).toMatchObject({ code: -32602, message: '_meta.agentProfile JSON definitions are not supported; send a preset id string' })
     const typo = await c.request(3, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'stanard' } })
     expect(typo.error).toMatchObject({ code: -32602 })
     const noSubagents = await c.request(4, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'grok-build-plan-no-subagents' } })
-    expect(noSubagents.error).toEqual({
+    expect(noSubagents.error).toMatchObject({
       code: -32602,
       message: '--no-subagents is not supported by this dscode bridge; choose a preset without subagents instead',
     })

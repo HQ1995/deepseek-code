@@ -86,8 +86,9 @@ native DeepSeek-V41-Flash setup and platform/UI limits.
 
 The browser is off by default. `/browser on --origin https://example.com` gives
 new sessions a private headless Chrome or Chromium that may open only the listed
-origins; `/browser origins add <origin>` extends the list. Every browser action
-asks for approval, also in always-approve mode. It is not an OS network or host
+origins; `/browser origins add <origin>` extends the list for new sessions.
+Every browser action asks for your approval and shows what it will do, so
+always-approve mode refuses browser actions. It is not an OS network or host
 sandbox; see the [browser notes](docs/upgrade-strategy.md#browser) for browser
 discovery, the Chromium sandbox and origin filtering.
 
@@ -95,22 +96,26 @@ discovery, the Chromium sandbox and origin filtering.
 
 A remote workspace is its own dscode home: every tool, shell, file edit and
 code run happens on one POSIX host over SSH, while the TUI, model access and
-session history stay on this computer. Install the matching remote helper, Node
-and PTC bootstrap on the host first; see the
+session history stay on this computer. The host needs Node 22 or newer and this
+dscode's DSH release of `@deepseek-ai/dsh-ssh` and
+`@deepseek-ai/dsh-ptc-runtime-node` npm-installed in one directory; `init`
+checks the host before it writes anything and prints the install command when
+they are missing. See the
 [remote workspace notes](docs/upgrade-strategy.md#remote-workspace-over-ssh).
 
 ```sh
 DSH_HOME=~/.dsh-remote/build dscode remote init --host build --workspace /srv/work \
-  --node /opt/node/bin/node --helper <remote helper.js> --helper-hash <sha256> \
-  --bootstrap <remote process.js> --bootstrap-hash <sha256>
+  --node /opt/node/bin/node --dsh /opt/dscode-dsh
 DSH_HOME=~/.dsh-remote/build dscode        # sessions open in build:/srv/work
-DSH_HOME=~/.dsh-remote/build dscode remote status
+DSH_HOME=~/.dsh-remote/build dscode remote status --check
 ```
 
 The host alias must already work with `ssh -o BatchMode=yes <alias>` and a
-known host key. Session paths are remote, so the TUI never links, opens or
-previews them here, and it does not use this directory's project settings or
-worktrees. `dscode remote remove` makes the home local again.
+known host key. The header shows `ssh build:/srv/work`. Session paths are
+remote, so the TUI never links, opens or previews them here, and it does not
+use this directory's project settings or worktrees. The connection does not
+reconnect: after it drops, restart dscode. `dscode remote remove` makes the
+home local again.
 
 ## Per-run configuration
 

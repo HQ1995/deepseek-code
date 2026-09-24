@@ -6,6 +6,8 @@ import { homedir, release } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseCliVersion, unsupportedPlatformMessage, validateRuntime } from './update.mjs'
+import { remoteSettings } from './remote.mjs'
+import { checkRemote, localHelpers } from './remote-check.mjs'
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const json = path => JSON.parse(readFileSync(path, 'utf8'))
@@ -128,6 +130,10 @@ export const installationReport = ({
   dshBin = process.env.DSH_BIN,
   tuiVersion = process.env.DSCODE_DOCTOR_TUI_VERSION,
   optional = true,
+  // Connects to a remote workspace's host; only the shell doctor does, since
+  // a session's /doctor already reports its live connection.
+  remote = false,
+  probe,
 } = {}) => {
   const findings = []
   const add = (status, name, detail) => findings.push({ status, name, detail })
@@ -175,6 +181,17 @@ export const installationReport = ({
     const anchor = dshInstallAnchor(resolved)
     if (anchor) findings.push(...profileBundleFindings({ anchor, profile }))
     else add('INFO', 'Profile bundles', 'Not evaluated: the DSH executable is not inside an @deepseek-ai/dsh installation.')
+  }
+  const settings = remote ? remoteSettings(existsSync(join(profile, 'cordis.patch.yml')) ? readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') : '') : undefined
+  if (settings !== undefined) {
+    const where = `ssh ${settings.host}:${settings.workspace}`
+    const local = resolved ? localHelpers(resolved) : undefined
+    try {
+      const node = checkRemote(settings, { ...local === undefined ? {} : { install: { version: local.version } }, ...probe === undefined ? {} : { probe } })
+      add('OK', 'Remote workspace', `${where} · Node ${node} · helper and bootstrap match their pinned digests`)
+    } catch (error) {
+      add('ERROR', 'Remote workspace', `${where}: ${error.message} No session can start until this works; \`dscode remote status --check\` repeats the check.`)
+    }
   }
   if (optional) {
     const missing = ['typescript-language-server', 'tsc'].filter(command => !executable(command))

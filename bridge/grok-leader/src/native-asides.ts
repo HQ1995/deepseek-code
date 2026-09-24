@@ -29,7 +29,7 @@ export function createNativeAsides<S extends AsideSession>(host: AsideHost<S>) {
     if (question.trim().length === 0) throw invalidParams('empty btw question')
     const available = host.canDelegate(record)
     active(record, scope)
-    if (!available) throw internalError('/btw is not available in the selected agent preset')
+    if (!available) throw invalidParams('/btw needs subagents, which this session\'s preset does not have. Ask in the conversation instead, or start a /new session with a preset that has subagents.')
     const subagents = host.subagents(record)
     active(record, scope)
     if (subagents === undefined) throw internalError('subagents are not available in this agent preset')

@@ -123,7 +123,7 @@ describe('leader handshake, registration and socket contract', () => {
       sessionId,
       prompt: [{ type: 'text', text: 'hello' }],
     })
-    expect(prompt.error).toEqual({
+    expect(prompt.error).toMatchObject({
       code: -32602,
       message: 'no model selected; use /provider to add or choose a provider first',
     })
@@ -137,7 +137,7 @@ describe('leader handshake, registration and socket contract', () => {
       cwd: process.cwd(),
       mcpServers: [{ name: 'unsafe', command: 'relative', args: [], env: [] }],
     })
-    expect(created.error).toEqual({
+    expect(created.error).toMatchObject({
       code: -32602,
       message: 'mcpServers[0].command must be an absolute path',
     })
@@ -186,32 +186,32 @@ describe('leader handshake, registration and socket contract', () => {
     await c.next()
 
     const badCwd = await c.request(1, 'session/new', { cwd: 'relative', mcpServers: [] })
-    expect(badCwd.error).toEqual({ code: -32602, message: 'cwd must be an absolute path: relative' })
+    expect(badCwd.error).toMatchObject({ code: -32602, message: 'cwd must be an absolute path: relative' })
 
     const withMcp = await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [{ name: 'fs', command: 'node', args: [], env: [] }] })
-    expect(withMcp.error).toEqual({ code: -32602, message: 'mcpServers[0].command must be an absolute path' })
+    expect(withMcp.error).toMatchObject({ code: -32602, message: 'mcpServers[0].command must be an absolute path' })
 
     const badMcp = await c.request(3, 'session/new', { cwd: process.cwd(), mcpServers: 'not-an-array' })
-    expect(badMcp.error).toEqual({ code: -32602, message: 'mcpServers must be an array' })
+    expect(badMcp.error).toMatchObject({ code: -32602, message: 'mcpServers must be an array' })
 
     const created = await c.request(4, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
 
     const unknownSession = await c.request(5, 'session/prompt', { sessionId: 'missing', prompt: [{ type: 'text', text: 'x' }] })
-    expect(unknownSession.error).toEqual({ code: -32602, message: 'unknown session: missing' })
+    expect(unknownSession.error).toMatchObject({ code: -32602, message: 'unknown session: missing' })
 
     const imagePrompt = await c.request(6, 'session/prompt', { sessionId, prompt: [{ type: 'image', data: '', mimeType: 'image/png' }] })
-    expect(imagePrompt.error).toEqual({ code: -32602, message: 'Image upload is not canonical base64.' })
+    expect(imagePrompt.error).toMatchObject({ code: -32602, message: 'Image upload is not canonical base64.' })
   })
 
   it('rejects malformed mcpServers declarations', async () => {
     const { client: c } = await start()
     register(c)
     await c.next()
-    expect((await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: { name: 'fs' } })).error).toEqual({ code: -32602, message: 'mcpServers must be an array' })
-    expect((await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: 'fs' })).error).toEqual({ code: -32602, message: 'mcpServers must be an array' })
-    expect((await c.request(3, 'session/new', { cwd: process.cwd(), mcpServers: 7 })).error).toEqual({ code: -32602, message: 'mcpServers must be an array' })
-    expect((await c.request(4, 'session/new', { cwd: process.cwd(), mcpServers: [{}] })).error).toEqual({ code: -32602, message: 'mcpServers[0].name must be a string' })
+    expect((await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: { name: 'fs' } })).error).toMatchObject({ code: -32602, message: 'mcpServers must be an array' })
+    expect((await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: 'fs' })).error).toMatchObject({ code: -32602, message: 'mcpServers must be an array' })
+    expect((await c.request(3, 'session/new', { cwd: process.cwd(), mcpServers: 7 })).error).toMatchObject({ code: -32602, message: 'mcpServers must be an array' })
+    expect((await c.request(4, 'session/new', { cwd: process.cwd(), mcpServers: [{}] })).error).toMatchObject({ code: -32602, message: 'mcpServers[0].name must be a string' })
     expect((await c.request(5, 'session/new', { cwd: process.cwd(), mcpServers: [] })).error).toBeUndefined()
   })
 
@@ -294,7 +294,7 @@ describe('leader handshake, registration and socket contract', () => {
       expect(String((response.error as { message?: string }).message)).toContain('refusing to run with silently weakened CLI settings')
     }
     const noSubagents = await c.request(cases.length + 1, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { subagents: false } })
-    expect(noSubagents.error).toEqual({
+    expect(noSubagents.error).toMatchObject({
       code: -32602,
       message: '--no-subagents is not supported by this dscode bridge; choose a preset without subagents instead',
     })
@@ -323,7 +323,7 @@ describe('leader handshake, registration and socket contract', () => {
       mcpServers: [],
       _meta: { sandbox: false },
     })
-    expect(invalid.error).toEqual({ code: -32602, message: '_meta.sandbox must be a string' })
+    expect(invalid.error).toMatchObject({ code: -32602, message: '_meta.sandbox must be a string' })
   })
 
   it('closing a session before 50ms suppresses _x.ai/mcp_initialized', async () => {

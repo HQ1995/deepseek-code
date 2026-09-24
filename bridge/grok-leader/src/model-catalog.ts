@@ -7,7 +7,7 @@ import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { RpcError } from './protocol.ts'
 import { JSONRPC_INVALID_PARAMS, internalError, paramRecord } from './acp.ts'
 import { discoverEndpointModelCapabilities, type EndpointCapabilities } from './model-endpoint.ts'
-import { nativeProviderForm, type NativeProviders } from './native-provider.ts'
+import { NATIVE_DEEPSEEK_NAME, nativeProviderForm, type NativeProviders } from './native-provider.ts'
 import { nativeInstance, type AgentDefaultModelLike, type CredentialInfo, type CredentialsLike, type LlmLike, type ModelInfo, type SettingsLike } from './native-seams.ts'
 import {
   NO_MODELS_MARKER, PROVIDER_SETTINGS_NS, discoveredModelUpdate, editableProfile, hasUserProviderRoute, isDiscoverableApi,
@@ -161,13 +161,14 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     note: string | undefined,
   ): Promise<CatalogProvider> => track(async () => {
     assertOpen()
-    const profile: Record<string, unknown> = dependencies.native?.owns(row.id) === true
-      ? dependencies.native.describe() : providerUserProfile(userSection, row.id)
+    const native = dependencies.native?.owns(row.id) === true
+    const profile: Record<string, unknown> = native ? dependencies.native!.describe() : providerUserProfile(userSection, row.id)
     const apiKeyEnv = typeof profile.apiKeyEnv === 'string' ? profile.apiKeyEnv : undefined
     const credential = await describeCredential(apiKeyEnv)
+    const name = native ? NATIVE_DEEPSEEK_NAME : row.name
     return {
       id: row.id,
-      ...row.name === undefined ? {} : { name: row.name },
+      ...name === undefined ? {} : { name },
       ...typeof profile.displayName === 'string' ? { displayName: profile.displayName } : {},
       ...apiKeyEnv === undefined ? {} : { apiKeyEnv },
       ...typeof profile.api === 'string' ? { api: profile.api } : {},
@@ -419,7 +420,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     if (dependencies.native?.owns(request.id, request.api) === true) {
       const form = nativeProviderForm(request)
       if ((await refreshCatalog()).providers.some(provider => dependencies.native!.owns(provider.id))) {
-        throw new RpcError(JSONRPC_INVALID_PARAMS, 'the native DeepSeek provider is already enabled')
+        throw new RpcError(JSONRPC_INVALID_PARAMS, NATIVE_DEEPSEEK_NAME + ' is already added. Edit it from /provider, and pick a model with /model.')
       }
       await dependencies.native.enable(form)
       return publishMutation(true)

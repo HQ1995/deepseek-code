@@ -54,7 +54,7 @@ field on the failed result.
 | `session/cancel` | cancel the active turn and reconcile queued prompts |
 | `session/load`, `session/list`, `session/close` | resume, enumerate, and dispose durable dsh sessions |
 | `session/set_model`, `session/set_mode` | switch model/effort and plan mode |
-| `session/request_permission` | wait for the owning client's answer; disconnect/cancel cancels the request without inventing a user rejection |
+| `session/request_permission` | wait for the owning client's answer; disconnect/cancel cancels the request without inventing a user rejection. The tool call carries the planned arguments as `rawInput` (`{variant: 'MCPTool', tool_name, tool_input}` for MCP tools) and, for browser tools, a `title` phrase; `_meta.dscodeAlwaysAsks` marks prompts the client must neither auto-approve nor offer always-approve on |
 
 `initialize` `_meta.dscodeExecutionWorld` says where tools run: `{kind: 'local'}`,
 or `{kind: 'ssh', host, workspace}` for a profile whose SSH adapter owns the
@@ -64,7 +64,9 @@ and it must not link, open, read, preview or complete session paths on this
 computer, nor load local project configuration. The bridge refuses a
 `session/new` or `session/load` cwd outside the workspace and ACP stdio MCP
 servers, and writes relative `.zip` exports under the home directory on this
-computer.
+computer. While the SSH adapter is not connected (it failed to start or lost
+its connection), `session/new`, `session/load` and turn-starting prompts fail
+with `-32602` naming the reason and the restart; slash commands still run.
 
 The bridge also implements the `x.ai/*` surfaces required by this TUI:
 
@@ -221,7 +223,14 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
   `session_search`, `session_event_search`, `session_trace`, `session_event_trace`,
   and `session_event_read`. They remain workspace-scoped even with explicit
   foreign session IDs; ordinary presets do not gain these tools globally.
-- Unknown JSON-RPC methods return `-32601`; invalid parameters return `-32602`.
+- Unknown JSON-RPC methods return `-32601`; invalid parameters return `-32602`
+  with `data.message` repeating the message, so the TUI shows a refusal as
+  final rather than as a retryable failure.
+- `subagent_finished` carries `duration_ms` with `_meta.subagentDurationAvailable`
+  when the child's settled run length is known, even while its other metrics
+  are not (`subagentMetricsAvailable: false`).
+- `x.ai/session/list` and `x.ai/sessions/list` leave out subagent and teammate
+  children (`origin: 'subagent'`); an exact-id query still finds one.
 - Disconnect and plugin disposal cancel and flush only the sessions owned by
   that client, including agents created by requests still awaiting publication.
   Reconnection cancels idle exit even while an earlier teardown is flushing.

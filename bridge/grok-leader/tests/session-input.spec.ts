@@ -38,6 +38,7 @@ function fixture() {
     commands: { execute: vi.fn<(_record: typeof record, _params: Record<string, unknown>, _parsed: ParsedPrompt, _signal?: AbortSignal) => Promise<PromptSettleResult | undefined> | undefined>(() => undefined) },
     models: { current: vi.fn(async () => catalog) }, attachments: vi.fn(() => attachments),
     notify: vi.fn(), cancelHuman: vi.fn(), goal: { pauseGoal: vi.fn(), refresh: vi.fn() },
+    remoteUnavailable: vi.fn((): string | undefined => undefined),
   }
   const input = createSessionInput(host)
   stops.push(async () => { await record.queue.dispose(); await input.dispose() })
@@ -48,6 +49,16 @@ function fixture() {
 }
 
 describe('session input routing', () => {
+  it('refuses a turn while the remote workspace is down but still runs commands', async () => {
+    const f = fixture()
+    f.host.remoteUnavailable.mockReturnValue('The remote workspace ssh swoop:/w is not connected: SSH helper disconnected.')
+    await expect(f.prompt('hello')).rejects.toMatchObject({ code: -32602, message: expect.stringContaining('ssh swoop:/w is not connected') })
+    expect(f.followup).not.toHaveBeenCalled()
+    f.host.commands.execute.mockReturnValueOnce(Promise.resolve({ stopReason: 'end_turn' } as unknown as PromptSettleResult))
+    await expect(f.prompt('/doctor')).resolves.toMatchObject({ stopReason: 'end_turn' })
+  })
+
+
   it('targets same-tick ordinary input without cancelling the native agent, human requests or goal', async () => {
     const f = fixture(), request = f.prompt()
     expect(f.input.cancelPrompt(1, { sessionId: 'one', promptId: 'request' })).toEqual({ status: 'cancelled' })
