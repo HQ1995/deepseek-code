@@ -4599,3 +4599,143 @@ fn execute_manual_expand_survives_progress_and_completion() {
         "completion must not snap a user-expanded Execute shut"
     );
 }
+use crate::scrollback::block::BlockContent as _;
+fn text_content(text: &str) -> Vec<acp::ToolCallContent> {
+    vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+        acp::TextContent::new(text.to_string()),
+    ))]
+}
+fn expanded_text(block: &dyn crate::scrollback::block::BlockContent) -> String {
+    let ctx = crate::scrollback::types::BlockContext {
+        width: 100,
+        mode: crate::scrollback::types::DisplayMode::Expanded,
+        is_running: false,
+        raw: false,
+        max_lines: None,
+        appearance: Default::default(),
+        is_selected: false,
+        cwd: None,
+    };
+    block
+        .output(&ctx)
+        .lines
+        .iter()
+        .map(|line| {
+            line.content
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+/// A successful non-shell execute tool (a code runner: no `command`, no
+/// Bash-shaped rawOutput) shows its result content, and its expanded card
+/// shows the code it ran.
+#[test]
+fn non_shell_execute_success_shows_content_and_input() {
+    let _theme = crate::theme::cache::pin_theme();
+    let call = |status| {
+        acp::ToolCall::new(acp::ToolCallId::new(Arc::from("rc1")), "run_code")
+            .kind(acp::ToolKind::Execute)
+            .status(status)
+            .content(text_content("42\n"))
+            .raw_input(Some(serde_json::json!({
+                "code": "const a = 40\nreturn a + 2",
+                "timeout_ms": 5000,
+            })))
+    };
+    let RenderBlock::ToolCall(ToolCallBlock::Execute(ok)) =
+        tool_call_to_block(&call(acp::ToolCallStatus::Completed), None)
+    else {
+        panic!("expected an execute card");
+    };
+    assert_eq!(ok.output.as_deref(), Some("42\n"));
+    assert!(ok.is_success());
+    assert_eq!(
+        ok.input.as_deref(),
+        Some("code:\n  const a = 40\n  return a + 2\ntimeout_ms: 5000")
+    );
+    let shown = expanded_text(&ok);
+    assert!(shown.contains("return a + 2"), "{shown}");
+    assert!(shown.contains("42"), "{shown}");
+    assert!(ok.is_foldable());
+
+    // A failure keeps the content as the error, and still shows the code.
+    let RenderBlock::ToolCall(ToolCallBlock::Execute(failed)) =
+        tool_call_to_block(&call(acp::ToolCallStatus::Failed), None)
+    else {
+        panic!("expected an execute card");
+    };
+    assert_eq!(failed.error.as_deref(), Some("42\n"));
+    assert!(failed.output.is_none());
+    assert!(failed.input.is_some());
+}
+/// A shell call already shows its command in the header: no input section,
+/// and a backgrounded one (no Bash rawOutput) shows its result text.
+#[test]
+fn shell_execute_without_bash_output_shows_content_but_no_input() {
+    let call = acp::ToolCall::new(acp::ToolCallId::new(Arc::from("sh1")), "bash")
+        .kind(acp::ToolKind::Execute)
+        .status(acp::ToolCallStatus::Completed)
+        .content(text_content("started job 7"))
+        .raw_input(Some(serde_json::json!({
+            "command": "sleep 60",
+            "description": "wait",
+            "run_in_background": true,
+        })));
+    let RenderBlock::ToolCall(ToolCallBlock::Execute(block)) = tool_call_to_block(&call, None)
+    else {
+        panic!("expected an execute card");
+    };
+    assert_eq!(block.command, "sleep 60");
+    assert_eq!(block.output.as_deref(), Some("started job 7"));
+    assert!(block.input.is_none());
+}
+/// A generic "other" tool row shows only its name when collapsed; expanded,
+/// it shows its input (capped) and its result.
+#[test]
+fn other_tool_expanded_shows_capped_input_and_content() {
+    let _theme = crate::theme::cache::pin_theme();
+    let long: String = (0..60).map(|i| format!("line {i}\n")).collect();
+    let call = acp::ToolCall::new(acp::ToolCallId::new(Arc::from("o1")), "lookup_ticket")
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Completed)
+        .content(text_content("ticket is open"))
+        .raw_input(Some(serde_json::json!({
+            "id": "T-1",
+            "filters": {"state": "open"},
+            "notes": long,
+        })));
+    let RenderBlock::ToolCall(ToolCallBlock::Other(block)) = tool_call_to_block(&call, None) else {
+        panic!("expected an other card");
+    };
+    let input = block.input.as_deref().expect("rawInput is kept");
+    let first: Vec<&str> = input.lines().take(4).collect();
+    for line in ["id: T-1", "filters: {\"state\":\"open\"}", "notes:"] {
+        assert!(first.contains(&line), "{first:?}");
+    }
+    assert!(input.contains("notes:\n  line 0\n  line 1\n"), "{input}");
+    assert_eq!(
+        input.lines().count(),
+        41,
+        "40 lines plus the overflow marker"
+    );
+    assert!(input.ends_with("\u{2026} +23 lines"), "{input}");
+    assert!(block.is_foldable());
+    let shown = expanded_text(&block);
+    assert!(shown.contains("id: T-1"), "{shown}");
+    assert!(shown.contains("ticket is open"), "{shown}");
+
+    // No input and no content: still just the name, not foldable.
+    let bare = acp::ToolCall::new(acp::ToolCallId::new(Arc::from("o2")), "ping")
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Completed)
+        .raw_input(Some(serde_json::json!({})));
+    let RenderBlock::ToolCall(ToolCallBlock::Other(bare)) = tool_call_to_block(&bare, None) else {
+        panic!("expected an other card");
+    };
+    assert!(bare.input.is_none());
+    assert!(!bare.is_foldable());
+}

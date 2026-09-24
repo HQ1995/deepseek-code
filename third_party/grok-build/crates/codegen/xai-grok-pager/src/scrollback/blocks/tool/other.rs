@@ -21,6 +21,10 @@ pub struct OtherToolCallBlock {
     pub error: Option<String>,
     /// Optional output.
     pub output: Option<String>,
+    /// DIVERGENCE(dscode): the call's input, pre-rendered and capped. Shown
+    /// when the card is expanded, so a generic tool row carries more than its
+    /// bare name.
+    pub input: Option<String>,
     /// Attachment preview errors, independent of tool execution success.
     pub media_notes: Vec<String>,
     /// When the tool started running (Phase 2: time tracking).
@@ -45,6 +49,7 @@ impl OtherToolCallBlock {
             summary: summary.into(),
             error: None,
             output: None,
+            input: None,
             media_notes: Vec::new(),
             started_at: None,
             elapsed_ms: None,
@@ -308,6 +313,10 @@ impl BlockContent for OtherToolCallBlock {
                 let mut lines: Vec<BlockLine> =
                     vec![self.collapsed_line(&theme, false, None).into()];
 
+                if let Some(input) = &self.input {
+                    super::push_tool_input_lines(&mut lines, input, &theme, width);
+                }
+
                 if let Some(output) = &self.output {
                     // Try to render as structured Q&A (AskUserQuestion output).
                     let qa_lines = parse_ask_user_qa_pairs(output);
@@ -404,7 +413,7 @@ impl BlockContent for OtherToolCallBlock {
         if self.error.is_some() {
             return false;
         }
-        self.output.is_some()
+        self.output.is_some() || self.input.is_some()
     }
 
     fn default_display_mode(&self) -> DisplayMode {
