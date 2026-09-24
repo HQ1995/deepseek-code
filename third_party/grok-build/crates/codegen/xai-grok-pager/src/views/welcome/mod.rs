@@ -614,6 +614,45 @@ fn render_prompt_and_version(
 }
 
 /// All display state for rendering the welcome screen.
+/// DIVERGENCE(dscode): the signed-in welcome menu in display order. Rendering,
+/// the row count and Enter/click dispatch all read this one list, so leaving a
+/// row out never moves another row's action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WelcomeMenuItem {
+    ImportClaude,
+    NewWorktree,
+    ResumeSession,
+    Changelog,
+    Quit,
+}
+
+/// The signed-in menu rows. "New worktree" appears only where one can be made.
+pub fn welcome_menu_items(
+    has_claude_import: bool,
+    offers_worktree: bool,
+    show_changelog: bool,
+) -> Vec<WelcomeMenuItem> {
+    let mut items = Vec::with_capacity(5);
+    if has_claude_import {
+        items.push(WelcomeMenuItem::ImportClaude);
+    }
+    if offers_worktree {
+        items.push(WelcomeMenuItem::NewWorktree);
+    }
+    items.push(WelcomeMenuItem::ResumeSession);
+    if show_changelog {
+        items.push(WelcomeMenuItem::Changelog);
+    }
+    items.push(WelcomeMenuItem::Quit);
+    items
+}
+
+/// Whether the welcome screen offers a new worktree: a git checkout on this
+/// computer, and not a remote workspace, whose sessions run elsewhere.
+pub fn offers_worktree(cwd_has_git_ancestor: bool) -> bool {
+    cwd_has_git_ancestor && !crate::execution_world::is_remote()
+}
+
 pub struct WelcomeRenderParams<'a> {
     pub prompt_focus: WelcomePromptFocus,
     pub auth_state: &'a AuthState,
@@ -635,6 +674,8 @@ pub struct WelcomeRenderParams<'a> {
     pub team_name: Option<&'a str>,
     pub has_access: bool,
     pub has_claude_import: bool,
+    /// See [`offers_worktree`].
+    pub offers_worktree: bool,
     pub mouse_pos: Option<(u16, u16)>,
     pub is_zdr_blocked: bool,
     pub session_picker: Option<&'a [SessionPickerEntry]>,
@@ -1769,24 +1810,25 @@ fn render_welcome_done(
             if in_vscode_family { "ctrl+d" } else { "ctrl+q" },
             "ctrl+i  [x]",
         );
-        // Insert the import row at the top when there are pending `.claude/`
-        // settings to import — it's the most actionable item right now.
-        let mut items: Vec<(&str, &str)> = Vec::with_capacity(5);
-        if p.has_claude_import {
-            // The trailing "[x]" is a clickable dismiss affordance — the
-            // welcome screen mouse handler treats clicks on the rightmost
-            // 3 cells of this row as dismiss instead of open. Keyboard:
-            // ctrl-shift-i. The key string is right-aligned by render_menu,
-            // so [x] sits at the very end of the row.
-            items.push((key_i_with_x, "Import Claude settings"));
-        }
-        items.push((key_w, "New worktree"));
-        items.push((key_s, "Resume session"));
-        // "Changelog" above Quit; no shortcut — opened by click (row or block).
-        if show_changelog_action {
-            items.push(("", "Changelog"));
-        }
-        items.push((key_q, "Quit"));
+        // The import row sits at the top when there are pending `.claude/`
+        // settings to import — it's the most actionable item right now. Its
+        // trailing "[x]" is a clickable dismiss affordance — the welcome
+        // screen mouse handler treats clicks on the rightmost 3 cells of this
+        // row as dismiss instead of open. Keyboard: ctrl-shift-i. The key
+        // string is right-aligned by render_menu, so [x] sits at the very end
+        // of the row. "Changelog" sits above Quit with no shortcut — opened by
+        // click (row or block).
+        let items: Vec<(&str, &str)> =
+            welcome_menu_items(p.has_claude_import, p.offers_worktree, show_changelog_action)
+                .into_iter()
+                .map(|item| match item {
+                    WelcomeMenuItem::ImportClaude => (key_i_with_x, "Import Claude settings"),
+                    WelcomeMenuItem::NewWorktree => (key_w, "New worktree"),
+                    WelcomeMenuItem::ResumeSession => (key_s, "Resume session"),
+                    WelcomeMenuItem::Changelog => ("", "Changelog"),
+                    WelcomeMenuItem::Quit => (key_q, "Quit"),
+                })
+                .collect();
         owned_menu = items;
         owned_menu.as_slice()
     };
@@ -2877,6 +2919,7 @@ mod tests {
             team_name: None,
             has_access: true,
             has_claude_import: false,
+            offers_worktree: true,
             mouse_pos: None,
             is_zdr_blocked: false,
             session_picker,

@@ -319,8 +319,9 @@ connected or not, so a failed connection never looks local. Inside that world:
   `ssh HOST:PATH` and never shows this computer's directory. It does not scan agent text for local images or videos,
   or discover git in a local directory with the same name.
 - **Local context:** it does not use this directory's MCP config, persona files,
-  worktrees or location changes, and asks no folder-trust question for it. It
-  refuses dropped local files; dropped images still attach as data.
+  worktrees or location changes, and asks no folder-trust question for it; the
+  welcome screen offers no new worktree. It refuses dropped local files; dropped
+  images still attach as data.
 - **Exports:** relative `.zip` exports land in the home directory on this computer.
 - **`/doctor`:** it names the host, workspace and helper digest, and reports
   ERROR while disconnected.

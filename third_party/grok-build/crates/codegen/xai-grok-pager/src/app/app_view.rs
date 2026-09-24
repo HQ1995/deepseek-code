@@ -2572,12 +2572,12 @@ impl AppView {
                     menu_count: if zdr_blocked {
                         2
                     } else {
-                        3 + if self.has_claude_import { 1 } else { 0 }
-                            + if self.welcome_show_changelog_action {
-                                1
-                            } else {
-                                0
-                            }
+                        crate::views::welcome::welcome_menu_items(
+                            self.has_claude_import,
+                            crate::views::welcome::offers_worktree(self.cwd_has_git_ancestor),
+                            self.welcome_show_changelog_action,
+                        )
+                        .len()
                     },
                     prompt_rect: self.welcome_prompt_rect.as_ref(),
                     import_banner_rect: self.welcome_import_banner_rect.as_ref(),
@@ -3787,7 +3787,9 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     xai_grok_telemetry::events::AnnouncementCtaSurface::Keyboard,
                 ));
             }
-            if key!('w', CONTROL).matches(key) && ctx.cwd_has_git_ancestor {
+            if key!('w', CONTROL).matches(key)
+                && crate::views::welcome::offers_worktree(ctx.cwd_has_git_ancestor)
+            {
                 return InputOutcome::Action(Action::OpenNewWorktreeDialog);
             }
             if key!(F(3)).matches(key) {
@@ -3843,8 +3845,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             {
                 return dispatch_menu_action(
                     idx,
-                    ctx.has_claude_import,
-                    ctx.show_changelog_action,
+                    &welcome_menu(ctx),
                     ctx.changelog_markdown.as_deref(),
                 );
             }
@@ -3985,8 +3986,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                         }
                         return dispatch_menu_action(
                             i,
-                            ctx.has_claude_import,
-                            ctx.show_changelog_action,
+                            &welcome_menu(ctx),
                             ctx.changelog_markdown.as_deref(),
                         );
                     }
@@ -4223,47 +4223,36 @@ fn dispatch_access_gate_menu_action(index: usize) -> InputOutcome {
         _ => InputOutcome::Unchanged,
     }
 }
-/// Dispatch an action for a welcome menu item by index.
-///
-/// Menu order: `[Import]`, New worktree, Resume session, `[Changelog]`, Quit.
-/// `show_changelog_action` is true when the Changelog row is rendered; release
-/// notes open only once `changelog_md` is available.
+/// The signed-in welcome menu as the last render showed it.
+fn welcome_menu(ctx: &WelcomeInputCtx<'_>) -> Vec<crate::views::welcome::WelcomeMenuItem> {
+    crate::views::welcome::welcome_menu_items(
+        ctx.has_claude_import,
+        crate::views::welcome::offers_worktree(ctx.cwd_has_git_ancestor),
+        ctx.show_changelog_action,
+    )
+}
+/// Dispatch an action for a welcome menu item by index into the rendered
+/// `items`. Release notes open only once `changelog_md` is available.
 fn dispatch_menu_action(
     index: usize,
-    has_claude_import: bool,
-    show_changelog_action: bool,
+    items: &[crate::views::welcome::WelcomeMenuItem],
     changelog_md: Option<&str>,
 ) -> InputOutcome {
-    let base = if has_claude_import { 1 } else { 0 };
-    let worktree_idx = base;
-    let resume_idx = base + 1;
-    let (changelog_idx, quit_idx) = if show_changelog_action {
-        (Some(base + 2), base + 3)
-    } else {
-        (None, base + 2)
-    };
-    if has_claude_import && index == 0 {
-        return InputOutcome::Action(Action::ImportClaudeSettings);
-    }
-    if index == worktree_idx {
-        return InputOutcome::Action(Action::OpenNewWorktreeDialog);
-    }
-    if index == resume_idx {
-        return InputOutcome::Action(Action::FetchSessionList);
-    }
-    if Some(index) == changelog_idx {
-        if let Some(md) = changelog_md {
-            return InputOutcome::Action(Action::ShowReleaseNotes {
+    use crate::views::welcome::WelcomeMenuItem;
+    match items.get(index) {
+        Some(WelcomeMenuItem::ImportClaude) => InputOutcome::Action(Action::ImportClaudeSettings),
+        Some(WelcomeMenuItem::NewWorktree) => InputOutcome::Action(Action::OpenNewWorktreeDialog),
+        Some(WelcomeMenuItem::ResumeSession) => InputOutcome::Action(Action::FetchSessionList),
+        Some(WelcomeMenuItem::Changelog) => match changelog_md {
+            Some(md) => InputOutcome::Action(Action::ShowReleaseNotes {
                 title: "Release Notes".to_string(),
                 content: md.trim().to_string(),
-            });
-        }
-        return InputOutcome::Unchanged;
+            }),
+            None => InputOutcome::Unchanged,
+        },
+        Some(WelcomeMenuItem::Quit) => InputOutcome::Action(Action::Quit),
+        None => InputOutcome::Unchanged,
     }
-    if index == quit_idx {
-        return InputOutcome::Action(Action::Quit);
-    }
-    InputOutcome::Unchanged
 }
 impl AppView {
     /// Merge notification escape sequences with render-produced post-flush
@@ -4627,6 +4616,9 @@ impl AppView {
                             team_name: self.team_name.as_deref(),
                             has_access,
                             has_claude_import: self.has_claude_import,
+                            offers_worktree: crate::views::welcome::offers_worktree(
+                                self.cwd_has_git_ancestor,
+                            ),
                             mouse_pos: self.last_mouse_pos,
                             is_zdr_blocked: zdr_blocked_for_draw,
                             session_picker: self.session_picker_entries.as_deref(),

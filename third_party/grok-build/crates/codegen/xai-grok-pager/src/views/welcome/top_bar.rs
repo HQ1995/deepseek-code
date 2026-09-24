@@ -54,7 +54,14 @@ pub(crate) fn location_line(theme: &Theme) -> Line<'static> {
 pub(crate) fn location_line_at(theme: &Theme, cwd: &Path) -> Line<'static> {
     let info_style = Style::default().fg(theme.gray);
 
-    let info = git_info::cwd_git_info_lazy(cwd);
+    // DIVERGENCE(dscode): a remote profile works on another machine, so the
+    // launch directory's branch and worktree (probed before the leader named
+    // the world) describe nothing it uses.
+    let info = if crate::execution_world::is_remote() {
+        None
+    } else {
+        git_info::cwd_git_info_lazy(cwd)
+    };
 
     let mut parts: Vec<Span> = Vec::new();
     if let Some(branch) = info.as_ref().and_then(|i| i.branch.as_deref()) {
@@ -132,6 +139,16 @@ fn collapse_home(dir: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_welcome_shows_no_local_branch() {
+        use crate::execution_world::{ExecutionWorld, with_test_world};
+        let remote = ExecutionWorld::Remote { host: "swoop".into(), workspace: "/srv/w".into() };
+        let cwd = std::env::current_dir().unwrap();
+        let line = with_test_world(remote, || location_line_at(&Theme::current(), &cwd));
+        let text: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(text, "ssh swoop:/srv/w");
+    }
 
     #[test]
     fn remote_welcome_names_the_host_workspace() {

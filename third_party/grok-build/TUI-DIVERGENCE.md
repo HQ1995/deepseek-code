@@ -765,8 +765,18 @@ Bridge-written tool images stay local and open as before. Unit tests cover the
 parse, the session cwd rule and each refusal.
 
 In a remote world the header reads `ssh HOST:PATH` and never shows the launch
-directory a view without a session still holds, and the first `@` shows a tip
-that completion is off there.
+directory a view without a session still holds, nor that directory's git branch
+or worktree badge on the welcome screen. The first `@` shows a tip that
+completion is off there.
+
+### Welcome menu rows come from one list
+
+The signed-in welcome menu is built from one ordered list of items that
+rendering, the row count and Enter/click dispatch all read (class: behavior).
+Upstream mapped fixed row positions to actions. "New worktree" appears only
+where a worktree can be made: a git checkout on this computer that is not a
+remote workspace. Ctrl+W follows the same rule. Leaving the row out never moves
+another row's action.
 
 ### Always-asking approvals
 

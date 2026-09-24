@@ -2503,67 +2503,89 @@ fn welcome_ctrl_d_requires_confirmation() {
         KeyShortcut::from(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
     );
 }
+fn menu(import: bool, worktree: bool, changelog: bool) -> Vec<crate::views::welcome::WelcomeMenuItem> {
+    crate::views::welcome::welcome_menu_items(import, worktree, changelog)
+}
 #[test]
 fn menu_action_indices_without_changelog() {
+    let items = menu(false, true, false);
     assert!(matches!(
-        dispatch_menu_action(0, false, false, None),
+        dispatch_menu_action(0, &items, None),
         InputOutcome::Action(Action::OpenNewWorktreeDialog)
     ));
     assert!(matches!(
-        dispatch_menu_action(1, false, false, None),
+        dispatch_menu_action(1, &items, None),
         InputOutcome::Action(Action::FetchSessionList)
     ));
     assert!(matches!(
-        dispatch_menu_action(2, false, false, None),
+        dispatch_menu_action(2, &items, None),
         InputOutcome::Action(Action::Quit)
     ));
+    assert!(matches!(dispatch_menu_action(3, &items, None), InputOutcome::Unchanged));
 }
 #[test]
 fn menu_action_changelog_sits_above_quit() {
     let md = Some("# notes");
+    let items = menu(false, true, true);
     assert!(matches!(
-        dispatch_menu_action(1, false, true, md),
+        dispatch_menu_action(1, &items, md),
         InputOutcome::Action(Action::FetchSessionList)
     ));
     assert!(matches!(
-        dispatch_menu_action(2, false, true, md),
+        dispatch_menu_action(2, &items, md),
         InputOutcome::Action(Action::ShowReleaseNotes { .. })
     ));
     assert!(matches!(
-        dispatch_menu_action(3, false, true, md),
+        dispatch_menu_action(3, &items, md),
         InputOutcome::Action(Action::Quit)
     ));
 }
 #[test]
 fn menu_action_changelog_before_fetch_is_noop() {
     assert!(matches!(
-        dispatch_menu_action(2, false, true, None),
+        dispatch_menu_action(2, &menu(false, true, true), None),
         InputOutcome::Unchanged
     ));
 }
 #[test]
 fn menu_action_indices_with_import_and_changelog() {
     let md = Some("# notes");
+    let items = menu(true, true, true);
     assert!(matches!(
-        dispatch_menu_action(0, true, true, md),
+        dispatch_menu_action(0, &items, md),
         InputOutcome::Action(Action::ImportClaudeSettings)
     ));
     assert!(matches!(
-        dispatch_menu_action(1, true, true, md),
+        dispatch_menu_action(1, &items, md),
         InputOutcome::Action(Action::OpenNewWorktreeDialog)
     ));
     assert!(matches!(
-        dispatch_menu_action(2, true, true, md),
+        dispatch_menu_action(2, &items, md),
         InputOutcome::Action(Action::FetchSessionList)
     ));
     assert!(matches!(
-        dispatch_menu_action(3, true, true, md),
+        dispatch_menu_action(3, &items, md),
         InputOutcome::Action(Action::ShowReleaseNotes { .. })
     ));
     assert!(matches!(
-        dispatch_menu_action(4, true, true, md),
+        dispatch_menu_action(4, &items, md),
         InputOutcome::Action(Action::Quit)
     ));
+}
+/// DIVERGENCE(dscode): without a worktree row every later row keeps its own
+/// action, and the row is left out in a remote workspace or outside git.
+#[test]
+fn menu_without_worktree_keeps_each_row_on_its_action() {
+    use crate::execution_world::{ExecutionWorld, with_test_world};
+    let items = menu(true, false, true);
+    assert!(matches!(dispatch_menu_action(0, &items, None), InputOutcome::Action(Action::ImportClaudeSettings)));
+    assert!(matches!(dispatch_menu_action(1, &items, None), InputOutcome::Action(Action::FetchSessionList)));
+    assert!(matches!(dispatch_menu_action(3, &items, None), InputOutcome::Action(Action::Quit)));
+    assert!(!items.contains(&crate::views::welcome::WelcomeMenuItem::NewWorktree));
+    assert!(crate::views::welcome::offers_worktree(true));
+    assert!(!crate::views::welcome::offers_worktree(false));
+    let remote = ExecutionWorld::Remote { host: "swoop".into(), workspace: "/srv/w".into() };
+    assert!(!with_test_world(remote, || crate::views::welcome::offers_worktree(true)));
 }
 #[test]
 fn welcome_pending_ctrl_c_quits_instantly() {
