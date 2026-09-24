@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import { readFile, unlink, writeFile } from 'node:fs/promises'
-import { basename, join } from 'node:path'
+import { join } from 'node:path'
+
+/** A tool image kept in the attachment store is captioned, not named by its
+ * content hash; Open still reaches the stored file (checked below). */
+const STORED_IMAGE_CAPTION = /Saved with the session · click to copy its path/
 
 const messageText = message => typeof message.content === 'string' ? message.content :
   (message.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')
@@ -220,7 +224,7 @@ export async function nativeControlsAcceptance(ui) {
   const stored = imageState.images.at(-1)
   assert.ok(stored.path && stored.path !== path)
   const bytes = await readFile(stored.path)
-  await wait(new RegExp(basename(stored.path).replaceAll('.', '\\.')))
+  await wait(STORED_IMAGE_CAPTION)
   const imageScreen = await wait(/\[Open/)
   const lines = imageScreen.split('\n'), y = lines.findLastIndex(line => line.includes('[Open'))
   await click(lines[y].indexOf('[Open') + 2, y)
@@ -235,12 +239,12 @@ export async function nativeControlsAcceptance(ui) {
   await unlink(path)
   await restart()
   assert.deepEqual(await readFile(stored.path), bytes)
-  await wait(new RegExp(basename(stored.path).replaceAll('.', '\\.')))
+  await wait(STORED_IMAGE_CAPTION)
   await artifact('controls-image-restarted', { image: stored, screen: await capture() })
   await openTask('DSCODE controlled child', true)
   await wait(/DSCODE controlled child[^\n]*\[✗\]/)
   for (let i = 0; i < 10; i++) await key('NPage')
-  await wait(new RegExp(basename(stored.path).replaceAll('.', '\\.')))
+  await wait(STORED_IMAGE_CAPTION)
   await artifact('controls-image-child-history', { screen: await capture() })
   await key('Escape'); await key('C-g')
   return { childId, jobId: job.id, dueReminderId: dueId, image: stored.attachment, deliveries: true, parentCatalog: true, feedbackWithoutTurn: true, idleCompletionWakes: WAKE_CHAIN_STEPS }
