@@ -348,7 +348,9 @@ runtime, and a release can change the helper (alpha.2's imports new subprocess
 modules). Before writing
 anything, `init` connects the way the leader will and checks the remote Node,
 the workspace and both digests, naming the fix and the exact `npm install`
-command when a file is missing or different; `--no-check` skips it.
+command when a file is missing or different; `--no-check` skips it. It stores
+the workspace as the host resolves it, since remote tools report resolved
+paths; `remote status --check` names a stored path that now resolves elsewhere.
 `dscode remote status --check` and `dscode doctor --runtime` repeat the check.
 The connection runs
 `ssh -T -M -o BatchMode=yes -o StrictHostKeyChecking=yes <alias>`, so the alias

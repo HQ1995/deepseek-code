@@ -187,7 +187,7 @@ export const installationReport = ({
     const where = `ssh ${settings.host}:${settings.workspace}`
     const local = resolved ? localHelpers(resolved) : undefined
     try {
-      const node = checkRemote(settings, { ...local === undefined ? {} : { install: { version: local.version } }, ...probe === undefined ? {} : { probe } })
+      const { node } = checkRemote(settings, { ...local === undefined ? {} : { install: { version: local.version } }, ...probe === undefined ? {} : { probe } })
       add('OK', 'Remote workspace', `${where} · Node ${node} · helper and bootstrap match their pinned digests`)
     } catch (error) {
       add('ERROR', 'Remote workspace', `${where}: ${error.message} No session can start until this works; \`dscode remote status --check\` repeats the check.`)

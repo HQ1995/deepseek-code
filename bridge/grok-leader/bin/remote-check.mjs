@@ -53,9 +53,9 @@ const shellQuote = value => `'${String(value).replaceAll("'", `'\\''`)}'`
 const PROBE = `const fs = require('node:fs'), crypto = require('node:crypto')
 const [workspace, ...files] = process.argv.slice(1)
 const digest = path => { try { return crypto.createHash('sha256').update(fs.readFileSync(path)).digest('hex') } catch { return null } }
-let directory = false
-try { directory = fs.statSync(workspace).isDirectory() } catch {}
-console.log(JSON.stringify({ node: process.version, workspace: directory, digests: files.map(digest) }))`
+let directory = false, real = null
+try { directory = fs.statSync(workspace).isDirectory(); real = fs.realpathSync(workspace) } catch {}
+console.log(JSON.stringify({ node: process.version, workspace: directory, realWorkspace: real, digests: files.map(digest) }))`
 
 /** `ssh` arguments that connect exactly as the leader does: batch mode and a known host key. */
 const probeArgs = (config, connectTimeout) => {
@@ -86,7 +86,8 @@ export function sshProbeAsync(config, { timeoutMs = 10_000, run = execFile } = {
 const lastLine = text => text.trim().split('\n').filter(Boolean).at(-1) ?? ''
 
 /**
- * Check one remote configuration; returns the remote Node version.
+ * Check one remote configuration; returns the remote Node version and the
+ * workspace as the host resolves it (tools there report resolved paths).
  * @param install - `{ dir?, version }` of the expected packages, for the install hint.
  * @throws a user-facing Error naming what to fix.
  */
@@ -115,5 +116,5 @@ export function checkRemote(config, { probe = sshProbe, install } = {}) {
       throw new Error(`${path} on ${config.host} is not the ${name} this dscode expects (sha256 ${actual}, expected ${expected}).${hint}`)
     }
   }
-  return report.node
+  return { node: report.node, workspace: typeof report.realWorkspace === 'string' ? report.realWorkspace : config.workspace }
 }

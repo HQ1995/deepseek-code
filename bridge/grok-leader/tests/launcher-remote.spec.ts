@@ -106,6 +106,26 @@ describe('dscode remote', () => {
       expect(log.mock.lastCall![0]).toContain("name: '@hqzhao95/dscode/ssh'")
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
+
+  it('stores the workspace path the host resolves it to', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dscode-remote-'))
+    try {
+      const log = vi.fn(), withLock = vi.fn(async (action: () => Promise<unknown>) => action())
+      const scaffold = vi.fn(() => writeFileSync(join(dir, 'cordis.patch.yml'), TEMPLATE, { flag: 'a' }))
+      const write = (path: string, text: string) => writeFileSync(path, text)
+      const resolved = (realWorkspace: string) => ({ status: 0, stderr: '',
+        stdout: JSON.stringify({ node: 'v24.19.0', workspace: true, realWorkspace, digests: [HASH_A, HASH_B.toLowerCase()] }) })
+      const probe = vi.fn(() => resolved('/data/work'))
+      const options = { profileDir: dir, dedicatedHome: true, withLock, scaffold, write, log, probe }
+      await remoteCommand(['init', ...flags], options)
+      expect(log).toHaveBeenCalledWith('Using /data/work, the path /home/u/work resolves to on swoop.')
+      expect(remoteStatus(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8'))?.workspace).toBe('/data/work')
+      // A link moved after init is named, not silently followed.
+      probe.mockReturnValueOnce(resolved('/data/elsewhere'))
+      await remoteCommand(['status', '--check'], options)
+      expect(log).toHaveBeenLastCalledWith('/data/work resolves to /data/elsewhere on swoop; run `dscode remote init` again to store that path.')
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
 })
 
 describe('dscode remote check', () => {
@@ -117,7 +137,8 @@ describe('dscode remote check', () => {
     () => checkRemote(config, { probe: () => result, ...install === undefined ? {} : { install } })
 
   it('names the one thing to fix', () => {
-    expect(check(report())()).toBe('v24.1.0')
+    expect(check(report())()).toEqual({ node: 'v24.1.0', workspace: '/srv/w' })
+    expect(check(report({ realWorkspace: '/data/w' }))()).toEqual({ node: 'v24.1.0', workspace: '/data/w' })
     expect(check({ status: 255, stdout: '', stderr: 'Host key verification failed.' })).toThrow('ssh build failed: Host key verification failed.')
     expect(check({ status: 127, stdout: '', stderr: "sh: /opt/it's/node: not found" })).toThrow("/opt/it's/node did not run on build")
     expect(check(report({ node: 'v20.11.0' }))).toThrow('is Node v20.11.0; the helper needs Node 22 or newer')

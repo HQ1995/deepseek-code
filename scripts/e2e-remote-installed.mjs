@@ -23,6 +23,8 @@ if (!runtime || !home || !configPath) throw new Error('usage: e2e-remote-install
 const config = JSON.parse(await readFile(configPath, 'utf8'))
 const execute = promisify(execFile)
 const remote = async command => (await execute('ssh', ['-o', 'BatchMode=yes', config.host, command], { timeout: 20_000 })).stdout
+// The workspace as the host resolves it: init stores that path, and remote tools report it.
+const workspace = (await remote(`cd ${JSON.stringify(config.workspace)} && pwd -P`)).trim()
 const KEY = 'loopback-fixture-only'
 const canary = 'dscode-remote-canary-' + randomUUID() + '.txt'
 const local = await mkdtemp(join(tmpdir(), 'dscode-remote-local-'))
@@ -38,8 +40,8 @@ const server = createServer((request, response) => {
     const results = body.messages.flatMap(message => Array.isArray(message.content) ? message.content : []).filter(block => block.type === 'tool_result')
     let tool, args
     if (phase === 'shell' && step === 0) { tool = 'bash'; args = { command: 'pwd; uname -s', description: 'Show the remote workspace' } }
-    else if (phase === 'shell' && step === 1) assert.match(JSON.stringify(results.at(-1)), new RegExp(config.workspace.replace(/[/.]/g, '\\$&') + '[\\s\\S]*Linux'))
-    else if (phase === 'write' && step === 0) { tool = 'write'; args = { file_path: posix.join(config.workspace, canary), content: 'REMOTE_CANARY' } }
+    else if (phase === 'shell' && step === 1) assert.match(JSON.stringify(results.at(-1)), new RegExp(workspace.replace(/[/.]/g, '\\$&') + '[\\s\\S]*Linux'))
+    else if (phase === 'write' && step === 0) { tool = 'write'; args = { file_path: posix.join(workspace, canary), content: 'REMOTE_CANARY' } }
     else if (phase === 'write' && step === 1) assert.doesNotMatch(JSON.stringify(results.at(-1)), /"is_error":true/)
     assert.ok(step++ < 3, 'unexpected model loop')
     writeMessagesReply(response, { id: 'msg-' + phase + step, callId: 'call-' + phase + step, model: body.model, tool, args, text: 'Remote fixture reply' })
@@ -61,12 +63,12 @@ const host = startLeader({ runtime, home, socketPath: `/tmp/dscode-remote-instal
 const { rpc } = host
 try {
   const init = await host.ready
-  assert.deepEqual(init._meta.dscodeExecutionWorld, { kind: 'ssh', host: config.host, workspace: config.workspace })
+  assert.deepEqual(init._meta.dscodeExecutionWorld, { kind: 'ssh', host: config.host, workspace })
   checks.push('initialize advertises the SSH world')
 
   await assert.rejects(rpc('session/new', { cwd: local, mcpServers: [] }), /remote workspace/)
-  await assert.rejects(rpc('session/new', { cwd: config.workspace, mcpServers: [{ name: 'local', command: '/usr/bin/true', args: [], env: [] }] }), /Local stdio MCP servers/)
-  const { sessionId } = await rpc('session/new', { cwd: config.workspace, mcpServers: [] })
+  await assert.rejects(rpc('session/new', { cwd: workspace, mcpServers: [{ name: 'local', command: '/usr/bin/true', args: [], env: [] }] }), /Local stdio MCP servers/)
+  const { sessionId } = await rpc('session/new', { cwd: workspace, mcpServers: [] })
   await rpc('x.ai/providers/add', { id: 'deepseek-official', api: 'deepseek-native', apiKey: KEY, baseURL: origin + '/anthropic', credentialSource: 'saved' })
   const model = (await rpc('x.ai/models/list', { sessionId })).availableModels.find(item => item._meta?.provider === 'deepseek-official')
   await rpc('session/set_model', { sessionId, modelId: model.modelId })
@@ -77,14 +79,14 @@ try {
   checks.push('bash runs on the remote host in the workspace (Linux)')
 
   // The write lands on the remote host; nothing appears at that path here.
-  const localTwin = join(config.workspace, canary)
+  const localTwin = join(workspace, canary)
   assert.equal((await prompt('write')).stopReason, 'end_turn')
   assert.equal((await remote(`cat ${JSON.stringify(localTwin)}`)).trim(), 'REMOTE_CANARY')
   assert.equal(existsSync(localTwin), false, 'the write must not land on this computer')
   checks.push('file writes land on the remote host only')
 
   const doctor = (await rpc('x.ai/doctor', { sessionId, tuiVersion: '0.0.14-alpha.12' })).text
-  assert.match(doctor, new RegExp(`\\[INFO\\] Remote workspace: ssh ${config.host}:${config.workspace.replace(/[/.]/g, '\\$&')}; helper sha256 ${config.helperHash}`))
+  assert.match(doctor, new RegExp(`\\[INFO\\] Remote workspace: ssh ${config.host}:${workspace.replace(/[/.]/g, '\\$&')}; helper sha256 ${config.helperHash}`))
   const archive = 'remote-export-' + process.pid + '.zip'
   await rpc('x.ai/session/export', { sessionId, prompt: [{ type: 'text', text: archive }] })
   assert.ok(existsSync(join(home, archive)), 'relative export lands under the home directory on this computer')
@@ -97,7 +99,7 @@ try {
   throw new Error(`${error.message}\n--- leader diagnostics ---\n${host.diagnostics}`, { cause: error })
 } finally {
   await host.stop()
-  await remote(`rm -f ${JSON.stringify(join(config.workspace, canary))}`).catch(() => {})
+  await remote(`rm -f ${JSON.stringify(join(workspace, canary))}`).catch(() => {})
   server.closeAllConnections(); await new Promise(resolve => server.close(resolve))
   await rm(local, { recursive: true, force: true })
 }

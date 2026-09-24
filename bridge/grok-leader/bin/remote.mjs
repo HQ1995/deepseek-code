@@ -151,14 +151,18 @@ export async function remoteCommand(args, { profileDir, dedicatedHome, withLock,
   }
   const install = dir => local === undefined ? undefined : { dir, version: local.version }
   const connected = (config, dir) => {
-    const node = checkRemote(config, { install: install(dir), ...probe === undefined ? {} : { probe } })
-    return `Checked ssh ${config.host}: Node ${node}, the workspace, and a helper and bootstrap matching this dscode.`
+    const checked = checkRemote(config, { install: install(dir), ...probe === undefined ? {} : { probe } })
+    return { ...checked, text: `Checked ssh ${config.host}: Node ${checked.node}, the workspace, and a helper and bootstrap matching this dscode.` }
   }
   if (verb === 'status' && (rest.length === 0 || (rest.length === 1 && rest[0] === '--check'))) {
     const text = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : ''
     const status = remoteStatus(text)
     log(status === undefined ? `${profileDir}: local workspace profile` : `${profileDir}: remote workspace ssh ${status.host}:${status.workspace} (helper sha256 ${status.helperHash})`)
-    if (status !== undefined && rest[0] === '--check') log(connected(remoteSettings(text)))
+    if (status !== undefined && rest[0] === '--check') {
+      const settings = remoteSettings(text), checked = connected(settings)
+      log(checked.text)
+      if (checked.workspace !== settings.workspace) log(`${settings.workspace} resolves to ${checked.workspace} on ${settings.host}; run \`dscode remote init\` again to store that path.`)
+    }
     return
   }
   if (verb === 'init' && rest[0] === '--print') {
@@ -171,7 +175,15 @@ export async function remoteCommand(args, { profileDir, dedicatedHome, withLock,
   if (verb === 'init') {
     const config = remoteConfig(rest, local)
     // Fail here, where the fix is obvious, rather than at the first session.
-    if (!rest.includes('--no-check')) log(connected(config, rest.includes('--dsh') ? rest[rest.indexOf('--dsh') + 1] : undefined))
+    if (!rest.includes('--no-check')) {
+      const checked = connected(config, rest.includes('--dsh') ? rest[rest.indexOf('--dsh') + 1] : undefined)
+      log(checked.text)
+      // Remote tools report resolved paths, so store the one they will see.
+      if (checked.workspace !== config.workspace) {
+        log(`Using ${checked.workspace}, the path ${config.workspace} resolves to on ${config.host}.`)
+        config.workspace = checked.workspace
+      }
+    }
     await withLock(async () => {
       scaffold()
       write(patchPath, applyRemote(readFileSync(patchPath, 'utf8'), config))

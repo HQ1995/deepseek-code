@@ -20,6 +20,8 @@ const [runtime, home, configPath, tui] = process.argv.slice(2)
 if (!runtime || !home || !configPath || !tui) throw new Error('usage: e2e-remote-tui.mjs <runtime> <dsh-home> <config.json> <dscode-tui>')
 const config = JSON.parse(await readFile(configPath, 'utf8'))
 const execute = promisify(execFile)
+// The workspace as the host resolves it: init stores that path, and remote tools report it.
+const workspace = (await execute('ssh', ['-o', 'BatchMode=yes', config.host, `cd ${JSON.stringify(config.workspace)} && pwd -P`])).stdout.trim()
 const KEY = 'loopback-fixture-only', MARKER = 'REMOTE_HEADLESS_OK'
 const local = await mkdtemp(join(tmpdir(), 'dscode-remote-tui-'))
 let step = 0, failure, toolResult = ''
@@ -56,7 +58,7 @@ try {
   }).catch(error => { throw new Error('headless run failed: ' + (error.stderr || error.message) + (failure ? '\nfixture: ' + (failure.stack ?? failure) : '')) })
   if (failure) throw failure
   assert.equal(JSON.parse(stdout).text, MARKER)
-  assert.match(toolResult, new RegExp(config.workspace.replace(/[/.]/g, '\\$&') + '[\\s\\S]*Linux'))
+  assert.match(toolResult, new RegExp(workspace.replace(/[/.]/g, '\\$&') + '[\\s\\S]*Linux'))
   const checks = ['headless: the session opened in the remote workspace (a local stdio MCP server would have been refused)', 'headless: bash ran on the remote host']
   await interactive(modelId)
   checks.push('interactive: the header names the remote workspace and a remote turn completes')
@@ -92,9 +94,9 @@ async function interactive(modelId) {
     const screen = await wait(new RegExp(MARKER), 'the fixture reply')
     if (failure) throw failure
     const header = screen.split('\n').find(line => line.trim().length > 0) ?? ''
-    assert.ok(header.includes(config.workspace), 'header must name the remote workspace: ' + header)
+    assert.ok(header.includes(workspace), 'header must name the remote workspace: ' + header)
     assert.ok(!screen.includes(local), 'the local launch directory must not appear: ' + header)
-    assert.match(toolResult, new RegExp(config.workspace.replace(/[/.]/g, '\\$&') + '[\\s\\S]*Linux'))
+    assert.match(toolResult, new RegExp(workspace.replace(/[/.]/g, '\\$&') + '[\\s\\S]*Linux'))
   } finally {
     try { tmux('kill-server') } catch { /* already gone */ }
   }
@@ -107,7 +109,7 @@ async function prepareProvider() {
   const { rpc } = host
   try {
     await host.ready
-    const { sessionId } = await rpc('session/new', { cwd: config.workspace, mcpServers: [] })
+    const { sessionId } = await rpc('session/new', { cwd: workspace, mcpServers: [] })
     await rpc('x.ai/providers/add', { id: 'deepseek-official', api: 'deepseek-native', apiKey: KEY, baseURL: origin + '/anthropic', credentialSource: 'saved' })
     const model = (await rpc('x.ai/models/list', { sessionId })).availableModels.find(item => item._meta?.provider === 'deepseek-official')
     assert.ok(model, 'native model listed')
