@@ -24,7 +24,7 @@ import { createNativeTasks } from './native-tasks.ts'
 import { createSessionRegistry } from './session-registry.ts'
 import { PACKAGE_VERSION } from './package-location.ts'
 import { createProfilePlugins, inspectPluginRuntime } from './profile-plugins.ts'
-export { analyzeBundlePatch, parseCommandLine, inspectPluginRuntime, type BundlePatchAnalysis } from './profile-plugins.ts'
+export { analyzeBundlePatch } from './profile-plugins.ts'
 import { protectTerminalSignals } from './terminal-signal.ts'
 import { JSONRPC_METHOD_NOT_FOUND, internalError, paramRecord, sessionIdParam } from './acp.ts'
 import { errorMessage } from './guards.ts'
@@ -75,11 +75,8 @@ import { jobOutputSnapshot } from './job-output.ts'
 import { createImageOutputProjector } from './image-output.ts'
 import { exportSessionArchive } from './session-export.ts'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
-import { acpPromptToText, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, sessionEventToUpdates, toolKindForName, turnEndToStopReason, type DecodeSpeed, type GrokSessionUpdate, type ProjectedUpdate, type StopReasonWire, type ToolKindWire } from './projection.ts'
 
-export { acpPromptToText, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, sessionEventToUpdates, toolKindForName, turnEndToStopReason }
-export type { DecodeSpeed, GrokSessionUpdate, ProjectedUpdate, StopReasonWire, ToolKindWire }
-export type { ToolResultContentBlock } from './projection.ts'
+export { cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, sessionEventToUpdates, type GrokSessionUpdate, type ToolResultContentBlock } from './projection.ts'
 
 export const name = 'grok-leader'
 /** Agents, maintained policy state and durable discovery must exist before accepting clients. */
