@@ -229,7 +229,7 @@ export async function nextSixAcceptance(ui) {
   await wait(/\/: search · c: copy/)
   // A live copy of the Teams preset would give every open session Team tools.
   await key('/'); await key('C-u'); await type('teams'); await key('Enter')
-  await wait(/Search: teams\s+\(1\/10\)[\s\S]*› Teams \(experimental\)/)
+  await wait(/Search: teams\s+\(1\/10\)[\s\S]*› Teams mode \(experimental\)/)
   await key('c'); await wait(/New preset id/); await type('teams-copy'); await key('Enter')
   await wait(/carries Agent Team tools/)
   await key('Escape')
