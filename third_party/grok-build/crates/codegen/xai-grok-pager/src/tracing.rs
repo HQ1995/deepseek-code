@@ -543,7 +543,6 @@ mod tests {
         assert_eq!(spans[0].content.as_ref(), "BOLD");
     }
     #[test]
-    #[ignore = "known broken: ANSI color expectations no longer match parsed RGB output"]
     fn entry_from_ansi_colored() {
         let entry = TracingEntry::new(1, "\x1b[32mINFO\x1b[0m  some message");
         assert_eq!(entry.plain(), "INFO  some message");
@@ -620,7 +619,6 @@ mod tests {
         assert_eq!(text, "INFO  hello");
     }
     #[test]
-    #[ignore = "known broken: ANSI color expectations no longer match parsed RGB output"]
     fn list_item_content_preserves_color() {
         let entry = TracingEntry::new(0, "\x1b[32mGREEN\x1b[0m");
         let content = entry.content();
