@@ -999,13 +999,16 @@ fn spawn_fake_acp_agent(
     });
     counter
 }
-/// Redirect `GROK_HOME` to a tempdir for test isolation.
-fn setup_grok_home_in_tempdir() -> tempfile::TempDir {
+/// Redirect `GROK_HOME` to a tempdir for test isolation. Callers join the
+/// `GROK_HOME` serial group: the worktree tests resolve the variable on every
+/// call, so a parallel swap would put their checkouts in this tempdir and
+/// delete them with it. The variable is restored before the dir goes.
+fn setup_grok_home_in_tempdir() -> (crate::test_util::EnvVarGuard, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir creation");
-    unsafe {
-        std::env::set_var("GROK_HOME", tmp.path());
-    }
-    tmp
+    (
+        crate::test_util::EnvVarGuard::set("GROK_HOME", tmp.path()),
+        tmp,
+    )
 }
 fn register_session_in(root: &std::path::Path, id: &str) -> acp::SessionId {
     use xai_grok_active_sessions::{ActiveSession, register_in};
@@ -1085,6 +1088,7 @@ fn unregister_best_effort_swallows_io_error() {
 }
 /// BestEffort path fires exactly one ACP notification regardless
 /// of disk outcome.
+#[serial_test::serial(GROK_HOME)]
 #[tokio::test]
 async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
     use agent_client_protocol as acp;
@@ -1121,6 +1125,7 @@ async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
 }
 /// WithRollback: notification count matches disk outcome
 /// (1 on Ok, 0 on Err).
+#[serial_test::serial(GROK_HOME)]
 #[tokio::test]
 async fn persist_permission_mode_acp_notification_gated_on_disk_for_with_rollback() {
     use agent_client_protocol as acp;
@@ -1158,6 +1163,7 @@ async fn persist_permission_mode_acp_notification_gated_on_disk_for_with_rollbac
     }
 }
 /// `session_id: None` suppresses ACP notification unconditionally.
+#[serial_test::serial(GROK_HOME)]
 #[tokio::test]
 async fn persist_permission_mode_no_session_id_suppresses_acp() {
     let _guard = setup_grok_home_in_tempdir();
@@ -1180,6 +1186,7 @@ async fn persist_permission_mode_no_session_id_suppresses_acp() {
         );
 }
 /// BestEffort + disk failure must NOT return `SettingPersisted`.
+#[serial_test::serial(GROK_HOME)]
 #[tokio::test]
 async fn persist_permission_mode_best_effort_failure_returns_dedicated_variant() {
     let _guard = setup_grok_home_in_tempdir();

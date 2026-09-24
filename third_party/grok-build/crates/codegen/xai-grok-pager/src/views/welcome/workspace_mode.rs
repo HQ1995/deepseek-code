@@ -814,7 +814,7 @@ mod apply_tests {
     }
 
     #[test]
-    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK)]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK, GROK_HOME)]
     fn local_without_ack_awaits_confirm() {
         let _ack = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV);
         // Isolate ack file from developer machine.

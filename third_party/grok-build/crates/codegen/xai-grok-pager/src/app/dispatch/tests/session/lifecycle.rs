@@ -3070,7 +3070,7 @@ mod welcome_workspace_mode {
         set_active_local_workspace(None).unwrap();
     }
     #[test]
-    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK)]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK, GROK_HOME)]
     fn confirm_ack_skips_reapply_and_sets_oneshot() {
         let _ack = xai_grok_test_support::EnvGuard::unset(
             crate::app::session_startup::GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV,
@@ -3183,7 +3183,7 @@ mod welcome_workspace_mode {
         set_active_local_workspace(None).unwrap();
     }
     #[test]
-    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK)]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK, GROK_HOME)]
     fn confirm_ack_honors_worktree_always() {
         let _ack = xai_grok_test_support::EnvGuard::unset(
             crate::app::session_startup::GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV,
