@@ -1,6 +1,6 @@
 /** Launch-only adapter over native SessionResources, Scope and MCP lifecycle
  * owners: one isolated headless browser per top-level Session. */
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { importRuntime } from '../shared/runtime-modules.mjs'
@@ -30,7 +30,10 @@ export function mountBrowserSessions(ctx, options) {
       label: 'dscode-browser', exclusive: false,
       async open(agent, signal) {
         const scope = createScope(ctx, agent)
-        const outputDir = await mkdtemp(join(tmpdir(), OUTPUT_PREFIX))
+        // Resolved: Playwright names its files relative to its cwd, and a
+        // symlinked temp dir (macOS /var -> /private/var) would print each
+        // name as a climb to the root through this private path.
+        const outputDir = await realpath(await mkdtemp(join(tmpdir(), OUTPUT_PREFIX)))
         let closing
         // One cleanup: the MCP scope (and its browser), then the private artifacts.
         const state = { closed: false, close: () => closing ??= (async () => {
