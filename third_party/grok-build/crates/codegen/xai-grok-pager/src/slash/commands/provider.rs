@@ -9,7 +9,7 @@
 //! /model), so the session model, app default, dashboard staging, persistence,
 //! and rollback all behave exactly like a model switch.
 
-use crate::acp::model_state::ModelState;
+use crate::acp::model_state::{ModelState, ProviderCredentialInfo};
 use crate::app::actions::Action;
 use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
 
@@ -184,13 +184,35 @@ impl SlashCommand for ProviderCommand {
     }
 }
 
+/// Where a provider's API key stands, from the non-secret credential facts the
+/// bridge reports: nothing for a saved key, "key missing" when the named
+/// reference resolves to nothing, else the layer supplying it (the launch
+/// environment and `.env` files both read as "env"). No credential facts (a
+/// route with no key reference) says nothing.
+///
+/// DIVERGENCE(dscode): generic over `CatalogProvider.credential`; the TUI
+/// names no provider or plugin.
+fn credential_status(credential: &ProviderCredentialInfo) -> Option<String> {
+    if !credential.configured {
+        return Some("key missing".to_string());
+    }
+    match credential.source.as_deref() {
+        None | Some("file") => None,
+        Some(source) if source == "env" || source.ends_with("-env") => {
+            Some("key from env".to_string())
+        }
+        Some(source) => Some(format!("key from {source}")),
+    }
+}
+
 /// One row per provider. The row owning the current model is tagged
 /// "(current)"; insert_text carries the provider id so acceptance feeds the
 /// typed form directly (the same string /provider run resolves
 /// case-insensitively). The description column carries the bridge-supplied
 /// note when present (the agent knows WHY a provider is empty and what
 /// unlocks it), else the model count — so an unpickable provider says so
-/// before the user hits the error.
+/// before the user hits the error — followed by the key status when the key
+/// is not simply saved (so "2 models" never hides a missing key).
 fn build_provider_items(models: &ModelState) -> Vec<ArgItem> {
     let scope = models.current_provider_scope();
     let mut items: Vec<ArgItem> = models
@@ -214,11 +236,15 @@ fn build_provider_items(models: &ModelState) -> Vec<ArgItem> {
                         == Some(provider.id.as_str())
                 })
                 .count();
-            let description = match (provider.note.as_deref(), model_count) {
+            let status = match (provider.note.as_deref(), model_count) {
                 (Some(note), _) => note.to_string(),
                 (None, 0) => "no models".to_string(),
                 (None, 1) => "1 model".to_string(),
                 (None, n) => format!("{n} models"),
+            };
+            let description = match provider.credential.as_ref().and_then(credential_status) {
+                Some(key) => format!("{status} · {key}"),
+                None => status,
             };
             ArgItem {
                 match_text: format!("{label} {}", provider.id),
@@ -425,6 +451,56 @@ mod tests {
             CommandResult::Error(msg) => assert_eq!(msg, "Provider bare has no models"),
             other => panic!("expected an error for a model-less provider, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rows_say_when_a_key_is_missing_or_comes_from_the_environment() {
+        let credential = |configured: bool, source: Option<&str>| {
+            Some(ProviderCredentialInfo {
+                configured,
+                source: source.map(str::to_string),
+                writable: true,
+            })
+        };
+        let mut state = sample();
+        state.providers[0].credential = credential(false, None);
+        state.providers[1].credential = credential(true, Some("env"));
+        for (id, source) in [
+            ("saved", Some("file")),
+            ("dotenv", Some("project-env")),
+            ("vault", Some("keychain")),
+        ] {
+            state.providers.push(crate::acp::model_state::ProviderInfo {
+                id: id.into(),
+                credential: credential(true, source),
+                ..Default::default()
+            });
+        }
+        state.providers.push(crate::acp::model_state::ProviderInfo {
+            id: "failing".into(),
+            note: Some("could not list models: 401".into()),
+            credential: credential(false, None),
+            ..Default::default()
+        });
+        let items = ProviderCommand.suggest_args(&app_ctx(&state), "").unwrap();
+        let description = |id: &str| {
+            items
+                .iter()
+                .find(|item| item.insert_text == id)
+                .unwrap()
+                .description
+                .clone()
+        };
+        assert_eq!(description("deepseek"), "2 models · key missing");
+        assert_eq!(description("pi"), "1 model · key from env");
+        // A saved key is the normal state: the row says nothing about it.
+        assert_eq!(description("saved"), "no models");
+        assert_eq!(description("dotenv"), "no models · key from env");
+        assert_eq!(description("vault"), "no models · key from keychain");
+        assert_eq!(
+            description("failing"),
+            "could not list models: 401 · key missing"
+        );
     }
 
     #[test]

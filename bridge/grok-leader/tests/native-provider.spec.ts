@@ -76,6 +76,12 @@ describe('native DeepSeek provider', () => {
     expect(() => nativeProviderForm({ baseURL: 'https://api.example/?q=1' })).toThrow('without credentials, query or fragment')
     expect(() => nativeProviderForm({ baseURL: 'file:///etc' })).toThrow('without credentials')
     expect(() => nativeProviderForm({ baseURL: 42 })).toThrow('must be a string')
+    // A pasted key passes the same checks as a pi-ai route's.
+    expect(() => nativeProviderForm({ apiKey: 'export DEEPSEEK_API_KEY=sk-abc' })).toThrow('shell line')
+    expect(() => nativeProviderForm({ apiKey: '  ' })).toThrow('is blank')
+    expect(() => nativeProviderForm({ apiKey: '"sk-abc"' })).toThrow('wrapped in quotes')
+    expect(() => nativeProviderForm({ apiKey: 7 })).toThrow('apiKey must be a string')
+    expect(nativeProviderForm({ apiKey: '' })).toEqual({})
   })
 
   it('stores a pasted key, enables the disabled row once and applies its settings', async () => {

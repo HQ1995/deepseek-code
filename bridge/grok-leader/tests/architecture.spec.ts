@@ -59,7 +59,7 @@ runtimeEdges.get('src/package-location.ts')!.add('bin/update.mjs')
 // it may import (type-only edges included). A path entry names a launcher file.
 const declaredDependencies = [
     ['model-catalog', ['acp', 'protocol', 'model-endpoint', 'native-provider', 'native-seams', 'provider-profile', 'wire-catalog', 'guards']],
-    ['native-provider', ['acp', 'native-seams', 'plugin-rows']],
+    ['native-provider', ['acp', 'native-seams', 'plugin-rows', 'provider-profile']],
     ['plugin-rows', ['acp', 'guards']],
     ['browser-control', ['acp', 'native-seams', 'plugin-rows', 'profile-plugins', 'guards']],
     ['browser-actions', ['guards']],

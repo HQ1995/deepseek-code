@@ -165,7 +165,12 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
   or invoke the model.
 - A fresh profile may advertise no providers or models. Provider mutations
   broadcast the refreshed catalog, and model/effort selections persist both as
-  the default for new sessions and as session-local durable events.
+  the default for new sessions and as session-local durable events. Like DSH's
+  own model picker, the bridge also rebuilds the catalog on
+  `llm/adapters-updated`, `settings/document-updated`, `app-boot/config-reload`,
+  `credentials/reference-updated` and `credentials/record-updated`: a burst of
+  events settles into one rebuild, broadcast as `x.ai/models/update` only when
+  what clients were last sent changed.
 - Fresh profiles resolve new sessions to `standard`. A TUI picker selection
   stamped with `_meta.rememberAgentPreset: true`, or raw `/preset`, writes
   `agent-preset-registry.selectedDefault` for later new sessions. Unmarked per-session/headless
@@ -174,6 +179,11 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
 - An explicit wire model id with no explicit provider resolves through the live
   catalog before any saved default route. A removed or renamed saved provider
   therefore cannot poison headless `--model <id>`.
+- A remembered route (a resumed or forked session's last selection, or the
+  saved default for a new session) that the catalog no longer carries falls
+  back to the catalog's current model. Once the open is answered, that session
+  gets one `image_dropped` system note: `Saved model <provider>/<model> is
+  unavailable; using <provider>/<model>. /model to change.`
 - The resolved provider/model route is materialized in the parent dsh
   `AgentOptions` on create, resume, and fork, so native child/subagent sessions
   inherit the actual route rather than an unset model prompt variable.
@@ -365,6 +375,10 @@ resume and child-history pages; relative paths resolve against the viewed
 session's workspace, including forks. It neither copies nor opens file contents.
 Native configurable-provider diagnostics use the existing provider `note` field,
 including providers with no serviceable models, without hiding healthy routes.
+A provider whose model listing throws (an expired login, an unreachable
+endpoint) stays in the roster with no models and `could not list models: …` as
+its note, as DSH's own catalog reports per-provider failures; initialize,
+`x.ai/models/list` and provider writes keep working.
 
 `x.ai/terminals` requires an owned `sessionId`. `action` defaults to `list`;
 `terminalId` optionally selects a non-consuming preview of the latest 1000

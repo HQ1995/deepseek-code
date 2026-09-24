@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   discoveredModelUpdate, editableProfile, hasUserProviderRoute, knownRouteBaseUrls, mergeEditable, normalizeProviderForm,
-  pastedApiKey, pastedKeyRef, providerUserProfile, providerUserSection, requireProviderId, routeSignature, sharesCredentialRef,
+  pastedApiKey, pastedApiKeyValue, pastedKeyRef, providerUserProfile, providerUserSection, requireProviderId, routeSignature, sharesCredentialRef,
 } from '../src/provider-profile.ts'
 import type { SettingsLike } from '../src/native-seams.ts'
 
@@ -135,6 +135,31 @@ describe('provider form rules', () => {
     expect(pastedApiKey({ apiKey: '', credentialSource: 'environment' })).toBeUndefined()
     expect(pastedKeyRef({}, 'my-gw.2')).toBe('MY_GW_2_API_KEY')
     expect(pastedKeyRef({ apiKeyEnv: 'OWN_KEY' }, 'my-gw')).toBe('OWN_KEY')
+  })
+
+  it('stores a pasted key trimmed of surrounding whitespace and keeps real key shapes', () => {
+    expect(pastedApiKey({ apiKey: '  sk-abc123\n' })).toBe('sk-abc123')
+    expect(pastedApiKey({})).toBeUndefined()
+    // Upper-case base64 padding and embedded "=" are keys, not assignments.
+    expect(pastedApiKeyValue('ABCDEF==')).toBe('ABCDEF==')
+    expect(pastedApiKeyValue('sk-proj_x=y')).toBe('sk-proj_x=y')
+    expect(pastedApiKeyValue('"unbalanced')).toBe('"unbalanced')
+  })
+
+  it.each([
+    ['   ', 'the pasted API key is blank'],
+    ['\t\n', 'the pasted API key is blank'],
+    ['DEEPSEEK_API_KEY=sk-abc', 'is a shell line (NAME=value)'],
+    ['export DEEPSEEK_API_KEY=sk-abc', 'is a shell line (NAME=value)'],
+    ['"sk-abc"', 'wrapped in quotes'],
+    ["'sk-abc'", 'wrapped in quotes'],
+    ['`sk-abc`', 'wrapped in quotes'],
+    ['sk abc', 'outside printable ASCII'],
+    ['sk-abc\u00e9', 'outside printable ASCII'],
+    ['sk-\u200babc', 'outside printable ASCII'],
+  ])('refuses the pasted key %j with the reason', (key, error) => {
+    expect(() => pastedApiKey({ apiKey: key })).toThrow(error)
+    expect(() => pastedApiKey({ apiKey: key })).toThrow(expect.objectContaining({ code: -32602 }))
   })
 
   it('names the offending field in route id errors', () => {

@@ -1,6 +1,7 @@
 /** Pure rules for llm-pi-ai provider routes: reading the user settings
  * section, validating the /provider form and deriving persisted profiles.
  * No I/O; the catalog owner performs every read and write. */
+import { normalizeApiKey } from '@deepseek-ai/dsh-llm'
 import { invalidParams } from './acp.ts'
 import type { PiAiReasoningEfforts } from './model-endpoint.ts'
 import type { SettingsLike } from './native-seams.ts'
@@ -115,14 +116,42 @@ export function normalizeProviderForm(form: Profile): Profile {
   return { ...form, baseURL }
 }
 
-/** The literal key pasted into the form, if any. An environment-sourced
- * credential must not also carry a pasted key. */
+/** A pasted `NAME=value` or `export NAME=value` shell line. As on DSH's
+ * Models page, the name must be upper-case (an `sk-` key breaks at the hyphen)
+ * and `=` must be followed by something other than `=`, so base64 padding on
+ * an all-upper-case key is not mistaken for an assignment. */
+const ENV_LINE = /^(?:export\s+)?[A-Z][A-Z0-9_]*=[^=]/
+const QUOTES = ['"', "'", '`']
+
+/**
+ * Judge one pasted API key the way DSH's Models page does before it is
+ * stored: surrounding whitespace is trimmed, and a blank value, a copied shell
+ * assignment, a quoted key or characters outside printable ASCII (which no
+ * HTTP header carries; `normalizeApiKey` is DSH's own rule) are refused with
+ * the reason, instead of being saved to fail later as a 401.
+ * @param raw - the key exactly as typed or pasted; empty means none was.
+ * @returns the key to store.
+ */
+export function pastedApiKeyValue(raw: string): string {
+  const value = raw.trim()
+  if (value.length === 0) throw invalidParams('the pasted API key is blank; paste the key, or leave the field empty to keep the current one')
+  if (ENV_LINE.test(value)) throw invalidParams('the pasted API key is a shell line (NAME=value); paste only the key after "="')
+  if (value.length > 1 && QUOTES.includes(value[0]!) && value.endsWith(value[0]!)) {
+    throw invalidParams('the pasted API key is wrapped in quotes; paste it without them')
+  }
+  const checked = normalizeApiKey(value)
+  if (!checked.ok) throw invalidParams('the pasted API key contains spaces or characters outside printable ASCII; paste the raw key alone')
+  return checked.value
+}
+
+/** The literal key pasted into the form, if any, as it will be stored. An
+ * environment-sourced credential must not also carry a pasted key. */
 export function pastedApiKey(form: Profile): string | undefined {
-  const pasted = nonEmpty(form.apiKey) ? form.apiKey : undefined
-  if (pasted !== undefined && form.credentialSource === 'environment') {
+  if (!nonEmpty(form.apiKey)) return undefined
+  if (form.credentialSource === 'environment') {
     throw invalidParams('apiKey must be empty when credentialSource is environment')
   }
-  return pasted
+  return pastedApiKeyValue(form.apiKey)
 }
 
 /** The credential name a pasted key is stored under: the form's apiKeyEnv, or

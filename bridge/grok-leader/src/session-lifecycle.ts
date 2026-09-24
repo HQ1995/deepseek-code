@@ -184,13 +184,16 @@ export function createSessionLifecycle(host: LifecycleHost) {
     if (registry.ownedAgent(record.agent) !== record || host.client(record.clientId)?.closed !== false) throw invalidParams('session closed during initialization')
     initializing.delete(record)
     host.unblocked(record)
-    if (creation.kind === 'load') return
+    const notice = record.model.notice
+    if (creation.kind === 'load' && notice === undefined) return
+    // After the response: a new session's id is unknown to the client until then.
     const conn = host.client(record.clientId)!
     record.mcpInitTimer = setTimeout(() => {
       record.mcpInitTimer = undefined
-      if (ownedRecord(record.clientId, record.agent.session.id) === record && host.client(record.clientId) === conn) {
-        conn.notify('_x.ai/mcp_initialized', { sessionId: record.agent.session.id })
-      }
+      if (ownedRecord(record.clientId, record.agent.session.id) !== record || host.client(record.clientId) !== conn) return
+      if (creation.kind !== 'load') conn.notify('_x.ai/mcp_initialized', { sessionId: record.agent.session.id })
+      // The TUI's display-only system note, once per opened session.
+      if (notice !== undefined) record.output.notify('x.ai/session_notification', { update: { sessionUpdate: 'image_dropped', notes: [notice] } })
     }, 50)
   }
   const activate = async (clientId: number, meta: Meta, events: readonly SessionEvent[], preset: Preset, creation: Creation, mcpConfigs?: McpClientConfig[]): Promise<SessionRecord> => {

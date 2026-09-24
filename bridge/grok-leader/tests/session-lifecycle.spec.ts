@@ -123,6 +123,28 @@ describe('session lifecycle ownership', () => {
     expect(f.sessions.records.size).toBe(0); expect(record.mcpInitTimer).toBeUndefined()
   })
 
+  it('sends a replaced saved model notice once per opened session, after the open is answered', async () => {
+    const f = fixture(), prepare = f.models.prepare.getMockImplementation()!, text = 'Saved model gone/old is unavailable; using fixture/model. /model to change.'
+    const withNotice = async (...args: Parameters<typeof prepare>) => Object.assign(await prepare(...args), { notice: text })
+    const notes = () => f.notify.mock.calls.filter(([method]) => method === 'x.ai/session_notification').map(([, params]) => params)
+    f.models.prepare.mockImplementationOnce(withNotice)
+    await f.add()
+    expect(notes()).toEqual([])
+    await vi.waitFor(() => expect(notes()).toHaveLength(1))
+    expect(notes()[0]).toMatchObject({ sessionId: 'root', update: { sessionUpdate: 'image_dropped', notes: [text] } })
+    await f.lifecycle.close(1, { sessionId: 'root' })
+    f.models.prepare.mockImplementationOnce(withNotice)
+    await f.lifecycle.load(1, { sessionId: 'root', cwd: '/tmp/workspace', mcpServers: [] })
+    const loaded = f.sessions.records.get(SessionId('root'))!
+    expect(loaded.mcpInitTimer).toBeDefined(); expect(notes()).toHaveLength(1)
+    await vi.waitFor(() => expect(notes()).toHaveLength(2))
+    expect(f.notify.mock.calls.filter(([method]) => method === '_x.ai/mcp_initialized')).toHaveLength(1)
+    // A load with nothing to say arms no deferred notification.
+    await f.lifecycle.close(1, { sessionId: 'root' })
+    await f.lifecycle.load(1, { sessionId: 'root', cwd: '/tmp/workspace', mcpServers: [] })
+    expect(f.sessions.records.get(SessionId('root'))!.mcpInitTimer).toBeUndefined()
+  })
+
   it('rejects unsupported workspace declarations before native composition and respects pinned durable ids', async () => {
     const f = fixture()
     await expect(f.lifecycle.new(1, { cwd: 'relative' })).rejects.toThrow('absolute path')
