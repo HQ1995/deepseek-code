@@ -40,7 +40,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 53 modules; `index.ts` is the composition root.
+`src/` has 52 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
@@ -50,7 +50,6 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `acp` | Shared ACP request validation and JSON-RPC errors |
 | `leader-transport` | Unix socket, registration, ACP request/reply and reverse-request lifetimes; no DSH |
 | `leader-lifecycle` | Host heartbeat, no-client grace, shutdown that joins every owner's drain |
-| `invariant` | Empty invariant companion; no shipped patch mounts it (removal waits on a lockfile refresh) |
 | `model-catalog` | Catalog snapshots, accepted native reads, discovery, route writes, disposal; no socket or Cordis |
 | `wire-catalog` | Pure: wire ids, catalog assembly, selection resolution, effort acceptance, provider notes |
 | `provider-profile` | Pure llm-pi-ai rules: settings reads, `/provider` form validation, profile merge |
@@ -104,10 +103,9 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 declares its local imports, type-only edges included, and each declared name
 must exist. `src/` and `bin/` have no runtime import cycle, nothing imports
 `index.ts`, and computed imports are enumerated. Cordis is type-only in
-`session-models`, `session-presets`, `profile-plugins`, `invariant`,
-`image-output`, `mcp` and `session-export`; a runtime dependency only in
-`native-tasks`, `session-migration`, `terminal-signal` and `preset-catalog`;
-absent elsewhere. The entry builds no maps, sets, abort controllers or timers
+`session-models`, `session-presets`, `profile-plugins`, `image-output`, `mcp`
+and `session-export`; a runtime dependency only in `native-tasks`,
+`session-migration`, `terminal-signal` and `preset-catalog`; absent elsewhere. The entry builds no maps, sets, abort controllers or timers
 and imports no `node:net`. `dsh-session-projection` and `zod` stay host peers.
 Each `.ts`/`.mjs` file in `src/`, `bin/` and `tests/` is capped at 800 lines;
 on 2026-09-24 none exceeds it (largest: `tests/leader-queue.spec.ts`, 763).

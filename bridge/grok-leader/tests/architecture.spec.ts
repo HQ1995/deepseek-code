@@ -96,7 +96,6 @@ const declaredDependencies = [
     ['acp', ['protocol']],
     ['protocol', ['codec']],
     ['codec', []],
-    ['invariant', []],
     ['projection', ['browser-actions']],
     ['child-history', ['projection']],
     ['image-output', ['projection']],
@@ -115,7 +114,7 @@ const declaredDependencies = [
 // How a module may depend on Cordis: 'type' names the native mount Context in
 // its interface without using the runtime; 'runtime' marks a native adapter.
 const cordisUse = {
-  'session-models': 'type', 'session-presets': 'type', 'profile-plugins': 'type', invariant: 'type',
+  'session-models': 'type', 'session-presets': 'type', 'profile-plugins': 'type',
   'image-output': 'type', mcp: 'type', 'session-export': 'type',
   'native-tasks': 'runtime', 'session-migration': 'runtime', 'terminal-signal': 'runtime', 'preset-catalog': 'runtime',
 } as const

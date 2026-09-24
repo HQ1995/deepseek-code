@@ -18,10 +18,6 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/types/index.js"
     },
-    "./invariant": {
-      "types": "./lib/types/invariant.d.ts",
-      "default": "./lib/types/invariant.js"
-    },
     "./src/*": "./src/*",
     "./browser": "./browser/index.mjs",
     "./ssh": "./ssh/index.mjs",
@@ -56,7 +52,6 @@
     "@deepseek-ai/dsh-agent": "0.1.7-rc.1",
     "@deepseek-ai/dsh-agent-preset-registry": "0.1.7-rc.1",
     "@deepseek-ai/dsh-attachment": "0.1.7-rc.1",
-    "@deepseek-ai/dsh-invariants": "0.1.7-rc.1",
     "@deepseek-ai/dsh-llm": "0.1.7-rc.1",
     "@deepseek-ai/dsh-llm-retry": "0.1.7-rc.1",
     "@deepseek-ai/dsh-mcp-client": "0.1.7-rc.1",
@@ -78,7 +73,8 @@
     "@deepseek-ai/dsh-settings": "0.1.7-rc.1",
     "@deepseek-ai/cordis-plugin-include": "1.0.9",
     "@deepseek-ai/dsh-config-editor": "0.1.7-rc.1",
-    "@deepseek-ai/dsh-app-boot": "0.1.7-rc.1"
+    "@deepseek-ai/dsh-app-boot": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-jobs": "0.1.7-rc.1"
   },
   "devDependencies": {
     "zod": "^4.4.3",
@@ -87,7 +83,6 @@
     "@deepseek-ai/dsh-agent-preset-registry": "0.1.7-rc.1",
     "@deepseek-ai/dsh-attachment": "0.1.7-rc.1",
     "@deepseek-ai/dsh-brand": "0.1.7-rc.1",
-    "@deepseek-ai/dsh-invariants": "0.1.7-rc.1",
     "@deepseek-ai/dsh-llm": "0.1.7-rc.1",
     "@deepseek-ai/dsh-llm-retry": "0.1.7-rc.1",
     "@deepseek-ai/dsh-mcp-client": "0.1.7-rc.1",
