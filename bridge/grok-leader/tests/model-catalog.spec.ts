@@ -523,4 +523,15 @@ describe('model catalog module', () => {
     expect(f.catalog.peek()).toBe(newer)
     await f.catalog.dispose()
   })
+
+  it.each(['add', 'update'] as const)('refuses a pasted shell line on %s before storing anything', async method => {
+    const f = fixture(), credentials = f.deps.getCredentials()!
+    f.routes.custom = {}
+    const params = { apiKey: 'export CUSTOM_API_KEY=sk-abc', ...method === 'add' ? { id: 'fresh' } : { providerId: 'custom' } }
+    await expect(f.catalog[method](params)).rejects.toMatchObject({ code: -32602, message: expect.stringContaining('shell line') })
+    expect(credentials.set).not.toHaveBeenCalled(); expect(f.stored.size).toBe(0); expect(f.settings.mutate).not.toHaveBeenCalled()
+    await f.catalog.add({ id: 'padded', apiKey: '  sk-abc  ' })
+    expect(f.stored.get('PADDED_API_KEY')).toBe('sk-abc')
+    await f.catalog.dispose()
+  })
 })

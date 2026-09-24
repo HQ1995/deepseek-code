@@ -26,9 +26,10 @@ The launcher verifies and installs the matching TUI, bridge, and pinned DSH
 runtime under `~/.dsh/profiles/dscode`, then links `~/.local/bin/dscode`. Add
 `~/.local/bin` to `PATH`. No global DSH installation or compiler is needed.
 
-Open `/provider --add` to configure a provider and API key, then `/model` to
-select a model. Fresh sessions use DSH's `standard` preset; `/preset` selects
-another preset and remembers it for future sessions.
+Open `/provider --add` to configure a provider and paste its API key (the key
+alone, not a `NAME=value` line), then `/model` to select a model. Fresh
+sessions use DSH's `standard` preset; `/preset` selects another preset and
+remembers it for future sessions.
 
 ## Use
 
