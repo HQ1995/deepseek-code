@@ -776,6 +776,12 @@ pub(crate) struct TaskStatusCounts {
     pub(crate) paused_workflows: usize,
 }
 
+/// DIVERGENCE(dscode): how long a first stop press (`x`) or `[✗]` click stays
+/// armed. Stopping a task, subagent, reminder or workflow from this pane takes
+/// a second press within the window, like the official DSH job list
+/// (`KILL_ARM_MS`).
+pub(crate) const STOP_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub struct TasksPane {
     /// Display list: sorted `items` with group headers inserted and
     /// collapsed groups' items removed. This is what the `ListPane` renders.
@@ -795,6 +801,8 @@ pub struct TasksPane {
     pub view_button_rects: Vec<(TaskEntryId, Rect)>,
     pub hovered_kill: Option<TaskEntryId>,
     pub hovered_view: Option<TaskEntryId>,
+    /// Row whose `[✗]` was clicked once, and when (see [`Self::confirm_stop_click`]).
+    stop_click_armed: Option<(TaskEntryId, std::time::Instant)>,
     prev_running_count: usize,
     opened_by_auto: bool,
     highlight_cache: HashMap<String, Vec<Span<'static>>>,
@@ -897,12 +905,35 @@ impl TasksPane {
             view_button_rects: Vec::new(),
             hovered_kill: None,
             hovered_view: None,
+            stop_click_armed: None,
             prev_running_count: 0,
             opened_by_auto: false,
             highlight_cache: HashMap::new(),
             last_theme: Theme::current_kind(),
             workflow_runs: Vec::new(),
         }
+    }
+
+    /// Two-click stop for the `[✗]` button. `true` when this click confirms:
+    /// the same row's button was clicked less than [`STOP_CONFIRM_WINDOW`]
+    /// before `now` (the arm is consumed). Otherwise arms `id` and returns
+    /// `false`. The `x` key uses the app's pending-action rail instead.
+    pub(crate) fn confirm_stop_click(&mut self, id: &TaskEntryId, now: std::time::Instant) -> bool {
+        match self.stop_click_armed.take() {
+            Some((armed, at)) if armed == *id && now.duration_since(at) < STOP_CONFIRM_WINDOW => {
+                true
+            }
+            _ => {
+                self.stop_click_armed = Some((id.clone(), now));
+                false
+            }
+        }
+    }
+
+    /// Lay the list out as a render would, so key navigation can select rows.
+    #[cfg(test)]
+    pub(crate) fn prepare_layout_for_test(&mut self) {
+        self.list_state.prepare_layout(&self.entries, 80, 10);
     }
 
     // -- Data sync -----------------------------------------------------------

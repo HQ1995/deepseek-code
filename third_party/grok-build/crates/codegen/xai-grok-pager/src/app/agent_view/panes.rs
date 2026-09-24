@@ -390,42 +390,19 @@ impl AgentView {
                 },
             ));
         }
-        if key!('x').matches(key) && self.tasks.list_state.input_mode().is_none() {
-            match self.tasks.selected_entry() {
-                Some(TaskEntry::BgTask { task_id, .. }) => {
-                    let task_id = task_id.clone();
-                    if self
-                        .session
-                        .bg_tasks
-                        .get(&task_id)
-                        .is_some_and(|t| t.status == crate::app::agent::BgTaskStatus::Running)
-                    {
-                        return InputOutcome::Action(Action::KillBgTask(task_id));
-                    }
-                }
-                Some(TaskEntry::Agent { subagent_id, .. }) => {
-                    let subagent_id = subagent_id.clone();
-                    if self.subagent_sessions.values().any(|s| {
-                        s.subagent_id.as_ref() == subagent_id && s.is_running() && !s.pending_kill
-                    }) {
-                        return InputOutcome::Action(Action::KillSubagent(subagent_id));
-                    }
-                }
-                Some(TaskEntry::Scheduled { task_id, .. }) => {
-                    return InputOutcome::Action(Action::CancelScheduledTask(task_id.clone()));
-                }
-                Some(TaskEntry::Workflow {
-                    name, stoppable, ..
-                }) => {
-                    if *stoppable {
-                        return InputOutcome::Action(Action::SendSlashCommandPreservingDraft(
-                            format!("/workflow stop {name}"),
-                        ));
-                    }
-                }
-                Some(TaskEntry::Header { .. }) => {}
-                None => {}
-            }
+        // DIVERGENCE(dscode): `x` arms the stop and a second `x` within
+        // STOP_CONFIRM_WINDOW fires it (the bar reads "x: press again to
+        // stop"; any other key disarms), like the official DSH job list.
+        if key!('x').matches(key)
+            && self.tasks.list_state.input_mode().is_none()
+            && let Some(action) = self.selected_task_stop_action()
+        {
+            return InputOutcome::ArmPending {
+                action,
+                shortcut: crate::input::key::KeyShortcut::from(*key),
+                label: Some("stop"),
+                ttl: crate::views::tasks_pane::STOP_CONFIRM_WINDOW,
+            };
         }
         if key!('y').matches(key)
             && self.tasks.list_state.input_mode().is_none()
@@ -460,6 +437,37 @@ impl AgentView {
             InputOutcome::Changed
         } else {
             InputOutcome::Unchanged
+        }
+    }
+    /// What stopping the selected tasks-pane row does, or `None` when the row
+    /// has nothing live to stop (a finished task or subagent, a paused
+    /// workflow, a group header).
+    fn selected_task_stop_action(&self) -> Option<Action> {
+        use crate::views::tasks_pane::TaskEntry;
+        match self.tasks.selected_entry()? {
+            TaskEntry::BgTask { task_id, .. } => self
+                .session
+                .bg_tasks
+                .get(task_id)
+                .is_some_and(|t| t.status == crate::app::agent::BgTaskStatus::Running)
+                .then(|| Action::KillBgTask(task_id.clone())),
+            TaskEntry::Agent { subagent_id, .. } => self
+                .subagent_sessions
+                .values()
+                .any(|s| {
+                    s.subagent_id.as_ref() == subagent_id.as_str()
+                        && s.is_running()
+                        && !s.pending_kill
+                })
+                .then(|| Action::KillSubagent(subagent_id.clone())),
+            TaskEntry::Scheduled { task_id, .. } => {
+                Some(Action::CancelScheduledTask(task_id.clone()))
+            }
+            TaskEntry::Workflow {
+                name, stoppable, ..
+            } => (*stoppable)
+                .then(|| Action::SendSlashCommandPreservingDraft(format!("/workflow stop {name}"))),
+            TaskEntry::Header { .. } => None,
         }
     }
     /// Toggle the bundled catalog pane (Ctrl+Y and /preset both route here).

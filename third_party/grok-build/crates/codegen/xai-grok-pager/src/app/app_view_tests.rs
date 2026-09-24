@@ -6708,3 +6708,32 @@ fn welcome_enter_on_add_provider_opens_the_form() {
     let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
     assert!(matches!(outcome, InputOutcome::Action(Action::NewSession)));
 }
+
+/// DIVERGENCE(dscode): stopping a job from the tasks pane takes two `x`
+/// presses. The first arms AppView's pending action (bar: "x: press again to
+/// stop"); the second fires the kill; any other key in between disarms it.
+#[test]
+fn tasks_pane_x_twice_stops_a_running_task() {
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    crate::app::agent_view::test_fixtures::focus_running_bg_task(app.agents.get_mut(&id).unwrap());
+    let x = key_event(KeyCode::Char('x'), KeyModifiers::NONE);
+
+    assert!(matches!(app.handle_input(&x), InputOutcome::Changed));
+    let pending = app.pending_action.as_ref().expect("first x arms the stop");
+    assert!(matches!(&pending.action, Action::KillBgTask(t) if t == "task-1"));
+    assert_eq!(pending.label, Some("stop"));
+    assert!(matches!(
+        app.handle_input(&x),
+        InputOutcome::Action(Action::KillBgTask(ref t)) if t == "task-1"
+    ));
+    assert!(app.pending_action.is_none());
+
+    // Another key between the presses disarms: the next `x` only re-arms.
+    assert!(matches!(app.handle_input(&x), InputOutcome::Changed));
+    let _ = app.handle_input(&key_event(KeyCode::Char('j'), KeyModifiers::NONE));
+    assert!(!matches!(
+        app.handle_input(&x),
+        InputOutcome::Action(Action::KillBgTask(_))
+    ));
+}

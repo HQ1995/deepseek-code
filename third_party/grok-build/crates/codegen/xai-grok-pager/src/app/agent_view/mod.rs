@@ -2638,6 +2638,30 @@ pub(crate) mod test_fixtures {
             &agent.workflow_runs,
         );
     }
+    /// Focus the tasks pane on its running `task-1` row (the pane lists a group
+    /// header first, so step the selection until the task row is selected).
+    pub fn focus_running_bg_task(agent: &mut AgentView) {
+        use crate::views::tasks_pane::TaskEntry;
+        add_running_bg_task(agent);
+        agent.tasks.overlay.visible = true;
+        agent.tasks.overlay.focused = true;
+        agent.set_active_pane(AgentPane::Tasks, true);
+        let down = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        for _ in 0..3 {
+            if matches!(agent.tasks.selected_entry(), Some(TaskEntry::BgTask { .. })) {
+                return;
+            }
+            agent.tasks.prepare_layout_for_test();
+            agent.tasks.handle_key(&down);
+        }
+        assert!(
+            matches!(agent.tasks.selected_entry(), Some(TaskEntry::BgTask { .. })),
+            "setup: the running task row must be selected"
+        );
+    }
     pub fn add_running_execute(agent: &mut AgentView) {
         use crate::acp::meta::NotificationMeta;
         use std::sync::Arc;

@@ -511,41 +511,41 @@ impl AgentView {
                     Some(AgentPane::Tasks) => {
                         use crate::views::tasks_pane::TaskEntryId;
                         self.set_active_pane(AgentPane::Tasks, false);
-                        for (entry_id, rect) in &self.tasks.kill_button_rects {
-                            if rect.contains((mouse.column, mouse.row).into()) {
-                                match entry_id {
-                                    TaskEntryId::BgTask(tid) => {
-                                        return InputOutcome::Action(Action::KillBgTask(
-                                            tid.clone(),
-                                        ));
-                                    }
-                                    TaskEntryId::Agent(sid) => {
-                                        return InputOutcome::Action(Action::KillSubagent(
-                                            sid.clone(),
-                                        ));
-                                    }
-                                    TaskEntryId::Scheduled(tid) => {
-                                        return InputOutcome::Action(Action::CancelScheduledTask(
-                                            tid.clone(),
-                                        ));
-                                    }
-                                    TaskEntryId::Workflow(run_id) => {
-                                        let Some(run) = self
-                                            .workflow_runs
-                                            .iter()
-                                            .find(|run| run.run_id == *run_id && run.can_stop())
-                                        else {
-                                            return InputOutcome::Changed;
-                                        };
-                                        return InputOutcome::Action(
-                                            Action::SendSlashCommandPreservingDraft(format!(
-                                                "/workflow stop {}",
-                                                run.name
-                                            )),
-                                        );
-                                    }
+                        let clicked_kill = self
+                            .tasks
+                            .kill_button_rects
+                            .iter()
+                            .find(|(_, rect)| rect.contains((mouse.column, mouse.row).into()))
+                            .map(|(entry_id, _)| entry_id.clone());
+                        if let Some(entry_id) = clicked_kill {
+                            let action = match &entry_id {
+                                TaskEntryId::BgTask(tid) => Action::KillBgTask(tid.clone()),
+                                TaskEntryId::Agent(sid) => Action::KillSubagent(sid.clone()),
+                                TaskEntryId::Scheduled(tid) => {
+                                    Action::CancelScheduledTask(tid.clone())
                                 }
+                                TaskEntryId::Workflow(run_id) => {
+                                    let Some(run) = self
+                                        .workflow_runs
+                                        .iter()
+                                        .find(|run| run.run_id == *run_id && run.can_stop())
+                                    else {
+                                        return InputOutcome::Changed;
+                                    };
+                                    Action::SendSlashCommandPreservingDraft(format!(
+                                        "/workflow stop {}",
+                                        run.name
+                                    ))
+                                }
+                            };
+                            // DIVERGENCE(dscode): a second `[✗]` click within
+                            // STOP_CONFIRM_WINDOW stops the row (the `x` key's
+                            // two-press twin; see `handle_bg_tasks_key`).
+                            if self.tasks.confirm_stop_click(&entry_id, Instant::now()) {
+                                return InputOutcome::Action(action);
                             }
+                            self.show_toast("Click \u{2717} again to stop");
+                            return InputOutcome::Changed;
                         }
                         for (entry_id, rect) in &self.tasks.view_button_rects {
                             if rect.contains((mouse.column, mouse.row).into()) {

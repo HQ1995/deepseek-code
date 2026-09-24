@@ -90,3 +90,91 @@ fn paused_status_has_one_click_target_that_clears_when_terminal() {
     let _ = draw_frame(&mut agent, &registry);
     assert!(agent.hit_bg_status.rect.is_none());
 }
+/// DIVERGENCE(dscode): `x` on a running task arms a stop instead of killing
+/// it; only the pending-action rail's second press fires the kill.
+#[test]
+fn tasks_pane_x_arms_a_two_press_stop() {
+    use crate::app::actions::Action;
+    let registry = ActionRegistry::defaults();
+    let mut agent = test_fixtures::make_agent();
+    test_fixtures::focus_running_bg_task(&mut agent);
+    let x = Event::Key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('x'),
+        KeyModifiers::NONE,
+    ));
+    match agent.handle_input(&x, &registry) {
+        InputOutcome::ArmPending {
+            action: Action::KillBgTask(task_id),
+            label: Some("stop"),
+            ttl,
+            ..
+        } => {
+            assert_eq!(task_id, "task-1");
+            assert_eq!(ttl, crate::views::tasks_pane::STOP_CONFIRM_WINDOW);
+            assert_eq!(ttl, std::time::Duration::from_secs(3));
+        }
+        other => panic!("x must arm the stop, got {other:?}"),
+    }
+    // A finished task has nothing to stop: `x` arms nothing.
+    agent.session.bg_tasks.get_mut("task-1").unwrap().status =
+        crate::app::agent::BgTaskStatus::Done;
+    assert!(!matches!(
+        agent.handle_input(&x, &registry),
+        InputOutcome::ArmPending { .. } | InputOutcome::Action(Action::KillBgTask(_))
+    ));
+}
+/// The `[✗]` button's twin: the first click arms (and says so), a second
+/// click on the same row inside the window confirms, and a click on another
+/// row or after the window re-arms instead.
+#[test]
+fn tasks_pane_stop_click_needs_a_second_click_within_the_window() {
+    use crate::views::tasks_pane::{STOP_CONFIRM_WINDOW, TaskEntryId, TasksPane};
+    let mut pane = TasksPane::new();
+    let a = TaskEntryId::BgTask("a".into());
+    let b = TaskEntryId::BgTask("b".into());
+    let t0 = Instant::now();
+    assert!(!pane.confirm_stop_click(&a, t0), "first click only arms");
+    assert!(pane.confirm_stop_click(&a, t0 + std::time::Duration::from_secs(2)));
+    assert!(
+        !pane.confirm_stop_click(&a, t0 + std::time::Duration::from_secs(2)),
+        "a confirm consumes the arm"
+    );
+    assert!(!pane.confirm_stop_click(&b, t0), "another row re-arms");
+    assert!(
+        !pane.confirm_stop_click(&a, t0),
+        "and disarms the first row"
+    );
+    assert!(
+        !pane.confirm_stop_click(&a, t0 + STOP_CONFIRM_WINDOW),
+        "a click after the window re-arms"
+    );
+}
+/// A single `[✗]` click only arms and says so; the second click on the same
+/// row stops the task.
+#[test]
+fn tasks_pane_kill_button_needs_two_clicks() {
+    use crate::app::actions::Action;
+    let _theme = crate::theme::cache::pin_theme();
+    let registry = ActionRegistry::defaults();
+    let mut agent = test_fixtures::make_agent();
+    agent.last_terminal_size = (80, 30);
+    test_fixtures::focus_running_bg_task(&mut agent);
+    let _ = draw_frame(&mut agent, &registry);
+    let (_, rect) = agent
+        .tasks
+        .kill_button_rects
+        .first()
+        .cloned()
+        .expect("a running task row paints a kill button");
+    let click = mouse_down(rect.x, rect.y);
+    assert!(matches!(
+        agent.handle_input(&click, &registry),
+        InputOutcome::Changed
+    ));
+    let toast = agent.toast.clone().map(|(msg, _)| msg);
+    assert_eq!(toast.as_deref(), Some("Click \u{2717} again to stop"));
+    assert!(matches!(
+        agent.handle_input(&click, &registry),
+        InputOutcome::Action(Action::KillBgTask(ref t)) if t == "task-1"
+    ));
+}
