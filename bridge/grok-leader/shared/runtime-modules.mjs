@@ -12,7 +12,7 @@ const marker = sep + 'node_modules' + sep
 const modules = reached.slice(0, reached.lastIndexOf(marker) + marker.length - 1)
 
 /** Resolve inside the installation's node_modules, never the plugin's own tree. */
-export const runtimeRequire = createRequire(join(modules, '.dscode-browser.cjs'))
+const runtimeRequire = createRequire(join(modules, '.dscode-browser.cjs'))
 export const importRuntime = specifier => import(pathToFileURL(runtimeRequire.resolve(specifier)).href)
 /** The Playwright MCP command line, from the same installation. */
 export const playwrightMcpCli = () => join(dirname(runtimeRequire.resolve('@playwright/mcp/package.json')), 'cli.js')

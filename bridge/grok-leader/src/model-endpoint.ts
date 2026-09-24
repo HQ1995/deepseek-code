@@ -50,7 +50,7 @@ export function endpointReasoningEfforts(entry: Record<string, unknown>): false 
 }
 
 /** Parse only per-model capability metadata from a `/models` listing. */
-export function endpointModelCapabilities(value: unknown): EndpointCapabilities {
+function endpointModelCapabilities(value: unknown): EndpointCapabilities {
   const data = value !== null && typeof value === 'object'
     ? (value as { data?: unknown }).data
     : undefined

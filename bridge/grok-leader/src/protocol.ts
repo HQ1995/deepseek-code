@@ -13,10 +13,10 @@ import { FrameError } from './codec.ts'
 export const LEADER_PROTOCOL_VERSION = 1
 
 /** How the client exchanges ACP traffic with the leader (protocol.rs ClientMode). */
-export type ClientMode = 'headless' | 'stdio'
+type ClientMode = 'headless' | 'stdio'
 
 /** Client capabilities reported during registration (protocol.rs ClientCapabilities). */
-export interface ClientCapabilities {
+interface ClientCapabilities {
   yoloMode?: boolean
   autoMode?: boolean
   defaultModel?: string | null
@@ -28,7 +28,7 @@ export interface ClientCapabilities {
 }
 
 /** Registration handshake request. First message every client must send. */
-export interface RegisterMessage {
+interface RegisterMessage {
   type: 'register'
   clientType: string
   mode: ClientMode
@@ -36,30 +36,30 @@ export interface RegisterMessage {
 }
 
 /** One embedded ACP JSON-RPC message from the client. */
-export interface AcpMessage {
+interface AcpMessage {
   type: 'acp'
   payload: string
 }
 
 /** Leader control-plane request; this leader implements no control commands. */
-export interface ControlMessage {
+interface ControlMessage {
   type: 'control'
   requestId: string
   command: unknown
 }
 
-export interface PingMessage {
+interface PingMessage {
   type: 'ping'
 }
 
-export interface DisconnectMessage {
+interface DisconnectMessage {
   type: 'disconnect'
 }
 
 export type ClientMessage = RegisterMessage | AcpMessage | ControlMessage | PingMessage | DisconnectMessage
 
 /** Leader capabilities advertised on registration (protocol.rs LeaderCapabilities). */
-export interface LeaderCapabilities {
+interface LeaderCapabilities {
   controlV1?: boolean
   runtimeCpuProfile?: boolean
   profileFormats?: string[]
@@ -68,7 +68,7 @@ export interface LeaderCapabilities {
 }
 
 /** Registration confirmation (protocol.rs ServerMessage::Registered). */
-export interface RegisteredMessage {
+interface RegisteredMessage {
   type: 'registered'
   clientId: number
   ready: boolean
@@ -78,23 +78,23 @@ export interface RegisteredMessage {
 }
 
 /** One embedded ACP JSON-RPC message for the client. */
-export interface ServerAcpMessage {
+interface ServerAcpMessage {
   type: 'acp'
   payload: string
 }
 
-export interface PongMessage {
+interface PongMessage {
   type: 'pong'
 }
 
-export interface ErrorMessage {
+interface ErrorMessage {
   type: 'error'
   code: number
   message: string
 }
 
 /** ControlResult with the serde Err arm; only the unsupported error is sent. */
-export interface ControlResultMessage {
+interface ControlResultMessage {
   type: 'controlResult'
   requestId: string
   result: { Err: { code: string; message: string } }

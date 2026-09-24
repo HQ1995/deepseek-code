@@ -4,7 +4,7 @@ import { symbols } from '@deepseek-ai/cordis'
 export const LEGACY_MODEL_SELECTION_EVENTS = new Set(['dscode/model-selected', 'model/selected'])
 
 /** Keep every envelope/payload field so native admission still rejects malformed records. */
-export function normalizeLegacyModelSelection(row: unknown): unknown {
+function normalizeLegacyModelSelection(row: unknown): unknown {
   if (row === null || typeof row !== 'object' || Array.isArray(row)) return row
   const event = row as Record<string, unknown>
   return typeof event.type === 'string' && LEGACY_MODEL_SELECTION_EVENTS.has(event.type)

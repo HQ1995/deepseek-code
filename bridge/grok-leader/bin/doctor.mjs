@@ -79,7 +79,7 @@ emit({ runtimeVersion: boot.getDshRuntimeVersion(), checked, issues, warnings: c
 `
 
 /** The DSH installation (package.json of `@deepseek-ai/dsh`) behind an executable. */
-export const dshInstallAnchor = bin => {
+const dshInstallAnchor = bin => {
   let dir
   try { dir = dirname(realpathSync(bin)) } catch { return undefined }
   for (;;) {

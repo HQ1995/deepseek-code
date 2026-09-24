@@ -67,7 +67,7 @@ export const needsUpdateWithChannel = (current, target, channel) => {
   if (!channelAccepts(lane, current)) return true
   return comparison > 0
 }
-export const readChannelConfig = profile => {
+const readChannelConfig = profile => {
   const path = join(profile, 'config.toml')
   const config = existsSync(path) ? parse(readFileSync(path, 'utf8')) : {}
   const channel = config.cli?.channel, format = config.cli?.channel_format
