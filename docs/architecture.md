@@ -127,7 +127,8 @@ each needs its own interface-first change with differential evidence.
   missing-half builds, fresh extraction and the pin/layout checks listed in
   [upgrade-strategy.md](upgrade-strategy.md), and returns two NUL-delimited
   paths without `eval`. These source-pinned harnesses have no unpinned or
-  global-CLI fallback; `scripts/dev-bridge-tests.sh` stays a separate runner.
+  global-CLI fallback. `scripts/dev-bridge-tests.sh` stays a separate runner;
+  `e2e-product.sh` runs its bridge suite through it.
 - Acceptance profiles set `[cli] auto_update = false` in a private
   `config.toml`: the `DSCODE_CONFIG` overlay allowlist excludes `cli`.
 - `bin/launcher-files.mjs` (builtins only) owns shared file/link operations,

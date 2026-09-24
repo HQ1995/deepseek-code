@@ -110,40 +110,17 @@ fi
 
 echo
 echo "[3/5] launcher, compiled CLI, and bridge socket E2E"
-if [[ -n "$("$NODE_BIN" -p "require('$BRIDGE/package.json').dsh?.sourceCommit || ''")" ]]; then
+# One source payload serves this bridge suite and the runtime E2Es below.
+if [[ -z "${DSCODE_RELEASE_DIR:-}" ]]; then
   STAGE="$(mktemp -d "${TMPDIR:-/tmp}/dscode-product-e2e.XXXXXX")"
   trap 'rm -rf "$STAGE"' EXIT
-  RELEASE_DIR="${DSCODE_RELEASE_DIR:-$STAGE/assets}"
-  PLATFORM="$("$NODE_BIN" -p "({'linux/x64':'linux-x86_64','darwin/arm64':'macos-aarch64'})[process.platform+'/'+process.arch] || ''")"
-  [[ -n "$PLATFORM" ]] || { echo "error: unsupported runtime platform" >&2; exit 1; }
-  if [[ -z "${DSCODE_RELEASE_DIR:-}" ]]; then
-    BUILD_ARGS=(--out "$RELEASE_DIR" --version "$(cat "$ROOT/VERSION")")
-    [[ -z "${DSCODE_SOURCE_DIR:-}" ]] || BUILD_ARGS+=(--source "$DSCODE_SOURCE_DIR")
-    [[ -z "${DSCODE_RUNTIME_CONSUMER:-}" ]] || BUILD_ARGS+=(--consumer "$DSCODE_RUNTIME_CONSUMER")
-    "$NODE_BIN" "$ROOT/scripts/build-release-payload.mjs" "${BUILD_ARGS[@]}"
-  fi
-  mkdir -p "$STAGE/runtime" "$STAGE/bridge/grok-leader"
-  tar -xzf "$RELEASE_DIR/dscode-runtime-$PLATFORM.tar.gz" -C "$STAGE/runtime"
-  for entry in src bin browser ssh shared tests presets package.json tsconfig.json cordis.patch.yml; do
-    cp -R "$BRIDGE/$entry" "$STAGE/bridge/grok-leader/$entry"
-  done
-  cp "$ROOT/VERSION" "$STAGE/VERSION"
-  ln -s "$STAGE/runtime/node_modules" "$STAGE/bridge/grok-leader/node_modules"
-  export DSCODE_E2E_DSH_BIN="${DSCODE_E2E_DSH_BIN:-$STAGE/runtime/bin/dsh}"
-  export DSCODE_E2E_PLUGIN_TGZ="${DSCODE_E2E_PLUGIN_TGZ:-$RELEASE_DIR/dscode-plugin.tgz}"
-  (
-    cd "$STAGE/bridge/grok-leader"
-    "$NODE_BIN" node_modules/typescript/bin/tsc -p tsconfig.json --tsBuildInfoFile "$STAGE/bridge.tsbuildinfo"
-    DSCODE_TUI_BIN="$TUI_BIN" "$NODE_BIN" node_modules/vitest/vitest.mjs run
-  )
-else
-  (
-    cd "$BRIDGE"
-    dscode_pnpm install --frozen-lockfile
-    "$NODE_BIN" node_modules/typescript/bin/tsc -b tsconfig.json
-    DSCODE_TUI_BIN="$TUI_BIN" "$NODE_BIN" node_modules/vitest/vitest.mjs run
-  )
+  BUILD_ARGS=(--out "$STAGE/assets" --version "$(cat "$ROOT/VERSION")")
+  [[ -z "${DSCODE_SOURCE_DIR:-}" ]] || BUILD_ARGS+=(--source "$DSCODE_SOURCE_DIR")
+  [[ -z "${DSCODE_RUNTIME_CONSUMER:-}" ]] || BUILD_ARGS+=(--consumer "$DSCODE_RUNTIME_CONSUMER")
+  "$NODE_BIN" "$ROOT/scripts/build-release-payload.mjs" "${BUILD_ARGS[@]}"
+  export DSCODE_RELEASE_DIR="$STAGE/assets"
 fi
+DSCODE_E2E_RELEASE_DIR="$DSCODE_RELEASE_DIR" DSCODE_TUI_BIN="$TUI_BIN" bash "$ROOT/scripts/dev-bridge-tests.sh"
 
 echo
 echo "[4/5] Rust CLI metadata and slash-command contracts"
