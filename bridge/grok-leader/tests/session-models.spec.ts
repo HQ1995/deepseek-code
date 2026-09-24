@@ -104,6 +104,21 @@ describe('session model ownership', () => {
     await f.models.dispose(); await configured.models.dispose()
   })
 
+  it('notes a remembered route the catalog replaced, but never an explicit or still-listed one', async () => {
+    const f = fixture()
+    f.catalog.select.mockResolvedValueOnce({ provider: 'alpha', model: 'shared' })
+    const resumed = await f.add('root', 1, [event('model/selection', { provider: 'removed', model: 'old' })])
+    expect(resumed.model.current).toEqual({ provider: 'alpha', model: 'shared' })
+    expect(resumed.model.notice).toBe('Saved model removed/old is unavailable; using alpha/shared. /model to change.')
+    f.setDefault({ provider: 'removed', model: 'old' })
+    f.catalog.select.mockResolvedValueOnce(undefined)
+    expect((await f.add('fresh', 2)).model.notice).toBe('Saved model removed/old is unavailable and no other model is available. /provider to add one.')
+    f.catalog.select.mockResolvedValueOnce({ provider: 'beta', model: 'shared' })
+    expect((await f.add('explicit', 3, [], { model: 'beta:shared' })).model.notice).toBeUndefined()
+    expect((await f.add('listed', 1, [event('model/selection', { provider: 'beta', model: 'shared' })])).model.notice).toBeUndefined()
+    await f.models.dispose()
+  })
+
   it('installs the native assembly/request coupling and releases its listeners with the model handle', async () => {
     const f = fixture(), { record, model, ctx } = await f.add()
     model.install(ctx)

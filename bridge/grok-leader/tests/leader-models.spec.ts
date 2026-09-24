@@ -62,6 +62,27 @@ describe('leader model catalog and selection', () => {
     expect(updates()).toHaveLength(1)
   })
 
+  it('tells a resumed session once, after the load answer, that its saved model was replaced', async () => {
+    const { persistence, registry, client: c } = await start()
+    register(c)
+    await c.next()
+    persistence.events.push({ type: 'model/selection', seq: 0, time: 0, data: { provider: 'removed', model: 'old-model' } } as SessionEvent)
+    const loaded = await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [] })
+    expect(loaded.error).toBeUndefined()
+    expect(registry.byId.get('persisted-session')?.options).toMatchObject({ provider: 'deepseek', model: 'deepseek-chat' })
+    const answered = c.all.indexOf(loaded)
+    const notes = () => c.all.flatMap((message, index) => message.method === 'x.ai/session_notification'
+      && (message.params as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === 'image_dropped' ? [{ index, message }] : [])
+    await waitFor(() => notes().length === 1)
+    expect(notes()[0]!.index).toBeGreaterThan(answered)
+    expect(notes()[0]!.message.params).toMatchObject({
+      sessionId: 'persisted-session',
+      update: { notes: ['Saved model removed/old-model is unavailable; using deepseek/deepseek-chat. /model to change.'] },
+    })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(notes()).toHaveLength(1)
+  })
+
   it('raw model names containing their provider prefix retain the full name', async () => {
     const llm = {
       listConfigurableProviders: () => [],

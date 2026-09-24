@@ -215,6 +215,24 @@ export function assembleCatalog(sources: CatalogSources): { catalog: ModelCatalo
   }
 }
 
+/** What to tell the user when a remembered (not explicitly requested) choice
+ * is no longer in the catalog: `resolveSelection` then falls back to the
+ * catalog's current model, which would otherwise switch a resumed session's
+ * model and provider without a word. Undefined when nothing was replaced. */
+export function unavailableSelectionNotice(
+  remembered: Selection | undefined,
+  resolved: ModelSelectionRef['current'],
+  current: Pick<ModelCatalog, 'providerModelToWireId'> | undefined,
+): string | undefined {
+  if (remembered === undefined) return undefined
+  if (resolved !== undefined && resolved.provider === remembered.provider && resolved.model === remembered.model) return undefined
+  if (current?.providerModelToWireId.has(modelEffortKey(remembered.provider, remembered.model)) === true) return undefined
+  const saved = 'Saved model ' + remembered.provider + '/' + remembered.model + ' is unavailable'
+  return resolved === undefined
+    ? saved + ' and no other model is available. /provider to add one.'
+    : saved + '; using ' + resolved.provider + '/' + resolved.model + '. /model to change.'
+}
+
 /** Resolve one session's requested/saved selection against a catalog snapshot.
  * `--model <wire-id>` infers its provider, and an existing configured provider
  * seeds a session even when the neutral deployment default is empty. Explicit

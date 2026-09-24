@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assembleCatalog, modelSelectionFromRequest, providerNote, resolveSelection, type CatalogSources, type ProviderModels } from '../src/wire-catalog.ts'
+import { assembleCatalog, modelSelectionFromRequest, providerNote, resolveSelection, unavailableSelectionNotice, type CatalogSources, type ProviderModels } from '../src/wire-catalog.ts'
 import type { ModelInfo } from '../src/native-seams.ts'
 
 const listing = (provider: string, ids: string[], metadata: Record<string, Partial<ModelInfo>> = {}): ProviderModels => ({
@@ -87,5 +87,24 @@ describe('provider notes', () => {
     expect(note.startsWith('could not list models: ')).toBe(true)
     expect(note.length).toBe('could not list models: '.length + 200)
     expect(note.endsWith('…')).toBe(true)
+  })
+})
+
+describe('unavailable saved selection notice', () => {
+  const catalog = assembleCatalog(sources({ rows: [listing('a', ['m']), listing('b', ['n'])] })).catalog
+
+  it('names the saved route and its replacement once the catalog lost it', () => {
+    const saved = { provider: 'gone', model: 'old' }
+    const resolved = resolveSelection(catalog, {}, saved, undefined)
+    expect(resolved).toEqual({ provider: 'a', model: 'm' })
+    expect(unavailableSelectionNotice(saved, resolved, catalog)).toBe('Saved model gone/old is unavailable; using a/m. /model to change.')
+    expect(unavailableSelectionNotice(saved, undefined, assembleCatalog(sources({})).catalog))
+      .toBe('Saved model gone/old is unavailable and no other model is available. /provider to add one.')
+  })
+
+  it('says nothing when the saved route resolved, is still listed, or nothing was saved', () => {
+    expect(unavailableSelectionNotice({ provider: 'b', model: 'n' }, { provider: 'b', model: 'n' }, catalog)).toBeUndefined()
+    expect(unavailableSelectionNotice({ provider: 'b', model: 'n' }, { provider: 'a', model: 'm' }, catalog)).toBeUndefined()
+    expect(unavailableSelectionNotice(undefined, { provider: 'a', model: 'm' }, catalog)).toBeUndefined()
   })
 })

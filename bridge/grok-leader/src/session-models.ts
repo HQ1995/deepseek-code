@@ -6,7 +6,7 @@ import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp
 import { nonEmpty } from './guards.ts'
 import type { CatalogChange, createModelCatalog } from './model-catalog.ts'
 import type { AgentDefaultModelLike } from './native-seams.ts'
-import { acceptedReasoningEffort, modelEffortKey, modelSelectionFromRequest, type ModelCatalog } from './wire-catalog.ts'
+import { acceptedReasoningEffort, modelEffortKey, modelSelectionFromRequest, unavailableSelectionNotice, type ModelCatalog } from './wire-catalog.ts'
 import { LEGACY_MODEL_SELECTION_EVENTS } from './session-migration.ts'
 
 interface DscodeModelSelectionEvent { provider: string; model: string; reasoningEffort?: string }
@@ -22,6 +22,9 @@ declare module '@deepseek-ai/dsh-session/types' {
 export interface SessionModel {
   readonly current: Readonly<ModelSelection> | undefined
   readonly agentOptions: Pick<AgentOptions, 'provider' | 'model'>
+  /** Display-only note for the opened session: its saved model is no longer
+   * in the catalog and another one replaced it. */
+  readonly notice?: string
   install(ctx: Context): void
   /** Settle accepted writes for reversible reload without releasing routing. */
   settle(): Promise<void>
@@ -98,9 +101,13 @@ export function createSessionModels<S extends ModelSession>(host: ModelHost<S>) 
     const remembered = modelSelectionFromRequest(host.config, fallback, meta)
     const current = await host.catalog.select(fallback, meta)
     assertOpen()
+    // An explicit request either resolves or fails; only a remembered choice falls back.
+    const notice = nonEmpty(meta?.model) || nonEmpty(meta?.provider) ? undefined
+      : unavailableSelectionNotice(remembered, current, host.catalog.peek())
     const state: ModelState = { selection: { current, assembled: undefined }, efforts: effortsFromLog(events, remembered ?? current), pending: new Set(), tail: Promise.resolve(), subscriptions: new Set(), closed: false }
     const model: SessionModel = {
       get current() { return state.selection.current === undefined ? undefined : { ...state.selection.current } },
+      ...notice === undefined ? {} : { notice },
       get agentOptions() {
         const provider = state.selection.current?.provider ?? host.config.provider
         const model = state.selection.current?.model ?? host.config.model

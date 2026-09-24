@@ -169,6 +169,11 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
 - An explicit wire model id with no explicit provider resolves through the live
   catalog before any saved default route. A removed or renamed saved provider
   therefore cannot poison headless `--model <id>`.
+- A remembered route (a resumed or forked session's last selection, or the
+  saved default for a new session) that the catalog no longer carries falls
+  back to the catalog's current model. Once the open is answered, that session
+  gets one `image_dropped` system note: `Saved model <provider>/<model> is
+  unavailable; using <provider>/<model>. /model to change.`
 - The resolved provider/model route is materialized in the parent dsh
   `AgentOptions` on create, resume, and fork, so native child/subagent sessions
   inherit the actual route rather than an unset model prompt variable.
