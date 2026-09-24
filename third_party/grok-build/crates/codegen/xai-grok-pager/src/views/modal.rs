@@ -1540,8 +1540,8 @@ mod doc_picker_tip_tests {
     fn fit_docs_tip_prefers_path_and_never_overflows() {
         let path = crate::util::display_user_grok_path(DOCS_USER_GUIDE_REL);
         let long =
-            format!("Tip · Ask Grok about the docs ({path}) — e.g. \"how do I set up MCP?\"");
-        let short = format!("Tip · Ask Grok about the docs · {path}");
+            format!("Tip · Ask Dscode about the docs ({path}) — e.g. \"how do I set up MCP?\"");
+        let short = format!("Tip · Ask Dscode about the docs · {path}");
         let path_only = format!("Tip · {path}");
         assert_eq!(fit_docs_ask_grok_tip(&path, long.width()), long);
         assert_eq!(fit_docs_ask_grok_tip(&path, short.width()), short);
@@ -1582,7 +1582,7 @@ mod doc_picker_tip_tests {
             all.push('\n');
         }
         assert!(
-            all.contains("Tip") && all.contains("Ask Grok"),
+            all.contains("Tip") && all.contains("Ask Dscode"),
             "missing tip footer:\n{all}"
         );
         assert!(

@@ -449,6 +449,21 @@ fn clipboard_poll_window_gate() {
     app.contextual_hints.image_input = true;
     let id = super::super::agent::AgentId(0);
     app.agents.get_mut(&id).unwrap().last_terminal_size = (80, 30);
+    // DIVERGENCE(dscode): image input fails closed, so the tip needs a
+    // current model that declares it.
+    {
+        let models = &mut app.agents.get_mut(&id).unwrap().session.models;
+        let model = agent_client_protocol::ModelId::new(std::sync::Arc::from("vision"));
+        models.available.insert(
+            model.clone(),
+            agent_client_protocol::ModelInfo::new(model.clone(), "Vision".to_string()).meta(
+                serde_json::json!({ "acceptsImages": true })
+                    .as_object()
+                    .cloned(),
+            ),
+        );
+        models.current = Some(model);
+    }
     app.notification_service.focus_tracker.on_focus_gained();
     let now = std::time::Instant::now();
     let supported = crate::clipboard::clipboard_image_probe_supported();
@@ -4581,7 +4596,7 @@ fn dashboard_stale_clears_skip_attached_popup_agent() {
     for _ in 0..2 {
         assert!(AppView::dashboard_stale_image_clears(&mut app.agents, Some(id)).is_none());
         let popup = crate::terminal::overlay::static_image(&png, 20, 10, 0, 0, 7).unwrap();
-        assert!(!popup.as_str().contains("a=t"));
+        assert!(!popup.as_str().contains("a=T"));
         let _ = popup.commit();
     }
     let agent = app.agents.get(&id).unwrap();
@@ -4617,14 +4632,14 @@ fn dashboard_too_small_popup_clears_shared_overlay_slot() {
         !crate::terminal::overlay::static_image(&png, 20, 10, 0, 0, 8)
             .unwrap()
             .as_str()
-            .contains("a=t")
+            .contains("a=T")
     );
     clear.write_to(&mut Vec::new()).unwrap();
     assert!(
         crate::terminal::overlay::static_image(&png, 20, 10, 0, 0, 8)
             .unwrap()
             .as_str()
-            .contains("a=t")
+            .contains("a=T")
     );
 }
 #[test]

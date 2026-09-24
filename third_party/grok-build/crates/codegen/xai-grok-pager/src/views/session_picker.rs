@@ -1497,7 +1497,7 @@ mod tests {
         assert_eq!(SourceFilter::All.next(), SourceFilter::Local);
         assert_eq!(SourceFilter::Local.next(), SourceFilter::Remote);
         assert_eq!(SourceFilter::Remote.next(), SourceFilter::Grok);
-        assert_eq!(SourceFilter::Grok.label(), "Grok");
+        assert_eq!(SourceFilter::Grok.label(), "Dscode");
         assert_eq!(SourceFilter::External.label(), "External");
         assert_eq!(SourceFilter::default(), SourceFilter::Grok);
     }

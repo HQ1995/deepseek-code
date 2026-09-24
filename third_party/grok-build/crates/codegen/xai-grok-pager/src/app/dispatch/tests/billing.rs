@@ -268,7 +268,7 @@ fn upsell_non_max_unified_shows_buy_credits() {
     assert_eq!(q.options[1].label, "Buy more credits");
     assert_eq!(
         q.options[1].description,
-        "Purchase credits to keep using Grok Build"
+        "Purchase credits to keep using Deepseek Code"
     );
 }
 

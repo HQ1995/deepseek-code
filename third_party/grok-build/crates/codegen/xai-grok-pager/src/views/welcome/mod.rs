@@ -2771,8 +2771,8 @@ mod tests {
                 "badge must not label the product: {rendered:?}"
             );
         }
-        assert!(full.contains("Grok Build"), "full badge: {full:?}");
-        assert!(inline.contains("Grok Build"), "inline badge: {inline:?}");
+        assert!(full.contains("Deepseek Code"), "full badge: {full:?}");
+        assert!(inline.contains("Deepseek Code"), "inline badge: {inline:?}");
         assert!(footer.contains("acme"), "footer keeps the team: {footer:?}");
         assert!(
             !footer.ends_with('\u{2502}'),
@@ -3028,14 +3028,14 @@ mod tests {
         let before_write =
             crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, owner_id).unwrap();
         assert!(
-            !before_write.as_str().contains("a=t"),
+            !before_write.as_str().contains("a=T"),
             "constructing the clear must not commit ownership"
         );
         post_flush.write_to(&mut Vec::new()).unwrap();
         let after_write =
             crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, owner_id).unwrap();
         assert!(
-            after_write.as_str().contains("a=t"),
+            after_write.as_str().contains("a=T"),
             "writing the clear must commit ownership"
         );
     }

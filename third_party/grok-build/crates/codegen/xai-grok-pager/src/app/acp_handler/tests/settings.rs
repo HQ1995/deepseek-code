@@ -159,12 +159,8 @@
                 .prompt
                 .slash_controller
                 .registry_mut()
-                .set_available_tools(
-                    [xai_grok_tools::implementations::grok_build::SCHEDULER_CREATE_TOOL_NAME]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                );
+                // DIVERGENCE(dscode): `/loop` needs DSH's native scheduler tool.
+                .set_available_tools(["schedule_create".to_string()].into_iter().collect());
         }
         let effects =
             crate::app::dispatch::dispatch(Action::SendPrompt(format!("/loop {args}")), app);
@@ -181,56 +177,48 @@
         }
     }
 
-    /// `/loop`'s wording must describe THIS session's fires. The shell pins the
-    /// fire mode when a session's actor spawns, so a mid-session settings push
-    /// carrying the opposite value must not change the instruction: describing
-    /// detached fires as in-session drops the self-contained state those fires
-    /// need.
+    /// DIVERGENCE(dscode): `/loop` asks for a native `schedule_create`
+    /// reminder, which runs only while the session is live. Grok's fire mode
+    /// (in-session or detached) does not exist there, so neither a mid-session
+    /// settings push nor the value a spawn pins changes the instruction.
     #[test]
-    fn loop_fire_mode_follows_session_not_later_settings_push() {
+    fn loop_instruction_ignores_a_later_fire_mode_push() {
         use crate::app::actions::{Action, TaskResult};
-        use xai_grok_tools::implementations::grok_build::{
-            LoopFireMode, loop_schedule_instruction,
+
+        // One `/loop` per session: a second would queue behind the first turn.
+        let instruction = |push: Option<bool>| {
+            let mut app = make_app_with_agent("sess-loop");
+            app.scheduler_background_loops_seed = true;
+            crate::app::dispatch::dispatch(
+                Action::TaskComplete(TaskResult::SessionCreated {
+                    agent_id: AgentId(0),
+                    session_id: acp::SessionId::new("sess-loop"),
+                    models: None,
+                    scheduler_background_loops: Some(false),
+                }),
+                &mut app,
+            );
+            if let Some(value) = push {
+                assert!(handle_ext_notification(
+                    &scheduler_background_loops_update(value),
+                    &mut app
+                ));
+            }
+            loop_instruction(&mut app, "5m check ci")
         };
-
-        let mut app = make_app_with_agent("sess-loop");
-        // Seed says detached; only the session's own answer can produce the
-        // in-session wording asserted below.
-        app.scheduler_background_loops_seed = true;
-        crate::app::dispatch::dispatch(
-            Action::TaskComplete(TaskResult::SessionCreated {
-                agent_id: AgentId(0),
-                session_id: acp::SessionId::new("sess-loop"),
-                models: None,
-                scheduler_background_loops: Some(false),
-            }),
-            &mut app,
-        );
-
-        assert!(handle_ext_notification(
-            &scheduler_background_loops_update(true),
-            &mut app
-        ));
-
-        assert_eq!(
-            loop_instruction(&mut app, "5m check ci"),
-            loop_schedule_instruction("5m check ci", LoopFireMode::InSession),
-            "a pushed flip must not re-describe fires this session already pinned"
-        );
+        let before = instruction(None);
+        assert!(before.contains("schedule_create") && before.contains("every_seconds"), "{before}");
+        assert!(before.ends_with("User request: 5m check ci"), "{before}");
+        assert_eq!(instruction(Some(true)), before);
     }
 
-    /// The value is session-scoped, not frozen for the process: resuming a
-    /// session adopts the mode that resume's spawn pinned.
+    /// DIVERGENCE(dscode): as above, a resumed session's pinned value leaves
+    /// the native instruction unchanged.
     #[test]
-    fn loop_fire_mode_adopts_the_loaded_session_value() {
+    fn loop_instruction_ignores_the_loaded_fire_mode() {
         use crate::app::actions::{Action, TaskResult};
-        use xai_grok_tools::implementations::grok_build::{
-            LoopFireMode, loop_schedule_instruction,
-        };
 
         let mut app = make_app_with_agent("sess-loop-load");
-        // Opposite of both the seed and the pre-resume value, so only the load
-        // response can produce the detached wording asserted below.
         app.scheduler_background_loops_seed = false;
         crate::app::dispatch::dispatch(
             Action::TaskComplete(TaskResult::SessionCreated {
@@ -241,6 +229,7 @@
             }),
             &mut app,
         );
+        let created = loop_instruction(&mut app, "5m check ci");
         crate::app::dispatch::dispatch(
             Action::TaskComplete(TaskResult::SessionLoaded {
                 agent_id: AgentId(0),
@@ -254,12 +243,7 @@
             }),
             &mut app,
         );
-
-        assert_eq!(
-            loop_instruction(&mut app, "5m check ci"),
-            loop_schedule_instruction("5m check ci", LoopFireMode::Detached),
-            "resume must adopt the value its own spawn pinned"
-        );
+        assert_eq!(loop_instruction(&mut app, "5m check ci"), created);
     }
 
     #[test]

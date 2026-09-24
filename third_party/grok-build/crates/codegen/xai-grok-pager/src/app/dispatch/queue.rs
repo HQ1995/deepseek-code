@@ -1462,10 +1462,12 @@ mod tests {
         assert_eq!(app.agents[&id].session.queue_len(), 0);
     }
 
-    /// An enqueueing builtin re-enters the local queue at the tail, so the row's
-    /// position is not preserved.
+    /// DIVERGENCE(dscode): no pager builtin enqueues itself (`/compact` comes
+    /// from the leader over ACP when a preset offers it), so a queued row
+    /// edited into a command this session does not offer is refused through
+    /// the send path and stays queued where it was.
     #[test]
-    fn run_edited_queued_command_with_enqueueing_builtin_re_adds_at_the_tail() {
+    fn run_edited_queued_command_unavailable_here_keeps_the_row() {
         use crate::app::agent::QueueEntryKind;
         let mut app = test_app_with_agent();
         let id = AgentId(0);
@@ -1486,8 +1488,8 @@ mod tests {
         assert_eq!(
             rows,
             vec![
+                ("edited into a command", QueueEntryKind::Prompt),
                 ("behind", QueueEntryKind::Prompt),
-                ("/compact", QueueEntryKind::Command),
             ]
         );
     }

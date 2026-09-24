@@ -2575,10 +2575,16 @@ mod link_click_tests {
                     .contains(Modifier::BOLD)
             })
             .collect();
+        // DIVERGENCE(dscode): the tip also offers the Alt+Enter steer chord
+        // where it is bound; key chords are the only bold cells.
+        let mut chords: Vec<u16> = (start + 9..start + 14).collect();
+        if let Some(steer) = row.find("Alt+Enter") {
+            let col = row[..steer].chars().count() as u16;
+            chords.extend(col..col + 9);
+        }
         assert_eq!(
-            bold_cols,
-            (start + 9..start + 14).collect::<Vec<u16>>(),
-            "only the Enter chord may be bold, got row {row:?}"
+            bold_cols, chords,
+            "only the key chords may be bold, got row {row:?}"
         );
     }
     /// Critical banner yields over an active ephemeral tip and occludes new shows.

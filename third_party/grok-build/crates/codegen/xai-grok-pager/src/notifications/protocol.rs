@@ -367,7 +367,7 @@ mod tests {
 
         let osc777 = notification_sequence(NotificationProtocol::Osc777, "ignored\x1b", "b\x1body")
             .expect("osc777 yields a sequence");
-        assert_eq!(osc777.as_ref(), "\x1b]777;notify;Grok;body\x1b\\");
+        assert_eq!(osc777.as_ref(), "\x1b]777;notify;Dscode;body\x1b\\");
     }
 
     #[test]

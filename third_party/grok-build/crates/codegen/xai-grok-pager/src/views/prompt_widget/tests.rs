@@ -1118,19 +1118,19 @@
             .draw(&mut buf, area, Some(overlay), &style, None, None)
             .post_flush_escapes
             .expect("first preview");
-        assert!(first_escape.as_str().contains("a=t"));
+        assert!(first_escape.as_str().contains("a=T"));
         let _ = first_escape.commit();
         let second_escape = second
             .draw(&mut buf, area, Some(overlay), &style, None, None)
             .post_flush_escapes
             .expect("second preview");
-        assert!(second_escape.as_str().contains("a=t"));
+        assert!(second_escape.as_str().contains("a=T"));
         let _ = second_escape.commit();
         let first_again = first
             .draw(&mut buf, area, Some(overlay), &style, None, None)
             .post_flush_escapes
             .expect("first preview again");
-        assert!(first_again.as_str().contains("a=t"));
+        assert!(first_again.as_str().contains("a=T"));
     }
 
     #[test]
@@ -1519,27 +1519,34 @@
     fn sync_acp_commands_passes_tools_to_registry() {
         // End-to-end: tracker advertises a toolset, sync forwards it,
         // and tool-gated commands disappear when their tool isn't registered.
-        // DIVERGENCE(deepseek): /loop is no longer tool-gated because the
-        // bridge handles it through dsh-schedule.
+        // DIVERGENCE(dscode): /loop is gated on DSH's native schedule_create
+        // tool, which only scheduling presets register.
         let mut pw = PromptWidget::new();
         let models = crate::acp::model_state::ModelState::default();
-        let mut empty_tools = std::collections::HashSet::new();
-        empty_tools.insert("read_file".to_string());
-
-        // Sync with a toolset that omits scheduler_create.
-        pw.sync_acp_commands(&[], Some(&empty_tools), &models);
-        // Now type /loop -- it should remain available.
-        pw.textarea.insert_str("/loop");
-        pw.refresh_slash(&models);
-        let snap = pw.slash_snapshot();
-        assert!(
-            snap.matches.iter().any(|r| r.display == "/loop"),
-            "/loop should be visible even without scheduler_create, got: {:?}",
-            snap.matches
+        pw.slash_controller
+            .set_capabilities(Some(["schedule".to_string()].into_iter().collect()));
+        let loop_rows = |pw: &mut PromptWidget| {
+            pw.textarea.set_text("/loop");
+            pw.refresh_slash(&models);
+            pw.slash_snapshot()
+                .matches
                 .iter()
-                .map(|r| r.display.as_str())
-                .collect::<Vec<_>>()
-        );
+                .map(|r| r.display.clone())
+                .filter(|display| display == "/loop")
+                .count()
+        };
+
+        let without: std::collections::HashSet<String> =
+            ["read_file".to_string()].into_iter().collect();
+        pw.sync_acp_commands(&[], Some(&without), &models);
+        assert_eq!(loop_rows(&mut pw), 0, "/loop must hide without schedule_create");
+
+        let with: std::collections::HashSet<String> =
+            ["read_file".to_string(), "schedule_create".to_string()]
+                .into_iter()
+                .collect();
+        pw.sync_acp_commands(&[], Some(&with), &models);
+        assert_eq!(loop_rows(&mut pw), 1, "/loop must return with schedule_create");
     }
 
     // ── Slash completion acceptance tests ──────────────────────────
@@ -1738,6 +1745,16 @@
     fn compact_completable_with_no_args() {
         let mut pw = PromptWidget::new();
         let models = crate::acp::model_state::ModelState::default();
+        // DIVERGENCE(dscode): the Grok /compact builtin is omitted; the
+        // preset's native compaction command arrives over ACP.
+        pw.sync_acp_commands(
+            &[agent_client_protocol::AvailableCommand::new(
+                "compact".to_string(),
+                "Compact the conversation".to_string(),
+            )],
+            None,
+            &models,
+        );
 
         // Type "/comp" → matches "/compact".
         pw.textarea.insert_str("/comp");
