@@ -36,7 +36,6 @@ import { createNativeTeam, type TeamServiceLike } from './native-team.ts'
 import { TEAM_TOOLS_MODULE } from './team-presets.ts'
 import { configuredRemote, executionWorld, remoteUnavailable, SSH_FAILURE, type ConfigEntryLike, type RemoteConnection, type RemoteLike } from './execution-world.ts'
 import type { LlmLike, SettingsLike, CredentialsLike, AgentDefaultModelLike } from './native-seams.ts'
-export { providerUserSection, providerUserProfile, hasUserProviderRoute, knownRouteBaseUrls } from './provider-profile.ts'
 /**
  * Grok leader-protocol unix-socket server driving harness agents.
  *
