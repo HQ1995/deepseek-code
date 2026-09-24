@@ -61,10 +61,36 @@ recorder keeps, and `62e9b7b6` updates the contract E2E for the renamed preset:
 Pass 3 at `d83b56ec` passed every gate but the full TUI E2E, which still
 expected the old Teams preset label.
 
-Not changed: the welcome menu still lists "New worktree" in a remote workspace,
-where remote mode refuses it. Its rows map to actions by position, so removing
-the row is left for a later change. The Flash model still has no description
-in the catalog.
+### Follow-up
+
+Three commits resolve the audit's leftovers and what re-testing them found:
+- `6c003140`: the welcome menu is built from one list that rendering, the row
+  count and Enter/click dispatch all read. "New worktree" and Ctrl+W appear
+  only in a git checkout on this computer that is not a remote workspace;
+  before, the row opened the name dialog and then failed. The remote welcome
+  bar also stops showing the launch directory's branch and worktree badge.
+- `ebfc330c`: the bridge describes the native Flash model, which DSH lists
+  without a description. The native route is now "DeepSeek (native)": the
+  longer name had pushed the Flash row past the picker's 40-column label cap,
+  which cut it to "DeepSeek-V41-F…". `/model` also drops the provider prefix
+  when only one provider has models.
+- `15861549`: a teammate spawn reads "Ran 1 teammate", not "Ran 1 subagent".
+
+Each was checked in the TUI lab: from a git checkout (row shown), from a
+directory outside git and a remote home (row and branch hidden), in the
+first `/model` pick, and on a Teams spawn.
+
+**macOS arm64:**
+- The full pager suite fails the same 49 upstream tests as the baseline, none
+  new, and `scripts/check-rust.sh` passes.
+- `control/int-verify-all.sh s4` passes every gate on both Node versions.
+  Bridge suites run 1,120 tests each. The browser and Teams negative controls
+  fail at their outside-origin and isolation checks.
+- Provider E2E run **76188** and full TUI E2E run **77175**.
+
+**Linux:** pass 5 at `15861549` ran all 15 gates, and all passed. Bridge
+suites ran 1,124 tests on each Node version. Provider E2E run **1122288** and
+full TUI E2E run **1129433**.
 
 ## Product integration — 2026-09-24
 
