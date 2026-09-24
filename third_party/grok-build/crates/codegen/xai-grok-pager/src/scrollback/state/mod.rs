@@ -3376,8 +3376,10 @@ mod tests {
         );
     }
 
+    /// DIVERGENCE(dscode): finished thinking adopts the session's default
+    /// Truncated mode, a one-line preview under the duration header.
     #[test]
-    fn untouched_running_thinking_collapses_on_finish() {
+    fn untouched_running_thinking_keeps_its_preview_on_finish() {
         let mut state = ScrollbackState::new();
         let id = state.push_block(RenderBlock::thinking_streaming());
         state.set_last_running(true);
@@ -3391,12 +3393,14 @@ mod tests {
 
         assert_eq!(
             state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Collapsed
+            DisplayMode::Truncated
         );
     }
 
+    /// DIVERGENCE(dscode): as above, toggling back to Truncated before the
+    /// finish leaves the preview in place.
     #[test]
-    fn running_thinking_toggled_back_to_truncated_collapses_on_finish() {
+    fn running_thinking_toggled_back_to_truncated_keeps_its_preview_on_finish() {
         let mut state = ScrollbackState::new();
         let id = state.push_block(RenderBlock::thinking_streaming());
         state.set_last_running(true);
@@ -3415,7 +3419,7 @@ mod tests {
 
         assert_eq!(
             state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Collapsed
+            DisplayMode::Truncated
         );
     }
 

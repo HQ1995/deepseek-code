@@ -823,6 +823,8 @@ fn cta_impressions_cover_welcome_and_dashboard_surfaces() {
     assert!(!logged.contains(&("q".to_string(), AnnouncementCtaSurface::Welcome)));
     assert_eq!(logged.len(), 3);
 }
+/// DIVERGENCE(dscode): an unregistered pager name is refused locally instead
+/// of reaching the model as prompt text.
 #[test]
 fn unregistered_announcements_does_not_mutate_local_banner_state() {
     let mut app = test_app_with_agent();
@@ -831,7 +833,11 @@ fn unregistered_announcements_does_not_mutate_local_banner_state() {
     app.active_announcements = vec![critical_announcement("crit-a")];
     let effects = dispatch(Action::SendPrompt("/announcements hide".into()), &mut app);
     assert!(
-        matches!(effects.as_slice(), [Effect::SendPrompt { text, .. }] if text == "/announcements hide")
+        effects.is_empty(),
+        "expected a local refusal, got {effects:?}"
+    );
+    assert!(
+        last_system_text(&app, agent_id).contains("/announcements is unavailable in this session")
     );
     assert!(app.hidden_announcement_ids.is_empty());
     assert!(app.agents[&agent_id].prompt.text().is_empty());
@@ -1512,13 +1518,18 @@ fn all_constructor_paths_initialize_slash_fields() {
         assert!(!s.model_switch_pending);
     }
 }
+/// DIVERGENCE(dscode): a pre-session pick leaves the display alone, so a
+/// second pick keeps the model shown before either as the rollback target.
 #[test]
 fn deferred_switch_overwritten_by_second_switch() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
+    let shown = acp::ModelId::new(std::sync::Arc::from("model-shown"));
     let model_a = acp::ModelId::new(std::sync::Arc::from("model-a"));
     let model_b = acp::ModelId::new(std::sync::Arc::from("model-b"));
-    app.agents.get_mut(&id).unwrap().session.session_id = None;
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.session_id = None;
+    agent.session.models.current = Some(shown.clone());
     dispatch(
         Action::SwitchModel {
             model_id: model_a.clone(),
@@ -1538,9 +1549,10 @@ fn deferred_switch_overwritten_by_second_switch() {
         Some(crate::app::agent::DeferredModelSwitch {
             model_id: model_b.clone(),
             effort: None,
-            prev_model_id: Some(model_a),
+            prev_model_id: Some(shown.clone()),
         })
     );
+    assert_eq!(app.agents[&id].session.models.current, Some(shown));
 }
 #[test]
 fn pick_over_cli_seed_keeps_display_as_rollback_target() {
@@ -1573,45 +1585,18 @@ fn pick_over_cli_seed_keeps_display_as_rollback_target() {
         })
     );
 }
+/// DIVERGENCE(dscode): a model change applies only once the leader
+/// acknowledges it, so a pick made before the session exists neither changes
+/// the displayed model nor persists; it waits for the session and says so.
 #[test]
-fn deferred_switch_updates_display_and_persists() {
+fn deferred_switch_waits_for_the_session_to_display_and_persist() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
+    let shown = acp::ModelId::new(std::sync::Arc::from("model-a"));
     let model_id = acp::ModelId::new(std::sync::Arc::from("model-b"));
-    app.agents.get_mut(&id).unwrap().session.session_id = None;
-    let effects = dispatch(
-        Action::SwitchModel {
-            model_id: model_id.clone(),
-            effort: None,
-        },
-        &mut app,
-    );
-    let agent = &app.agents[&id];
-    assert_eq!(
-        agent.session.models.current,
-        Some(model_id.clone()),
-        "pre-session pick must update the displayed model immediately"
-    );
-    assert_eq!(
-        agent.session.deferred_model_switch,
-        Some(crate::app::agent::DeferredModelSwitch {
-            model_id: model_id.clone(),
-            effort: None,
-            prev_model_id: None,
-        }),
-        "switch must still round-trip once the session exists"
-    );
-    assert!(
-        !agent.session.model_switch_pending,
-        "nothing is in flight yet — the queue must not be blocked"
-    );
-    assert!(
-        matches!(
-            &effects[..],
-            [Effect::PersistPreferredModel { model_id: m, .. }] if m == &model_id
-        ),
-        "expected a single PersistPreferredModel effect, got {effects:?}"
-    );
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.session_id = None;
+    agent.session.models.current = Some(shown.clone());
     let effects = dispatch(
         Action::SwitchModel {
             model_id: model_id.clone(),
@@ -1621,7 +1606,26 @@ fn deferred_switch_updates_display_and_persists() {
     );
     assert!(
         effects.is_empty(),
-        "unchanged pre-session pick must not re-persist, got {effects:?}"
+        "nothing persists before the ack, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert_eq!(agent.session.models.current, Some(shown.clone()));
+    assert_eq!(
+        agent.session.deferred_model_switch,
+        Some(crate::app::agent::DeferredModelSwitch {
+            model_id,
+            effort: None,
+            prev_model_id: Some(shown),
+        }),
+        "switch must still round-trip once the session exists"
+    );
+    assert!(
+        !agent.session.model_switch_pending,
+        "nothing is in flight yet — the queue must not be blocked"
+    );
+    assert_eq!(
+        read_toast(&app),
+        "Model switch will finish after the session starts"
     );
 }
 #[test]

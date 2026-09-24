@@ -2680,6 +2680,18 @@ mod scrollback_paste_focus_forward_tests {
     #[test]
     fn dragging_image_while_scrollback_focused_attaches_to_composer() {
         let (mut agent, reg) = scrollback_agent();
+        // DIVERGENCE(dscode): image input fails closed, so the drop needs a
+        // current model that declares it.
+        let model = agent_client_protocol::ModelId::new(std::sync::Arc::from("vision"));
+        agent.session.models.available.insert(
+            model.clone(),
+            agent_client_protocol::ModelInfo::new(model.clone(), "Vision".to_string()).meta(
+                serde_json::json!({ "acceptsImages": true })
+                    .as_object()
+                    .cloned(),
+            ),
+        );
+        agent.session.models.current = Some(model);
         let dir = tempfile::tempdir().unwrap();
         let png = dir.path().join("drag.png");
         std::fs::write(&png, make_test_png(8, 8)).unwrap();
