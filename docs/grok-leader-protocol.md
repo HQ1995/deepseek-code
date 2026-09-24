@@ -200,7 +200,12 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
 - Permission controls use native permission/plan services; an explicit mode
   takes precedence over the legacy YOLO bit. Task rows and terminal status come
   from native jobs/subagents, and cancellation goes through their owning services,
-  not a fabricated shell exit code or success result.
+  not a fabricated shell exit code or success result. A background subagent's
+  `subagent` job gets no task row: its child row stands for it, and
+  `x.ai/subagent/cancel` on that one-shot child kills the job (found by its
+  description among the session's running subagent jobs; a description another
+  job or running one-shot child shares refuses). A `workflow` job keeps its task
+  row, since the workflow row offers no stop.
 - Child controls resolve only descendants of the owning session and require
   continuable mode. Queue/Steer use native `subagents.prompt` with fresh user RPC
   provenance. Edits retain message IDs and source; Stop retains pending input.

@@ -633,6 +633,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const children = createNativeChildren({
     sessions, owned: ownedRecord, agent: id => agents.get(id),
     subagents: record => presetServiceFor(record, 'subagents'),
+    jobs: record => presetServiceFor(record, 'jobs'),
     workflow: record => {
       const state = ctx.sessionProjections.stateOf(record.agent.session, 'dscodeWorkflows')
       if (state === undefined) throw internalError('workflow history projection is unavailable')

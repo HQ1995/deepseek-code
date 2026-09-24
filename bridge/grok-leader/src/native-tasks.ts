@@ -244,6 +244,11 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
     if (previous === undefined) { previous = new Map(); jobSnapshots.set(record, previous) }
     const systemTime = (ms: number): unknown => ({ secs_since_epoch: Math.floor(ms / 1000), nanos_since_epoch: (ms % 1000) * 1_000_000 })
     for (const job of jobs.list(record.agent.session.id)) {
+      // The Tasks pane merges job, child and workflow rows. A background
+      // subagent's job runs a one-shot child that already has its child row,
+      // whose stop kills this job (native-children); a second row would list
+      // it twice. A workflow job stays: its workflow row offers no stop.
+      if (job.kind === 'subagent') continue
       // Settled producers are immutable; do not rescan their output every tick.
       // A settled producer's final passive output can arrive after settlement.
       // Stop rescanning only after that final output has actually been observed.

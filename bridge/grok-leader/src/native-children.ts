@@ -42,6 +42,8 @@ interface ChildHost<S extends ChildSession> {
   notify(record: S, method: string, params: unknown): void
   /** Teammates of the session's Agent Team, when its preset has one. */
   teamMembers?(record: S): ReadonlyArray<{ id: string; name: string }> | undefined
+  /** The session's background job registry, which runs background one-shot children. */
+  jobs?(record: S): unknown
   on<K extends keyof ChildEventMap>(name: K, listener: (...args: ChildEventMap[K]) => void): () => void
   logger: { warn(message: string): void }
 }
@@ -409,6 +411,39 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     })
   }
 
+  type JobsLike = {
+    list(caller: SessionId): Array<{ id: string; kind: string; label: string; status: string }>
+    kill(id: string, caller: SessionId, reason?: string): 'requested' | 'already-finished'
+    wait(id: string, timeoutMs: number, caller: SessionId): Promise<{ status: string }>
+  }
+  /** The native service interrupts only continuable children. A background
+   * one-shot child runs inside a `subagent` job labelled with its description
+   * (DSH's subagent tool), and the Tasks pane lists it only as its child row,
+   * so a stop there kills that job, as the official job controller does. The
+   * job names no child: it is found by label among this session's running
+   * subagent jobs. A label that another running one-shot child or job shares
+   * refuses rather than stop the wrong one. */
+  const stopBackgroundChild = async (record: S, row: ChildRow, rows: readonly ChildRow[], scope: SessionOperation,
+    result: (cancelled: boolean, kind: 'cancelled' | 'already_finished' | 'not_found', status?: string) => unknown): Promise<unknown> => {
+    const refused = 'one-shot subagents are not interruptible through the released subagent service'
+    const jobs = host.jobs?.(record) as JobsLike | undefined
+    if (typeof jobs?.list !== 'function' || typeof jobs.kill !== 'function' || typeof jobs.wait !== 'function' || row.label === undefined) throw internalError(refused)
+    const caller = record.agent.session.id
+    const matches = jobs.list(caller).filter(job => job.kind === 'subagent' && job.label === row.label && (job.status === 'running' || job.status === 'stopping'))
+    if (matches.length === 0) throw internalError(refused)
+    const namesakes = rows.filter(other => other.kind === 'child' && other.mode !== 'continuable' && other.label === row.label
+      && host.agent(SessionId(other.id))?.status === 'running')
+    if (matches.length > 1 || namesakes.length > 1) throw internalError('several running subagents are named "' + row.label + '", so dscode cannot tell which background job to stop; let it finish or ask the agent to stop it')
+    scope.assertActive()
+    const id = matches[0]!.id
+    const requested = jobs.kill(id, caller, 'cancelled by the user')
+    const settled = requested === 'already-finished' ? undefined : await jobs.wait(id, 5000, caller)
+    if (!isLive(record)) throw invalidParams('session closed')
+    if (settled === undefined) return result(false, 'already_finished')
+    if (settled.status === 'running' || settled.status === 'stopping') throw internalError('subagent cancellation requested; its background job has not settled yet')
+    return result(settled.status === 'killed', settled.status === 'killed' ? 'cancelled' : 'already_finished', settled.status === 'killed' ? 'cancelled' : settled.status)
+  }
+
   const cancelSubagent = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'x.ai/subagent/cancel')
     if (!nonEmpty(p.sessionId) || !nonEmpty(p.subagentId)) throw invalidParams('x.ai/subagent/cancel requires sessionId and subagentId')
@@ -426,7 +461,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       if (row === undefined) return result(false, 'not_found')
       const child = host.agent(SessionId(subagentId))
       if (child === undefined || child.status !== 'running') return result(false, 'already_finished', child?.status ?? 'inactive')
-      if (row.mode !== 'continuable') throw internalError('one-shot subagents are not interruptible through the released subagent service')
+      if (row.mode !== 'continuable') return await stopBackgroundChild(record, row, rows, scope, result)
       const watch: { latest?: SessionEvent<'turn/start'> } = {}
       const watches = turnWatches.get(child.session) ?? new Set()
       turnWatches.set(child.session, watches); watches.add(watch)
