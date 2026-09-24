@@ -1,8 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { internalError, invalidParams, paramRecord } from './acp.ts'
+import type { SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
+import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
 import { errorMessage, isRecord } from './guards.ts'
 import type { SettingsLike } from './native-seams.ts'
 import { presetHistory, type PresetHistory } from './preset-history.ts'
@@ -355,7 +355,7 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
     controls(clientId: number, params: unknown) {
       return run(async () => {
         const p = paramRecord(params, 'x.ai/presets')
-        const record = host.owned(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+        const record = host.owned(clientId, sessionIdParam(p.sessionId))
         if (record === undefined) throw invalidParams('presets requires an owned sessionId')
         return run(() => controls(record, p), record)
       })

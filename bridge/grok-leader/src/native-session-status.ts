@@ -2,7 +2,7 @@ import type { SessionWork } from './session-work.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { EncodedImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { internalError, invalidParams, paramRecord } from './acp.ts'
+import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
 import { parsePrompt } from './prompt-content.ts'
 import { goalUpdateFromView, type ContextProjectionValues, type NativeGoalView } from './projection.ts'
 import type { SessionOutput } from './session-output.ts'
@@ -110,7 +110,7 @@ export function createNativeSessionStatus<S extends StatusSession>(host: StatusH
 
   const goal = async (clientId: number, params: unknown): Promise<{ result: { kind: string; text: string } }> => {
     const p = paramRecord(params, 'x.ai/goal')
-    const record = closed ? undefined : host.owned(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+    const record = closed ? undefined : host.owned(clientId, sessionIdParam(p.sessionId))
     if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
     return record.work.run(async scope => {
       const parsed = parsePrompt(p.prompt)

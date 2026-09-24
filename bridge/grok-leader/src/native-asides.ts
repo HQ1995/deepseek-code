@@ -1,7 +1,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentRun, SubagentRuntime } from '@deepseek-ai/dsh-subagent'
-import { internalError, invalidParams, paramRecord } from './acp.ts'
+import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
 import { textBlocks } from './projection.ts'
 import type { SessionOperation, SessionWork } from './session-work.ts'
 
@@ -92,7 +92,7 @@ export function createNativeAsides<S extends AsideSession>(host: AsideHost<S>) {
       // Publish accepted work before a getter or native callback can reenter disposal.
       try {
         const p = paramRecord(params, 'x.ai/btw')
-        const record = host.owned(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+        const record = host.owned(clientId, sessionIdParam(p.sessionId))
         assertOpen()
         if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
         resolve(record.work.run(scope => execute(record, typeof p.question === 'string' ? p.question : '', scope)))

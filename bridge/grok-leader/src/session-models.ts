@@ -1,8 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentOptions, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId, errorChain } from '@deepseek-ai/dsh-llm'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { internalError, invalidParams, paramRecord } from './acp.ts'
+import type { SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
+import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
 import { nonEmpty } from './guards.ts'
 import type { createModelCatalog } from './model-catalog.ts'
 import type { AgentDefaultModelLike } from './native-seams.ts'
@@ -201,7 +201,7 @@ export function createSessionModels<S extends ModelSession>(host: ModelHost<S>) 
       return run(async () => {
         assertOpen()
         const p = paramRecord(params, 'session/set_model')
-        const record = host.owned(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+        const record = host.owned(clientId, sessionIdParam(p.sessionId))
         if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
         const state = states.get(record.model)
         if (state === undefined || !isLive(record)) throw invalidParams('session closed')

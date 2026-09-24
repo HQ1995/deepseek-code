@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { errorChain } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalRequestEvent } from '@deepseek-ai/dsh-user-approval/types'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
-import { internalError, invalidParams, paramRecord } from './acp.ts'
+import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
 import { browserAction, isBrowserTool } from './browser-actions.ts'
 import { isRecord } from './guards.ts'
 import type { LeaderClient } from './leader-transport.ts'
@@ -222,7 +222,7 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
   }
   const mode = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'session/set_mode')
-    const record = closed ? undefined : host.owned(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+    const record = closed ? undefined : host.owned(clientId, sessionIdParam(p.sessionId))
     if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
     assertReady(record); host.assertReady(record)
     const plan = host.planMode(record)
@@ -233,7 +233,7 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
   }
   const notification = (clientId: number, params: unknown): void => {
     const outer = object(params), p = object(outer?.params) ?? outer
-    const record = closed || typeof p?.sessionId !== 'string' ? undefined : host.owned(clientId, SessionId(p.sessionId))
+    const record = closed ? undefined : host.owned(clientId, sessionIdParam(p?.sessionId))
     if (record === undefined) return
     try {
       host.assertReady(record)

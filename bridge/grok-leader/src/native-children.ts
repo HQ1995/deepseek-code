@@ -6,7 +6,7 @@ import { errorChain } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionInspection, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { SubagentRuntime, SubagentPromptRequestId } from '@deepseek-ai/dsh-subagent'
-import { invalidParams, internalError, paramRecord } from './acp.ts'
+import { invalidParams, internalError, paramRecord, sessionIdParam } from './acp.ts'
 import { nonEmpty } from './guards.ts'
 import { ChildHistoryIndex, CHILD_HISTORY_PAGE_SIZE, type ChildEventReader } from './child-history.ts'
 import { workflowUpdates, type WorkflowHistory, type LiveWorkflow } from './workflows.ts'
@@ -465,7 +465,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
 
   const childInbox = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'x.ai/subagent/inbox')
-    const record = owned(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+    const record = owned(clientId, sessionIdParam(p.sessionId))
     if (record === undefined) throw invalidParams('unknown session')
     return record.work.run(async scope => {
       const service = subagentsService(record)
@@ -509,7 +509,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
   /** Human controls use native child admission and inbox mutations; the parent turn is untouched. */
   const executeSubagentCommand = async (clientId: number, params: unknown): Promise<{ result: { kind: 'success' | 'error'; text: string } }> => {
     const p = paramRecord(params, 'x.ai/subagents')
-    const record = owned(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+    const record = owned(clientId, sessionIdParam(p.sessionId))
     if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
     const parsed = parsePrompt(p.prompt)
     if (parsed.images.length > 0) throw invalidParams('/subagents accepts text commands only')

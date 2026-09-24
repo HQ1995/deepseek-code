@@ -3,9 +3,9 @@ import { browserFacts, type BrowserStatus } from './browser-control.ts'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import { TerminalSessionId, type TerminalSessionService } from '@deepseek-ai/dsh-terminal'
-import { internalError, invalidParams, paramRecord } from './acp.ts'
+import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
 import { PACKAGE_DIRECTORY } from './package-location.ts'
 import type { SessionOperation, SessionWork } from './session-work.ts'
 
@@ -65,7 +65,7 @@ export function createNativeExecution<S extends ExecutionSession>(host: Executio
     // Publish before native getters/callbacks can reenter disposal.
     try {
       const p = paramRecord(params, 'x.ai/' + method)
-      const record = host.owned(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+      const record = host.owned(clientId, sessionIdParam(p.sessionId))
       assertOpen()
       if (record === undefined) throw invalidParams(method + ' requires an owned sessionId')
       resolve(record.work.run(async scope => {

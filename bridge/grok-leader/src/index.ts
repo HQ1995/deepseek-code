@@ -26,7 +26,7 @@ import { PACKAGE_VERSION } from './package-location.ts'
 import { createProfilePlugins, inspectPluginRuntime } from './profile-plugins.ts'
 export { analyzeBundlePatch, parseCommandLine, inspectPluginRuntime, type BundlePatchAnalysis } from './profile-plugins.ts'
 import { protectTerminalSignals } from './terminal-signal.ts'
-import { JSONRPC_METHOD_NOT_FOUND, internalError, paramRecord } from './acp.ts'
+import { JSONRPC_METHOD_NOT_FOUND, internalError, paramRecord, sessionIdParam } from './acp.ts'
 import { errorMessage } from './guards.ts'
 import { createModelCatalog } from './model-catalog.ts'
 import { createNativeProviders } from './native-provider.ts'
@@ -69,7 +69,7 @@ import { errorChain } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm-retry'
 import type {} from '@deepseek-ai/dsh-settings'
 import { readProfilePatches, reconcileProfilePatches, type ProfileContext } from '@deepseek-ai/dsh-app-boot'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { RpcError } from './protocol.ts'
 import { jobOutputSnapshot } from './job-output.ts'
 import { createImageOutputProjector } from './image-output.ts'
@@ -541,7 +541,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return await sessionCommands.skills(clientId, params)
       case 'x.ai/mcp/list': {
         const p = paramRecord(params, 'x.ai/mcp/list')
-        const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
+        const sessionId = sessionIdParam(p.sessionId)
         const record = sessionId === undefined ? undefined : ownedRecord(clientId, sessionId)
         return await listMcpServers(ctx, record?.agent)
       }

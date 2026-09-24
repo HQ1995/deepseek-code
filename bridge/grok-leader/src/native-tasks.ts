@@ -8,7 +8,7 @@ import { ToolCallId, errorChain } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { foldScheduleEvents } from '@deepseek-ai/dsh-schedule'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
-import { invalidParams, internalError, paramRecord } from './acp.ts'
+import { invalidParams, internalError, paramRecord, sessionIdParam } from './acp.ts'
 import { parseReminder } from './reminders.ts'
 import { nonEmpty } from './guards.ts'
 import type { SessionOutput } from './session-output.ts'
@@ -121,7 +121,7 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
 
   const reminders = async (clientId: number, method: string, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, method)
-    const record = owned(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+    const record = owned(clientId, sessionIdParam(p.sessionId))
     if (record === undefined) throw invalidParams('unknown session')
     return record.work.run(async scope => {
       const available = host.tools(record)

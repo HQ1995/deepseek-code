@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { internalError, invalidParams, paramRecord } from './acp.ts'
+import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
 import { isRecord } from './guards.ts'
 import type { createModelCatalog } from './model-catalog.ts'
 import { modelEffortKey } from './wire-catalog.ts'
@@ -49,7 +49,7 @@ export function createSessionInput<S extends InputSession>(host: InputHost<S>) {
   }
   const owned = (clientId: number, id: unknown) => {
     assertOpen()
-    const record = host.owned(clientId, typeof id === 'string' ? SessionId(id) : undefined)
+    const record = host.owned(clientId, sessionIdParam(id))
     if (record === undefined) throw invalidParams('unknown session: ' + String(id))
     active(record); host.assertReady(record); active(record)
     return record
@@ -141,7 +141,7 @@ export function createSessionInput<S extends InputSession>(host: InputHost<S>) {
     cancel(clientId: number, params: unknown): void {
       if (closed) return
       const p = isRecord(params) ? params : undefined
-      const record = host.owned(clientId, typeof p?.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+      const record = host.owned(clientId, sessionIdParam(p?.sessionId))
       if (record === undefined) return
       const failures: unknown[] = []
       // session/cancel must abort composer work that has not reached the queue

@@ -1,4 +1,5 @@
 /** Shared ACP request validation; independent of sockets and DSH lifetimes. */
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { isRecord } from './guards.ts'
 import { RpcError } from './protocol.ts'
 
@@ -13,3 +14,6 @@ export const paramRecord = (params: unknown, method: string): Record<string, unk
   if (!isRecord(params)) throw invalidParams(method + ' params must be an object')
   return params
 }
+
+/** A wire `sessionId`; anything but a string reads as absent. */
+export const sessionIdParam = (value: unknown): SessionId | undefined => typeof value === 'string' ? SessionId(value) : undefined
