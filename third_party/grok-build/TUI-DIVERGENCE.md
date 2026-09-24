@@ -378,6 +378,29 @@ commands before capability discovery; they do not become model prompts.
   ancestor. CI/dev `TMPDIR` may itself live inside another checkout, where the
   original fixture was correctly detected as Git-backed and asserted the
   opposite. Product behavior is unchanged; this is test isolation.
+- `app/status_line/command.rs`: when the wait sees the script exit first
+  (another child's `SIGCHLD` reaps it before the reactor reports its stdout),
+  the run collects what the non-blocking pipe already holds instead of
+  painting an empty row. A grandchild still holding the pipe answers
+  `WouldBlock`, so the read never waits for it.
+- `completions_cmd.rs`: the zsh root-prompt fix-up matches the context tag of
+  the name the script is generated for; a fixed `grok-command` tag stopped
+  matching once the binary was renamed.
+- `views/welcome/mod.rs`: a startup warning wraps at spaces to the screen
+  width (at most four rows, the last ending in `…`) instead of being cut at
+  the edge, and `sanitize_user_error` keeps 400 characters instead of 200 so a
+  session failure can name its cause and the next step. It also drops an ACP
+  error's data when that data only repeats the message (a leader refusal's
+  `{"message": …}`), which `Display` would print again as JSON.
+- Tests that point `GROK_HOME` at a tempdir join the `GROK_HOME` serial group,
+  and the effects helper restores the variable before its tempdir goes. Worktree
+  paths resolve `GROK_HOME` on every call, so a parallel swap could put another
+  test's checkout in that tempdir and delete it.
+- Upstream pager tests that assert what dscode replaces (branding, Kitty
+  placement, `/loop` gating, fail-closed images, ACP-owned `/compact`, the
+  pre-session model pick, local refusal of unregistered pager names, finished
+  thinking previews) carry `DIVERGENCE(dscode)` notes; the full pager suite
+  passes.
 Slash commands removed: login, logout, share, feedback, imagine,
 imagine_video, import_claude, gboom, voice, release_notes, announcements,
 recap, timeline.
@@ -574,7 +597,10 @@ The grok `/compact` builtin is omitted from `slash/commands/mod.rs`, and
 `@deepseek-ai/dsh-command-compact` advertise its ACP command; the existing
 generic command adapter executes `compactNow()` without a model turn. Presets
 without that command show no completion row, while a raw `/compact` receives
-the bridge's explicit unavailable result instead of becoming model text.
+the bridge's explicit unavailable result instead of becoming model text. An ACP
+command that takes an omitted builtin's name (a `PAGER_COMMAND_KEYS` entry)
+breaks completion ties like that builtin, so `/comp` still completes to
+`/compact` rather than `/compact-mode`.
 
 ### Bare /provider opens a list picker
 
@@ -586,7 +612,9 @@ provider's default model, `e` opens the edit form, `d` arms a y/n delete
 refuses removing the in-use provider), `a` opens the add form. The typed
 `/provider <id>` form still works. Rationale: the completion dropdown is a
 typing surface, not a management surface — picking/editing providers wants
-a highlighted list ("上下选到哪个就指向哪个").
+a highlighted list ("上下选到哪个就指向哪个"). The modal footer lists `e`, `d`
+and `a`; after `d` it shows the y/n confirm, or why the in-use provider cannot
+be deleted.
 
 ### Native DeepSeek provider template
 
@@ -808,3 +836,22 @@ finished row stops counting up (class: feature).
 Subagent rows whose role is `teammate` group under their own noun ("Ran 1
 teammate"), and a terminal row keeps its started row's persona and role so one
 teammate counts once (class: feature).
+
+### First-run welcome offers a provider
+
+While the catalog that arrives with the leader handshake has no model, the
+welcome menu leads with "Add a provider", which opens the add-provider form
+(class: feature). Enter runs the row the arrows highlighted; it used to start
+a session whatever was highlighted, which left rows without a shortcut
+unreachable from the keyboard. The welcome footer no longer reads "Logged in with API key":
+the leader advertises that auth method only to pass the auth gate, and keys
+belong to each provider (class: behavior).
+
+### Browser actions read as actions
+
+A `Browser: <action>` tool title renders on the running status row as the
+label and the action, like `Fetch:`, rather than as a shell command after
+"Run" (class: feature). A media card whose file is an object in the leader's
+content-addressed attachment store (`…/objects/<xx>/<sha256>`, a browser
+screenshot) shows a caption on its path row; Open and copy-path still target
+the file.
