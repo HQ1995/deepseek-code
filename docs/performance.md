@@ -13,7 +13,7 @@ A shipped change reopens
 
 Optimizations still in the code, newest first. Bridge paths are relative to
 `bridge/grok-leader/`, Rust crates to `third_party/grok-build/crates/codegen/`;
-runtime items are in the source backport `patches/dsh-46a7f68b….patch`.
+runtime items are in the source backport `patches/dsh-477b4f42….patch`.
 
 ### 2026-09-23: a settings read no longer recomposes the profile once per plugin
 

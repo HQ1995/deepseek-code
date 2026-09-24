@@ -26,6 +26,8 @@ interface InteractionHost<S extends InteractionSession> {
   planMode(record: S): { set(agent: Agent, active: boolean): unknown } | undefined
   on<K extends keyof InteractionEvents>(name: K, listener: InteractionEvents[K], options?: { prepend?: boolean }): () => void
   logger: { warn(message: string): void }
+  /** Lower-case BCP 47 tag an approval reason is shown in; defaults to the process locale. */
+  locale?(): string | undefined
 }
 type Meta = Record<string, unknown> | null | undefined
 const permissionModes = new Set(['default', 'ask', 'workspace-write', 'plan', 'bypassPermissions', 'always-approve'])
@@ -33,6 +35,41 @@ const object = (value: unknown): Record<string, unknown> | undefined => isRecord
 const cancelledQuestion = () => new UserQuestionError('the user cancelled ask_user_question', 'ASK_CANCELLED')
 /** Calls whose arguments an approval prompt may still show. */
 const RECENT_CALLS = 64
+/** Prefix of the audited reason DSH 0.1.7-rc.2's experimental auto-review
+ * gives a call its reviewer denied and hands to a human. The request carries
+ * no other mark, and always-approve must never answer it; a spec checks the
+ * installed package still writes it. */
+export const REVIEWER_DENIED = 'Auto review denied tool "'
+const REASON_LIMIT = 500
+
+/** The message locale by POSIX precedence (LC_ALL, LC_MESSAGES, LANG), as a
+ * lower-case BCP 47 tag; undefined for the C/POSIX locale or none. */
+export function environmentLocale(env: Readonly<Record<string, string | undefined>> = process.env): string | undefined {
+  for (const key of ['LC_ALL', 'LC_MESSAGES', 'LANG']) {
+    const value = env[key]
+    if (value === undefined || value === '') continue
+    const tag = value.split(/[.@]/)[0]!.replace(/_/g, '-').toLowerCase()
+    return tag === '' || tag === 'c' || tag === 'posix' ? undefined : tag
+  }
+  return undefined
+}
+
+/** One prompt line for why an approval is asked: `displayReason` in the
+ * locale (exact tag, then its language), then in English, then the audited
+ * `reason`. Control and format characters (bidi overrides included) and line
+ * breaks collapse to spaces; the text is bounded by code points. */
+export function approvalReason(request: Pick<ApprovalRequestEvent, 'reason' | 'displayReason'>, locale?: string): string | undefined {
+  const display: Readonly<Record<string, unknown>> | undefined = isRecord(request.displayReason) ? request.displayReason : undefined
+  const text = (key: string | undefined): string | undefined => {
+    const value = key !== undefined && display !== undefined && Object.hasOwn(display, key) ? display[key] : undefined
+    return typeof value === 'string' && value.trim() !== '' ? value : undefined
+  }
+  const chosen = text(locale) ?? text(locale?.split('-')[0]) ?? text('en')
+    ?? (typeof request.reason === 'string' && request.reason.trim() !== '' ? request.reason : undefined)
+  if (chosen === undefined) return undefined
+  const line = [...chosen.replace(/[\p{Cc}\p{Cf}\s]+/gu, ' ').trim()]
+  return line.length > REASON_LIMIT ? line.slice(0, REASON_LIMIT - 1).join('') + '…' : line.join('')
+}
 
 /** Native policy and human answerers share exact-session ownership. This module
  * owns subscriptions and accepted reverse requests, not the transport engine.
@@ -57,15 +94,22 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
     }
     return next()
   }
-  /** The TUI shows the planned arguments and, for browser calls, what they do. */
-  const permissionToolCall = (callId: string, toolName: string) => {
+  const locale = (): string | undefined => host.locale === undefined ? environmentLocale() : host.locale()
+  /** The TUI shows the planned arguments and, for browser calls, what they do.
+   * Its prompt reads "Allow <title>?", so the asker's reason rides the title
+   * (a bash prompt shows the command's own description there instead). A
+   * browser prompt names its action instead: the browser plugin's fixed
+   * reason restates what the docs and `/browser status` say. */
+  const permissionToolCall = (callId: string, toolName: string, reason: string | undefined) => {
     const call = calls.get(callId)
     calls.delete(callId)
     const args = call?.name === toolName ? call.arguments : undefined
     const action = browserAction(toolName, args)
+    const title = action !== undefined ? 'the browser to ' + action
+      : reason === undefined ? undefined : toolName + ' — ' + reason.replace(/[.。]+$/u, '')
     return {
       toolCallId: callId, displayName: toolName,
-      ...action === undefined ? {} : { title: 'the browser to ' + action },
+      ...title === undefined ? {} : { title },
       ...args === undefined ? {} : {
         rawInput: toolName.startsWith('mcp__') ? { variant: 'MCPTool', tool_name: toolName, tool_input: args } : args,
       },
@@ -118,19 +162,21 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
     if (client === undefined) return next()
     return accepted(record, request.signal, async signal => {
       if (signal.aborted || !live(record)) return 'cancelled'
-      // Browser actions reach arbitrary hosts; always-approve never covers them.
-      const browser = isBrowserTool(request.toolName)
-      if (record.yolo && !browser) { calls.delete(callId); return 'allowed-once' }
+      // Browser actions reach arbitrary hosts, and a reviewer's denial is a
+      // decision only a human may overrule; always-approve covers neither.
+      const alwaysAsks = isBrowserTool(request.toolName)
+        || (typeof request.reason === 'string' && request.reason.startsWith(REVIEWER_DENIED))
+      if (record.yolo && !alwaysAsks) { calls.delete(callId); return 'allowed-once' }
       try {
         const response = await client.request<unknown>('session/request_permission', {
           sessionId: record.agent.session.id,
-          toolCall: permissionToolCall(callId, request.toolName),
+          toolCall: permissionToolCall(callId, request.toolName, approvalReason(request, locale())),
           options: [
             { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
             { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
           ],
           // The TUI neither auto-approves nor offers always-approve for these.
-          ...browser ? { _meta: { dscodeAlwaysAsks: true } } : {},
+          ...alwaysAsks ? { _meta: { dscodeAlwaysAsks: true } } : {},
         }, record.agent.session.id, Infinity, signal)
         if (signal.aborted || !live(record)) return 'cancelled'
         const outcome = object(object(response)?.outcome)

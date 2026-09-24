@@ -732,8 +732,11 @@ and real TUI Queue/Edit/Remove/Steer/Clear/Stop/Resume with a held parent stream
 `/inbox` and `/reminders`. Child Tasks rows open their queue with `q`; reminder
 rows open the Schedule list. Responses are scoped to the owning session and
 modal request. Failed edits retain their draft; failed cancellation retains the
-reminder row. `/loop` requests native `schedule_create` with `every_seconds` and
-the official five-minute minimum, independent of Grok's detached-loop setting.
+reminder row. The add editor lists every reminder form the bridge parses
+(after/every/at plus DSH 0.1.7-rc.2's daily/weekly/cron), wrapped over as many
+rows as the width needs. `/loop` requests native `schedule_create` with a title,
+`every_seconds` and the official one-minute minimum (DSH 0.1.7-rc.2),
+independent of Grok's detached-loop setting.
 
 The bridge feeds non-consuming collected subprocess snapshots into the existing
 Tasks stdout store and viewer. Completed output is not repeatedly rescanned.
@@ -841,6 +844,10 @@ auto-approves it on arrival nor drains it when turned on, and the prompt offers
 no Ctrl+O always-approve hint. The leader also sends the call's planned
 arguments as `rawInput` and, for browser actions, a title such as "the browser
 to open https://…", which the existing MCP argument display renders.
+When DSH gives a reason for asking, the leader appends it to the tool title
+("bash — <reason>"). Execute prompts are titled from the command's own
+description, so such a title (anything but Grok's "Execute `…`") becomes the
+first line under the command instead of being dropped (class: feature).
 
 ### Preset change after history opens a new session
 

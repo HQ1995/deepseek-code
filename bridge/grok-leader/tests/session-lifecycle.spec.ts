@@ -18,9 +18,12 @@ function fixture() {
   const native = new Map<string, Agent>(), durable = new Map<string, SessionInspection>()
   const histories = new WeakMap<Agent['session'], readonly SessionEvent[]>()
   const nativeDisposals = new Map<string, ReturnType<typeof vi.fn>>()
+  // Readiness the registry and the lifecycle each report, with the lifecycle's verdict at that moment.
+  const reopened = vi.fn((_record: SessionRecord) => {}), unblocked = vi.fn((_record: SessionRecord) => {})
+  const readyWhenUnblocked: boolean[] = []
   const sessions = createSessionRegistry<SessionRecord>({
     clientIsLive: id => clients.get(id)?.closed === false,
-    flush: async session => flush(session), cancelRequests: vi.fn(), logger: { warn: vi.fn() },
+    flush: async session => flush(session), cancelRequests: vi.fn(), unblocked: reopened, logger: { warn: vi.fn() },
   })
   const flush = vi.fn(async (session: Agent['session']) => {
     order.push('flush:' + session.id)
@@ -91,14 +94,18 @@ function fixture() {
     client: (id: number) => clients.get(id), queue: { combineQueued: false, followUpSteer: false },
     world: vi.fn((): ExecutionWorld => ({ kind: 'local' })),
     permissions: { validateMeta: vi.fn(), apply: permissions, assertReady: vi.fn() }, views, contextValues: () => ({}), projectImages: vi.fn(async (_event: SessionEvent, updates: unknown[]) => updates) as never,
-    logger: { warn: vi.fn() } }
+    logger: { warn: vi.fn() },
+    unblocked: (record: SessionRecord) => {
+      readyWhenUnblocked.push((() => { try { lifecycle.assertReady(record); return true } catch { return false } })())
+      unblocked(record)
+    } }
   const lifecycle = createSessionLifecycle(host)
   const add = async (id = 'root', meta: Record<string, unknown> = {}) => {
     await lifecycle.new(1, { cwd: '/tmp/workspace', mcpServers: [], _meta: { sessionId: id, ...meta } })
     return sessions.records.get(SessionId(id))!
   }
   return { lifecycle, sessions, native, nativeDisposals, durable, agents, models, modelHandles, install, presets, mount, commit,
-    permissions, views, persistence, closeRead, read, flush, clients, client, notify, host, order, add }
+    permissions, views, persistence, closeRead, read, flush, clients, client, notify, host, order, add, reopened, unblocked, readyWhenUnblocked }
 }
 
 describe('session lifecycle ownership', () => {
@@ -217,9 +224,12 @@ describe('session lifecycle ownership', () => {
     await expect(record.work.read(async () => 'initial snapshot')).resolves.toBe('initial snapshot')
     await expect(record.work.run(async () => 'not yet')).rejects.toThrow('initializing')
     expect(completed).toBe(false); expect(record.mcpInitTimer).toBeUndefined()
+    expect(f.unblocked).not.toHaveBeenCalled()
     gate.resolve(); await creation
     f.lifecycle.assertReady(record)
     expect(record.mcpInitTimer).toBeDefined()
+    expect(f.unblocked).toHaveBeenCalledExactlyOnceWith(record)
+    expect(f.readyWhenUnblocked).toEqual([true])
   })
 
   it('denies async native work when the native registry replaced the agent or its client disconnected', async () => {
@@ -253,6 +263,7 @@ describe('session lifecycle ownership', () => {
     await f.lifecycle.close(1, { sessionId: 'root' })
     gate.resolve(); await failure
     expect(record.mcpInitTimer).toBeUndefined(); expect(f.nativeDisposals.get('root')).toHaveBeenCalledOnce()
+    expect(f.unblocked).not.toHaveBeenCalled()
   })
 
   it('drains pending task history and retains both errors when a sibling startup view fails', async () => {
@@ -308,10 +319,15 @@ describe('session lifecycle ownership', () => {
     gate.resolve(); await reload
     expect(f.models.prepare.mock.calls.at(-1)?.[1]?.at(-1)).toMatchObject({ type: 'model/selection', data: { provider: 'changed' } })
     const current = f.sessions.records.get(SessionId('root'))!
+    // The replacement reports readiness once it is published and initialized; the retired owner never does.
+    expect(f.unblocked.mock.calls).toEqual([[record], [current]])
+    expect(f.reopened).not.toHaveBeenCalled()
     f.flush.mockRejectedValueOnce(new Error('storage unavailable'))
     await expect(f.lifecycle.load(1, { sessionId: 'root', cwd: '/tmp/workspace' })).rejects.toThrow('storage unavailable')
     expect(f.sessions.ownedAgent(current.agent)).toBe(current)
     f.lifecycle.assertReady(current)
+    expect(f.reopened).toHaveBeenCalledExactlyOnceWith(current)
+    expect(f.readyWhenUnblocked).toEqual([true, true])
   })
 
   it('restores prompt history without transcript replay for a headless load, and refuses foreign live owners', async () => {

@@ -58,8 +58,8 @@ To upgrade dsh:
 9. Run macOS and [Linux acceptance](#linux-acceptance), and redeploy the
    [remote SSH helper](#remote-workspace-over-ssh) on each host.
 
-The current source pin is `0.1.7-rc.1` at
-`46a7f68b0922371ce7144b668b90e377d8e799f4`. The builder uses the official upstream
+The current source pin is `0.1.7-rc.2` at
+`477b4f420553e8a52c2fbccc464d7561b239c443`. The builder uses the official upstream
 package build, compiles the bridge against that installed SDK, bundles ordinary
 plugin dependencies without duplicating host peers, and packages the private
 runtime including native helpers. Users install those artifacts as a complete
@@ -105,6 +105,14 @@ releases describe the target; the
 notes summarize the series since 0.1.5-rc.3. Runtime features use official
 implementations. Browser presentation does not automatically become a TUI feature.
 
+[rc.2](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.7-rc.2)
+moves schedules into a host service with its own storage, adds daily, weekly
+and cron schedules and `schedule_update`, and delivers through a host-provided
+`sessionController`. It splits the native DeepSeek adapter into an API-key
+route and a new account route, lets tools change inside a running
+conversation, and gives approval requests a localized reason. dscode adopts
+each of these below; the account route stays off.
+
 rc.1 enforces plugin compatibility: every `@deepseek-ai/dsh` and
 `@deepseek-ai/dsh-*` peer of a profile bundle or preset row must be satisfied by
 the running DSH version, prereleases included. At startup, DSH skips an
@@ -142,7 +150,9 @@ be on PATH; dscode's `/dsh add` uses npm.
 | Continuable children, queue/edit/remove/steer/stop | Existing native inbox adapters and TUI controls; terminal states retain readable history |
 | Agent Team messaging changes | Included in the runtime and the shipped `teams` preset (see [Agent Teams](#agent-teams)) |
 | Goals, explicit pause/resume and turn cancellation | `/goal` and native controls; pausing does not let the model resume itself |
-| Reminder scheduling | `/reminders`; native durable schedules, delivered while the owning session is open |
+| Reminder scheduling | `/reminders` with `after`, `every`, `at`, `daily`, `weekly` and `cron`; DSH Host Schedule tasks, delivered only while their Session is open in dscode, so one that falls due while it is closed arrives when it next opens. rc.1 session-event reminders are not migrated; each open names them once and shows how to recreate them |
+| Mid-conversation tool changes | The next step carries the changed tools; a `Tools added: …` / `Tools removed: …` system line appears live and on resume, and the session's commands refresh |
+| Approval reasons | Shown after the tool name, and as the first description line of a shell prompt; see [approval reasons](#approval-reasons) |
 | Jobs, retained output and subprocess cleanup | `/tasks`, native non-consuming `readAt`, session-owned events and cancellation; host PID validation remains enforced |
 | Completion wakeups after successive background jobs or one-shot subagents | Native `tool-jobs` default: dscode presets set no cap, so each idle completion wakes its owner; a profile may still set `maxConsecutiveWakes` |
 | Token-budgeted tool-result retention, including MCP images | Native `spill-policy` with the base bundle's `maxInlineTokens: 12500`; dscode adds no override. A custom `maxInlineBytes` override must move to `maxInlineTokens` |
@@ -187,9 +197,11 @@ key in the DSH credentials store and enables the `llm-deepseek` row through the
 plugin manager. It then reconciles the live leader, so `deepseek-official` models
 appear in `/model` without a restart. The enabled row persists in the profile's
 `cordis.patch.yml`. Removing that provider disables the row again; it is refused
-while the provider is in use. A signed-in DeepSeek account sends its own token
-for the endpoint it covers. `scripts/e2e-native-provider.mjs` exercises the whole
-path against a loopback Messages fixture.
+while the provider is in use. Since rc.2 the row is
+`@deepseek-ai/dsh-llm-deepseek-api-key` and authenticates only with that key
+(`x-api-key`); a signed-in DeepSeek account no longer lends its token to
+`deepseek-official`. `scripts/e2e-native-provider.mjs` exercises the whole path
+against a loopback Messages fixture.
 
 A custom base URL must be a Messages root: the adapter appends `/v1/messages`
 and `/v1/files`, reuses a root that already ends in `/v1`, and does not
@@ -198,6 +210,11 @@ PDF or Office understanding. File ids are scoped to the credential and
 endpoint; an expired id or failed upload falls back to inline bytes and may
 permanently offload the oldest image, and a TUI notice says how to reattach
 it. Generic `anthropic-messages` pi-ai routes are not this adapter.
+DeepSeek-V41-Flash (`deepseek-flash`) declares `toolUpdate: 'addition-only'`:
+tools added mid-conversation are declared with `defer_loading` and activated by
+later `tool_addition` blocks, sent with
+`anthropic-beta: mid-conversation-tool-changes-2026-07-01`. A custom gateway
+must accept that header and pass those blocks through.
 `experiments/capabilities/messages-smoke.mjs` covers Files reuse, offload and
 fallback against a loopback fixture.
 
@@ -209,6 +226,24 @@ catalog and transport tests do not certify a live provider account.
 The profile also disables `session-log-deepseek`, which would add the
 session's raw events to native DeepSeek requests. It has no hostname
 allowlist, so a custom native gateway would receive that field too.
+
+rc.2 also ships the account route `llm-deepseek-account` (provider "DeepSeek
+Account"), switched on in its base layer. dscode's patch disables it: `/provider`
+cannot manage that route, and it would otherwise sit in the roster with no
+models. `/dsh add` flags a bundle that touches it, as it does the other
+credential rows.
+
+### Approval reasons
+
+rc.2 approval requests carry why they ask: a sandbox or `run_code` escalation,
+a hook, or auto review. The bridge appends it to the prompt's title after the
+tool name, e.g. "Allow run_code — Allow this operation with danger-full-access
+permissions: …?", choosing DSH's translation for `LC_ALL`, `LC_MESSAGES` or
+`LANG` and English otherwise, on one line with control and bidi characters
+removed. A shell prompt keeps the command's description as its title and shows
+the reason as its first description line. A call that auto review denied and
+passed to the user is never answered by always-approve, in the bridge or the
+TUI (`_meta.dscodeAlwaysAsks`).
 
 ### Agent Teams
 
@@ -259,9 +294,12 @@ headless TUI.
 (`@hqzhao95/dscode/browser`) through the plugin manager and reconciles the live
 leader, as `/provider` does for the native adapter. `/browser off` disables it
 and closes open browsers. The choice persists in the profile's
-`cordis.patch.yml` and applies to Sessions created or resumed afterwards; a
-running Session keeps its tool list. Only top-level Sessions get a browser,
-subagents do not. `/doctor` reports the executable, and warns when none is found
+`cordis.patch.yml` and applies to running Sessions too: once its settings are
+written, `/browser on` starts a browser for each open top-level Session, and
+that Session's next step carries the tools. DSH records the change in the
+conversation, and the TUI shows a one-line `Tools added: …` / `Tools removed: …`
+notice, live and on resume. `/browser off` removes the tools from running
+Sessions the same way. Only top-level Sessions get a browser, subagents do not. `/doctor` reports the executable, and warns when none is found
 or the sandbox is off.
 
 Each Session starts its own Playwright MCP 0.0.80 through DSH's browser-use
@@ -290,7 +328,8 @@ name or IP address, no credentials) unless `--any-origin` was chosen. Unless any
 origin is allowed, Playwright also refuses page requests outside the allowed
 origins and blocks service workers. That filter is fixed when a Session's
 browser starts, so a removed origin is refused at once while an added one
-applies to new Sessions: navigating to it from an older Session is refused
+applies to browsers started later (new Sessions, or `/browser off` then
+`/browser on`): navigating to it from an older browser is refused
 with that explanation rather than Playwright's bare `net::ERR_BLOCKED_BY_CLIENT`.
 It is request routing inside the browser, not an OS network sandbox. DSH cannot
 restrict per-Session MCP tools, so the plugin drops the refused operations from
@@ -316,9 +355,10 @@ the SDK: catalog, approvals, origin filtering, cancellation cleanup and unload.
 `DSCODE_BROWSER_SMOKE_ANY_ORIGIN=1` is its negative control and must fail. It
 needs the compiled bridge `lib/` and a bridge `node_modules` that resolves to
 the runtime's closure. `scripts/e2e-browser-installed.mjs <runtime> <home> <chrome>`
-checks an installed leader over ACP: off by default, `/browser on` for new
-Sessions only, approvals, rejection and cancel without late page requests,
-resume with fresh storage, then `/browser off`.
+checks an installed leader over ACP: off by default, `/browser on` reaching the
+running Session (a browser call there plus the tool notice), approvals,
+rejection and cancel without late page requests, resume with fresh storage,
+then `/browser off`, also in the running Session.
 
 ### Remote workspace over SSH
 

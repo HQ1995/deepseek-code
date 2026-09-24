@@ -2,7 +2,7 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { errorChain, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { hasToolImages } from './image-output.ts'
-import { assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, imageOffloadCount, imageOffloadNotes, noteDecodeSpeed, parseJsonObject, sessionEventToUpdates, contextInfoFromProjection, type ContextProjectionValues, type DecodeSpeed, type ProjectedUpdate } from './projection.ts'
+import { assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, parseJsonObject, sessionEventToUpdates, systemNotes, contextInfoFromProjection, type ContextProjectionValues, type DecodeSpeed, type ProjectedUpdate } from './projection.ts'
 
 export interface SessionOutputHost {
   sessionId: string
@@ -38,9 +38,13 @@ interface OutputState {
   /** Pending tool-call facts keyed by callId, used to attach rawInput/rawOutput. */
   pendingToolCalls: Map<string, { name: string; arguments: unknown }>
 }
-type ImageOffloadUpdate = { sessionUpdate: 'image_dropped'; notes: string[]; totalTokens?: never; cacheHitPercent?: never; tokensPerSecond?: never }
-type OutputUpdate = ProjectedUpdate | ImageOffloadUpdate
-const offloadUpdate = (count: number): ImageOffloadUpdate => ({ sessionUpdate: 'image_dropped', notes: imageOffloadNotes(count) })
+/** The pager renders `image_dropped` notes as one plain system block, so every neutral notice rides it. */
+type SystemNoticeUpdate = { sessionUpdate: 'image_dropped'; notes: string[]; totalTokens?: never; cacheHitPercent?: never; tokensPerSecond?: never }
+type OutputUpdate = ProjectedUpdate | SystemNoticeUpdate
+const noticeUpdate = (event: SessionEvent): SystemNoticeUpdate | undefined => {
+  const notes = systemNotes(event)
+  return notes === undefined ? undefined : { sessionUpdate: 'image_dropped', notes }
+}
 
 /** Per-attached-agent output ownership: revision/replay dedup, meter folding,
  * wire sequence stamps and asynchronous image hydration share one lifetime. */
@@ -305,8 +309,8 @@ export function createSessionOutput(host: SessionOutputHost) {
       return
     }
     const updates = mapEvent(event, false)
-    const offloaded = imageOffloadCount(event)
-    if (offloaded !== undefined) update(offloadUpdate(offloaded), false, event.time)
+    const notice = noticeUpdate(event)
+    if (notice !== undefined) update(notice, false, event.time)
     const projected = hasToolImages(event) ? host.projectImages(event, updates) : undefined
     updates.forEach((item, index) => update(
       projected === undefined ? item : projected.then(items => items[index]!), false, event.time))
@@ -335,8 +339,8 @@ export function createSessionOutput(host: SessionOutputHost) {
         if (event.type === 'turn/start') state.turnStartMs = event.time
         const items = mapEvent(event, true)
         if (!send) continue
-        const offloaded = imageOffloadCount(event)
-        if (offloaded !== undefined) update(offloadUpdate(offloaded), true, event.time)
+        const notice = noticeUpdate(event)
+        if (notice !== undefined) update(notice, true, event.time)
         if (items.length === 0) continue
         // Reserve the complete replay prefix and its wire positions before
         // yielding. Otherwise a live successor raises lastSeq while an image

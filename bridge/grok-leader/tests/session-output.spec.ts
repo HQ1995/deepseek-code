@@ -82,6 +82,26 @@ describe('session output ownership', () => {
     expect(f.notes).toHaveLength(1)
   })
 
+  it('renders a DSH tool change as the same system notice live and on replay, once', async () => {
+    const change = event(2, 'developer/message', { turn: 1, step: 1, headerSeq: 1, message: { id: 'm', role: 'developer', source: { kind: 'tool-registry' },
+      content: [{ type: 'tool-addition', toolName: 'mcp__playwright-mcp__browser_navigate' }] } })
+    const f = fixture()
+    f.output.live(change)
+    await f.output.restore([change])
+    expect(f.notes).toEqual([{ method: 'x.ai/session_notification', params: expect.objectContaining({ sessionId: 'session',
+      update: { sessionUpdate: 'image_dropped', notes: ['Tools added: mcp__playwright-mcp__browser_navigate'] } }) }])
+    expect(f.notes[0]!.params._meta).not.toHaveProperty('isReplay')
+    const restored = fixture()
+    await restored.output.restore([change])
+    expect(restored.notes.map(note => [note.method, note.params.update, note.params._meta.isReplay]))
+      .toEqual([['x.ai/session_notification', f.notes[0]!.params.update, true]])
+    // Other developer messages stay off the TUI.
+    const other = fixture()
+    other.output.live(event(3, 'developer/message', { turn: 1, step: 1, message: { id: 'n', role: 'developer', source: { kind: 'context' }, content: [{ type: 'text', text: 'hidden' }] } }))
+    expect(other.notes).toEqual([])
+    expect(f.output.stats).toMatchObject({ messageCount: 0 })
+  })
+
   it('admits each event once while preserving all blocks and live/replay meter dedup', async () => {
     const f = fixture()
     const prompt = event(0, 'user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: 'one' }, { type: 'text', text: 'two' }] })

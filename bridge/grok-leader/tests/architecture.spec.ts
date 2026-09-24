@@ -82,7 +82,8 @@ const declaredDependencies = [
     ['session-presets', ['acp', 'native-seams', 'preset-history', 'guards']],
     ['preset-history', []],
     ['session-output', ['projection', 'image-output']],
-    ['native-tasks', ['acp', 'reminders', 'session-output', 'session-work', 'session-discovery', 'job-output', 'guards']],
+    ['native-tasks', ['acp', 'reminders', 'legacy-reminders', 'session-output', 'session-work', 'job-output', 'guards']],
+    ['session-controller', []],
     ['native-children', ['acp', 'child-history', 'workflows', 'prompt-content', 'projection', 'session-output', 'session-work', 'image-output', 'guards']],
     ['native-session-status', ['acp', 'prompt-content', 'projection', 'session-output', 'session-work']],
     ['native-interactions', ['acp', 'browser-actions', 'leader-transport', 'guards']],
@@ -103,6 +104,7 @@ const declaredDependencies = [
     ['job-output', []],
     ['mcp', ['guards']],
     ['reminders', []],
+    ['legacy-reminders', []],
     ['workflows', []],
     ['session-list', []],
     ['session-export', []],
@@ -148,7 +150,8 @@ describe('architecture ownership and dependency gate', () => {
       const content: ToolResultContentBlock = { type: 'content', content: { type: 'text', text: 'preserved' } }
       const preset: SessionProjectionStateMap['dscodePresetHistory'] = { selected: 'standard', locked: false }
       const workflows: SessionProjectionStateMap['dscodeWorkflows'] = { runs: [] }
-      void [native, legacy, older, content, preset, workflows]
+      const reminders: SessionProjectionStateMap['dscodeLegacyReminders'] = { inherited: 0, active: [] }
+      void [native, legacy, older, content, preset, workflows, reminders]
     `
     const options: ts.CompilerOptions = { noEmit: true, skipLibCheck: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext, types: [] }
     const host = ts.createCompilerHost(options), read = host.getSourceFile.bind(host)

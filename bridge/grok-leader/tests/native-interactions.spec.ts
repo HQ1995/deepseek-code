@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { createNativeInteractions } from '../src/native-interactions.ts'
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { approvalReason, createNativeInteractions, environmentLocale, REVIEWER_DENIED } from '../src/native-interactions.ts'
 
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(stops.splice(0).map(stop => stop())) })
@@ -77,6 +79,72 @@ describe('native interaction ownership', () => {
     expect(f.request.mock.calls[2]![1]).toMatchObject({ toolCall: { toolCallId: 'x', displayName: 'other' } })
     expect((f.request.mock.calls[2]![1] as { toolCall: object }).toolCall).not.toHaveProperty('rawInput')
     expect((f.request.mock.calls[3]![1] as { toolCall: object }).toolCall).not.toHaveProperty('rawInput')
+  })
+
+  it('shows why an approval is asked, in the user\'s locale, where the prompt renders its title', async () => {
+    const f = fixture()
+    f.host.locale = () => 'zh-cn'
+    const escalation = { reason: 'escalate sandbox to danger-full-access: fetch deps',
+      displayReason: { en: 'Allow this operation with danger-full-access permissions: fetch deps', zh: '允许本次操作使用 danger-full-access 权限：fetch deps' } }
+    const ask = (callId: string, toolName: string, extra: object) =>
+      f.emit('approval/request', { agent: f.root.agent, callId, toolName, ...extra }, async () => 'fallback')
+    await f.emit('tools/pre-execute', { callId: 'code', name: 'run_code', arguments: { code: 'fetch()' } }, async () => ({ kind: 'ask' }))
+    await ask('code', 'run_code', escalation)
+    expect(f.request.mock.calls[0]![1]).toMatchObject({ toolCall: { toolCallId: 'code', displayName: 'run_code',
+      title: 'run_code — 允许本次操作使用 danger-full-access 权限：fetch deps', rawInput: { code: 'fetch()' } } })
+    expect(f.request.mock.calls[0]![1]).not.toHaveProperty('_meta')
+    f.host.locale = () => 'fr-fr'
+    await ask('other', 'write', escalation)
+    expect(f.request.mock.calls[1]![1]).toMatchObject({ toolCall: { title: 'write — Allow this operation with danger-full-access permissions: fetch deps' } })
+    // Without a presentation text the audited reason shows, on one line, and
+    // its closing full stop gives way to the prompt's question mark.
+    await ask('hook', 'write', { reason: 'policy hook:\nconfirm\u001b[31m\u202e writes.' })
+    expect(f.request.mock.calls[2]![1]).toMatchObject({ toolCall: { title: 'write — policy hook: confirm [31m writes' } })
+    // A browser prompt names its action; the plugin's fixed reason adds nothing.
+    await f.emit('tools/pre-execute', { callId: 'nav', name: 'mcp__playwright-mcp__browser_navigate', arguments: { url: 'http://127.0.0.1:3000/a' } }, async () => ({ kind: 'ask' }))
+    await ask('nav', 'mcp__playwright-mcp__browser_navigate', { reason: 'Browser action. Browser state is isolated.' })
+    expect(f.request.mock.calls[3]![1]).toMatchObject({ toolCall: { title: 'the browser to open http://127.0.0.1:3000/a' }, _meta: { dscodeAlwaysAsks: true } })
+  })
+
+  it('resolves the reason text and the process locale defensively', () => {
+    const displayReason = { en: 'English', zh: '中文', 'zh-tw': '繁體' }
+    expect(approvalReason({ reason: 'audit', displayReason }, 'zh-tw')).toBe('繁體')
+    expect(approvalReason({ reason: 'audit', displayReason }, 'zh-cn')).toBe('中文')
+    expect(approvalReason({ reason: 'audit', displayReason }, 'constructor')).toBe('English')
+    expect(approvalReason({ reason: 'audit', displayReason: { en: '  ' } }, undefined)).toBe('audit')
+    expect(approvalReason({}, 'en')).toBeUndefined()
+    expect(approvalReason({ reason: 'x'.repeat(600) })).toHaveLength(500)
+    expect([...approvalReason({ reason: '😀'.repeat(600) })!]).toHaveLength(500)
+    expect(environmentLocale({ LC_ALL: 'zh_CN.UTF-8', LANG: 'en_US.UTF-8' })).toBe('zh-cn')
+    expect(environmentLocale({ LC_ALL: '', LC_MESSAGES: 'de_DE@euro', LANG: 'en_US' })).toBe('de-de')
+    expect(environmentLocale({ LANG: 'C.UTF-8' })).toBeUndefined()
+    expect(environmentLocale({})).toBeUndefined()
+  })
+
+  it('recognizes the denial reason the installed auto-review package writes', () => {
+    // rc.2 marks a reviewer denial handed to a human only by this reason text.
+    const require = createRequire(import.meta.url)
+    const lib = readFileSync(require.resolve('@deepseek-ai/dsh-experimental-auto-review'), 'utf8')
+    expect(lib).toContain('`' + REVIEWER_DENIED + '${exec.name}"`')
+  })
+
+  it('never lets always-approve answer a call the automated reviewer denied', async () => {
+    const f = fixture()
+    Object.assign(f.root, { yolo: true })
+    const review = { reason: 'Auto review denied tool "bash": deletes the repository',
+      displayReason: { en: 'Auto review denied this call: deletes the repository', zh: 'Auto review 拒绝了此调用：deletes the repository' } }
+    const ask = (extra: object) => f.emit<string>('approval/request', { agent: f.root.agent, callId: 'call', toolName: 'bash', ...extra }, async () => 'fallback')
+    // Other asks, such as a sandbox escalation, stay covered by always-approve.
+    await expect(ask({ reason: 'escalate sandbox to danger-full-access: fetch deps' })).resolves.toBe('allowed-once')
+    expect(f.request).not.toHaveBeenCalled()
+    f.host.locale = () => 'en'
+    f.replies.mockResolvedValueOnce({ outcome: { outcome: 'selected', optionId: 'reject-once' } })
+    await expect(ask(review)).resolves.toBe('rejected')
+    // The TUI's own always-approve must not answer it either.
+    expect(f.request.mock.calls[0]![1]).toMatchObject({ _meta: { dscodeAlwaysAsks: true },
+      toolCall: { title: 'bash — Auto review denied this call: deletes the repository' } })
+    await expect(ask(review)).resolves.toBe('allowed-once')
+    expect(f.request).toHaveBeenCalledTimes(2)
   })
 
   it('routes one-shot approvals to the exact owner and preserves unbounded human waits', async () => {

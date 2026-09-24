@@ -2,23 +2,74 @@ import { describe, expect, it, vi } from 'vitest'
 import { symbols } from '@deepseek-ai/cordis'
 import type { JobEvent, JobEventFilter } from '@deepseek-ai/dsh-jobs'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SessionId, type SessionEvent, type SessionLogOffset } from '@deepseek-ai/dsh-session'
-import { createAfterScheduleRecord, createEveryScheduleRecord, ScheduleId } from '@deepseek-ai/dsh-schedule'
-import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
-import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
-import { createSessionDiscovery } from '../src/session-discovery.ts'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import {
+  ScheduleId, ScheduleInputError, createAfterScheduleRecord, createAtScheduleRecord, createCronScheduleRecord, createDailyScheduleRecord,
+  createEveryScheduleRecord, createWeeklyScheduleRecord,
+  type ScheduleCatalogEntry, type ScheduleCreateRequest, type ScheduleDeleteRequest, type ScheduleRecord,
+} from '@deepseek-ai/dsh-schedule'
 import { createNativeTasks } from '../src/native-tasks.ts'
 import { createSessionWork } from '../src/session-work.ts'
+import type { LegacyReminders } from '../src/legacy-reminders.ts'
 
 type Job = { id: string; kind: string; label: string; owner: string; status: 'running' | 'stopping' | 'completed' | 'killed'; startedAt: number; finishedAt?: number }
+type Task = { sessionId: SessionId; record: ScheduleRecord; status: 'active' | 'inactive'; lastDelivery?: ScheduleCatalogEntry['lastDelivery'] }
+
+/** The Host Schedule service's shape: Host-storage tasks and a post-commit `schedule/changed`. */
+function scheduleService(changed: () => void) {
+  const tasks = new Map<string, Task>()
+  let next = 0
+  const build = (id: ScheduleId, request: ScheduleCreateRequest, now: number): ScheduleRecord => {
+    const { prompt, title } = request
+    if (request.after_seconds !== undefined) return createAfterScheduleRecord(id, prompt, request.after_seconds, now, title)
+    if (request.every_seconds !== undefined) return createEveryScheduleRecord(id, prompt, request.every_seconds, now, title)
+    if (request.at !== undefined) return createAtScheduleRecord(id, prompt, request.at, now, title)
+    if (request.daily !== undefined) return createDailyScheduleRecord(id, prompt, request.daily, now, title)
+    if (request.weekly !== undefined) return createWeeklyScheduleRecord(id, prompt, request.weekly, now, title)
+    return createCronScheduleRecord(id, prompt, request.cron!, now, title)
+  }
+  const service = {
+    tasks, changed,
+    list: vi.fn(async ({ sessionId }: { sessionId: SessionId }) =>
+      [...tasks.values()].filter(task => task.sessionId === sessionId && task.status === 'active').map(task => task.record)),
+    catalog: vi.fn(async (): Promise<ScheduleCatalogEntry[]> => [...tasks.values()]
+      .map(task => ({ ...task.record, sessionId: task.sessionId, status: task.status, ...task.lastDelivery === undefined ? {} : { lastDelivery: task.lastDelivery } }))
+      .sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt) || a.id.localeCompare(b.id))),
+    create: vi.fn(async (sessionId: SessionId, request: ScheduleCreateRequest, signal?: AbortSignal): Promise<ScheduleRecord> => {
+      const record = build(ScheduleId('schedule-' + String(++next)), request, Date.now())
+      signal?.throwIfAborted()
+      tasks.set(record.id, { sessionId, record, status: 'active' }); changed()
+      return record
+    }),
+    delete: vi.fn(async (request: ScheduleDeleteRequest, signal?: AbortSignal) => {
+      signal?.throwIfAborted()
+      if (tasks.get(request.id)?.sessionId !== request.sessionId) return { id: request.id, deleted: false as const, code: 'schedule_not_found' as const }
+      tasks.delete(request.id); changed()
+      return { id: request.id, deleted: true as const }
+    }),
+    update: vi.fn(async () => { throw new Error('the bridge never updates reminders') }),
+    history: vi.fn(async () => { throw new Error('the bridge reads lastDelivery from the catalog') }),
+    /** A native delivery: one-shots end, recurring ones advance. */
+    deliver(id: string, nextAt?: string) {
+      const task = tasks.get(id)!
+      task.lastDelivery = { scheduledAt: task.record.scheduledAt, deliveredAt: task.record.scheduledAt, messageId: ('m-' + id) as never }
+      if (nextAt === undefined) task.status = 'inactive'
+      else task.record = { ...task.record, scheduledAt: nextAt }
+      changed()
+    },
+    seed(sessionId: SessionId, record: ScheduleRecord, status: Task['status'] = 'active') { tasks.set(record.id, { sessionId, record, status }) },
+  }
+  return service
+}
+
 function fixture() {
   const sessions = new Map<SessionId, ReturnType<typeof session>>()
+  const ready = new Set<unknown>()
   function session(id: string, clientId = 1) {
-    const events: SessionEvent[] = []
-    const record = { clientId, agent: { ctx: { get: () => undefined }, session: { id: SessionId(id), header: { cwd: '/workspace' },
-      get seq() { return events.length }, inheritedEventCount: 0, ownEvents: () => events } } as unknown as Agent,
-      output: { notify: vi.fn(), update: vi.fn() }, events,
+    const record = { clientId, agent: { ctx: { get: () => undefined }, session: { id: SessionId(id), header: { cwd: '/workspace' } } } as unknown as Agent,
+      output: { notify: vi.fn(), update: vi.fn() },
       work: createSessionWork({ isLive: () => sessions.get(SessionId(id)) === record, assertReady: () => {} }) }
+    ready.add(record)
     return record
   }
   const add = (id: string, clientId = 1) => {
@@ -46,19 +97,20 @@ function fixture() {
     }) },
     read: vi.fn(() => { throw new Error('must not consume the model cursor') }),
   }
-  const names = new Set(['schedule_list', 'schedule_create', 'schedule_delete'])
-  const execute = vi.fn(async (_request: unknown): Promise<unknown> => ({ isError: false, value: [] }))
+  const names = new Set(['schedule_list', 'schedule_create', 'schedule_delete', 'schedule_update'])
+  const schedule = scheduleService(() => tasks.scheduleChanged())
   const output = vi.fn((_registry: object, agent: Agent, id: string) => outputs.get(agent.session.id + ':' + id))
   const warn = vi.fn()
-  const flush = vi.fn(async (_session: Agent['session']) => {})
-  const select = vi.fn(async <T>(id: SessionId, { end }: { end: SessionLogOffset; signal?: AbortSignal }, project: (event: SessionEvent) => T | undefined): Promise<T[]> =>
-    sessions.get(id)!.events.slice(0, end).flatMap(event => { const value = project(event); return value === undefined ? [] : [value] }))
+  const legacy = new Map<unknown, LegacyReminders>()
   const host = { sessions, owned: (clientId: number, id: SessionId | undefined) => {
     const record = id === undefined ? undefined : sessions.get(id)
     return record?.clientId === clientId ? record : undefined
   }, jobs: vi.fn((_record: typeof owner): unknown => ({ [symbols.original]: { [symbols.original]: jobs } })),
-  tools: (_record: typeof owner) => ({ runtime: { execute } as Pick<ToolRuntime, 'execute'>, names }),
-  discovery: { select }, flush, output, logger: { warn } }
+  toolNames: vi.fn((_record: typeof owner): ReadonlySet<string> | undefined => names),
+  schedule: vi.fn((): typeof schedule | undefined => schedule),
+  legacyReminders: vi.fn((record: typeof owner) => legacy.get(record)),
+  ready: vi.fn((record: typeof owner) => ready.has(record)),
+  output, logger: { warn } }
   const tasks = createNativeTasks(host)
   const job = (id: string, record = owner, status: Job['status'] = 'running') => {
     const row: Job = { id, kind: 'bash', label: 'build ' + id, owner: record.agent.session.id, status, startedAt: 1234 }
@@ -66,48 +118,48 @@ function fixture() {
   }
   const change = (record = owner) => { for (const listener of listeners) listener({ type: 'output', owner: record.agent.session.id, id: 'changed' as never, total: 0 }) }
   const request = (taskId: string, record = owner) => ({ sessionId: record.agent.session.id, taskId, source: 'clientUi' })
-  const append = (data: unknown, record = owner) => {
-    const event = { seq: record.events.length, time: 1000, type: 'schedule/change', data } as SessionEvent
-    record.events.push(event); return event
-  }
-  return { tasks, owner, other, sessions, add, rows, outputs, jobs, host, output, listeners, unsubscribe, change, job, request, names, execute, append, warn, flush, select }
+  const reminder = (text: string, clientId = 1, sessionId = 'owner') => tasks.reminders(clientId, 'x.ai/scheduler/create', { sessionId, text })
+  /** Wire updates one owner received, in order. */
+  const sent = (record = owner) => record.output.notify.mock.calls.map(call => (call[1] as { update: Record<string, unknown> }).update)
+  const settle = async () => { for (let index = 0; index < 5; index++) await new Promise(resolve => setImmediate(resolve)) }
+  return { tasks, owner, other, sessions, add, rows, outputs, jobs, host, output, listeners, unsubscribe, change, job, request, names, warn, schedule, legacy, ready, reminder, sent, settle }
 }
 
 describe('native task ownership', () => {
-  it('session cancellation aborts a reminder and prevents the following list even if the owner is live again', async () => {
-    const f = fixture(), held = Promise.withResolvers<unknown>()
+  it('session cancellation aborts a pending reminder write and prevents the following list', async () => {
+    const f = fixture(), held = Promise.withResolvers<ScheduleRecord>()
     let signal!: AbortSignal
-    f.execute.mockImplementationOnce(request => { signal = (request as { signal: AbortSignal }).signal; return held.promise })
-    const operation = f.tasks.reminders(1, 'x.ai/scheduler/create', { sessionId: 'owner', text: 'after 10m check build' })
+    f.schedule.create.mockImplementationOnce((_id, _request, received) => { signal = received!; return held.promise })
+    const operation = f.reminder('after 10m check build')
     const rejected = expect(operation).rejects.toThrow('session closed')
-    await vi.waitFor(() => expect(f.execute).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(f.schedule.create).toHaveBeenCalledOnce())
     f.owner.work.cancel()
     expect(signal.aborted).toBe(true)
-    held.resolve({ isError: false, value: {} })
+    held.reject(signal.reason)
     await rejected; await f.owner.work.settle()
-    expect(f.execute).toHaveBeenCalledOnce()
+    expect(f.schedule.catalog).not.toHaveBeenCalled()
     await f.tasks.dispose()
   })
 
-  it('aborts and drains a reminder whose native executor synchronously starts disposal', async () => {
-    const f = fixture(), held = Promise.withResolvers<unknown>(), entered = Promise.withResolvers<void>()
+  it('aborts and drains a reminder whose native write synchronously starts disposal', async () => {
+    const f = fixture(), held = Promise.withResolvers<ScheduleRecord>(), entered = Promise.withResolvers<void>()
     let disposal!: Promise<void>, done = false, signal!: AbortSignal
-    f.execute.mockImplementationOnce(async request => {
-      signal = (request as { signal: AbortSignal }).signal
+    f.schedule.create.mockImplementationOnce(async (_id, _request, received) => {
+      signal = received!
       disposal = Promise.resolve(f.tasks.dispose())
       void disposal.then(() => { done = true })
       entered.resolve()
       return held.promise
     })
-    const work = f.tasks.reminders(1, 'x.ai/scheduler/create', { sessionId: 'owner', text: 'after 1m check' })
+    const work = f.reminder('after 1m check')
     const rejected = expect(work).rejects.toThrow('session closed')
     await entered.promise; await Promise.resolve()
     try {
       expect(done).toBe(false)
       expect(signal.aborted).toBe(true)
-    } finally { held.resolve({ isError: false, value: {} }) }
+    } finally { held.resolve(createAfterScheduleRecord(ScheduleId('late'), 'check', 60, Date.now(), 'check')) }
     await rejected; await disposal
-    expect(f.execute).toHaveBeenCalledTimes(1)
+    expect(f.schedule.create).toHaveBeenCalledTimes(1)
     expect(f.owner.output.notify).not.toHaveBeenCalled()
   })
 
@@ -250,202 +302,214 @@ describe('native task ownership', () => {
     expect(f.jobs.list).toHaveBeenCalledOnce()
     await f.tasks.dispose()
   })
+})
 
-  it('replays active reminders and clears deleted IDs exactly once after reconnect', async () => {
-    const f = fixture()
-    const after = createAfterScheduleRecord(ScheduleId('once'), 'check', 600, 1000)
-    const every = createEveryScheduleRecord(ScheduleId('repeat'), 'again', 300, 1000)
-    f.append({ version: 1, operation: 'create', schedule: after })
-    f.append({ version: 1, operation: 'delete', id: after.id })
-    f.append({ version: 1, operation: 'create', schedule: every })
-    await f.tasks.snapshot(f.owner); await f.tasks.snapshot(f.owner)
-    expect(f.owner.output.notify).toHaveBeenCalledTimes(2)
-    expect(f.owner.output.notify).toHaveBeenCalledWith('x.ai/session_notification', { update: {
-      sessionUpdate: 'scheduled_task_created', task_id: 'repeat', prompt: 'again', human_schedule: 'every 300s', next_fire_at: every.scheduledAt,
-    } }, { nativeSchedule: true })
-    expect(f.owner.output.notify).toHaveBeenCalledWith('x.ai/session_notification', { update: {
-      sessionUpdate: 'scheduled_task_deleted', task_id: 'once', reason: 'deleted',
-    } }, { nativeSchedule: true })
-    f.tasks.observe(f.owner, f.append({ version: 1, operation: 'delete', id: 'repeat' }))
-    await f.owner.work.settle()
-    expect(f.owner.output.notify).toHaveBeenCalledTimes(3)
-    await f.tasks.dispose()
-  })
-
-  it('uses native host projection state including deleted IDs without a first-snapshot history scan', async () => {
-    const f = fixture(), every = createEveryScheduleRecord(ScheduleId('repeat'), 'again', 300, 1000)
-    let projected = { active: [every], seenIds: [ScheduleId('once'), every.id] }
-    const stateOf = vi.fn(() => projected)
-    vi.spyOn(f.owner.agent.ctx, 'get').mockReturnValue({ stateOf } as never)
-    const history = vi.spyOn(f.owner.agent.session, 'ownEvents').mockImplementation(() => { throw new Error('must use maintained schedule state') })
-    f.tasks.snapshot(f.owner); f.tasks.snapshot(f.owner)
-    expect(history).not.toHaveBeenCalled()
-    expect(stateOf).toHaveBeenCalledWith(f.owner.agent.session, 'schedule')
-    expect(f.owner.output.notify).toHaveBeenCalledTimes(2)
-    expect(f.owner.output.notify.mock.calls.map(call => (call[1] as { update: { task_id: string } }).update.task_id)).toEqual(['repeat', 'once'])
-    projected = { ...projected, active: [] }
-    f.tasks.observe(f.owner, { type: 'schedule/change' } as SessionEvent)
-    f.tasks.snapshot(f.owner)
-    expect(f.owner.output.notify).toHaveBeenCalledTimes(3)
-    expect(f.owner.output.notify).toHaveBeenLastCalledWith('x.ai/session_notification', { update: {
-      sessionUpdate: 'scheduled_task_deleted', task_id: 'repeat', reason: 'deleted',
-    } }, { nativeSchedule: true })
-    await f.tasks.dispose()
-  })
-
-  it('does not resurrect inherited reminders excluded by the native projection', async () => {
-    const f = fixture()
-    const inherited = createAfterScheduleRecord(ScheduleId('parent'), 'parent only', 600, 1000)
-    f.append({ version: 1, operation: 'create', schedule: inherited })
-    vi.spyOn(f.owner.agent.ctx, 'get').mockReturnValue({ stateOf: () => ({ active: [], seenIds: [] }) } as never)
-    f.tasks.snapshot(f.owner)
-    expect(f.owner.output.notify).not.toHaveBeenCalled()
-    await f.tasks.dispose()
-  })
-
-  it('selects only owned Schedule changes and preserves native decoding without synchronous reads', async () => {
-    const f = fixture(), id = ScheduleId('same-id')
-    f.append({ version: 1, operation: 'create', schedule: createAfterScheduleRecord(id, 'parent', 600, 1000) })
-    Object.assign(f.owner.agent.session, { inheritedEventCount: 1 })
-    for (let index = 0; index < 1000; index++) f.owner.events.push({ seq: f.owner.events.length, time: 1000, type: 'session/title', data: { title: 'unrelated' } } as SessionEvent)
-    f.append({ version: 1, operation: 'create', schedule: createAfterScheduleRecord(id, 'child', 600, 1000) })
-    const sync = vi.spyOn(f.owner.agent.session, 'ownEvents').mockImplementation(() => { throw new Error('must select durable Schedule history') })
-    const read = vi.fn(async (offset = 0, length = 0) => ({ events: f.owner.events.slice(offset, offset + length), eventState: 'detached' as const }))
-    const close = vi.fn(async () => {})
-    const discovery = createSessionDiscovery({
-      persistence: () => ({ list: async () => [], open: async (): Promise<SessionHandle> => ({
-        id: f.owner.agent.session.id, header: f.owner.agent.session.header, inheritedEventCount: 1 as SessionLogOffset,
-        access: 'read', read, close, [Symbol.asyncDispose]: close,
-        append: async () => { throw new Error('read handle cannot append') }, flush: async () => { throw new Error('read handle cannot flush') },
-      }) }),
-      query: () => undefined, projectionCache: () => undefined, owns: () => false, onEvent: () => () => {}, onCreated: () => () => {},
-    })
-    f.select.mockImplementation(discovery.select)
-    await f.tasks.snapshot(f.owner)
-    expect(f.select).toHaveBeenCalledWith('owner', { end: 1002, signal: expect.any(AbortSignal) }, expect.any(Function))
-    expect(await f.select.mock.results[0]!.value).toHaveLength(1)
-    expect(read.mock.calls).toEqual([[0, 256, expect.any(Object)], [256, 256, expect.any(Object)], [512, 256, expect.any(Object)], [768, 234, expect.any(Object)]])
-    expect(close).toHaveBeenCalledOnce()
-    expect(f.owner.output.notify).toHaveBeenCalledOnce()
-    expect(f.owner.output.notify).toHaveBeenCalledWith('x.ai/session_notification', { update: expect.objectContaining({ task_id: id, prompt: 'child' }) }, { nativeSchedule: true })
-    expect(sync).not.toHaveBeenCalled()
-    await f.tasks.dispose()
-    await discovery.dispose()
-  })
-
-  it('serializes observed cuts in order and recovers the queue after a failed read', async () => {
-    const f = fixture(), gate = Promise.withResolvers<void>(), record = createAfterScheduleRecord(ScheduleId('once'), 'check', 600, 1000)
-    f.append({ version: 1, operation: 'create', schedule: record })
-    f.flush.mockImplementationOnce(() => gate.promise)
-    const first = f.tasks.snapshot(f.owner)
-    await vi.waitFor(() => expect(f.flush).toHaveBeenCalledOnce())
-    f.append({ version: 1, operation: 'delete', id: record.id })
-    const second = f.tasks.snapshot(f.owner)
-    expect(f.select).not.toHaveBeenCalled()
-    gate.resolve(); await first; await second
-    expect(f.select.mock.calls.map(([, options]) => options.end)).toEqual([1, 2])
-    expect(f.owner.output.notify.mock.calls.map(call => (call[1] as { update: { sessionUpdate: string } }).update.sessionUpdate))
-      .toEqual(['scheduled_task_created', 'scheduled_task_deleted'])
-    f.select.mockRejectedValueOnce(new Error('read offline'))
-    await expect(f.tasks.snapshot(f.owner)).rejects.toThrow('read offline')
-    await f.tasks.snapshot(f.owner)
-    expect(f.owner.output.notify).toHaveBeenCalledTimes(2)
-    await f.tasks.dispose()
-  })
-
-  it.each(['owner', 'module'])('cancels and drains an uncooperative fallback read when the %s closes', async kind => {
-    const f = fixture(), gate = Promise.withResolvers<SessionEvent[]>()
-    f.append({ version: 1, operation: 'create', schedule: createAfterScheduleRecord(ScheduleId('once'), 'check', 600, 1000) })
-    f.select.mockImplementationOnce(() => gate.promise as never)
-    const work = f.tasks.snapshot(f.owner), rejected = expect(work).rejects.toThrow('session closed')
-    await vi.waitFor(() => expect(f.select).toHaveBeenCalledOnce())
-    let done = false
-    if (kind === 'owner') f.owner.work.cancel()
-    const disposal = (kind === 'owner' ? f.owner.work.settle() : f.tasks.dispose()).then(() => { done = true })
-    expect(f.select.mock.calls[0]![1].signal!.aborted).toBe(true)
-    await Promise.resolve(); expect(done).toBe(false)
-    gate.resolve(f.owner.events); await rejected; await disposal
-    expect(f.owner.output.notify).not.toHaveBeenCalled()
-    await f.tasks.dispose()
-  })
-
-  it('uses a newly available native state instead of publishing an older fallback', async () => {
-    const f = fixture(), gate = Promise.withResolvers<SessionEvent[]>(), id = ScheduleId('once')
-    f.append({ version: 1, operation: 'create', schedule: createAfterScheduleRecord(id, 'stale', 600, 1000) })
-    f.select.mockImplementationOnce(() => gate.promise as never)
-    const work = f.tasks.snapshot(f.owner)
-    await vi.waitFor(() => expect(f.select).toHaveBeenCalledOnce())
-    f.append({ version: 1, operation: 'delete', id })
-    vi.spyOn(f.owner.agent.ctx, 'get').mockReturnValue({ stateOf: () => ({ active: [], seenIds: [id] }) } as never)
-    gate.resolve(f.owner.events.slice(0, 1)); await work
-    expect(f.owner.output.notify).toHaveBeenCalledOnce()
-    expect(f.owner.output.notify).toHaveBeenCalledWith('x.ai/session_notification', { update: expect.objectContaining({ sessionUpdate: 'scheduled_task_deleted', task_id: id }) }, { nativeSchedule: true })
-    await f.tasks.snapshot(f.owner)
-    expect(f.select).toHaveBeenCalledOnce()
-    await f.tasks.dispose()
-  })
-
-  it('does not hide native Schedule validation errors in fallback history', async () => {
-    const f = fixture()
-    f.append({ version: 1, operation: 'delete', id: ScheduleId('never-created') })
-    await expect(f.tasks.snapshot(f.owner)).rejects.toThrow('inactive id')
-    expect(f.owner.output.notify).not.toHaveBeenCalled()
-    await f.tasks.dispose()
-  })
-
-  it('parses reminder controls through the native tools without changing the prompt', async () => {
-    const f = fixture()
-    const cases = [
-      ['after 10m check\nthe build', { after_seconds: 600, prompt: 'check\nthe build' }],
-      ['every 5m check', { every_seconds: 300, prompt: 'check' }],
-      ['at 2030-01-01T00:00:00Z check', { at: '2030-01-01T00:00:00Z', prompt: 'check' }],
-    ] as const
-    for (const [text, args] of cases) {
-      await f.tasks.reminders(1, 'x.ai/scheduler/create', { sessionId: 'owner', text })
-      expect(f.execute).toHaveBeenNthCalledWith(f.execute.mock.calls.length - 1, expect.objectContaining({ name: 'schedule_create', arguments: args,
-        agent: f.owner.agent, callId: expect.stringMatching(/^tui-/), signal: expect.any(AbortSignal) }))
-      expect(f.execute).toHaveBeenLastCalledWith(expect.objectContaining({ name: 'schedule_list' }))
+describe('native reminders through the Host Schedule service', () => {
+  it('creates every /reminders kind with a derived title and lists the session\'s rows', async () => {
+    const f = fixture(), zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    const cases: Array<[string, Partial<ScheduleCreateRequest>]> = [
+      ['after 10m check\nthe build', { after_seconds: 600, prompt: 'check\nthe build', title: 'check' }],
+      ['every 5m check', { every_seconds: 300, prompt: 'check', title: 'check' }],
+      ['at 2099-01-01T00:00:00Z ship it', { at: '2099-01-01T00:00:00Z', prompt: 'ship it', title: 'ship it' }],
+      ['daily 09:00 stand up', { daily: { time: '09:00:00', time_zone: zone }, prompt: 'stand up', title: 'stand up' }],
+      ['weekly mon,wed 17:30 review', { weekly: { weekdays: [1, 3], time: '17:30:00', time_zone: zone }, prompt: 'review', title: 'review' }],
+      ['cron "0 9 * * 1-5" poll', { cron: { expression: '0 9 * * 1-5', time_zone: zone }, prompt: 'poll', title: 'poll' }],
+    ]
+    for (const [text, request] of cases) {
+      await f.reminder(text)
+      expect(f.schedule.create).toHaveBeenLastCalledWith('owner', request, expect.any(AbortSignal))
     }
-    const calls = f.execute.mock.calls.length
-    for (const text of ['every 0m check', 'after 999999999999999999d check', 'weekly check', 'after 1h']) {
-      await expect(f.tasks.reminders(1, 'x.ai/scheduler/create', { sessionId: 'owner', text })).rejects.toThrow()
-    }
-    expect(f.execute).toHaveBeenCalledTimes(calls)
-    f.execute.mockResolvedValueOnce({ isError: false, value: {} }).mockResolvedValueOnce({ isError: false, value: [{ id: 'repeat', prompt: 'check', state: 'waiting', scheduledAt: 'future', kind: 'every', everySeconds: 300 }] })
-    await expect(f.tasks.reminders(1, 'x.ai/scheduler/delete', { sessionId: 'owner', taskId: 'once' })).resolves.toEqual({ title: 'Session reminders', items: [
-      { id: 'repeat', text: 'check', detail: 'waiting · future · every 300s', editable: false },
-    ] })
+    f.schedule.seed(SessionId('other'), createAfterScheduleRecord(ScheduleId('foreign'), 'not mine', 60, Date.now(), 'not mine'))
+    const list = await f.tasks.reminders(1, 'x.ai/scheduler/list', { sessionId: 'owner' }) as { title: string; items: Array<{ id: string; text: string; detail: string }> }
+    expect(list.title).toBe('Session reminders')
+    expect(list.items.map(item => item.text)).toEqual(expect.arrayContaining(['check\nthe build', 'check', 'ship it', 'stand up', 'review', 'poll']))
+    expect(list.items).toHaveLength(6)
+    expect(list.items.map(item => item.detail.split(' · ').slice(0, 2).join(' · '))).toEqual(expect.arrayContaining([
+      'active · after 10m', 'active · every 5m', 'active · at 2099-01-01T00:00:00.000Z', `active · daily 09:00 ${zone}`,
+      `active · weekly Mon,Wed 17:30 ${zone}`, `active · cron "0 9 * * 1-5" ${zone}`,
+    ]))
+    expect(f.schedule.update).not.toHaveBeenCalled()
     await f.tasks.dispose()
   })
 
-  it('enforces reminder availability/ownership and preserves native errors', async () => {
+  it('keeps native validation as the authority and maps its errors', async () => {
+    const f = fixture()
+    await expect(f.reminder('at 2000-01-01T00:00:00Z too late')).rejects.toMatchObject({ code: -32602, message: expect.stringMatching(/future/i) })
+    f.schedule.create.mockRejectedValueOnce(new ScheduleInputError('frequency_too_high', 'every_seconds must be at least 60.'))
+    await expect(f.reminder('every 1m check')).rejects.toMatchObject({ code: -32602, message: 'every_seconds must be at least 60.' })
+    f.schedule.create.mockRejectedValueOnce(new Error('storage offline'))
+    await expect(f.reminder('every 1m check')).rejects.toMatchObject({ code: -32603, message: expect.stringContaining('storage offline') })
+    // Parsing failures never reach the service.
+    const calls = f.schedule.create.mock.calls.length
+    for (const text of ['every 30s check', 'weekly check', 'after 1h', 'cron 0 9 * * * check']) await expect(f.reminder(text)).rejects.toMatchObject({ code: -32602 })
+    await expect(f.tasks.reminders(1, 'x.ai/scheduler/create', { sessionId: 'owner' })).rejects.toThrow('A reminder is required.')
+    expect(f.schedule.create).toHaveBeenCalledTimes(calls)
+    await f.tasks.dispose()
+  })
+
+  it('deletes within the owning session and reports a missing row', async () => {
+    const f = fixture()
+    await f.reminder('after 10m first'); await f.reminder('every 1h second')
+    const result = await f.tasks.reminders(1, 'x.ai/scheduler/delete', { sessionId: 'owner', taskId: 'schedule-1' }) as { items: Array<{ id: string }> }
+    expect(f.schedule.delete).toHaveBeenCalledWith({ sessionId: 'owner', id: 'schedule-1' }, expect.any(AbortSignal))
+    expect(result.items.map(item => item.id)).toEqual(['schedule-2'])
+    await expect(f.tasks.reminders(1, 'x.ai/scheduler/delete', { sessionId: 'owner', taskId: 'schedule-1' })).rejects.toMatchObject({ code: -32602, message: 'Reminder schedule-1 no longer exists.' })
+    await expect(f.tasks.reminders(1, 'x.ai/scheduler/delete', { sessionId: 'owner' })).rejects.toThrow('taskId is required')
+    await f.tasks.dispose()
+  })
+
+  it('enforces reminder availability and ownership', async () => {
     const f = fixture(), request = { sessionId: 'owner' }
     await expect(f.tasks.reminders(2, 'x.ai/scheduler/list', request)).rejects.toThrow('unknown session')
-    f.names.clear()
-    await expect(f.tasks.reminders(1, 'x.ai/scheduler/list', request)).rejects.toThrow('unavailable')
-    expect(f.execute).not.toHaveBeenCalled()
-    f.names.add('schedule_list')
-    f.execute.mockResolvedValueOnce({ isError: true, error: { message: 'native failure' } })
-    await expect(f.tasks.reminders(1, 'x.ai/scheduler/list', request)).rejects.toMatchObject({ code: -32603, message: 'native failure' })
-    f.execute.mockResolvedValueOnce({ isError: false, value: { code: 'invalid_rule', message: 'too frequent' } })
-    await expect(f.tasks.reminders(1, 'x.ai/scheduler/list', request)).rejects.toMatchObject({ code: -32602, message: 'too frequent' })
-    f.execute.mockResolvedValueOnce({ isError: false, value: {} })
-    await expect(f.tasks.reminders(1, 'x.ai/scheduler/list', request)).rejects.toThrow('Invalid reminder list')
+    f.host.schedule.mockReturnValueOnce(undefined)
+    await expect(f.tasks.reminders(1, 'x.ai/scheduler/list', request)).rejects.toThrow('unavailable in this preset')
+    f.names.delete('schedule_create')
+    await expect(f.tasks.reminders(1, 'x.ai/scheduler/list', request)).rejects.toThrow('unavailable in this preset')
+    f.host.toolNames.mockReturnValueOnce(undefined)
+    await expect(f.tasks.reminders(1, 'x.ai/scheduler/list', request)).rejects.toThrow('unavailable in this preset')
+    expect(f.schedule.catalog).not.toHaveBeenCalled()
     await f.tasks.dispose()
   })
 
   it.each(['replaced', 'disposed'])('rejects late reminder results after the owner is %s', async action => {
-    const f = fixture(), finish = Promise.withResolvers<unknown>()
-    f.execute.mockImplementationOnce(() => finish.promise)
-    const request = f.tasks.reminders(1, 'x.ai/scheduler/create', { sessionId: 'owner', text: 'after 1m check' })
+    const f = fixture(), finish = Promise.withResolvers<ScheduleRecord>()
+    f.schedule.create.mockImplementationOnce(() => finish.promise)
+    const request = f.reminder('after 1m check')
+    await vi.waitFor(() => expect(f.schedule.create).toHaveBeenCalledOnce())
     const disposal = action === 'disposed' ? f.tasks.dispose() : undefined
     if (action !== 'disposed') { f.add('owner'); f.tasks.poll() }
-    expect((f.execute.mock.calls[0]![0] as { signal: AbortSignal }).signal.aborted).toBe(true)
-    finish.resolve({ isError: false, value: {} })
+    expect((f.schedule.create.mock.calls[0]![2]!).aborted).toBe(true)
+    finish.resolve(createAfterScheduleRecord(ScheduleId('late'), 'check', 60, Date.now(), 'check'))
     await expect(request).rejects.toThrow('session closed')
-    expect(f.execute).toHaveBeenCalledTimes(1)
+    expect(f.schedule.catalog).not.toHaveBeenCalled()
     expect(f.owner.output.notify).not.toHaveBeenCalled()
     await disposal
+    await f.tasks.dispose()
+  })
+})
+
+describe('Tasks-pane reminder rows from schedule/changed', () => {
+  const created = (record: ScheduleRecord, schedule: string) => ({
+    sessionUpdate: 'scheduled_task_created', task_id: record.id, prompt: record.prompt, human_schedule: schedule, next_fire_at: record.scheduledAt,
+  })
+
+  it('announces creation, recurring advances, deliveries and deletions, each once and only to the owner', async () => {
+    const f = fixture()
+    await f.tasks.snapshot(f.owner); await f.tasks.snapshot(f.other)
+    expect(f.sent()).toEqual([])
+    await f.reminder('every 5m repeat'); await f.reminder('after 10m once'); await f.reminder('daily 09:00 wake')
+    await f.settle()
+    const [repeat, once, daily] = ['schedule-1', 'schedule-2', 'schedule-3'].map(id => f.schedule.tasks.get(id)!.record)
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    expect(f.sent()).toEqual([created(repeat!, 'every 5m'), created(once!, 'once'), created(daily!, `daily 09:00 ${zone}`)])
+    expect(f.owner.output.notify.mock.calls.every(call => call[0] === 'x.ai/session_notification' && (call[2] as { nativeSchedule?: boolean }).nativeSchedule === true)).toBe(true)
+    expect(f.sent(f.other)).toEqual([])
+
+    const advanced = '2099-01-01T00:00:00.000Z'
+    f.schedule.deliver('schedule-1', advanced); f.schedule.deliver('schedule-2')
+    await f.settle()
+    expect(f.sent().slice(3)).toEqual([
+      { ...created(repeat!, 'every 5m'), next_fire_at: advanced },
+      { sessionUpdate: 'scheduled_task_deleted', task_id: 'schedule-2', reason: 'completed' },
+    ])
+    await f.tasks.reminders(1, 'x.ai/scheduler/delete', { sessionId: 'owner', taskId: 'schedule-3' })
+    await f.settle()
+    expect(f.sent().slice(5)).toEqual([{ sessionUpdate: 'scheduled_task_deleted', task_id: 'schedule-3', reason: 'deleted' }])
+    f.tasks.scheduleChanged(); await f.settle()
+    expect(f.sent()).toHaveLength(6)
+    await f.tasks.dispose()
+  })
+
+  it('clears rows that ended while the TUI was away exactly once per open', async () => {
+    const f = fixture(), now = Date.now()
+    f.schedule.seed(SessionId('owner'), createAfterScheduleRecord(ScheduleId('ended'), 'done', 60, now, 'done'), 'inactive')
+    const armed = createEveryScheduleRecord(ScheduleId('armed'), 'again', 300, now, 'again')
+    f.schedule.seed(SessionId('owner'), armed)
+    f.schedule.seed(SessionId('other'), createAfterScheduleRecord(ScheduleId('foreign-ended'), 'x', 60, now, 'x'), 'inactive')
+    await f.tasks.snapshot(f.owner); await f.tasks.snapshot(f.owner)
+    expect(f.sent()).toEqual([created(armed, 'every 5m'), { sessionUpdate: 'scheduled_task_deleted', task_id: 'ended', reason: 'completed' }])
+    const reopened = f.add('owner')
+    await f.tasks.snapshot(reopened)
+    expect(f.sent(reopened)).toHaveLength(2)
+    await f.tasks.dispose()
+  })
+
+  it('publishes a change made during a held read through one queued read, and never publishes to a closed owner', async () => {
+    const f = fixture(), gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
+    await f.tasks.snapshot(f.owner); await f.tasks.snapshot(f.other)
+    const list = f.schedule.list.getMockImplementation()!
+    // The owner's next read answers with the rows as they were when it started.
+    let hold = true
+    f.schedule.list.mockImplementation(async request => {
+      const rows = await list(request)
+      if (hold && request.sessionId === 'owner') { hold = false; entered.resolve(); await gate.promise }
+      return rows
+    })
+    const reads = f.schedule.list.mock.calls.length
+    f.tasks.scheduleChanged()
+    await entered.promise
+    const burst = createAfterScheduleRecord(ScheduleId('burst'), 'burst', 60, Date.now(), 'burst')
+    f.schedule.seed(SessionId('owner'), burst)
+    for (let index = 0; index < 20; index++) f.tasks.scheduleChanged()
+    gate.resolve(); await f.settle()
+    expect(f.sent()).toEqual([created(burst, 'once')])
+    expect(f.sent(f.other)).toEqual([])
+    expect(f.schedule.list.mock.calls.length - reads).toBeLessThanOrEqual(2 * 2) // owner + other, one running and one queued each
+    const held = Promise.withResolvers<ScheduleRecord[]>()
+    f.schedule.list.mockImplementationOnce(() => held.promise)
+    f.schedule.seed(SessionId('owner'), createAfterScheduleRecord(ScheduleId('late'), 'late', 60, Date.now(), 'late'))
+    const refresh = f.tasks.snapshot(f.owner)
+    f.sessions.delete(SessionId('owner'))
+    held.resolve([burst, f.schedule.tasks.get('late')!.record])
+    await refresh
+    expect(f.sent()).toEqual([created(burst, 'once')])
+    expect(f.warn).not.toHaveBeenCalled()
+    await f.tasks.dispose()
+  })
+
+  it('reports a Schedule read failure without failing the session open', async () => {
+    const f = fixture()
+    f.schedule.list.mockRejectedValueOnce(new Error('storage offline'))
+    await expect(f.tasks.snapshot(f.owner)).resolves.toBeUndefined()
+    expect(f.warn).toHaveBeenCalledWith(expect.stringContaining('storage offline'))
+    f.host.schedule.mockReturnValue(undefined)
+    expect(f.tasks.snapshot(f.owner)).toBeUndefined()
+    await f.tasks.dispose()
+  })
+})
+
+describe('legacy session-event reminders', () => {
+  it('sends one system note per open, only after the session is ready', async () => {
+    const f = fixture(), state: LegacyReminders = { inherited: 0, active: [{ id: 'schedule-1', kind: 'every', prompt: 'standup' }] }
+    f.legacy.set(f.owner, state)
+    f.ready.delete(f.owner)
+    await f.tasks.snapshot(f.owner)
+    f.tasks.poll()
+    expect(f.owner.output.notify).not.toHaveBeenCalled()
+    f.ready.add(f.owner)
+    f.tasks.poll(); f.tasks.poll()
+    expect(f.owner.output.notify).toHaveBeenCalledOnce()
+    expect(f.owner.output.notify).toHaveBeenCalledWith('x.ai/session_notification', { update: {
+      sessionUpdate: 'image_dropped', notes: [expect.stringMatching(/^This session has a reminder created by an earlier dscode version \("standup"\)\. It no longer fires/)],
+    } }, { legacySchedule: true })
+    // Legacy rows are never shown as live Tasks-pane rows.
+    expect(f.sent().some(update => update.sessionUpdate === 'scheduled_task_created')).toBe(false)
+    const reopened = f.add('owner')
+    f.legacy.set(reopened, state)
+    await f.tasks.snapshot(reopened); f.tasks.poll()
+    expect(reopened.output.notify).toHaveBeenCalledOnce()
+    await f.tasks.dispose()
+  })
+
+  it('stays quiet without legacy reminders and reports an unreadable projection', async () => {
+    const f = fixture()
+    f.legacy.set(f.owner, { inherited: 0, active: [] })
+    await f.tasks.snapshot(f.owner); f.tasks.poll()
+    f.host.legacyReminders.mockImplementationOnce(() => { throw new Error('projection unavailable') })
+    await f.tasks.snapshot(f.other); f.tasks.poll()
+    expect(f.owner.output.notify).not.toHaveBeenCalled()
+    expect(f.other.output.notify).not.toHaveBeenCalled()
+    expect(f.warn).toHaveBeenCalledWith(expect.stringContaining('projection unavailable'))
     await f.tasks.dispose()
   })
 })

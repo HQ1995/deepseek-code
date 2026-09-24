@@ -123,33 +123,47 @@ export async function nativeControlsAcceptance(ui) {
   await key('C-u')
 
   // Native reminders survive a new leader, and overdue delivery uses the
-  // official resume path. No observer or test controller mutates the schedule.
+  // official resume path. No observer or test controller mutates the schedule:
+  // the observer only reads the Host Schedule catalog (DSH 0.1.7-rc.2).
+  const reminder = (value, prompt) => value.reminders.find(row => row.prompt === prompt)
   await send('/reminders'); await wait(/Session reminders/); await ready()
   const reminderStart = (await readRequests()).length
   await edit('a', 'after 1h DSCODE_CONTROLS_CANCEL')
-  const cancelState = await waitState(value => value.schedules.some(event => event.data.schedule?.prompt === 'DSCODE_CONTROLS_CANCEL'), 'panel-reminder-created')
-  const cancelId = cancelState.schedules.find(event => event.data.schedule?.prompt === 'DSCODE_CONTROLS_CANCEL').data.schedule.id
+  const cancelState = await waitState(value => reminder(value, 'DSCODE_CONTROLS_CANCEL')?.status === 'active', 'panel-reminder-created')
+  const cancelId = reminder(cancelState, 'DSCODE_CONTROLS_CANCEL').id
   await key('x'); await ready()
-  await waitState(value => value.schedules.some(event => event.data.operation === 'delete' && event.data.id === cancelId), 'panel-reminder-cancelled')
+  // A deleted Host task has no row left in the catalog.
+  await waitState(value => !value.reminders.some(row => row.id === cancelId), 'panel-reminder-cancelled')
   await edit('a', 'every 5m DSCODE_CONTROLS_RECURRING')
+  await waitState(value => reminder(value, 'DSCODE_CONTROLS_RECURRING')?.kind === 'every', 'panel-reminder-recurring-created')
   await key('a'); await wait(/Enter: submit/); await paste('every 1s DSCODE_CONTROLS_INVALID'); await key('Enter')
-  await wait(/every_seconds must be at least 300/)
+  await wait(/A repeating reminder needs an interval of at least 1m\./)
   await wait(/every 1s DSCODE_CONTROLS_INVALID/)
   await artifact('controls-reminder-invalid', { screen: await capture(), state: await state() })
+  assert.ok(!(await state()).reminders.some(row => row.prompt === 'DSCODE_CONTROLS_INVALID'), 'An invalid reminder must not be stored')
   await key('Escape')
   await edit('a', 'after 12s DSCODE_CONTROLS_REMINDER_DUE')
-  const scheduled = await waitState(value => value.schedules.some(event => event.data.schedule?.prompt === 'DSCODE_CONTROLS_REMINDER_DUE'), 'panel-reminder-due-created')
-  const dueId = scheduled.schedules.find(event => event.data.schedule?.prompt === 'DSCODE_CONTROLS_REMINDER_DUE').data.schedule.id
+  const scheduled = await waitState(value => reminder(value, 'DSCODE_CONTROLS_REMINDER_DUE')?.status === 'active', 'panel-reminder-due-created')
+  const dueId = reminder(scheduled, 'DSCODE_CONTROLS_REMINDER_DUE').id
   assert.equal((await readRequests()).length, reminderStart, 'Reminder CRUD must not prompt the model')
   await artifact('controls-reminders-live', { state: scheduled, screen: await capture() })
   await key('Escape')
   await restart(13000)
   await wait(/DSCODE_CONTROLS_REMINDER_DELIVERED/)
-  await waitState(value => value.status === 'idle' && value.schedules.some(event => event.data.operation === 'dispatch' && event.data.id === dueId), 'overdue-reminder-native-dispatch')
-  await send('/reminders'); await wait(/DSCODE_CONTROLS_RECURRING/); await ready()
-  assert.ok(!(await capture()).includes('DSCODE_CONTROLS_REMINDER_DUE'))
+  // A delivered one-shot ends: the Host keeps it as an inactive row with its delivery.
+  const dueDelivered = await waitState(value => value.status === 'idle'
+    && value.reminders.some(row => row.id === dueId && row.status === 'inactive' && row.lastDelivery), 'overdue-reminder-native-dispatch')
+  assert.equal(reminder(dueDelivered, 'DSCODE_CONTROLS_RECURRING')?.status, 'active', 'The recurring reminder stays armed across the restart')
+  // Armed reminders list first; the delivered one stays listed as inactive until deleted.
+  await send('/reminders'); await wait(/DSCODE_CONTROLS_RECURRING/)
+  await wait(/DSCODE_CONTROLS_REMINDER_DUE[^\n]*\n[^\n]*inactive · after 12s · delivered \d{4}-/); await ready()
   await artifact('controls-reminders-restarted', { state: await state(), screen: await capture() })
-  await key('x'); await ready(); await key('Escape')
+  // Delete both rows (the armed one first) so nothing fires into the steps below.
+  await key('x'); await ready()
+  await waitState(value => !value.reminders.some(row => row.prompt === 'DSCODE_CONTROLS_RECURRING'), 'panel-reminder-recurring-deleted')
+  await key('x'); await ready()
+  await waitState(value => value.reminders.length === 0, 'panel-reminder-inactive-deleted')
+  await wait(/No pending items/); await key('Escape')
 
   await send('DSCODE_CONTROLS_JOB_START'); await wait(/DSCODE_CONTROLS_JOB_HELD/)
   const jobs = await waitState(value => value.jobs.some(job => job.label.includes('DSCODE_LOG_')), 'passive-log-native-job')

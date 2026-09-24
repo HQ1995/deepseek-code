@@ -19,6 +19,11 @@
     model: ''
 - id: llm-deepseek
   disabled: true
+# 0.1.7-rc.2 splits the native adapter into an API-key and an account route;
+# the account row ships on and would register a "DeepSeek Account" provider
+# that /provider cannot own. The native route above uses an API key only.
+- id: llm-deepseek-account
+  disabled: true
 
 # Enabling a native model route does not opt into uploading raw Session events.
 # The row has no hostname allowlist, so a custom native gateway would receive

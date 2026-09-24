@@ -142,7 +142,7 @@ async function packaging() {
   }
   const manifest = JSON.parse(await readFile(join(packageDir, 'package.json'), 'utf8'))
   const expected = manifest.dsh.testedVersion
-  assert.equal(expected, '0.1.7-rc.1', 'Acceptance targets the requested upstream runtime');
+  assert.equal(expected, '0.1.7-rc.2', 'Acceptance targets the requested upstream runtime');
   const cli = await execute(env.DSH_BIN, ['--version'], { env: baseEnv, timeout: 10000 })
   assert.equal(cli.stdout.trim().split('\n')[0], expected)
   let runtimeModules
@@ -196,6 +196,11 @@ async function permissionAcceptance() {
   const denied = join(scratch, 'permission-denied')
   await send(`DSCODE_PERMISSION_ESCALATED:${Buffer.from(denied).toString('base64url')}`)
   await wait(/No, reject \(type to add feedback\)/, 30000)
+  // DSH 0.1.7-rc.2's approval reason rides the tool title ("bash — <reason>");
+  // the prompt keeps the command's description as its title and shows the
+  // reason under the command.
+  const reasonScreen = await wait(/bash — (?:Allow this operation with|允许本次操作使用) danger-full-access/, 30000)
+  assert.match(reasonScreen, /DSCODE permission probe/)
   await settle(700)
   await assert.rejects(readFile(denied), { code: 'ENOENT' }, 'Ask must hold the real shell operation pending approval')
   await artifact('permission-pending', { initial, asking, peerBefore, peerAfter, screen: await capture() })

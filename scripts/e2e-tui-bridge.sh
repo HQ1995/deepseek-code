@@ -584,7 +584,7 @@ completion_count_after="$(grep -c 'POST /v1/chat/completions' "$MOCK_LOG" 2>/dev
   const expected = [
     "ask_user_question", "bash", "create_goal", "edit", "exit_plan_mode",
     "get_goal", "glob", "grep", "interrupt_agent", "job_kill", "job_list",
-    "job_output", "list_agents", "present", "read", "read_image", "schedule_create", "schedule_delete", "schedule_list", "send_message",
+    "job_output", "list_agents", "present", "read", "read_image", "schedule_create", "schedule_delete", "schedule_list", "schedule_update", "send_message",
     "skill", "subagent", "subagent_fork", "todo_write", "update_goal",
     "web_fetch", "web_search", "workflow", "write",
   ].sort()
@@ -640,7 +640,7 @@ audit_responses_preset() {
     const standard = [
       "ask_user_question", "bash", "create_goal", "edit", "exit_plan_mode",
       "get_goal", "glob", "grep", "interrupt_agent", "job_kill", "job_list",
-      "job_output", "list_agents", "present", "read", "read_image", "schedule_create", "schedule_delete", "schedule_list", "send_message",
+      "job_output", "list_agents", "present", "read", "read_image", "schedule_create", "schedule_delete", "schedule_list", "schedule_update", "send_message",
       "skill", "subagent", "subagent_fork", "todo_write", "update_goal",
       "web_fetch", "web_search", "workflow", "write",
     ].sort()
@@ -649,7 +649,7 @@ audit_responses_preset() {
     // manager upstream, which the shipped `standard` leaves disabled.
     const owned = [...standard, "ralph"]
     const expected = {
-      minimal: ["bash", "schedule_create", "schedule_delete", "schedule_list"],
+      minimal: ["bash", "schedule_create", "schedule_delete", "schedule_list", "schedule_update"],
       standard,
       history: [...owned, "session_search", "session_event_search", "session_trace", "session_event_trace", "session_event_read"].sort(),
       lsp: [...owned, "lsp"].sort(),
@@ -665,7 +665,7 @@ audit_responses_preset() {
       teams: [...standard.filter(name => !["subagent", "subagent_fork", "workflow"].includes(name)),
         "session_search", "session_event_search", "session_trace", "session_event_trace", "session_event_read",
         "spawn_teammate", "wait_agent", "team_task_create", "team_task_get", "team_task_list", "team_task_update"].sort(),
-      "fixture-custom": ["bash", "fixture_echo", "schedule_create", "schedule_delete", "schedule_list"],
+      "fixture-custom": ["bash", "fixture_echo", "schedule_create", "schedule_delete", "schedule_list", "schedule_update"],
     }
     const wanted = expected[preset]
     if (JSON.stringify(names) !== JSON.stringify(wanted)) {

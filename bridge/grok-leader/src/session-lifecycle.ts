@@ -62,6 +62,8 @@ interface LifecycleHost {
   contextValues(record: SessionRecord): ContextProjectionValues
   projectImages: SessionOutputHost['projectImages']
   logger: { warn(message: string): void }
+  /** A published session finished initializing and accepts input. */
+  unblocked(record: SessionRecord): void
   views: {
     status(record: SessionRecord, replay?: boolean): void
     children(record: SessionRecord, replay: boolean): Promise<void>
@@ -181,6 +183,7 @@ export function createSessionLifecycle(host: LifecycleHost) {
     if (unique.length > 1) throw new AggregateError(unique, 'session initialization projections failed')
     if (registry.ownedAgent(record.agent) !== record || host.client(record.clientId)?.closed !== false) throw invalidParams('session closed during initialization')
     initializing.delete(record)
+    host.unblocked(record)
     if (creation.kind === 'load') return
     const conn = host.client(record.clientId)!
     record.mcpInitTimer = setTimeout(() => {
