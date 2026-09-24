@@ -92,6 +92,64 @@ first `/model` pick, and on a Teams spawn.
 suites ran 1,124 tests on each Node version. Provider E2E run **1122288** and
 full TUI E2E run **1129433**.
 
+### Remaining failures and leftovers
+
+Commits `21fb2cfa` to `b2ca9024` clear the pager suite's long-standing
+failures and the audit's smaller leftovers.
+
+**Pager suite.** The 49 failures inherited from upstream are gone. Most tests
+asserted Grok behavior that dscode replaces on purpose (names, Kitty placement,
+`/loop` gating, fail-closed images, ACP-owned `/compact`, the pre-session model
+pick, local refusal of pager names, the finished-thinking preview); they now
+assert dscode's behavior and carry `DIVERGENCE(dscode)` notes. Four were real
+bugs:
+- `dscode worktree <TAB>` offered every top-level command again: the zsh
+  fix-up matched Grok's context tag, not dscode's.
+- `/comp` completed to `/compact-mode`: the ACP `/compact` lost its tie with
+  the builtin it replaces.
+- The status line could paint an empty row when the script's exit was seen
+  before its output; the pipe is now read after the exit.
+- Tests that pointed `GROK_HOME` at a tempdir, outside its serial group,
+  could delete the worktree adapter test's checkout.
+
+**Leftovers.**
+- Remote workspace: a connection that never comes up names its cause (unknown
+  alias, refused key, missing Node, workspace or helper) from one extra probe,
+  since dsh-ssh drops ssh's stderr. The welcome warning wraps, error text keeps
+  400 characters, and an ACP error whose data repeats its message reads once.
+- First run: the welcome menu leads with "Add a provider" until a provider has
+  a model, Enter runs the highlighted row, and the footer no longer says
+  "Logged in with API key".
+- A turn DSH fails for a missing or unusable key is refused with the provider
+  and `/provider`, instead of DSH's web page and "Try sending again". Other
+  internal errors keep that advice; the rest are real internal failures.
+- Browser: results name `./page-….png` (on macOS the unresolved temp directory
+  printed `../../../../var/folders/…`), the running row reads "Browser open …",
+  and a screenshot card captions the attachment store path.
+- The `/provider` picker lists `e`, `d` and `a`, and shows the delete confirm,
+  or why the provider in use cannot go. `/team` names models as the picker
+  does.
+
+Each leftover was checked by hand in the TUI lab: a fresh home, an unknown SSH
+host, a keyless provider, the browser against a loopback page, the provider
+picker and a Teams roster.
+
+**macOS arm64** (evidence root `/Users/hqzhao/AI/dsh-rc171/run-20260923`):
+- Full pager suite: 9,024 passed, 0 failed; ten repeated runs were clean.
+  `scripts/check-rust.sh` passes.
+- `control/int-verify-all.sh s5`: bridge suites on Node 24.19.0 and 22.19.0
+  (1,125 tests each), the browser, Teams and Inspector smokes, and provider E2E
+  run **13612** pass; the browser and Teams negative controls fail as designed.
+  Its full TUI E2E stopped at a stale check for the screenshot file name, fixed
+  by `b2ca9024`; the rerun, run **27717**, passes.
+
+**Linux** (swoop, the same isolation as before). Pass 7 at `b2ca9024` ran all 15
+gates, and all passed: the bundle update and plugin build; on each Node version
+the bridge suites (1,129 tests, compiled-CLI tests included), script tests,
+native provider E2E, browser and Teams smokes; the TUI build, provider E2E run
+**3044239** and full TUI E2E run **3055745**. Pass 6 at `19c50203` failed only
+the full TUI E2E, at the same stale check.
+
 ## Product integration — 2026-09-24
 
 Branch **`dsh-integration`**, on `dsh-capabilities-rc.1` (`0050882d`). The

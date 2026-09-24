@@ -256,8 +256,10 @@ restrict per-Session MCP tools, so the plugin drops the refused operations from
 the model's tool list at prompt assembly, and a guard still refuses everything
 outside 13 reviewed operations: no code evaluation, uploads, tab management,
 MCP resource reads, or `filename`, `paths` and `_meta` arguments. Results name
-snapshot and screenshot files without their private directory, and terminal
-colour codes are stripped from them.
+snapshot and screenshot files relative to the private directory
+(`./page-….png`); the plugin resolves it first, because on macOS the temp
+directory is a symlink and the names would otherwise climb through
+`/var/folders/…`. Terminal colour codes are stripped from failed calls' text.
 
 Every call asks for approval. The prompt names the action ("Allow the browser
 to open https://…?") and lists its arguments, and tool cards read
@@ -328,9 +330,12 @@ connected or not, so a failed connection never looks local. Inside that world:
 - **Disconnected:** a profile whose SSH row did not connect, or whose
   connection was lost, refuses new sessions and turns; slash commands still
   work. A lost connection says to restart dscode, and the leader then exits as
-  soon as its last client leaves so the restart reconnects. A connection that
-  never came up points to `dscode doctor --runtime`, because the helper does not
-  keep ssh's own error.
+  soon as its last client leaves so the restart reconnects. The helper does not
+  keep ssh's own error, so when a connection never comes up the SSH row probes
+  the host once more, the way `dscode remote status --check` does, and the
+  refusal names what it found (an unknown alias, a refused key, a missing Node,
+  workspace or helper). It then points to `dscode doctor --runtime`, which
+  repeats the check with the fix spelled out.
 
 Transcripts, attachments and credentials stay on this computer.
 
