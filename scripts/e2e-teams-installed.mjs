@@ -23,7 +23,7 @@ const TEAM_TOOLS = ['spawn_teammate', 'send_message', 'list_agents', 'wait_agent
 const LEGACY = ['subagent', 'subagent_fork', 'workflow', 'ralph']
 const POLICY = /create teammates only when the user explicitly asks to use Agent Teams or teammates/
 const MARKER = 'TEAMMATE-FIXTURE'
-let phase, step = 0, failure, teammateTurns = 0
+let phase, step = 0, failure, teammateTurns = 0, task, nestedRefused = false
 const checks = []
 
 const server = createServer((request, response) => {
@@ -35,12 +35,18 @@ const server = createServer((request, response) => {
     const body = JSON.parse(Buffer.concat(chunks))
     const names = body.tools.map(tool => tool.name)
     assert.equal(new Set(names).size, names.length, 'duplicate tool names: ' + names.join(', '))
-    const wire = JSON.stringify(body.messages)
+    const last = JSON.stringify(body.messages.at(-1))
     let tool, args
-    if (wire.includes(MARKER)) {
+    // The Lead's own requests carry MARKER inside its spawn_teammate call, so
+    // only a conversation that opens with it is the teammate's.
+    if (JSON.stringify(body.messages[0]).includes(MARKER)) {
       // The teammate's own turn: a Team member composed under the Lead's preset.
       assert.ok(TEAM_TOOLS.every(name => names.includes(name)), 'teammate tools: ' + names.join(', '))
-      teammateTurns++
+      if (teammateTurns++ === 0) { tool = 'spawn_teammate'; args = { name: 'nested', description: 'Must be refused', prompt: 'Must be refused' } }
+      else if (!nestedRefused) {
+        assert.match(last, /"is_error":true/, 'a teammate must not spawn teammates')
+        nestedRefused = true
+      }
     } else if (phase === 'plain') {
       assert.ok(TEAM_TOOLS.slice(0, 1).concat(TEAM_TOOLS.slice(5)).every(name => !names.includes(name)), 'Team tools leaked into another preset: ' + names.join(', '))
       assert.ok(['subagent', 'send_message', 'list_agents'].every(name => names.includes(name)), 'standard delegation tools: ' + names.join(', '))
@@ -51,10 +57,19 @@ const server = createServer((request, response) => {
       assert.match(JSON.stringify(body.system), POLICY)
       if (phase === 'team' && step === 0) { tool = 'team_task_create'; args = { subject: 'Check notes', description: 'Explicit test task', write_scopes: ['notes.md'] } }
       else if (phase === 'team' && step === 1) {
-        assert.doesNotMatch(JSON.stringify(body.messages.at(-1)), /"is_error":true/)
+        assert.doesNotMatch(last, /"is_error":true/)
+        task = JSON.parse(toolResultText(body))
+        tool = 'team_task_update'; args = { task_id: task.id, expected_revision: task.revision, action: 'claim' }
+      } else if (phase === 'team' && step === 2) {
+        assert.doesNotMatch(last, /"is_error":true/)
+        // The claim advanced the revision, so this update names a stale one.
+        tool = 'team_task_update'; args = { task_id: task.id, expected_revision: task.revision, action: 'complete' }
+      } else if (phase === 'team' && step === 3) {
+        assert.match(last, /"is_error":true/, 'a stale task revision must be refused')
         tool = 'spawn_teammate'; args = { name: 'reviewer', description: 'Review notes', prompt: MARKER + ' Reply briefly.' }
-      } else if (phase === 'team' && step === 2) assert.match(JSON.stringify(body.messages.at(-1)), /reviewer/)
-      assert.ok(step++ < 3, 'unexpected model loop')
+      } else if (phase === 'team' && step === 4) assert.match(last, /reviewer/)
+      // Later Lead turns are wake-ups for the teammate's deliveries; reply only.
+      assert.ok(step++ < 8, 'unexpected model loop')
     }
     response.writeHead(200, { 'content-type': 'text/event-stream' })
     for (const event of [
@@ -68,6 +83,10 @@ const server = createServer((request, response) => {
     response.end()
   })().catch(error => { failure ??= error; response.destroy(error) })
 })
+const toolResultText = body => {
+  const block = body.messages.at(-1).content.find(item => item.type === 'tool_result')
+  return typeof block.content === 'string' ? block.content : block.content.filter(item => item.type === 'text').map(item => item.text).join('')
+}
 server.listen(0, '127.0.0.1'); await once(server, 'listening')
 const origin = `http://127.0.0.1:${server.address().port}`
 // Test-only overlay: no title request, native tool calls. Never a deployment policy.
@@ -165,7 +184,7 @@ try {
 
   const team = await open(host, 'teams')
   assert.equal((await prompt(host, team, 'team')).stopReason, 'end_turn')
-  await until('the teammate turn', () => teammateTurns > 0)
+  await until("the teammate's refused nested spawn", () => nestedRefused)
   const spawned = host.notes.find(note => note.params?.sessionId === team && note.params.update?.sessionUpdate === 'subagent_spawned')?.params.update
   assert.ok(spawned, 'teammate child notification')
   assert.equal(spawned.persona, 'reviewer'); assert.equal(spawned.role, 'teammate')
@@ -174,8 +193,8 @@ try {
   assert.equal(commands.meta.capabilities.includes('subagents'), false, '/btw stays off in Teams')
   const board = await command(host, team, '/team')
   assert.match(board, /^- reviewer \(teammate [0-9a-f]{8}\) · /m)
-  assert.match(board, /Check notes · (pending|in_progress)/)
-  checks.push('teams: nine Team tools and policy, task and teammate created, persona on the child row, /team board, no /btw')
+  assert.match(board, /Check notes · in progress/)
+  checks.push('teams: nine Team tools and policy, task claimed and a stale revision refused, teammate created and its nested spawn refused, persona on the child row, /team board, no /btw')
 
   const cleared = await command(host, team, '/subagents clear ' + spawned.subagent_id).catch(error => error.message)
   assert.match(cleared, /reviewer is an Agent Team member/)
@@ -191,13 +210,14 @@ try {
   const blank = await open(host)
   await assert.rejects(command(host, blank, '/preset teams'), /attaches Agent Team tools when a session opens/)
   const blankTeam = await open(host, 'teams')
+  assert.doesNotMatch(await command(host, blankTeam, '/team'), /Check notes|reviewer/, "another Lead's board")
   await assert.rejects(command(host, blankTeam, '/preset history'), /cannot be switched in place/)
   await assert.rejects(host.rpc('x.ai/presets', { sessionId: blank, action: 'copy', from: 'teams', id: 'teams-copy' }), /carries Agent Team tools/)
   // The TUI picker reopens the session with the chosen preset.
   await host.rpc('session/load', { sessionId: blank, cwd: workspace, mcpServers: [], _meta: { agentPreset: 'teams' } })
   await nativeModel(host, blank)
   assert.equal((await prompt(host, blank, 'team-again')).stopReason, 'end_turn')
-  checks.push('in-place /preset switches and copies of teams are refused; reopening with teams attaches the tools')
+  checks.push("another Lead sees none of this Team; in-place /preset switches and copies of teams are refused; reopening with teams attaches the tools")
   assert.doesNotMatch(host.diagnostics, /failed to import|duplicate service|unresolved|did not activate/i)
   await host.stop()
 
@@ -205,8 +225,10 @@ try {
   await host.rpc('session/load', { sessionId: team, cwd: workspace, mcpServers: [] })
   await nativeModel(host, team)
   assert.equal((await prompt(host, team, 'team-again')).stopReason, 'end_turn')
-  assert.match(await command(host, team, '/team'), /^- reviewer \(teammate [0-9a-f]{8}\) · /m)
-  checks.push('a restarted leader reloads the Team session with its tools and durable roster')
+  const reloaded = await command(host, team, '/team')
+  assert.match(reloaded, /^- reviewer \(teammate [0-9a-f]{8}\) · /m)
+  assert.match(reloaded, /Check notes · in progress/)
+  checks.push('a restarted leader reloads the Team session with its tools, durable roster and task board')
   assert.doesNotMatch(host.diagnostics, /failed to import|duplicate service|unresolved|did not activate/i)
   if (failure) throw failure
   console.log(JSON.stringify({ node: process.version, passed: true, checks, workspace }))
