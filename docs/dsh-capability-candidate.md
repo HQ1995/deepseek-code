@@ -1,5 +1,71 @@
 # DSH capability candidate
 
+## UX audit — 2026-09-24
+
+A hands-on audit of the four integrated features in a real TUI (a scripted
+loopback model, real Chrome, and swoop over SSH) found problems that blocked or
+misled users. Commit `d83b56ec` fixes them, `6f80fb80` trims what the approval
+recorder keeps, and `62e9b7b6` updates the contract E2E for the renamed preset:
+
+- **Browser:** approvals now name the action and list its arguments. In
+  always-approve mode, DSH's `danger-full-access` preset had rejected every
+  browser call silently; the plugin now refuses with a reason, and the TUI
+  never auto-approves a browser prompt. An origin added after a session
+  started is refused with that reason instead of `net::ERR_BLOCKED_BY_CLIENT`.
+  The 11 always-refused tools leave the model's list, results lose private
+  paths and colour codes, and `/browser` replies render line by line.
+- **Teams:** `/team` renders line by line with teammate ids, and `/subagents`
+  takes teammate names. A preset pick for a session with history opens a new
+  session instead of blanking the transcript. Children stay out of `/resume`,
+  settled children stop counting in `/tasks`, and `/btw` explains its refusal.
+- **Remote workspace:** `dscode remote init --dsh DIR` takes the digests from
+  this dscode's runtime and checks the host before writing. A failed or lost
+  connection refuses turns with the reason and the next step, and a broken
+  leader exits at once so a restart reconnects. The header shows
+  `ssh HOST:PATH`, and `@` explains why nothing completes.
+- **Provider:** the native DeepSeek template sits beside the
+  OpenAI-compatible one, with a distinct name and fixed fields. After the
+  first provider, the toast and footer point to `/model`.
+
+### Verification
+
+**macOS arm64** (rc.1 runtime, evidence root `/Users/hqzhao/AI/dsh-rc171/run-20260923`):
+- The same scenarios by hand in tmux, against a scripted loopback model, real
+  Chrome and swoop. Each fix was checked in the new TUI, including a dropped
+  SSH master and an unreachable host.
+- Bridge suite on Node 24.19.0 and 22.19.0: 71 files, 1,120 tests each (4
+  compiled-CLI skips). `scripts/check-rust.sh` passes. The full pager suite
+  fails the same 49 upstream tests as before these changes (one timing test
+  passes alone).
+- `control/int-verify-all.sh s3` on both Node versions:
+  - the SDK and installed browser smokes, the Teams smoke and the Inspector
+    smoke;
+  - the browser and Teams negative controls, which failed at the
+    outside-origin and isolation checks.
+- Provider E2E run **3040** and full TUI E2E run **94902**, the latter after
+  `62e9b7b6`.
+- Remote workspace against swoop: `e2e-remote-installed.mjs` and
+  `e2e-remote-tui.mjs` pass. `dscode remote init` refused a missing package
+  directory (with the install command), a missing workspace and an unknown
+  host, and accepted the rc.1 directory.
+
+**Linux** (swoop, the same isolation as before). Pass 4 at `62e9b7b6` ran all
+15 gates, and all passed:
+- the bundle update and the plugin build;
+- on each Node version: bridge suites (1,124 tests, compiled-CLI tests
+  included), script tests and the native provider E2E;
+- on each Node version: the browser smokes and the Teams smoke, whose negative
+  controls failed as designed;
+- the TUI build, provider E2E run **638558** and full TUI E2E run **642755**.
+
+Pass 3 at `d83b56ec` passed every gate but the full TUI E2E, which still
+expected the old Teams preset label.
+
+Not changed: the welcome menu still lists "New worktree" in a remote workspace,
+where remote mode refuses it. Its rows map to actions by position, so removing
+the row is left for a later change. The Flash model still has no description
+in the catalog.
+
 ## Product integration — 2026-09-24
 
 Branch **`dsh-integration`**, on `dsh-capabilities-rc.1` (`0050882d`). The
