@@ -104,7 +104,9 @@ describe('native DeepSeek provider', () => {
     let liveProvider: string | undefined
     const llm: LlmLike = {
       listProviders: () => [{ id: 'alpha' }, ...f.isEnabled() ? [{ id: NATIVE_DEEPSEEK_PROVIDER, name: 'DeepSeek' }] : []],
-      listModels: async provider => provider === NATIVE_DEEPSEEK_PROVIDER ? [{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' }] : [{ id: 'shared', name: 'Shared' }],
+      listModels: async provider => provider === NATIVE_DEEPSEEK_PROVIDER
+        ? [{ id: 'deepseek-flash', name: 'DeepSeek-V41-Flash' }, { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', description: 'Stronger.' }]
+        : [{ id: 'deepseek-flash', name: 'Same id elsewhere' }, { id: 'shared', name: 'Shared' }],
     }
     const piAi: SettingsLike = { describe: () => [{ ns: 'llm-pi-ai', user: { providers: {} } }, ...f.settings.describe!()], mutate: f.settings.mutate }
     const catalog = createModelCatalog({
@@ -120,8 +122,14 @@ describe('native DeepSeek provider', () => {
     expect(JSON.stringify(added)).toContain(NATIVE_DEEPSEEK_PROVIDER)
     const roster = (await catalog.current()).providers.find(provider => provider.id === NATIVE_DEEPSEEK_PROVIDER)
     // Named apart from a pi-ai "DeepSeek" route in /provider and /model.
-    expect(roster).toMatchObject({ name: 'DeepSeek (native API)', api: NATIVE_DEEPSEEK_API, apiKeyEnv: 'DEEPSEEK_API_KEY', credential: { configured: true } })
-    await expect(catalog.add({ id: NATIVE_DEEPSEEK_PROVIDER })).rejects.toThrow('DeepSeek (native API) is already added. Edit it from /provider')
+    expect(roster).toMatchObject({ name: 'DeepSeek (native)', api: NATIVE_DEEPSEEK_API, apiKeyEnv: 'DEEPSEEK_API_KEY', credential: { configured: true } })
+    await expect(catalog.add({ id: NATIVE_DEEPSEEK_PROVIDER })).rejects.toThrow('DeepSeek (native) is already added. Edit it from /provider')
+    // The adapter's undescribed default model gets dscode's description; others keep theirs.
+    const models = (await catalog.current()).availableModels
+    const describe = (name: string) => models.find(model => model.name === name)?.description
+    expect(describe('DeepSeek-V41-Flash')).toBe('Default model for everyday coding, with image input; costs less than DeepSeek-V4-Pro.')
+    expect(describe('DeepSeek V4 Pro')).toBe('Stronger.')
+    expect(describe('Same id elsewhere')).toBeUndefined()
     await catalog.update({ providerId: NATIVE_DEEPSEEK_PROVIDER, baseURL: 'https://gateway.example/anthropic' })
     expect(f.section).toEqual({ baseURL: 'https://gateway.example/anthropic' })
     liveProvider = NATIVE_DEEPSEEK_PROVIDER

@@ -11,7 +11,14 @@ export const NATIVE_DEEPSEEK_PROVIDER = 'deepseek-official'
 /** Wire marker for the add-provider form; never a pi-ai `api` value. */
 export const NATIVE_DEEPSEEK_API = 'deepseek-native'
 /** How /provider and /model name this route beside a pi-ai "DeepSeek" route. */
-export const NATIVE_DEEPSEEK_NAME = 'DeepSeek (native API)'
+export const NATIVE_DEEPSEEK_NAME = 'DeepSeek (native)'
+/** DSH 0.1.7-rc.1 lists its default model without a description (its own
+ * picker still keys one to the older `deepseek-v4-flash` id). These fill a
+ * missing one with what the adapter's catalog states: the first entry, image
+ * input, and V4-Pro described as the costlier choice. */
+export const NATIVE_MODEL_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  'deepseek-flash': 'Default model for everyday coding, with image input; costs less than DeepSeek-V4-Pro.',
+}
 const ROW_ID = 'llm-deepseek'
 const MODULE = '@deepseek-ai/dsh-llm-deepseek'
 const DEFAULT_KEY_ENV = 'DEEPSEEK_API_KEY'

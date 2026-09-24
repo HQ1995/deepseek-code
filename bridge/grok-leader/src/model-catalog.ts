@@ -7,7 +7,7 @@ import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { RpcError } from './protocol.ts'
 import { JSONRPC_INVALID_PARAMS, internalError, paramRecord } from './acp.ts'
 import { discoverEndpointModelCapabilities, type EndpointCapabilities } from './model-endpoint.ts'
-import { NATIVE_DEEPSEEK_NAME, nativeProviderForm, type NativeProviders } from './native-provider.ts'
+import { NATIVE_DEEPSEEK_NAME, NATIVE_MODEL_DESCRIPTIONS, nativeProviderForm, type NativeProviders } from './native-provider.ts'
 import { nativeInstance, type AgentDefaultModelLike, type CredentialInfo, type CredentialsLike, type LlmLike, type ModelInfo, type SettingsLike } from './native-seams.ts'
 import {
   NO_MODELS_MARKER, PROVIDER_SETTINGS_NS, discoveredModelUpdate, editableProfile, hasUserProviderRoute, isDiscoverableApi,
@@ -136,7 +136,10 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
    * listing) and their exact metadata, read sequentially inside the drain. */
   const readProviderModels = (llmService: LlmLike, provider: string): Promise<ProviderModels> => track(async () => {
     assertOpen()
-    const staticModels = await llmService.listModels(provider)
+    const listed = await llmService.listModels(provider)
+    const native = dependencies.native?.owns(provider) === true
+    const staticModels = native ? listed.map(model => model.description !== undefined || NATIVE_MODEL_DESCRIPTIONS[model.id] === undefined
+      ? model : { ...model, description: NATIVE_MODEL_DESCRIPTIONS[model.id] }) : listed
     const discovered = discoveredModels.get(provider)
     const models = discovered === undefined ? staticModels : discovered.map(model => ({ id: model.id, name: model.name ?? model.id }))
     const metadata = new Map<string, ModelInfo>()

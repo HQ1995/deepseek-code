@@ -67,11 +67,11 @@ pub const PRESETS: &[ProviderPreset] = &[
     },
     // DIVERGENCE(dscode): the official DeepSeek adapter: Messages API, Files
     // API image reuse and native reasoning. Its models appear under provider
-    // deepseek-official; the bridge names it "DeepSeek (native API)".
+    // deepseek-official; the bridge names it "DeepSeek (native)".
     ProviderPreset {
         label: "DeepSeek (native)",
         id: "deepseek-official",
-        display_name: "DeepSeek (native API)",
+        display_name: "DeepSeek (native)",
         api_key_env: "DEEPSEEK_API_KEY",
         api: NATIVE_DEEPSEEK_API,
         base_url: "",
@@ -1054,7 +1054,7 @@ mod tests {
         let value = |field: Field| rows.iter().find(|row| row.field == field).unwrap().value.clone();
         assert_eq!(value(Field::Api), "DeepSeek native Messages API  (fixed)");
         assert_eq!(value(Field::Id), "deepseek-official  (fixed)");
-        assert_eq!(value(Field::DisplayName), "DeepSeek (native API)  (fixed)");
+        assert_eq!(value(Field::DisplayName), "DeepSeek (native)  (fixed)");
         assert!(!value(Field::ApiKeyEnv).contains("fixed"));
     }
 

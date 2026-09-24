@@ -597,11 +597,13 @@ native template uses provider id `deepseek-official`, the `DEEPSEEK_API_KEY`
 variable and the default base URL `https://api.deepseek.com/anthropic`. Its API
 value `deepseek-native` is not a pi-ai protocol but a marker. The bridge
 enables the official `llm-deepseek` adapter for it instead of writing a pi-ai
-route and names it "DeepSeek (native API)". The form shows its id, name and
+route and names it "DeepSeek (native)". The form shows its id, name and
 protocol as fixed and skips them, since the bridge would ignore edits.
 
 Adding a provider while no model is selected says to choose one with `/model`,
-and re-picking the active provider says so instead of closing silently.
+and re-picking the active provider says so instead of closing silently. The
+`/model` picker drops the `[provider]` prefix when only one provider has models,
+so the first pick after adding a provider shows plain model names.
 
 ### Provider form: arrows move fields; presets are a chooser row
 

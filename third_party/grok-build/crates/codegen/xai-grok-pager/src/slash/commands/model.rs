@@ -165,6 +165,14 @@ fn build_model_items(models: &ModelState, query: &str) -> Vec<ArgItem> {
         && models
             .listed_models()
             .any(|(id, _)| models.provider_for(id) == scope);
+    // DIVERGENCE(dscode): with one provider the prefix names nothing new
+    // (the first pick after adding a provider has no current model).
+    let single_provider = {
+        let mut providers = models.listed_models().map(|(id, _)| models.provider_for(id));
+        providers
+            .next()
+            .is_none_or(|first| providers.all(|other| other == first))
+    };
     for (id, info) in models.listed_models() {
         let provider = models.provider_for(id);
         // Empty query: show the current provider's models first. A non-empty
@@ -192,7 +200,7 @@ fn build_model_items(models: &ModelState, query: &str) -> Vec<ArgItem> {
             format!("{} (current)", info.name)
         } else if provider.is_empty() {
             info.name.clone()
-        } else if scope.is_empty() || provider != scope {
+        } else if (scope.is_empty() && !single_provider) || (!scope.is_empty() && provider != scope) {
             format!("[{}] {}", provider_label, info.name)
         } else {
             info.name.clone()
@@ -474,10 +482,29 @@ mod tests {
             current_title: None,
         };
         let items = ModelCommand.suggest_args(&ctx, "").unwrap();
-        assert_eq!(items[0].display, "[DeepSeek] DeepSeek V4 Flash");
+        // DIVERGENCE(dscode): one provider needs no prefix, even before a pick.
+        assert_eq!(items[0].display, "DeepSeek V4 Flash");
         assert_eq!(items[0].description, "deepseek-v4-flash");
         assert!(items[0].match_text.contains("deepseek-v4-flash"));
         assert!(items[0].match_text.contains("DeepSeek"));
+
+        // A second provider brings the human-readable prefix back.
+        let (id, info) = provider_model("pi-code", "Pi Code", "pi");
+        state.available.insert(id, info);
+        let ctx = AppCtx {
+            models: &state,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            workflows_available: true,
+            capabilities: None,
+            screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
+        };
+        let items = ModelCommand.suggest_args(&ctx, "").unwrap();
+        assert!(items.iter().any(|item| item.display == "[DeepSeek] DeepSeek V4 Flash"));
+        assert!(items.iter().any(|item| item.display == "[pi] Pi Code"));
     }
 
     #[test]
