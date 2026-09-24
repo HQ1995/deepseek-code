@@ -85,6 +85,9 @@ export const name = 'grok-leader'
 /** Agents, maintained policy state and durable discovery must exist before accepting clients. */
 export const inject = ['agents', 'sessionPersistence', 'sessionProjections', 'attachments']
 
+/** Leader socket when the config names none. */
+const DEFAULT_SOCKET_PATH = '/tmp/dsh-grok-leader.sock'
+
 /** Plugin config: socket path and the provider/model selection used for created agents. */
 export interface GrokLeaderConfig {
   /** Unix socket path the grok clients connect to. */
@@ -111,7 +114,7 @@ export const Config: Schema<GrokLeaderConfig> = Schema.object({
   // `config value ?? env ?? fallback` in apply(), which requires ABSENCE to
   // be observable — a schema default would fill the slot before the env
   // layer could speak.
-  socketPath: Schema.string().default('/tmp/dsh-grok-leader.sock'),
+  socketPath: Schema.string().default(DEFAULT_SOCKET_PATH),
   provider: Schema.string(),
   model: Schema.string(),
   combineQueuedPrompts: Schema.boolean(),
@@ -131,10 +134,7 @@ const WIRE = {
   sessionSetModel: 'session/set_model',
   sessionSetMode: 'session/set_mode',
   sessionClose: 'session/close',
-  sessionUpdate: 'session/update',
   modelsList: 'x.ai/models/list',
-  modelsUpdate: 'x.ai/models/update',
-  sessionsList: 'x.ai/sessions/list',
   providersAdd: 'x.ai/providers/add',
   providersUpdate: 'x.ai/providers/update',
   providersRemove: 'x.ai/providers/remove',
@@ -212,7 +212,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     },
   })
   const transport = createLeaderTransport({
-    socketPath: config.socketPath ?? '/tmp/dsh-grok-leader.sock',
+    socketPath: config.socketPath ?? DEFAULT_SOCKET_PATH,
     version: PACKAGE_VERSION,
     async request(clientId, method, params) {
       try { return await dispatchRequest(clientId, method, params) }
