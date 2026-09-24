@@ -5,6 +5,15 @@
 //! config must too — reintroducing a config `?` fails exactly that run.
 //! The pointer must equal the current version: the installer converges in
 //! both directions, so an older pointer triggers a downgrade attempt.
+//!
+//! DIVERGENCE(dscode): `dscode update` reads its release channel strictly,
+//! in Rust (`build_update_config`) and in the managed JS updater, so a
+//! corrupt `config.toml` stops it with the parse error instead of falling
+//! back to the version's default channel. dscode also drops inherited
+//! `GROK_*` values: the profile comes from `DSCODE_HOME` and the release
+//! from the loopback `DSC_UPDATE_BASE_URL` seam, in GitHub-release form.
+//! `PATH` is not passed: the updater installs through `npx`, and a test must
+//! not reach npm.
 
 use std::io::{Read, Write};
 use std::process::Command;
@@ -17,7 +26,8 @@ fn pager_binary() -> std::path::PathBuf {
         return std::path::absolute(&p)
             .unwrap_or_else(|e| panic!("failed to absolutize PAGER_BINARY {p}: {e}"));
     }
-    option_env!("CARGO_BIN_EXE_xai-grok-pager")
+    // DIVERGENCE(dscode): the binary target is `dscode`, not `xai-grok-pager`.
+    option_env!("CARGO_BIN_EXE_dscode")
         .map(std::path::PathBuf::from)
         .expect("PAGER_BINARY is unset and this build is not `cargo test`")
 }
@@ -31,8 +41,18 @@ fn spawn_pointer_server(body: Arc<Mutex<String>>) -> (std::net::TcpListener, Str
         for stream in serving.incoming() {
             let Ok(mut stream) = stream else { return };
             let mut buf = [0u8; 1024];
-            let _ = stream.read(&mut buf);
+            let read = stream.read(&mut buf).unwrap_or(0);
             let version = body.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            // DIVERGENCE(dscode): `/releases/latest` answers one GitHub
+            // release; the alpha/beta lookup lists them.
+            let release =
+                format!(r#"{{"tag_name":"v{version}","draft":false,"prerelease":false}}"#);
+            let latest = String::from_utf8_lossy(&buf[..read]).contains("/releases/latest");
+            let version = if latest {
+                release
+            } else {
+                format!("[{release}]")
+            };
             let _ = stream.write_all(
                 format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -55,9 +75,8 @@ fn run_update(base: &str, config_toml: &str, extra_args: &[&str]) -> std::proces
         .args(extra_args)
         .env_clear()
         .env("HOME", home.path())
-        .env("GROK_HOME", home.path())
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("GROK_CLI_BASE_URL", base)
+        .env("DSCODE_HOME", home.path())
+        .env("DSC_UPDATE_BASE_URL", base)
         .output()
         .expect("spawn grok update")
 }
@@ -65,7 +84,7 @@ fn run_update(base: &str, config_toml: &str, extra_args: &[&str]) -> std::proces
 /// The valid run proves the environment resolves to success, so a nonzero
 /// corrupt run can only mean a config failure aborted the update.
 #[test]
-fn corrupt_config_never_changes_update_outcome() {
+fn corrupt_config_stops_update_with_the_parse_error() {
     let body = Arc::new(Mutex::new("0.0.1".to_owned()));
     let (_listener, base) = spawn_pointer_server(body.clone());
 
@@ -88,10 +107,10 @@ fn corrupt_config_never_changes_update_outcome() {
     );
 
     let corrupt = run_update(&base, "this is not toml {{{[[[", &[]);
+    let stderr = String::from_utf8_lossy(&corrupt.stderr);
     assert!(
-        corrupt.status.success(),
-        "a corrupt config.toml must not block grok update\nstdout:\n{}\nstderr:\n{}",
+        !corrupt.status.success() && stderr.contains("TOML parse error"),
+        "a corrupt config.toml must stop dscode update with the parse error\nstdout:\n{}\nstderr:\n{stderr}",
         String::from_utf8_lossy(&corrupt.stdout),
-        String::from_utf8_lossy(&corrupt.stderr)
     );
 }

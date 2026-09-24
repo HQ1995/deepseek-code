@@ -127,6 +127,13 @@ after entering the namespace to handle older util-linux launchers.
   Missing or historical launchers bootstrap a known whole-product updater
   separately from the target version, preventing old beta launchers from
   delegating back into a newer cached TUI indefinitely.
+- Update config is read strictly. A `config.toml` that does not parse, or that
+  names an unknown channel or format, stops `dscode update` with the error, in
+  Rust `build_update_config` and in the JS updater. Upstream instead falls back
+  to the version's default channel so `grok update` can recover from a broken
+  config. `xai-grok-pager-bin/tests/update_never_blocked_by_config.rs` pins the
+  dscode outcome through the `dscode` binary, `DSCODE_HOME` and the loopback
+  `DSC_UPDATE_BASE_URL` release seam, without network access or an install.
 - GitHub release lookups send `GITHUB_TOKEN`/`GH_TOKEN` when the environment
   provides one and fall back to the anonymous call when it is rejected or
   limit-spent: the anonymous API allows 60 requests per hour per address, which
