@@ -4,8 +4,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { createSessionPresets, type AgentPresetsLike } from '../src/session-presets.ts'
 import { presetHistory } from '../src/preset-history.ts'
+import { event } from './support/session-events.ts'
 
-const event = (type: string, data: unknown = {}) => ({ type, data, seq: 0, time: 0 }) as SessionEvent
 function fixture() {
   const order: string[] = [], sessions = new Map<string, { clientId: number; agent: Agent; queue: { busy: boolean } }>()
   const choices = new Map<Context, string>()

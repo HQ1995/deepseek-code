@@ -8,10 +8,10 @@ import type { ExecutionWorld } from '../src/execution-world.ts'
 import { createSessionRegistry } from '../src/session-registry.ts'
 import { createSessionDiscovery } from '../src/session-discovery.ts'
 import type { SessionModel } from '../src/session-models.ts'
+import { event } from './support/session-events.ts'
 
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(stops.splice(0).map(stop => stop())) })
-const event = (type: string, data: unknown = {}, seq = 0) => ({ type, data, seq, time: 1 }) as SessionEvent
 function fixture() {
   const order: string[] = [], notify = vi.fn(), client = { closed: false, notify }
   const clients = new Map([[1, client], [2, { closed: false, notify: vi.fn() }]])
@@ -62,7 +62,7 @@ function fixture() {
     const header = inspection?.meta ?? { id, createdAt: 1, version: 3, isSeeded: false, ...options.meta }
     const session = { id, header, inheritedEventCount: inspection?.inheritedEventCount ?? options.inheritedEventCount ?? SessionLogOffset(0),
       get seq() { return SessionLogOffset(events.length) },
-      snapshotEvents: () => events, append: (type: string, data: unknown) => { const next = event(type, data, events.length); events.push(next); return next } }
+      snapshotEvents: () => events, append: (type: string, data: unknown) => { const next = event(type, data, events.length, 1); events.push(next); return next } }
     const agent = { id, session, ctx, options: options.agentOptions, status: 'idle', cancel: vi.fn(),
       followup: vi.fn(), steer: vi.fn(), whenIdle: vi.fn(async () => {}) } as unknown as Agent
     histories.set(agent.session, events)

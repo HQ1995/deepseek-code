@@ -7,6 +7,7 @@ import {
 } from '@deepseek-ai/dsh-session-persistence'
 import { createSessionDiscovery, type SessionProjectionCacheLike, type SessionQueryLike } from '../src/session-discovery.ts'
 import { tick } from './support/async.ts'
+import { event } from './support/session-events.ts'
 
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(stops.splice(0).map(stop => stop())) })
@@ -16,9 +17,8 @@ afterEach(async () => { await Promise.all(stops.splice(0).map(stop => stop())) }
 const traceable = <T extends object>(value: T): T => new Proxy(value, {
   get: (target, property, receiver) => property === symbols.original ? target : Reflect.get(target, property, receiver),
 })
-const event = (type: string, data: unknown, time: number): SessionEvent => ({ type, data, time, seq: time }) as SessionEvent
-const prompt = (text: string, time = 1) => event('user/message', { source: { kind: 'user' }, content: [{ type: 'text', text }] }, time)
-const title = (text: string, time = 2) => event('session/title', { title: text }, time)
+const prompt = (text: string, time = 1) => event('user/message', { source: { kind: 'user' }, content: [{ type: 'text', text }] }, time, time)
+const title = (text: string, time = 2) => event('session/title', { title: text }, time, time)
 function fixture(cleanupError?: string) {
   const headers = new Map<string, SessionHeader>(), logs = new Map<string, readonly SessionEvent[]>()
   const revisions = new Map<string, string>(), owned = new Set<Session>()
@@ -557,7 +557,7 @@ describe('owned session discovery', () => {
   })
 
   it('selects compact values from bounded contiguous pages with one handle and a fixed end', async () => {
-    const f = fixture(), events = Array.from({ length: 1030 }, (_, seq) => event('session/title', { title: 'body'.repeat(2048) }, seq))
+    const f = fixture(), events = Array.from({ length: 1030 }, (_, seq) => event('session/title', { title: 'body'.repeat(2048) }, seq, seq))
     f.add('a', '/work', events)
     const selected = await f.discovery.select(SessionId('a'), { end: SessionLogOffset(1027) }, event => event.seq % 256 === 0 ? event.seq : undefined)
     expect(selected).toEqual([0, 256, 512, 768, 1024])
