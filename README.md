@@ -38,7 +38,7 @@ dscode "review this repository"     # start with a prompt
 dscode -p "explain src/index.ts"     # headless single turn
 dscode -c                           # continue the latest session for this cwd
 dscode --resume <id-or-title>       # resume a session
-dscode sessions list                # list durable sessions
+dscode sessions list [--all]        # this cwd's sessions (all cwds); also `sessions search <q>`
 dscode -w                           # new session in an auto-named worktree
 dscode --worktree=feat "fix it"     # named worktree with an initial prompt
 dscode worktree list                # inspect managed worktrees
