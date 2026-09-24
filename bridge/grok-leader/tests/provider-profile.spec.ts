@@ -1,13 +1,114 @@
+/**
+ * Pure provider-route rules from src/provider-profile.ts: reading the
+ * llm-pi-ai user section, validating the /provider form and deriving the
+ * persisted profiles. They are behavior-pinned here so the model catalog and
+ * socket suites do not need to re-prove them end to end.
+ */
 import { describe, expect, it } from 'vitest'
 import {
-  discoveredModelUpdate, editableProfile, knownRouteBaseUrls, mergeEditable, normalizeProviderForm, pastedApiKey, pastedKeyRef,
-  requireProviderId, routeSignature, sharesCredentialRef,
+  discoveredModelUpdate, editableProfile, hasUserProviderRoute, knownRouteBaseUrls, mergeEditable, normalizeProviderForm,
+  pastedApiKey, pastedKeyRef, providerUserProfile, providerUserSection, requireProviderId, routeSignature, sharesCredentialRef,
 } from '../src/provider-profile.ts'
 import type { SettingsLike } from '../src/native-seams.ts'
 
 const settingsWith = (providers: Record<string, unknown>): SettingsLike => ({
   mutate: async () => {},
   describe: () => [{ ns: 'llm-pi-ai', user: { providers } }],
+})
+
+/** Minimal structural stand-in for the settings seam's user-section read. */
+function settingsService(expose: { ns: string; user?: unknown }[]): {
+  describe?(): Array<{ ns: string; user?: unknown }>
+} {
+  return { describe: () => expose }
+}
+
+/** A fresh std user section mirroring what dsh-settings-file writes. */
+function userSection(): Record<string, unknown> {
+  return {
+    providers: {
+      'provider-a': { apiKeyEnv: 'A_KEY', baseURL: 'https://a.example/v1' },
+      'provider-b': { apiKeyEnv: 'B_KEY' },
+    },
+  }
+}
+
+describe('providerUserSection', () => {
+  it('returns the llm-pi-ai user section from a settings service', () => {
+    const svc = settingsService([{ ns: 'llm-pi-ai', user: userSection() }])
+    expect(providerUserSection(svc)).toEqual(userSection())
+  })
+
+  it('returns undefined when the llm-pi-ai ns is absent', () => {
+    const svc = settingsService([{ ns: 'agent-preset-registry', user: { selectedDefault: 'standard' } }])
+    expect(providerUserSection(svc)).toBeUndefined()
+  })
+
+  it('returns undefined when the user value is null or non-object', () => {
+    expect(providerUserSection(settingsService([{ ns: 'llm-pi-ai', user: null }]))).toBeUndefined()
+    expect(providerUserSection(settingsService([{ ns: 'llm-pi-ai', user: 'nope' }]))).toBeUndefined()
+  })
+
+  it('treats a service with no describe seam as absent', () => {
+    expect(providerUserSection(undefined)).toBeUndefined()
+    expect(providerUserSection({})).toBeUndefined()
+  })
+})
+
+describe('providerUserProfile', () => {
+  it('returns one provider profile from the section', () => {
+    expect(providerUserProfile(userSection(), 'provider-a')).toEqual({ apiKeyEnv: 'A_KEY', baseURL: 'https://a.example/v1' })
+    expect(providerUserProfile(userSection(), 'provider-b')).toEqual({ apiKeyEnv: 'B_KEY' })
+  })
+
+  it('returns {} for an unknown provider id', () => {
+    expect(providerUserProfile(userSection(), 'provider-c')).toEqual({})
+  })
+
+  it('returns {} when the section does not expose providers', () => {
+    expect(providerUserProfile(undefined, 'provider-a')).toEqual({})
+    expect(providerUserProfile({}, 'provider-a')).toEqual({})
+    expect(providerUserProfile({ providers: null }, 'provider-a')).toEqual({})
+  })
+})
+
+describe('hasUserProviderRoute', () => {
+  it('is true only for ids named in the user section', () => {
+    const svc = settingsService([{ ns: 'llm-pi-ai', user: userSection() }])
+    expect(hasUserProviderRoute(svc, 'provider-a')).toBe(true)
+    expect(hasUserProviderRoute(svc, 'provider-b')).toBe(true)
+    expect(hasUserProviderRoute(svc, 'provider-c')).toBe(false)
+  })
+
+  it('is false without a section or providers', () => {
+    expect(hasUserProviderRoute(undefined, 'provider-a')).toBe(false)
+    expect(hasUserProviderRoute(settingsService([{ ns: 'agent-preset-registry', user: {} }]), 'provider-a')).toBe(false)
+    expect(hasUserProviderRoute(settingsService([{ ns: 'llm-pi-ai', user: { providers: undefined } }]), 'provider-a')).toBe(false)
+  })
+})
+
+describe('knownRouteBaseUrls', () => {
+  it('returns [] when no route carries a baseURL', () => {
+    const svcB = settingsService([{ ns: 'llm-pi-ai', user: { providers: { 'provider-b': { apiKeyEnv: 'B_KEY' } } } }])
+    expect(knownRouteBaseUrls(svcB)).toEqual([])
+    expect(knownRouteBaseUrls(settingsService([{ ns: 'llm-pi-ai', user: { providers: {} } }]))).toEqual([])
+    expect(knownRouteBaseUrls(undefined)).toEqual([])
+  })
+
+  it('skips non-object profiles and non-string baseURLs', () => {
+    const svc = settingsService([{
+      ns: 'llm-pi-ai',
+      user: {
+        providers: {
+          a: { baseURL: 'https://ok.example' },
+          b: 'scalar',
+          c: { baseURL: 42 },
+          d: { baseURL: '' },
+        },
+      },
+    }])
+    expect(knownRouteBaseUrls(svc)).toEqual(['https://ok.example'])
+  })
 })
 
 describe('provider form rules', () => {
