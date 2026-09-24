@@ -27,6 +27,7 @@ import { createProfilePlugins, inspectPluginRuntime } from './profile-plugins.ts
 export { analyzeBundlePatch, parseCommandLine, inspectPluginRuntime, type BundlePatchAnalysis } from './profile-plugins.ts'
 import { protectTerminalSignals } from './terminal-signal.ts'
 import { JSONRPC_METHOD_NOT_FOUND, internalError, paramRecord } from './acp.ts'
+import { errorMessage } from './guards.ts'
 import { createModelCatalog } from './model-catalog.ts'
 import { createNativeProviders } from './native-provider.ts'
 import { createPluginRows, type PluginManagerLike } from './plugin-rows.ts'
@@ -394,7 +395,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const teamMembers = (record: SessionRecord) => {
     if (!hasTeam(record)) return undefined
     try { return teamService()?.listMembers(record.agent).filter(member => member.role === 'teammate') } catch (error) {
-      logger.warn('grok-leader: Agent Team roster unavailable: ' + (error instanceof Error ? error.message : String(error)))
+      logger.warn('grok-leader: Agent Team roster unavailable: ' + errorMessage(error))
       return undefined
     }
   }

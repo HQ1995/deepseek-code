@@ -1,4 +1,5 @@
 /** Shared ACP request validation; independent of sockets and DSH lifetimes. */
+import { isRecord } from './guards.ts'
 import { RpcError } from './protocol.ts'
 
 export const JSONRPC_METHOD_NOT_FOUND = -32601
@@ -9,8 +10,6 @@ export const invalidParams = (detail: string): RpcError => new RpcError(JSONRPC_
 export const internalError = (detail: string): RpcError => new RpcError(JSONRPC_INTERNAL_ERROR, detail)
 
 export const paramRecord = (params: unknown, method: string): Record<string, unknown> => {
-  if (typeof params !== 'object' || params === null || Array.isArray(params)) {
-    throw invalidParams(method + ' params must be an object')
-  }
-  return params as Record<string, unknown>
+  if (!isRecord(params)) throw invalidParams(method + ' params must be an object')
+  return params
 }

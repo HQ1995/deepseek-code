@@ -10,6 +10,7 @@ import { foldScheduleEvents } from '@deepseek-ai/dsh-schedule'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { invalidParams, internalError, paramRecord } from './acp.ts'
 import { parseReminder } from './reminders.ts'
+import { nonEmpty } from './guards.ts'
 import type { SessionOutput } from './session-output.ts'
 import { jobOutputPatch } from './job-output.ts'
 
@@ -32,7 +33,6 @@ interface TaskHost<T extends TaskSession> {
 interface ScheduleProjections {
   stateOf(session: Agent['session'], key: 'schedule'): ReturnType<typeof foldScheduleEvents> | undefined
 }
-const nonEmptyString = (value: unknown): value is string => typeof value === 'string' && value.length > 0
 
 /** Native task controls, reminder projection and passive job-output snapshots
  * share one owner. The host supplies a single heartbeat; this module creates
@@ -150,7 +150,7 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
         try { args = parseReminder(p.text) } catch (error) { throw invalidParams(errorChain(error)) }
         await invoke('schedule_create', args)
       } else if (method === 'x.ai/scheduler/delete') {
-        if (!nonEmptyString(p.taskId)) throw invalidParams('taskId is required')
+        if (!nonEmpty(p.taskId)) throw invalidParams('taskId is required')
         await invoke('schedule_delete', { id: p.taskId })
       }
       const rows = await invoke('schedule_list', {})
@@ -265,7 +265,7 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
   }
   const killTask = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'x.ai/task/kill')
-    if (!nonEmptyString(p.sessionId) || !nonEmptyString(p.taskId) || (p.source !== 'clientUi' && p.source !== 'teardown')) throw invalidParams('x.ai/task/kill requires sessionId, taskId and source')
+    if (!nonEmpty(p.sessionId) || !nonEmpty(p.taskId) || (p.source !== 'clientUi' && p.source !== 'teardown')) throw invalidParams('x.ai/task/kill requires sessionId, taskId and source')
     const record = owned(clientId, SessionId(p.sessionId))
     if (record === undefined) throw invalidParams('unknown session: ' + p.sessionId)
     const taskId = p.taskId, source = p.source
@@ -287,7 +287,7 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
 
   const taskOutput = (clientId: number, params: unknown): unknown => {
     const p = paramRecord(params, 'x.ai/task/output')
-    if (!nonEmptyString(p.sessionId) || !nonEmptyString(p.taskId)) throw invalidParams('task output requires sessionId and taskId')
+    if (!nonEmpty(p.sessionId) || !nonEmpty(p.taskId)) throw invalidParams('task output requires sessionId and taskId')
     const record = owned(clientId, SessionId(p.sessionId))
     if (record === undefined) throw invalidParams('unknown session')
     const jobs = jobsService(record)

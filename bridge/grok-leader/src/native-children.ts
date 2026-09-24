@@ -7,6 +7,7 @@ import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionInspection, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { SubagentRuntime, SubagentPromptRequestId } from '@deepseek-ai/dsh-subagent'
 import { invalidParams, internalError, paramRecord } from './acp.ts'
+import { nonEmpty } from './guards.ts'
 import { ChildHistoryIndex, CHILD_HISTORY_PAGE_SIZE, type ChildEventReader } from './child-history.ts'
 import { workflowUpdates, type WorkflowHistory, type LiveWorkflow } from './workflows.ts'
 import { parsePrompt } from './prompt-content.ts'
@@ -44,7 +45,6 @@ interface ChildHost<S extends ChildSession> {
   on<K extends keyof ChildEventMap>(name: K, listener: (...args: ChildEventMap[K]) => void): () => void
   logger: { warn(message: string): void }
 }
-const nonEmptyString = (value: unknown): value is string => typeof value === 'string' && value.length > 0
 
 /** Workflow membership and child visibility are one native projection. Owns
  * their subscriptions, bounded history indexes, refresh coalescing and pending
@@ -349,7 +349,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
 
   const childHistory = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'x.ai/subagent/history')
-    if (!nonEmptyString(p.sessionId) || !nonEmptyString(p.childSessionId)) throw invalidParams('subagent history requires sessionId and childSessionId')
+    if (!nonEmpty(p.sessionId) || !nonEmpty(p.childSessionId)) throw invalidParams('subagent history requires sessionId and childSessionId')
     const sessionId = SessionId(p.sessionId), childSessionId = SessionId(p.childSessionId)
     const record = owned(clientId, sessionId)
     if (record === undefined) throw invalidParams('unknown session: ' + sessionId)
@@ -396,7 +396,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
 
   const cancelSubagent = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'x.ai/subagent/cancel')
-    if (!nonEmptyString(p.sessionId) || !nonEmptyString(p.subagentId)) throw invalidParams('x.ai/subagent/cancel requires sessionId and subagentId')
+    if (!nonEmpty(p.sessionId) || !nonEmpty(p.subagentId)) throw invalidParams('x.ai/subagent/cancel requires sessionId and subagentId')
     const record = owned(clientId, SessionId(p.sessionId))
     if (record === undefined) throw invalidParams('unknown session: ' + p.sessionId)
     const subagentId = p.subagentId

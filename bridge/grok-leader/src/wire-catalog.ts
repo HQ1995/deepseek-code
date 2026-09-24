@@ -4,6 +4,7 @@
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { invalidParams } from './acp.ts'
+import { nonEmpty } from './guards.ts'
 import type { CredentialInfo, ModelInfo } from './native-seams.ts'
 
 /**
@@ -60,8 +61,6 @@ export interface ProviderModels {
 
 type Selection = { provider: string; model: string; reasoningEffort?: string }
 
-const nonEmptyString = (value: unknown): value is string => typeof value === 'string' && value.length > 0
-
 /** Build the wire catalog id for a provider/model pair. */
 const wireModelId = (provider: string, modelId: string): string => provider + MODEL_ID_SEPARATOR + modelId
 
@@ -72,13 +71,13 @@ export function modelEffortKey(provider: string, model: string): string {
 
 /** Keep a saved/session effort only when the exact advertised model accepts it. */
 export const acceptedReasoningEffort = (model: CatalogModel | undefined, effort: unknown): string | undefined => {
-  if (!nonEmptyString(effort) || model === undefined) return undefined
+  if (!nonEmpty(effort) || model === undefined) return undefined
   if (model._meta?.supportsReasoningEffort === false) return undefined
   const supported = model._meta?.reasoningEfforts
   return supported === undefined || supported.includes(effort) ? effort : undefined
 }
 
-const firstNonEmpty = (...values: unknown[]): string | undefined => values.find(nonEmptyString)
+const firstNonEmpty = (...values: unknown[]): string | undefined => values.find(nonEmpty)
 
 /** Resolve a session selection from request overrides, deployment config, or
  * the supplied saved/session default. All-empty means provider onboarding. */
@@ -113,8 +112,8 @@ function advertise(
   info: ModelInfo | undefined,
   hasMetadataResolver: boolean,
 ): CatalogModel {
-  const inputModalities = (info?.inputModalities ?? model.inputModalities)?.filter(nonEmptyString)
-  const efforts = info?.reasoning?.efforts?.map(effort => effort.id).filter(nonEmptyString)
+  const inputModalities = (info?.inputModalities ?? model.inputModalities)?.filter(nonEmpty)
+  const efforts = info?.reasoning?.efforts?.map(effort => effort.id).filter(nonEmpty)
   return {
     modelId: wireId,
     name: model.name,
@@ -162,7 +161,7 @@ function flattenRoutes(rows: readonly ProviderModels[], hasMetadataResolver: boo
       routes.routesByModel.set(wireId, { provider: row.provider, model: model.id })
       const info = row.metadata.get(model.id)
       const defaultEffort = info?.reasoning?.defaultEffort
-      if (nonEmptyString(defaultEffort)) routes.defaultEfforts.set(pairKey, defaultEffort)
+      if (nonEmpty(defaultEffort)) routes.defaultEfforts.set(pairKey, defaultEffort)
       routes.availableModels.push(advertise(wireId, row.provider, model, info, hasMetadataResolver))
     }
   }
@@ -231,8 +230,8 @@ export function resolveSelection(
   meta: Record<string, unknown> | null | undefined,
 ): ModelSelectionRef['current'] {
   const candidate = modelSelectionFromRequest(config, defaultSelection, meta)
-  const explicitModel = nonEmptyString(meta?.model) ? meta.model : undefined
-  const explicitProvider = nonEmptyString(meta?.provider) ? meta.provider : undefined
+  const explicitModel = nonEmpty(meta?.model) ? meta.model : undefined
+  const explicitProvider = nonEmpty(meta?.provider) ? meta.provider : undefined
   let wireId: string | undefined
   if (explicitProvider === undefined && explicitModel !== undefined && current.routesByModel.has(explicitModel)) {
     wireId = explicitModel

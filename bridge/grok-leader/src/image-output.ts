@@ -7,6 +7,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProjectedUpdate } from './projection.ts'
+import { errorMessage } from './guards.ts'
 
 /**
  * Image blocks of one tool outcome. Native results and PTC sub-dispatches
@@ -54,7 +55,7 @@ export function createImageOutputProjector(ctx: Context) {
         }
         paths.push(path)
       } catch (error) {
-        errors.push('Image preview unavailable: ' + (error instanceof Error ? error.message : String(error)))
+        errors.push('Image preview unavailable: ' + errorMessage(error))
       }
     }
     return updates.map(update => update.sessionUpdate !== 'tool_call_update' ? update : ({

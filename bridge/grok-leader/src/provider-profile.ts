@@ -4,6 +4,7 @@
 import { invalidParams } from './acp.ts'
 import type { PiAiReasoningEfforts } from './model-endpoint.ts'
 import type { SettingsLike } from './native-seams.ts'
+import { nonEmpty } from './guards.ts'
 
 /** The dsh settings namespace the llm-pi-ai plugin owns (packages/llm/llm-pi-ai). */
 export const PROVIDER_SETTINGS_NS = 'llm-pi-ai'
@@ -31,42 +32,42 @@ export interface DiscoveredProviderModel {
 
 type Profile = Record<string, unknown>
 
-export const nonEmpty = (value: unknown): value is string => typeof value === 'string' && value.length > 0
-const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object'
+/** Unlike guards' isRecord, arrays pass. */
+const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object'
 
 /** Raw user section of the llm-pi-ai namespace, when the settings service exposes it. */
 export function providerUserSection(providerService: SettingsLike | undefined): Profile | undefined {
   const user = providerService?.describe?.().find(entry => entry.ns === PROVIDER_SETTINGS_NS)?.user
-  return isRecord(user) ? user : undefined
+  return isObject(user) ? user : undefined
 }
 
 /** One provider's raw user profile ({} when the section does not name it). */
 export function providerUserProfile(userSection: Profile | undefined, id: string): Profile {
   const providers = userSection?.providers
-  const profile = isRecord(providers) ? providers[id] : undefined
-  return isRecord(profile) ? profile : {}
+  const profile = isObject(providers) ? providers[id] : undefined
+  return isObject(profile) ? profile : {}
 }
 
 export function hasUserProviderRoute(providerService: SettingsLike | undefined, id: string): boolean {
   const providers = providerUserSection(providerService)?.providers
-  return isRecord(providers) && Object.prototype.hasOwnProperty.call(providers, id)
+  return isObject(providers) && Object.prototype.hasOwnProperty.call(providers, id)
 }
 
 /** baseURLs of the provider routes already persisted in the user settings
  * section: the only endpoints a resolved env secret may be sent to. */
 export function knownRouteBaseUrls(providerService: SettingsLike | undefined): string[] {
   const providers = providerUserSection(providerService)?.providers
-  if (!isRecord(providers)) return []
+  if (!isObject(providers)) return []
   return Object.values(providers)
-    .map(profile => isRecord(profile) ? profile.baseURL : undefined)
+    .map(profile => isObject(profile) ? profile.baseURL : undefined)
     .filter(nonEmpty)
 }
 
 /** Whether another route than `excludedProviderId` still names `ref`. */
 export function sharesCredentialRef(userSection: Profile | undefined, ref: string, excludedProviderId: string): boolean {
   const providers = userSection?.providers
-  return isRecord(providers) && Object.entries(providers).some(([id, profile]) =>
-    id !== excludedProviderId && isRecord(profile) && profile.apiKeyEnv === ref)
+  return isObject(providers) && Object.entries(providers).some(([id, profile]) =>
+    id !== excludedProviderId && isObject(profile) && profile.apiKeyEnv === ref)
 }
 
 /** Refuse a route id that is not lowercase kebab-case; `label` names the field. */

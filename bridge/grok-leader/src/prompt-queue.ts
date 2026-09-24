@@ -5,6 +5,7 @@ export type { DurablePromptBlock } from './prompt-content.ts'
 import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams } from './acp.ts'
+import { errorMessage } from './guards.ts'
 import { turnEndToStopReason, type StopReasonWire } from './projection.ts'
 
 /** A model call DSH refused for want of a usable key fails the same way on
@@ -228,7 +229,7 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
           host.agent.followup(message)
         } catch (error: unknown) {
           state.inflight = undefined
-          reject(internalError('prompt was not queued: ' + (error instanceof Error ? error.message : String(error))))
+          reject(internalError('prompt was not queued: ' + errorMessage(error)))
           return
         }
       // Echo the accepted prompt so it enters the client transcript, then let
@@ -409,7 +410,7 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
           const index = state.steered.indexOf(steered)
           if (index >= 0) state.steered.splice(index, 1)
           broadcastQueueChanged()
-          reject(internalError('prompt was not steered: ' + (error instanceof Error ? error.message : String(error))))
+          reject(internalError('prompt was not steered: ' + errorMessage(error)))
           return
         }
         // Echo into the live turn's stream: steered text belongs to the
@@ -501,7 +502,7 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
           // Put the row back so a failed steer never loses the queued message.
           state.promptQueue.splice(located.index, 0, entry)
           queueMutate()
-          entry.reject(internalError('prompt was not steered: ' + (error instanceof Error ? error.message : String(error))))
+          entry.reject(internalError('prompt was not steered: ' + errorMessage(error)))
           return
         }
         state.steered.push({ id: entry.id, resolve: entry.resolve })

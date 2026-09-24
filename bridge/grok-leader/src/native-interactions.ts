@@ -7,6 +7,7 @@ import type { ApprovalRequestEvent } from '@deepseek-ai/dsh-user-approval/types'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 import { internalError, invalidParams, paramRecord } from './acp.ts'
 import { browserAction, isBrowserTool } from './browser-actions.ts'
+import { isRecord } from './guards.ts'
 import type { LeaderClient } from './leader-transport.ts'
 
 interface InteractionSession { agent: Agent; clientId: number; yolo: boolean; queue: { cancel(): void }; work: { cancel(): void } }
@@ -28,8 +29,7 @@ interface InteractionHost<S extends InteractionSession> {
 }
 type Meta = Record<string, unknown> | null | undefined
 const permissionModes = new Set(['default', 'ask', 'workspace-write', 'plan', 'bypassPermissions', 'always-approve'])
-const object = (value: unknown): Record<string, unknown> | undefined =>
-  typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+const object = (value: unknown): Record<string, unknown> | undefined => isRecord(value) ? value : undefined
 const cancelledQuestion = () => new UserQuestionError('the user cancelled ask_user_question', 'ASK_CANCELLED')
 /** Calls whose arguments an approval prompt may still show. */
 const RECENT_CALLS = 64

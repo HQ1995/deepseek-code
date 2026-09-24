@@ -3,6 +3,7 @@
  * browser keeps the origins, executable and sandbox it started with; removing
  * an origin also stops navigation there at once. Replies are Markdown. */
 import { invalidParams, internalError } from './acp.ts'
+import { errorMessage } from './guards.ts'
 import type { SettingsLike } from './native-seams.ts'
 import type { PluginRows } from './plugin-rows.ts'
 import { parseCommandLine } from './profile-plugins.ts'
@@ -142,7 +143,7 @@ export function createBrowserControl(dependencies: BrowserControlDependencies) {
     async execute(text: string): Promise<string> {
       let words: string[]
       try { words = parseCommandLine(text).slice(1) } catch (error) {
-        throw invalidParams('Could not parse /browser command: ' + (error instanceof Error ? error.message : String(error)))
+        throw invalidParams('Could not parse /browser command: ' + errorMessage(error))
       }
       const [verb = 'status', ...rest] = words
       switch (verb) {

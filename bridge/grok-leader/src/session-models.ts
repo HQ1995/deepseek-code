@@ -3,6 +3,7 @@ import { installModelSelection, type Agent, type AgentOptions, type ModelSelecti
 import { ReasoningEffortId, errorChain } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams, paramRecord } from './acp.ts'
+import { nonEmpty } from './guards.ts'
 import type { createModelCatalog } from './model-catalog.ts'
 import type { AgentDefaultModelLike } from './native-seams.ts'
 import { acceptedReasoningEffort, modelEffortKey, modelSelectionFromRequest, type ModelCatalog } from './wire-catalog.ts'
@@ -47,22 +48,21 @@ interface ModelHost<S extends ModelSession> {
   defaults(): AgentDefaultModelLike | undefined
   flush(session: Agent['session']): Promise<unknown>
 }
-const nonEmptyString = (value: unknown): value is string => typeof value === 'string' && value.length > 0
 const isSelection = (event: SessionEvent) => event.type === 'model/selection' || LEGACY_MODEL_SELECTION_EVENTS.has(event.type)
 function selectionFromLog(events: readonly SessionEvent[]): ModelSelection | undefined {
   for (let index = events.length - 1; index >= 0; index--) {
     const event = events[index]!
     if (!isSelection(event)) continue
     const { provider, model, reasoningEffort } = event.data as DscodeModelSelectionEvent
-    if (!nonEmptyString(provider) || !nonEmptyString(model)) continue
-    return { provider, model, ...nonEmptyString(reasoningEffort) ? { reasoningEffort: ReasoningEffortId(reasoningEffort) } : {} }
+    if (!nonEmpty(provider) || !nonEmpty(model)) continue
+    return { provider, model, ...nonEmpty(reasoningEffort) ? { reasoningEffort: ReasoningEffortId(reasoningEffort) } : {} }
   }
   return undefined
 }
 function effortsFromLog(events: readonly SessionEvent[], selection: ModelSelection | undefined): Map<string, string> {
   const efforts = new Map<string, string>()
   const remember = ({ provider, model, reasoningEffort }: DscodeModelSelectionEvent) => {
-    if (nonEmptyString(provider) && nonEmptyString(model) && nonEmptyString(reasoningEffort)) efforts.set(modelEffortKey(provider, model), reasoningEffort)
+    if (nonEmpty(provider) && nonEmpty(model) && nonEmpty(reasoningEffort)) efforts.set(modelEffortKey(provider, model), reasoningEffort)
   }
   if (selection !== undefined) remember(selection)
   for (const event of events) if (isSelection(event)) remember(event.data as DscodeModelSelectionEvent)
@@ -157,9 +157,9 @@ export function createSessionModels<S extends ModelSession>(host: ModelHost<S>) 
   const change = async (record: S, state: ModelState, p: Record<string, unknown>): Promise<object> => {
     assertLive(record)
     const modelId = p.modelId
-    if (!nonEmptyString(modelId)) throw invalidParams('modelId must be a non-empty string')
+    if (!nonEmpty(modelId)) throw invalidParams('modelId must be a non-empty string')
     const meta = p._meta as Record<string, unknown> | null | undefined
-    const explicitEffort = nonEmptyString(meta?.reasoningEffort) ? meta.reasoningEffort : undefined
+    const explicitEffort = nonEmpty(meta?.reasoningEffort) ? meta.reasoningEffort : undefined
     const current = await host.catalog.current()
     assertLive(record)
     if (!current.routesByModel.has(modelId)) throw invalidParams('modelId is not in the catalog: ' + modelId)

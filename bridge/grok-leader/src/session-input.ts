@@ -4,6 +4,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams, paramRecord } from './acp.ts'
+import { isRecord } from './guards.ts'
 import type { createModelCatalog } from './model-catalog.ts'
 import { modelEffortKey } from './wire-catalog.ts'
 import { admitPromptContent, parsePrompt, type ParsedPrompt, type DurablePromptBlock } from './prompt-content.ts'
@@ -70,7 +71,7 @@ export function createSessionInput<S extends InputSession>(host: InputHost<S>) {
         const parsed = parsePrompt(p.prompt)
         const text = parsed.text.trim().length > 0 ? parsed.text : parsed.images.length > 0 ? '[Image]' : ''
         if (text.length === 0) throw invalidParams('empty prompt')
-        const meta = typeof p._meta === 'object' && p._meta !== null && !Array.isArray(p._meta) ? p._meta as Record<string, unknown> : {}
+        const meta = isRecord(p._meta) ? p._meta : {}
         const id = typeof meta.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
         const requestParams = { ...p, _meta: { ...meta, promptId: id } }
         let ownedRequests = requests.get(record)
@@ -139,7 +140,7 @@ export function createSessionInput<S extends InputSession>(host: InputHost<S>) {
     },
     cancel(clientId: number, params: unknown): void {
       if (closed) return
-      const p = typeof params === 'object' && params !== null && !Array.isArray(params) ? params as Record<string, unknown> : undefined
+      const p = isRecord(params) ? params : undefined
       const record = host.owned(clientId, typeof p?.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
       if (record === undefined) return
       const failures: unknown[] = []
