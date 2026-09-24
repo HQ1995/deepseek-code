@@ -210,8 +210,11 @@ workspace code. It ran all 15 gates, and all passed:
 Not covered: live model accounts, a second remote host, and remote Phase 2 (a
 remote read API for `@` completion, the line viewer, full-file highlighting and
 the git branch display). The pager test
-`dragging_image_while_scrollback_focused_attaches_to_composer` fails with and
-without these changes, and is outside the release gate's filter.
+`dragging_image_while_scrollback_focused_attaches_to_composer` failed with and
+without these changes: it predated fail-closed image input, so its fixture
+model could not accept images. `2f40bfc992` gave it an image-capable model.
+It passes with `SSH_CONNECTION`, `SSH_CLIENT` and `SSH_TTY` unset, and
+`scripts/check-rust.sh` now runs it.
 
 ## Port to DSH 0.1.7 — 2026-09-23
 

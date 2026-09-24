@@ -33,9 +33,8 @@ after entering the namespace to handle older util-linux launchers.
 - Product name and visible strings changed grok -> dscode / "Deepseek Code"
   across the pager and shell crates (recovered from the squashed history; if
   a string resurfaces after an upstream sync, reapply here).
-- Privacy/telemetry vendor copy: "SpaceXAI" -> "DeepSeek" in
-  crates/codegen/xai-grok-pager/src/views/privacy_banner.rs and
-  .../settings/defs.rs (plus their test expectations).
+- Vendor copy: "SpaceXAI" -> "DeepSeek" in the default model description
+  (crates/codegen/xai-grok-models/default_models.json).
 - Minimal auth rendering's header assertion matches the existing "Dscode"
   branding in .../xai-grok-pager-minimal/src/auth.rs.
 
@@ -128,6 +127,13 @@ after entering the namespace to handle older util-linux launchers.
   Missing or historical launchers bootstrap a known whole-product updater
   separately from the target version, preventing old beta launchers from
   delegating back into a newer cached TUI indefinitely.
+- Update config is read strictly. A `config.toml` that does not parse, or that
+  names an unknown channel or format, stops `dscode update` with the error, in
+  Rust `build_update_config` and in the JS updater. Upstream instead falls back
+  to the version's default channel so `grok update` can recover from a broken
+  config. `xai-grok-pager-bin/tests/update_never_blocked_by_config.rs` pins the
+  dscode outcome through the `dscode` binary, `DSCODE_HOME` and the loopback
+  `DSC_UPDATE_BASE_URL` release seam, without network access or an install.
 - GitHub release lookups send `GITHUB_TOKEN`/`GH_TOKEN` when the environment
   provides one and fall back to the anonymous call when it is rejected or
   limit-spent: the anonymous API allows 60 requests per hour per address, which
@@ -268,6 +274,11 @@ after entering the namespace to handle older util-linux launchers.
   /login, /logout, /share, /feedback, /imagine, /imagine_video, /import_claude,
   /gboom, /voice, /release_notes, /announcements, /recap, /timeline. /preset
   remains the only preset picker; /usage is adapted to session stats (above).
+- Coding-data sharing, an x.ai account preference with no dsh counterpart, is
+  removed: no consent banner, `coding_data_sharing` settings row or `/privacy`
+  command. The pager snapshot field, its lock type and its `current_value_for`
+  mapping stay dormant. `tests/settings_e2e.rs` omits the row's tests and
+  asserts that neither the row nor `/privacy` is registered.
 Unavailable built-ins: `/dashboard`, `/cd`, `/recap`, `/voice`, `/auto`, `/hooks`, `/plugins`, `/marketplace`, `/delete`, `/remember`.
 
 These commands remain known to the registry while hidden from completion.
@@ -399,8 +410,12 @@ commands before capability discovery; they do not become model prompts.
 - Upstream pager tests that assert what dscode replaces (branding, Kitty
   placement, `/loop` gating, fail-closed images, ACP-owned `/compact`, the
   pre-session model pick, local refusal of unregistered pager names, finished
-  thinking previews) carry `DIVERGENCE(dscode)` notes; the full pager suite
-  passes.
+  thinking previews, removed coding-data sharing) carry `DIVERGENCE(dscode)`
+  notes; the full pager suite passes, integration targets included. Run it as
+  `scripts/check-rust.sh` runs its gate, with `SSH_CONNECTION`, `SSH_CLIENT`
+  and `SSH_TTY` unset. Upstream reads them once per process and skips local
+  file-drop classification over SSH, so its file-drop paste tests fail in a
+  suite started from an SSH shell.
 Slash commands removed: login, logout, share, feedback, imagine,
 imagine_video, import_claude, gboom, voice, release_notes, announcements,
 recap, timeline.
