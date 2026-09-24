@@ -1120,8 +1120,8 @@ impl SlashController {
                 .then_with(|| owns_typed_name[b.1].cmp(&owns_typed_name[a.1]))
                 .then_with(|| mru_scores[b.1].cmp(&mru_scores[a.1]))
                 .then_with(|| {
-                    let a_builtin = sort_meta[a.1].1 == CommandSource::Builtin;
-                    let b_builtin = sort_meta[b.1].1 == CommandSource::Builtin;
+                    let a_builtin = ranks_as_builtin(&sort_meta[a.1]);
+                    let b_builtin = ranks_as_builtin(&sort_meta[b.1]);
                     b_builtin.cmp(&a_builtin)
                 })
                 .then_with(|| rows[a.1].display.cmp(&rows[b.1].display))
@@ -1421,6 +1421,14 @@ pub fn is_command_complete(line: &str, registry: &CommandRegistry) -> bool {
     }
     // Args required -- complete only if non-empty.
     !invocation.args.trim().is_empty()
+}
+
+/// DIVERGENCE(dscode): a native command advertised over ACP in place of an
+/// omitted Grok builtin (`/compact`) keeps that builtin's tie-break, so `/comp`
+/// still completes to `/compact` rather than the pager's `/compact-mode`.
+fn ranks_as_builtin((canonical, source): &(String, CommandSource)) -> bool {
+    *source == CommandSource::Builtin
+        || xai_grok_shell::session::PAGER_COMMAND_KEYS.contains(&canonical.as_str())
 }
 
 /// True when `text` is a complete invocation of a pager BUILTIN, a name only this process honors.
