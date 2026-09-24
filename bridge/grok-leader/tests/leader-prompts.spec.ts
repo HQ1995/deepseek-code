@@ -403,6 +403,24 @@ describe('leader prompt turns, content and usage', () => {
     expect(await c.next()).toMatchObject({ params: { _meta: { tokensPerSecond: '28' } } })
   })
 
+  it('refuses a turn DSH failed for a missing key, naming dscode\'s fix', async () => {
+    const { registry, pluginCtx, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'keyless' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    pluginCtx.emit('agent/inbox/claimed', { agent, message: agent.internals.messages[0] as UserMessage, turn: 1 })
+    pluginCtx.emit('agent/error', { agent, turn: 1, step: 0, error: Object.assign(new Error('llm-deepseek: no API key'), {
+      failure: { code: 'MISSING_CREDENTIAL', message: 'llm-deepseek: no API key for provider route "deepseek-official"; store it' },
+    }) })
+    const refusal = 'No API key is stored for provider "deepseek-official". Add one in /provider (highlight it and press e), then send again.'
+    expect((await waitForId(c, 2)).error).toEqual({ code: -32602, message: refusal, data: { message: refusal } })
+  })
+
   it('rejects a prompt only when agent/error names its in-flight turn', async () => {
     const { registry, pluginCtx, client: c } = await start({ manualIdle: true })
     register(c)

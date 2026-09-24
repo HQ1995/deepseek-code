@@ -1,7 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setImmediate } from 'node:timers/promises'
 import type { SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-session'
-import { createPromptQueues, type DurablePromptBlock, type PromptQueue, type PromptQueueHost } from '../src/prompt-queue.ts'
+import { createPromptQueues, credentialFix, type DurablePromptBlock, type PromptQueue, type PromptQueueHost } from '../src/prompt-queue.ts'
+
+describe('credential failures', () => {
+  it('name dscode\'s fix instead of DSH\'s web page, and leave other failures alone', () => {
+    const route = 'llm-pi-ai: no credential for provider route "or"; its profile resolves OR_KEY'
+    expect(credentialFix({ code: 'MISSING_CREDENTIAL', message: route }))
+      .toBe('No API key is stored for provider "or". Add one in /provider (highlight it and press e), then send again.')
+    expect(credentialFix({ code: 'INVALID_CREDENTIAL', message: 'malformed key' }))
+      .toBe('The API key stored for this provider is not usable. Replace it in /provider (highlight it and press e), then send again.')
+    expect(credentialFix({ code: 'QUOTA', message: route })).toBeUndefined()
+  })
+})
 
 const disposers: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(disposers.splice(0).map(dispose => dispose())) })

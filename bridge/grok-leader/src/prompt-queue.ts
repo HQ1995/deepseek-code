@@ -7,6 +7,19 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams } from './acp.ts'
 import { turnEndToStopReason, type StopReasonWire } from './projection.ts'
 
+/** A model call DSH refused for want of a usable key fails the same way on
+ * every retry, and DSH's wording points at its web Models page. It settles as
+ * a refusal naming dscode's fix; the TUI shows a refusal without "Try sending
+ * again". */
+export function credentialFix(failure: { message: string; code?: string }): string | undefined {
+  const provider = /provider route "([^"]+)"/.exec(failure.message)?.[1]
+  const which = provider === undefined ? 'this provider' : 'provider "' + provider + '"'
+  const edit = ' in /provider (highlight it and press e), then send again.'
+  if (failure.code === 'MISSING_CREDENTIAL') return 'No API key is stored for ' + which + '. Add one' + edit
+  if (failure.code === 'INVALID_CREDENTIAL') return 'The API key stored for ' + which + ' is not usable. Replace it' + edit
+  return undefined
+}
+
 /** RPC result of a settled session/prompt. `_meta.promptId` lets the pager
  *  attribute the response to its queue row directly (the grok shell's
  *  PromptResponse `_meta` shape) instead of inferring from RPC ids. */
@@ -695,7 +708,8 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
       if (inflight !== undefined && event.type === 'turn/end' && inflight.turn === event.data.turn) {
         if (event.data.reason.kind === 'error') {
           state.inflight = undefined
-          inflight.reject(internalError('turn failed: ' + event.data.reason.error.message))
+          const failure = event.data.reason.error, fix = credentialFix(failure)
+          inflight.reject(fix === undefined ? internalError('turn failed: ' + failure.message) : invalidParams(fix))
         } else {
           // The grok PromptResponse settles at turn end, not whole-agent idle.
           settlePrompt(turnEndToStopReason(event.data.reason))
@@ -710,7 +724,9 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
       const inflight = state.inflight
       if (inflight === undefined || inflight.turn !== turn) return
       state.inflight = undefined
-      inflight.reject(internalError('turn failed: ' + errorChain(error)))
+      const failure = (error as { failure?: { message: string; code?: string } } | null | undefined)?.failure
+      const fix = failure === undefined ? undefined : credentialFix(failure)
+      inflight.reject(fix === undefined ? internalError('turn failed: ' + errorChain(error)) : invalidParams(fix))
     },
     cancel,
     agentIdle() {
