@@ -64,6 +64,14 @@ export function createSessionInput<S extends InputSession>(host: InputHost<S>) {
     catch (error) { reject(error) }
     return result
   }
+  /** Alt+Enter's native path: the harness claims steering at its next step
+   * boundary, and every attached pane shows the interjection. */
+  const steer = (record: S, text: string, interjectionId?: unknown): void => {
+    record.agent.steer(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
+    active(record)
+    host.notify(record, 'x.ai/session/interjection', { sessionId: String(record.agent.session.id), text,
+      ...typeof interjectionId === 'string' ? { interjectionId } : {} })
+  }
   return {
     prompt(clientId: number, params: unknown) {
       return accept(async () => {
@@ -131,12 +139,26 @@ export function createSessionInput<S extends InputSession>(host: InputHost<S>) {
       const text = typeof p.text === 'string' ? p.text : ''
       if (text.trim().length === 0) throw invalidParams('empty interjection')
       record.prompts.push(text)
-      record.agent.steer(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
-      active(record)
       // The originator already rendered its block; its id dedupes this echo.
-      host.notify(record, 'x.ai/session/interjection', { sessionId: String(record.agent.session.id), text,
-        ...typeof p.interjectionId === 'string' ? { interjectionId: p.interjectionId } : {} })
+      steer(record, text, p.interjectionId)
       return {}
+    },
+    /** Feedback typed on a rejected approval (the TUI's `_meta.followup_message`)
+     * reaches the model the way an Alt+Enter steer does, once the rejection has
+     * resolved: the harness claims it at the next step boundary, after the
+     * rejected call's result. It carries no interjection id, so the pane that
+     * typed it renders it too. With no turn left to steer, it queues as the
+     * next prompt instead of waking a turn the prompt queue does not own. */
+    rejectionFeedback(record: S, text: string): Promise<unknown> | undefined {
+      if (text.trim().length === 0) return undefined
+      active(record); host.assertReady(record)
+      if (record.agent.status === 'running') { steer(record, text); return undefined }
+      const unavailable = host.remoteUnavailable?.()
+      if (unavailable !== undefined) throw invalidParams(unavailable)
+      if (record.model.current === undefined) throw invalidParams('no model selected')
+      const sessionId = String(record.agent.session.id)
+      return accept(() => record.queue.submit({ sessionId, prompt: [{ type: 'text', text }], _meta: { promptId: randomUUID() } },
+        text, async admission => { admission.assertActive(); return [{ type: 'text', text }] }))
     },
     cancel(clientId: number, params: unknown): void {
       if (closed) return

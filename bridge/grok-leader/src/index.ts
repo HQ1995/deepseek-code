@@ -273,6 +273,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     permissionPresets: () => ctx.get('permissionPresets') as { set(session: Agent['session'], preset: string): void } | undefined,
     planMode: record => presetServiceFor(record, 'planMode') as { set(agent: Agent, active: boolean): unknown } | undefined,
     on: (name, listener, options) => ctx.on(name as never, listener as never, options), logger,
+    // Wired before `input` exists; approvals only arrive once sessions do.
+    rejectionFeedback: (record, text): Promise<unknown> | undefined => input.rejectionFeedback(record, text),
   })
   // DSH's Host Schedule service delivers reminders through `sessionController`,
   // which only the Web app provides. dscode delivers into a session a TUI has

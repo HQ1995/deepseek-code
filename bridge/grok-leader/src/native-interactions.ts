@@ -28,6 +28,9 @@ interface InteractionHost<S extends InteractionSession> {
   logger: { warn(message: string): void }
   /** Lower-case BCP 47 tag an approval reason is shown in; defaults to the process locale. */
   locale?(): string | undefined
+  /** Hands the model the text a user typed while rejecting a call; a returned
+   * promise is the queued fallback's settlement. */
+  rejectionFeedback?(record: S, text: string): Promise<unknown> | undefined
 }
 type Meta = Record<string, unknown> | null | undefined
 const permissionModes = new Set(['default', 'ask', 'workspace-write', 'plan', 'bypassPermissions', 'always-approve'])
@@ -153,6 +156,15 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
     if (failures.length > 1) throw new AggregateError(failures, 'permission change and cancellation failed')
     throw error
   }
+  /** DSH's approval outcome has no room for a reason, so the text the TUI's
+   * reject row invites travels as a steer once the rejection has resolved. */
+  const deliverFeedback = (record: S, text: string): void => {
+    const failed = (error: unknown) => { host.logger.warn('grok-leader: rejection feedback was not delivered: ' + errorChain(error)) }
+    try {
+      if (!live(record)) throw new Error('session closed')
+      void host.rejectionFeedback?.(record, text)?.catch(failed)
+    } catch (error) { failed(error) }
+  }
   const approval: InteractionEvents['approval/request'] = (request, next) => {
     if (closed) return Promise.resolve('cancelled')
     const record = host.ownedAgent(request.agent)
@@ -160,7 +172,8 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
     if (record === undefined || callId === undefined) return next()
     const client = host.client(record.clientId)
     if (client === undefined) return next()
-    return accepted(record, request.signal, async signal => {
+    let feedback: string | undefined
+    const decided = accepted(record, request.signal, async signal => {
       if (signal.aborted || !live(record)) return 'cancelled'
       // Browser actions reach arbitrary hosts, and a reviewer's denial is a
       // decision only a human may overrule; always-approve covers neither.
@@ -181,12 +194,17 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
         if (signal.aborted || !live(record)) return 'cancelled'
         const outcome = object(object(response)?.outcome)
         if (outcome?.outcome === 'cancelled') return 'cancelled'
-        return outcome?.outcome === 'selected' && outcome.optionId === 'allow-once' ? 'allowed-once' : 'rejected'
+        if (outcome?.outcome === 'selected' && outcome.optionId === 'allow-once') return 'allowed-once'
+        const text = object(object(response)?._meta)?.followup_message
+        if (typeof text === 'string' && text.trim() !== '') feedback = text
+        return 'rejected'
       } catch (error) {
         host.logger.warn('grok-leader: permission request failed: ' + errorChain(error))
         return 'cancelled'
       }
     })
+    void decided.then(outcome => { if (outcome === 'rejected' && feedback !== undefined) deliverFeedback(record, feedback) }, () => {})
+    return decided
   }
   const question: InteractionEvents['user-questions/request'] = (request, next) => {
     if (closed) return Promise.reject(cancelledQuestion())

@@ -54,7 +54,7 @@ field on the failed result.
 | `session/cancel` | cancel the active turn and reconcile queued prompts |
 | `session/load`, `session/list`, `session/close` | resume, enumerate, and dispose durable dsh sessions |
 | `session/set_model`, `session/set_mode` | switch model/effort and plan mode |
-| `session/request_permission` | wait for the owning client's answer; disconnect/cancel cancels the request without inventing a user rejection. The tool call carries the planned arguments as `rawInput` (`{variant: 'MCPTool', tool_name, tool_input}` for MCP tools) and, for browser tools, a `title` phrase; `_meta.dscodeAlwaysAsks` marks prompts the client must neither auto-approve nor offer always-approve on |
+| `session/request_permission` | wait for the owning client's answer; disconnect/cancel cancels the request without inventing a user rejection. The tool call carries the planned arguments as `rawInput` (`{variant: 'MCPTool', tool_name, tool_input}` for MCP tools) and, for browser tools, a `title` phrase; `_meta.dscodeAlwaysAsks` marks prompts the client must neither auto-approve nor offer always-approve on. A reject whose response carries `_meta.followup_message` resolves as a rejection, then steers that text into the running turn like `x.ai/interject` (broadcast as an `x.ai/session/interjection` without an id); with no turn running it queues as the next prompt |
 
 `initialize` `_meta.dscodeExecutionWorld` says where tools run: `{kind: 'local'}`,
 or `{kind: 'ssh', host, workspace}` for a profile whose SSH adapter owns the
