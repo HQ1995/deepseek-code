@@ -13,7 +13,7 @@ unset SSH_CONNECTION SSH_CLIENT SSH_TTY
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT/third_party/grok-build"
 cargo check -p xai-grok-pager-bin
-cargo test -p xai-grok-pager-bin --bin dscode -- dsh_launch dscode_aliases
+cargo test -p xai-grok-pager-bin --bin dscode -- dsh_launch dscode_aliases dashboard_subcommand
 cargo test -p xai-grok-shell-base util::tests:: --lib
 cargo test -p xai-grok-shell --lib -- leader:: image_normalize util::config
 cargo test -p xai-grok-tools --lib ask_user_question

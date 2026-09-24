@@ -536,9 +536,7 @@ installs. The gates:
 Any change to what ships reopens Linux acceptance. The minimum re-run is the
 matrix, `scripts/check.sh`, and the script and bridge suites on Node 22.19.0
 and 24.19.0. Add `scripts/check-rust.sh` when `third_party/grok-build`
-changes. Its filters miss the `dashboard_subcommand_*` tests, so run
-`cargo test -p xai-grok-pager-bin --bin dscode -- dashboard_subcommand`
-separately in the same `unshare` lane.
+changes.
 
 - `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY` means pnpm tried to purge a
   copied modules directory without a TTY; run
