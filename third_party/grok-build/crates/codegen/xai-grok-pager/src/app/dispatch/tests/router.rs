@@ -2996,3 +2996,38 @@ fn toggle_scroll_log_flips_recorder_and_reports_path() {
         "disable must be confirmed, got {texts:?}"
     );
 }
+#[test]
+fn add_provider_from_welcome_mounts_the_form_on_the_new_session() {
+    let mut app = test_app();
+    app.active_view = ActiveView::Welcome;
+    assert!(app.agents.is_empty());
+    let _ = dispatch(Action::OpenAddProvider, &mut app);
+    let ActiveView::Agent(id) = app.active_view else {
+        panic!("expected an agent view, got {:?}", app.active_view);
+    };
+    assert!(matches!(
+        app.agents[&id].active_modal,
+        Some(crate::views::modal::ActiveModal::AddProvider { .. })
+    ));
+    let _ = dispatch(
+        Action::TaskComplete(crate::app::actions::TaskResult::SessionCreated {
+            agent_id: id,
+            session_id: acp::SessionId::new("placeholder"),
+            models: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    assert_eq!(app.active_view, ActiveView::Agent(id));
+    assert!(
+        matches!(
+            app.agents[&id].active_modal,
+            Some(crate::views::modal::ActiveModal::AddProvider { .. })
+        ),
+        "the form must survive its placeholder session starting, got {:?}",
+        app.agents[&id]
+            .active_modal
+            .as_ref()
+            .map(std::mem::discriminant)
+    );
+}

@@ -619,6 +619,8 @@ fn render_prompt_and_version(
 /// row out never moves another row's action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WelcomeMenuItem {
+    /// DIVERGENCE(dscode): first, while no provider offers a model.
+    AddProvider,
     ImportClaude,
     NewWorktree,
     ResumeSession,
@@ -626,13 +628,19 @@ pub enum WelcomeMenuItem {
     Quit,
 }
 
-/// The signed-in menu rows. "New worktree" appears only where one can be made.
+/// The signed-in menu rows. "New worktree" appears only where one can be made;
+/// "Add a provider" leads while no provider offers a model, since nothing can
+/// be sent until one does.
 pub fn welcome_menu_items(
+    needs_provider: bool,
     has_claude_import: bool,
     offers_worktree: bool,
     show_changelog: bool,
 ) -> Vec<WelcomeMenuItem> {
-    let mut items = Vec::with_capacity(5);
+    let mut items = Vec::with_capacity(6);
+    if needs_provider {
+        items.push(WelcomeMenuItem::AddProvider);
+    }
     if has_claude_import {
         items.push(WelcomeMenuItem::ImportClaude);
     }
@@ -676,6 +684,8 @@ pub struct WelcomeRenderParams<'a> {
     pub has_claude_import: bool,
     /// See [`offers_worktree`].
     pub offers_worktree: bool,
+    /// No provider offers a model yet (the catalog came with the handshake).
+    pub needs_provider: bool,
     pub mouse_pos: Option<(u16, u16)>,
     pub is_zdr_blocked: bool,
     pub session_picker: Option<&'a [SessionPickerEntry]>,
@@ -1763,9 +1773,7 @@ fn render_welcome_done(
     // Startup-warning hint height (multi-line aware). Must pick the same
     // entry `render_startup_warnings` draws — see `startup::banner_warning`.
     let hint_height = crate::startup::banner_warning(p.startup_warnings).map_or(0u16, |w| {
-        let msg_lines = w.message.lines().count() as u16;
-        let action_line = if w.action.is_some() { 1 } else { 0 };
-        msg_lines + action_line + 1 // +1 for buffer spacing
+        startup_warning_rows(w, content_area.width).len() as u16 + 1 // +1 for buffer spacing
     });
     let has_update_tip = p.pending_update_version.is_some();
     let has_resume_tip = !has_update_tip && p.foreign_resume_hint.is_some();
@@ -1818,17 +1826,22 @@ fn render_welcome_done(
         // string is right-aligned by render_menu, so [x] sits at the very end
         // of the row. "Changelog" sits above Quit with no shortcut — opened by
         // click (row or block).
-        let items: Vec<(&str, &str)> =
-            welcome_menu_items(p.has_claude_import, p.offers_worktree, show_changelog_action)
-                .into_iter()
-                .map(|item| match item {
-                    WelcomeMenuItem::ImportClaude => (key_i_with_x, "Import Claude settings"),
-                    WelcomeMenuItem::NewWorktree => (key_w, "New worktree"),
-                    WelcomeMenuItem::ResumeSession => (key_s, "Resume session"),
-                    WelcomeMenuItem::Changelog => ("", "Changelog"),
-                    WelcomeMenuItem::Quit => (key_q, "Quit"),
-                })
-                .collect();
+        let items: Vec<(&str, &str)> = welcome_menu_items(
+            p.needs_provider,
+            p.has_claude_import,
+            p.offers_worktree,
+            show_changelog_action,
+        )
+        .into_iter()
+        .map(|item| match item {
+            WelcomeMenuItem::AddProvider => ("", "Add a provider"),
+            WelcomeMenuItem::ImportClaude => (key_i_with_x, "Import Claude settings"),
+            WelcomeMenuItem::NewWorktree => (key_w, "New worktree"),
+            WelcomeMenuItem::ResumeSession => (key_s, "Resume session"),
+            WelcomeMenuItem::Changelog => ("", "Changelog"),
+            WelcomeMenuItem::Quit => (key_q, "Quit"),
+        })
+        .collect();
         owned_menu = items;
         owned_menu.as_slice()
     };
@@ -2651,8 +2664,9 @@ fn render_auth_input_box(
 /// kitty-keyboard banner is prepended ahead of `summarize_warnings()`
 /// output — see `diagnostics::assemble_startup_warnings`), but only one is
 /// rendered — the severity-aware pick from `startup::banner_warning`, so a
-/// runtime-pushed Warning displaces an earlier Info entry. One message line,
-/// one optional action line, plus a buffer row for spacing.
+/// runtime-pushed Warning displaces an earlier Info entry. The message rows
+/// from `startup_warning_rows`, one optional action row, plus a buffer row for
+/// spacing.
 /// Severity controls color (yellow for `Warning`, dim for `Info`).
 fn render_startup_warnings(
     area: Rect,
@@ -2677,17 +2691,45 @@ fn render_startup_warnings(
     };
     let style = Style::default().fg(color);
 
-    let mut lines: Vec<Line<'_>> = w
-        .message
-        .lines()
-        .map(|l| Line::from(Span::styled(l, style)).alignment(Alignment::Center))
+    let lines: Vec<Line<'_>> = startup_warning_rows(w, area.width)
+        .into_iter()
+        .map(|row| Line::from(Span::styled(row, style)).alignment(Alignment::Center))
         .collect();
-    if let Some(ref action) = w.action {
-        lines.push(Line::from(Span::styled(action.as_str(), style)).alignment(Alignment::Center));
-    }
 
     Paragraph::new(lines).render(area, buf);
     None
+}
+
+/// Most rows a startup warning's message takes, so a long one cannot push the
+/// menu off the screen.
+const MAX_WARNING_ROWS: usize = 4;
+
+/// A startup warning's rows at `width`, then its action row. DIVERGENCE(dscode):
+/// each message line wraps, so a long one (a session failure that names its
+/// cause and the fix) reads in full instead of running off the edge. Past
+/// `MAX_WARNING_ROWS` the message is cut, its last row ending in `…`.
+fn startup_warning_rows(w: &StartupWarning, width: u16) -> Vec<String> {
+    let width = usize::from(width.saturating_sub(4)).max(20);
+    // Spaces only: the messages carry paths and commands that read wrong split.
+    let options = textwrap::Options::new(width).word_separator(textwrap::WordSeparator::AsciiSpace);
+    let mut rows: Vec<String> = w
+        .message
+        .lines()
+        .flat_map(|line| {
+            textwrap::wrap(line, &options)
+                .into_iter()
+                .map(|row| row.into_owned())
+        })
+        .collect();
+    if rows.len() > MAX_WARNING_ROWS {
+        rows.truncate(MAX_WARNING_ROWS);
+        if let Some(last) = rows.last_mut() {
+            while last.chars().count() + 1 > width && last.pop().is_some() {}
+            last.push('…');
+        }
+    }
+    rows.extend(w.action.clone());
+    rows
 }
 
 fn auth_token_grapheme_visible(index: usize, total: usize) -> bool {
@@ -2736,6 +2778,38 @@ fn masked_auth_token_view(input: &str, cursor_byte: usize, width: usize) -> (Str
 
 #[cfg(test)]
 mod tests {
+
+    /// DIVERGENCE(dscode): a long startup warning wraps instead of being cut
+    /// at the edge, keeps its own line breaks, and stops at four rows.
+    #[test]
+    fn startup_warning_rows_wrap_long_messages() {
+        use crate::startup::{StartupWarning, WarningSeverity};
+        let warning = |message: String, action: Option<String>| StartupWarning {
+            severity: WarningSeverity::Warning,
+            message,
+            action,
+        };
+        let failure = "Session creation failed: Could not connect to ssh build:/srv/w: ssh build failed: \
+                       ssh: Could not resolve hostname build. Run `dscode doctor --runtime` to check the host.";
+        let rows = startup_warning_rows(&warning(failure.to_string(), None), 64);
+        assert!(rows.len() > 1, "{rows:?}");
+        assert!(rows.iter().all(|row| row.chars().count() <= 60), "{rows:?}");
+        assert_eq!(rows.join(" "), failure);
+
+        let rows = startup_warning_rows(
+            &warning(
+                "first\nsecond".to_string(),
+                Some("Press ctrl+r".to_string()),
+            ),
+            80,
+        );
+        assert_eq!(rows, ["first", "second", "Press ctrl+r"]);
+
+        let rows = startup_warning_rows(&warning("word ".repeat(200), None), 40);
+        assert_eq!(rows.len(), MAX_WARNING_ROWS);
+        assert!(rows[MAX_WARNING_ROWS - 1].ends_with('…'));
+        assert!(rows.iter().all(|row| row.chars().count() <= 36), "{rows:?}");
+    }
     use super::*;
     use crate::app::app_view::SessionPickerEntry;
     use crate::views::picker::PickerState;
@@ -2920,6 +2994,7 @@ mod tests {
             has_access: true,
             has_claude_import: false,
             offers_worktree: true,
+            needs_provider: false,
             mouse_pos: None,
             is_zdr_blocked: false,
             session_picker,

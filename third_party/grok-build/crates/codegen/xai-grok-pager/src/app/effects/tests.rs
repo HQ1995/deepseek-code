@@ -2744,6 +2744,30 @@ fn sanitize_user_error_strips_auth_prefixes() {
             "Login timed out after 10 minutes. Please try again."
         );
 }
+/// DIVERGENCE(dscode): a refusal whose data repeats its message reads once.
+#[test]
+fn sanitize_user_error_drops_data_that_repeats_the_message() {
+    let refusal = agent_client_protocol::Error::new(
+        agent_client_protocol::ErrorCode::InvalidParams.into(),
+        "Could not connect to ssh h:/w.",
+    )
+    .data(serde_json::json!({ "message": "Could not connect to ssh h:/w." }));
+    assert_eq!(
+        sanitize_user_error(&refusal.to_string()),
+        "Could not connect to ssh h:/w."
+    );
+    let other = "boom: {\"message\": \"different\"}";
+    assert_eq!(sanitize_user_error(other), other);
+}
+/// DIVERGENCE(dscode): errors keep up to 400 characters before the cut.
+#[test]
+fn sanitize_user_error_keeps_a_named_cause_whole() {
+    let named = "x".repeat(350);
+    assert_eq!(sanitize_user_error(&named), named);
+    let runaway = sanitize_user_error(&"y".repeat(500));
+    assert_eq!(runaway.chars().count(), 383);
+    assert!(runaway.ends_with("..."));
+}
 #[test]
 fn sanitize_user_error_collapses_disk_full() {
     assert_eq!(

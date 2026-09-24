@@ -269,15 +269,40 @@ pub(crate) fn sanitize_user_error(raw: &str) -> String {
         ("Authentication required: ", ""),
         ("Authentication failed: ", ""),
     ];
-    let mut result = raw.to_string();
+    let mut result = without_repeated_data(raw).to_string();
     for (pattern, replacement) in REPLACEMENTS {
         result = result.replace(pattern, replacement);
     }
-    if result.chars().count() > 200 {
-        let truncated: String = result.chars().take(180).collect();
+    // DIVERGENCE(dscode): 400, not 200: the welcome warning wraps now, and a
+    // remote workspace's refusal names its cause and the next step.
+    if result.chars().count() > MAX_USER_ERROR_CHARS {
+        let truncated: String = result.chars().take(MAX_USER_ERROR_CHARS - 20).collect();
         result = format!("{truncated}...");
     }
     result
+}
+/// Longest error text `sanitize_user_error` keeps whole.
+const MAX_USER_ERROR_CHARS: usize = 400;
+
+/// DIVERGENCE(dscode): an ACP error prints its data after the message as JSON.
+/// A leader refusal's data is `{"message": …}` repeating that message, so the
+/// sentence alone is kept; any other data stays.
+fn without_repeated_data(text: &str) -> &str {
+    let Some(at) = text.find(": {") else {
+        return text;
+    };
+    let head = &text[..at];
+    let repeats = serde_json::from_str::<serde_json::Value>(&text[at + 2..])
+        .ok()
+        .and_then(|data| data.as_object().cloned())
+        .is_some_and(|data| {
+            data.len() == 1
+                && data
+                    .get("message")
+                    .and_then(|message| message.as_str())
+                    .is_some_and(|message| message.trim() == head.trim())
+        });
+    if repeats { head } else { text }
 }
 /// Additive session creation flags passed from CLI → AppView → effects.
 ///

@@ -2573,6 +2573,7 @@ impl AppView {
                         2
                     } else {
                         crate::views::welcome::welcome_menu_items(
+                            self.models.available.is_empty(),
                             self.has_claude_import,
                             crate::views::welcome::offers_worktree(self.cwd_has_git_ancestor),
                             self.welcome_show_changelog_action,
@@ -2609,6 +2610,7 @@ impl AppView {
                     sp_content_loading: self.session_picker_content_loading,
                     sp_entries_query: &self.session_picker_entries_query,
                     has_claude_import: self.has_claude_import,
+                    needs_provider: self.models.available.is_empty(),
                     import_claude_modal: &mut self.import_claude_modal,
                     welcome_doc_viewer: &mut self.welcome_doc_viewer,
                     changelog_markdown: &self.changelog_markdown,
@@ -3244,6 +3246,8 @@ struct WelcomeInputCtx<'a> {
     /// [`crate::views::session_picker::effective_filter_query`]).
     sp_entries_query: &'a Option<String>,
     has_claude_import: bool,
+    /// No provider offers a model yet: the menu leads with "Add a provider".
+    needs_provider: bool,
     import_claude_modal: &'a mut Option<crate::views::import_claude_modal::ImportClaudeModalState>,
     welcome_doc_viewer: &'a mut Option<crate::views::modal::ActiveModal>,
     changelog_markdown: &'a Option<String>,
@@ -3775,9 +3779,13 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 dispatch_access_gate_menu_action,
             );
         }
+        // DIVERGENCE(dscode): Enter on a row the arrows highlighted runs that
+        // row (below); it used to start a session regardless, which left rows
+        // without a shortcut ("Add a provider") unreachable from the keyboard.
         if matches!(ctx.auth_state, AuthState::Done)
             && key!(Enter).matches(key)
             && key.modifiers.is_empty()
+            && (*ctx.prompt_focused || ctx.menu_index.is_none())
         {
             return InputOutcome::Action(Action::NewSession);
         }
@@ -4226,6 +4234,7 @@ fn dispatch_access_gate_menu_action(index: usize) -> InputOutcome {
 /// The signed-in welcome menu as the last render showed it.
 fn welcome_menu(ctx: &WelcomeInputCtx<'_>) -> Vec<crate::views::welcome::WelcomeMenuItem> {
     crate::views::welcome::welcome_menu_items(
+        ctx.needs_provider,
         ctx.has_claude_import,
         crate::views::welcome::offers_worktree(ctx.cwd_has_git_ancestor),
         ctx.show_changelog_action,
@@ -4240,6 +4249,7 @@ fn dispatch_menu_action(
 ) -> InputOutcome {
     use crate::views::welcome::WelcomeMenuItem;
     match items.get(index) {
+        Some(WelcomeMenuItem::AddProvider) => InputOutcome::Action(Action::OpenAddProvider),
         Some(WelcomeMenuItem::ImportClaude) => InputOutcome::Action(Action::ImportClaudeSettings),
         Some(WelcomeMenuItem::NewWorktree) => InputOutcome::Action(Action::OpenNewWorktreeDialog),
         Some(WelcomeMenuItem::ResumeSession) => InputOutcome::Action(Action::FetchSessionList),
@@ -4619,6 +4629,7 @@ impl AppView {
                             offers_worktree: crate::views::welcome::offers_worktree(
                                 self.cwd_has_git_ancestor,
                             ),
+                            needs_provider: self.models.available.is_empty(),
                             mouse_pos: self.last_mouse_pos,
                             is_zdr_blocked: zdr_blocked_for_draw,
                             session_picker: self.session_picker_entries.as_deref(),
@@ -4653,7 +4664,10 @@ impl AppView {
                             credit_balance: self.credit_balance.as_ref(),
                             auto_topup: self.auto_topup.as_ref(),
                             usage_visible: self.usage_visible,
-                            is_api_key_auth: self.is_api_key_auth,
+                            // DIVERGENCE(dscode): the leader advertises the API-key
+                            // method only to pass the auth gate; keys live with each
+                            // provider, so "Logged in with API key" named no login.
+                            is_api_key_auth: false,
                             changelog_bullets: &self.changelog_bullets,
                             changelog_has_full_notes: self.changelog_markdown.is_some(),
                             welcome_announcement_expanded: self.welcome_announcement.expanded,

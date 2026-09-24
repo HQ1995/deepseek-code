@@ -2519,7 +2519,20 @@ fn welcome_ctrl_d_requires_confirmation() {
     );
 }
 fn menu(import: bool, worktree: bool, changelog: bool) -> Vec<crate::views::welcome::WelcomeMenuItem> {
-    crate::views::welcome::welcome_menu_items(import, worktree, changelog)
+    crate::views::welcome::welcome_menu_items(false, import, worktree, changelog)
+}
+/// DIVERGENCE(dscode): with no provider, the menu leads with "Add a provider",
+/// which opens the add-provider form.
+#[test]
+fn menu_leads_with_add_provider_until_a_provider_offers_a_model() {
+    use crate::views::welcome::WelcomeMenuItem;
+    let items = crate::views::welcome::welcome_menu_items(true, false, false, false);
+    assert_eq!(items[0], WelcomeMenuItem::AddProvider);
+    assert!(matches!(
+        dispatch_menu_action(0, &items, None),
+        InputOutcome::Action(Action::OpenAddProvider)
+    ));
+    assert!(!menu(false, false, false).contains(&WelcomeMenuItem::AddProvider));
 }
 #[test]
 fn menu_action_indices_without_changelog() {
@@ -6674,4 +6687,24 @@ fn native_preset_document_viewer_survives_ticks_without_a_transcript_anchor() {
     ));
     assert!(!AppView::tick_agent_block_viewer(&mut agent));
     assert!(agent.block_viewer.is_some());
+}
+/// DIVERGENCE(dscode): Enter runs the welcome row the arrows highlighted.
+#[test]
+fn welcome_enter_on_add_provider_opens_the_form() {
+    let mut app = test_app();
+    app.auth_state = AuthState::Done;
+    assert!(app.models.available.is_empty());
+    let _ = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+    let _ = app.handle_input(&key_event(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.welcome_menu_index, Some(0));
+    let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::OpenAddProvider)),
+        "got {outcome:?}"
+    );
+    // From the prompt, Enter still starts a session.
+    let mut app = test_app();
+    app.auth_state = AuthState::Done;
+    let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(outcome, InputOutcome::Action(Action::NewSession)));
 }
