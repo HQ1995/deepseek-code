@@ -181,6 +181,15 @@ fn still_running_label(watchers: Watchers) -> Option<String> {
 /// rows read as held. `Model` waits stay excluded — the model is actively
 /// producing the turn, so a message typed there queues behind real work. Pure
 /// predicate over the resolved activity; no turn-lifecycle side effects.
+/// A tool title that reads as a label and its subject rather than a command:
+/// `Fetch: URL`, and DIVERGENCE(dscode): `Browser: open URL`, so a running
+/// browser call reads like its card instead of "Run Browser: open URL".
+fn labeled_tool_title(title: &str) -> Option<(&'static str, &str)> {
+    [("Fetch: ", "Fetch "), ("Browser: ", "Browser ")]
+        .into_iter()
+        .find_map(|(tag, label)| title.strip_prefix(tag).map(|detail| (label, detail)))
+}
+
 pub fn is_sendable_wait(activity: &Option<TurnActivity>) -> bool {
     matches!(
         activity,
@@ -529,12 +538,11 @@ pub fn render_turn_status(
                 let display = truncate_str(query, max_query);
                 left_spans.push(Span::styled(prefix, Style::default().fg(theme.gray)));
                 left_spans.push(Span::styled(display, Style::default().fg(theme.command)));
-            } else if let Some(url) = title.strip_prefix("Fetch: ") {
-                // Fetch tools: "Fetch " (muted) + URL (yellow)
-                let prefix = "Fetch ";
+            } else if let Some((prefix, detail)) = labeled_tool_title(title) {
+                // Fetch and browser tools: label (muted) + URL or action (yellow)
                 let prefix_width = prefix.width();
-                let max_url = available_for_label.saturating_sub(prefix_width).max(5);
-                let display = truncate_str(url, max_url);
+                let max_detail = available_for_label.saturating_sub(prefix_width).max(5);
+                let display = truncate_str(detail, max_detail);
                 left_spans.push(Span::styled(prefix, Style::default().fg(theme.gray)));
                 left_spans.push(Span::styled(display, Style::default().fg(theme.command)));
             } else {
@@ -912,6 +920,19 @@ mod tests {
         );
         assert!(!is_sendable_wait(&Some(TurnActivity::Thinking)));
         assert!(!is_sendable_wait(&None));
+    }
+
+    #[test]
+    fn labeled_tool_titles_split_into_label_and_subject() {
+        assert_eq!(
+            labeled_tool_title("Fetch: https://a.test"),
+            Some(("Fetch ", "https://a.test"))
+        );
+        assert_eq!(
+            labeled_tool_title("Browser: open https://a.test/"),
+            Some(("Browser ", "open https://a.test/"))
+        );
+        assert_eq!(labeled_tool_title("cargo test"), None);
     }
 
     #[test]

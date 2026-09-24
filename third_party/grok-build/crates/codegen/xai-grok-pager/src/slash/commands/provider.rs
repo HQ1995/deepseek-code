@@ -35,6 +35,33 @@ pub(crate) struct ProviderPendingDelete {
     pub blocked: bool,
 }
 
+/// Footer of the bare `/provider` picker: its row keys, or the armed delete's
+/// confirm, which is a refusal while the row owns the current model. Without
+/// it `e`, `d` and `a` went unmentioned and `d` answered with nothing.
+pub(crate) fn provider_picker_footer(pending: Option<&ProviderPendingDelete>) -> Vec<String> {
+    match pending {
+        Some(armed) if armed.blocked => vec![
+            format!("{} is in use; switch provider first", armed.name),
+            "n dismiss".to_string(),
+        ],
+        Some(armed) => vec![
+            format!("Delete {} and its unused saved key?", armed.name),
+            "y confirm".to_string(),
+            "n cancel".to_string(),
+        ],
+        None => [
+            "\u{2191}/\u{2193} nav",
+            "Enter switch",
+            "e edit",
+            "d delete",
+            "a add",
+            "Esc close",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    }
+}
+
 /// Outcome of routing a key through an armed ProviderPendingDelete.
 pub(crate) enum ProviderPendingDeleteKey {
     /// 'y': caller should remove this provider (never for a blocked arm).
@@ -511,6 +538,29 @@ mod tests {
             ),
             ProviderPendingDeleteKey::NotArmed
         ));
+    }
+
+    #[test]
+    fn picker_footer_names_the_row_keys_and_the_armed_confirm() {
+        assert!(provider_picker_footer(None).contains(&"d delete".to_string()));
+        let mut armed = ProviderPendingDelete {
+            provider_id: "pi".into(),
+            name: "Pi".into(),
+            blocked: false,
+        };
+        assert_eq!(
+            provider_picker_footer(Some(&armed)),
+            [
+                "Delete Pi and its unused saved key?",
+                "y confirm",
+                "n cancel"
+            ]
+        );
+        armed.blocked = true;
+        assert_eq!(
+            provider_picker_footer(Some(&armed))[0],
+            "Pi is in use; switch provider first"
+        );
     }
 
     #[test]

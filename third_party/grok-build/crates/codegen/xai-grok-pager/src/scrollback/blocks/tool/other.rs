@@ -187,6 +187,28 @@ impl OtherToolCallBlock {
     }
 }
 
+/// Row 1 of a media card whose file is a leader attachment object; the row
+/// keeps its click-to-copy target.
+const ATTACHMENT_CAPTION: &str = "Saved with the session · click to copy its path";
+
+/// DIVERGENCE(dscode): whether `path` is an object in the leader's
+/// content-addressed attachment store (`…/objects/ec/ec4c…`, a browser
+/// screenshot). Its name says nothing to a reader, so the card captions it.
+fn is_attachment_object(path: &std::path::Path) -> bool {
+    let mut parts = path
+        .components()
+        .rev()
+        .map(|part| part.as_os_str().to_str().unwrap_or(""));
+    let (Some(object), Some(shard), Some("objects")) = (parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    object.len() == 64
+        && object.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && shard.len() == 2
+        && object.starts_with(shard)
+}
+
 impl BlockContent for OtherToolCallBlock {
     fn output(&self, ctx: &BlockContext) -> BlockOutput {
         let theme = Theme::current();
@@ -202,9 +224,13 @@ impl BlockContent for OtherToolCallBlock {
             // Percent-decode for display only (e.g. `%2F` → `/`); the stored
             // path is unchanged so Open / copy-path still target the file.
             let raw_path = media_path.display().to_string();
-            let path_str = urlencoding::decode(&raw_path)
-                .map(|s| s.into_owned())
-                .unwrap_or(raw_path);
+            let path_str = if is_attachment_object(&media_path) {
+                ATTACHMENT_CAPTION.to_string()
+            } else {
+                urlencoding::decode(&raw_path)
+                    .map(|s| s.into_owned())
+                    .unwrap_or(raw_path)
+            };
             // Char-boundary middle-ellipsis (decoded paths may be multibyte).
             let path_display = if path_str.chars().count() > max_w {
                 let keep = max_w.saturating_sub(3) / 2;
@@ -568,4 +594,61 @@ fn parse_ask_user_qa_pairs(output: &str) -> Vec<(String, String)> {
     }
 
     vec![]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scrollback::types::BlockContext;
+
+    fn png() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]));
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+
+    fn path_row(block: &OtherToolCallBlock) -> String {
+        let ctx = BlockContext {
+            width: 120,
+            mode: DisplayMode::Collapsed,
+            is_running: false,
+            raw: false,
+            max_lines: None,
+            appearance: Default::default(),
+            is_selected: false,
+            cwd: None,
+        };
+        let output = block.output(&ctx);
+        output.lines[1]
+            .content
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn attachment_objects_are_captioned_and_named_files_keep_their_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let object = format!("ec{}", "4c".repeat(31));
+        let stored = dir.path().join("attachments/v1/objects/ec").join(&object);
+        std::fs::create_dir_all(stored.parent().unwrap()).unwrap();
+        std::fs::write(&stored, png()).unwrap();
+        let named = dir.path().join("shot.png");
+        std::fs::write(&named, png()).unwrap();
+
+        let screenshot = OtherToolCallBlock::new("Browser: take a screenshot", "")
+            .with_media_ref(&stored, false);
+        assert_eq!(path_row(&screenshot), ATTACHMENT_CAPTION);
+        assert_eq!(screenshot.media_ref_path(), Some(stored.clone()));
+        let generated = OtherToolCallBlock::new("image_gen", "").with_media_ref(&named, false);
+        assert_eq!(path_row(&generated), named.display().to_string());
+
+        assert!(!is_attachment_object(&dir.path().join("objects/ec/ec4c")));
+        assert!(!is_attachment_object(
+            &dir.path().join("objects/ab").join(&object)
+        ));
+    }
 }

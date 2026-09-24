@@ -2133,10 +2133,30 @@ impl AgentView {
                 let compact = self.scrollback.appearance().prompt.compact;
                 // Surface `i search` in the footer when vim nav mode is active.
                 mw::push_vim_nav_search_hint(&mut picker_shortcuts, state.search_active);
+                // DIVERGENCE(dscode): /provider rows take e/d/a, and d arms a
+                // confirm that only the footer can show.
+                let provider_footer = (command == "provider").then(|| {
+                    crate::slash::commands::provider::provider_picker_footer(
+                        self.prompt.provider_pending_delete.as_ref(),
+                    )
+                });
+                let provider_shortcuts: Vec<Shortcut<'_>> = provider_footer
+                    .iter()
+                    .flatten()
+                    .map(|label| Shortcut {
+                        label,
+                        clickable: false,
+                        id: 0,
+                    })
+                    .collect();
                 let modal_config = ModalWindowConfig {
                     title,
                     tabs: None,
-                    shortcuts: &picker_shortcuts,
+                    shortcuts: if provider_footer.is_some() {
+                        &provider_shortcuts
+                    } else {
+                        &picker_shortcuts
+                    },
                     sizing: ModalSizing {
                         width_pct: 0.50,
                         max_width: 80,
