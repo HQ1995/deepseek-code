@@ -520,6 +520,16 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
 
   return {
     peek: () => catalog,
+    /** The name the picker shows for a model id a native service reports (a
+     * teammate's bare `deepseek-flash`): exact with its provider, otherwise
+     * only when every provider names that id alike. */
+    modelName(id: string, provider?: string): string | undefined {
+      const rows = catalog?.availableModels ?? []
+      const wire = provider === undefined ? undefined : catalog?.providerModelToWireId.get(modelEffortKey(provider, id))
+      if (wire !== undefined) return rows.find(row => row.modelId === wire)?.name
+      const names = new Set(rows.filter(row => row.modelId === id || catalog?.routesByModel.get(row.modelId)?.model === id).map(row => row.name))
+      return names.size === 1 ? [...names][0] : undefined
+    },
     /** A settings namespace was recomposed (`ns`), or the profile reloaded
      * (no `ns`): the next display read recomposes the provider section. */
     settingsChanged(ns?: string): void {

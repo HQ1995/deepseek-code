@@ -36,6 +36,8 @@ describe('/team', () => {
     expect(describeTeam(members.slice(0, 1), [])).toContain('- no teammates yet; they start only when you ask for them')
     expect(describeTeam(members.slice(0, 1), [])).toContain('Tasks:\n- none')
     expect(describeTeam(members.slice(0, 1), [])).not.toContain('/subagents')
+    expect(describeTeam(members, [], id => id === 'deepseek-flash' ? 'DeepSeek-V41-Flash' : undefined))
+      .toContain('· model DeepSeek-V41-Flash ·')
   })
 
   it('reads the Lead agent only for Team sessions and refuses arguments', () => {

@@ -14,6 +14,7 @@ export interface TeamMemberRow {
   status: string
   description?: string
   context?: string
+  provider?: string
   model?: string
   diagnostics: readonly string[]
 }
@@ -33,6 +34,8 @@ export interface NativeTeamHost<S> {
   /** Whether the session's preset mounts the Team tools. */
   hasTeam(record: S): boolean
   agent(record: S): unknown
+  /** The name the model picker shows for a model id, when it knows one. */
+  modelName?(id: string, provider?: string): string | undefined
 }
 
 export const TEAM_USAGE = 'Usage: /team'
@@ -41,14 +44,16 @@ const STATUS: Record<string, string> = { running: 'running', inactive: 'idle', p
 const CONTEXT: Record<string, string> = { fresh: 'new context', fork: 'forked context' }
 const TASK_STATUS: Record<string, string> = { in_progress: 'in progress' }
 
-/** Markdown: the TUI joins single line breaks, so items are list entries. */
-export function describeTeam(members: ReadonlyArray<TeamMemberRow>, tasks: ReadonlyArray<TeamTaskRow>): string {
+/** Markdown: the TUI joins single line breaks, so items are list entries.
+ * Models read as the picker and footer name them, falling back to the id. */
+export function describeTeam(members: ReadonlyArray<TeamMemberRow>, tasks: ReadonlyArray<TeamTaskRow>,
+  modelName: (id: string, provider?: string) => string | undefined = () => undefined): string {
   const lines = ['Agent Team', '', 'Members:']
   for (const member of members) {
     // A teammate's short id is the child conversation /subagents controls.
     const who = member.role === 'lead' ? member.name + ' (lead)' : member.name + ' (teammate ' + member.id.slice(0, 8) + ')'
     const facts = [STATUS[member.status] ?? member.status, member.context === undefined ? undefined : CONTEXT[member.context] ?? member.context,
-      member.model === undefined || member.model === '' ? undefined : 'model ' + member.model, member.description]
+      member.model === undefined || member.model === '' ? undefined : 'model ' + (modelName(member.model, member.provider) ?? member.model), member.description]
       .filter((fact): fact is string => fact !== undefined && fact !== '')
     lines.push('- ' + who + ' · ' + facts.join(' · '))
     for (const diagnostic of member.diagnostics) lines.push('  - ! ' + diagnostic)
@@ -77,7 +82,7 @@ export function createNativeTeam<S>(host: NativeTeamHost<S>) {
       const service = host.service()
       if (service === undefined) throw internalError('the Agent Team runtime is unavailable; restart dscode and retry')
       const agent = host.agent(record)
-      return describeTeam(service.listMembers(agent), service.listTasks(agent))
+      return describeTeam(service.listMembers(agent), service.listTasks(agent), (id, provider) => host.modelName?.(id, provider))
     },
   }
 }

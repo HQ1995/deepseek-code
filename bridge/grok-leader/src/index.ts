@@ -395,7 +395,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   // preset that mounts the Team tools have a Team to show.
   const teamService = (): TeamServiceLike | undefined => ctx.get('agentTeams') as TeamServiceLike | undefined
   const hasTeam = (record: SessionRecord) => nativeCapabilities.toolNames(record).has('spawn_teammate')
-  const nativeTeam = createNativeTeam<SessionRecord>({ service: teamService, hasTeam, agent: record => record.agent })
+  const nativeTeam = createNativeTeam<SessionRecord>({ service: teamService, hasTeam, agent: record => record.agent, modelName: models.modelName })
   const teamMembers = (record: SessionRecord) => {
     if (!hasTeam(record)) return undefined
     try { return teamService()?.listMembers(record.agent).filter(member => member.role === 'teammate') } catch (error) {

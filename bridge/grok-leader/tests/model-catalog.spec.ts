@@ -55,6 +55,19 @@ function fixture() {
 }
 
 describe('model catalog module', () => {
+  it('names a bare model id the way the picker does, unless providers disagree', async () => {
+    const f = fixture()
+    expect(f.catalog.modelName('shared')).toBeUndefined()
+    await f.catalog.current()
+    expect(f.catalog.modelName('shared')).toBe('Shared model')
+    expect(f.catalog.modelName('missing')).toBeUndefined()
+    vi.mocked(f.llm.listModels).mockImplementation(async (provider: string) => [{ id: 'shared', name: provider + ' shared' }])
+    await f.catalog.refresh()
+    expect(f.catalog.modelName('shared')).toBeUndefined()
+    expect(f.catalog.modelName('shared', 'beta')).toBe('beta shared')
+    await f.catalog.dispose()
+  })
+
   it('publishes acknowledged choices through the latest wire mapping without rediscovery', async () => {
     const f = fixture(), current = await f.catalog.current()
     const calls = vi.mocked(f.llm.listModels).mock.calls.length
