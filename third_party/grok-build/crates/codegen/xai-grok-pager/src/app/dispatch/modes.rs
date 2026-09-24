@@ -396,8 +396,7 @@ pub(super) fn set_yolo_mode(app: &mut AppView, new: bool) -> Vec<Effect> {
     sync_active_auto_flag(app);
 
     // Toast on every save. YOLO ON gets a weightier visual; under an active
-    // plan mode, say the plan edit gate stays binding — "all tool actions
-    // auto-run" would overpromise while the shell rejects non-plan-file edits.
+    // plan mode, say plan mode will not hold edits back (see the constant).
     if new && effective_plan {
         app.show_toast(YOLO_ON_UNDER_PLAN_TOAST);
     } else {
@@ -471,7 +470,7 @@ pub(super) fn set_permission_mode(
     sync_active_auto_flag(app);
 
     // Toast on every save (plan-aware for AlwaysApprove, mirroring
-    // `set_yolo_mode` — the plan edit gate stays binding under yolo).
+    // `set_yolo_mode`).
     if kind.is_always_approve() && effective_plan {
         app.show_toast(YOLO_ON_UNDER_PLAN_TOAST);
     } else {
@@ -498,11 +497,14 @@ pub(super) fn permission_mode_toast(kind: crate::app::actions::PermissionModeKin
     }
 }
 
-/// YOLO-ON toast when plan mode is active: always-approve arms the permission
-/// fast path, but the shell's plan-mode gate still rejects non-plan-file
-/// edits, so the standard "all tool actions auto-run" would overpromise.
+/// YOLO-ON toast when plan mode is active.
+///
+/// DIVERGENCE(dscode): upstream warned that plan mode still blocks file
+/// edits. DSH plan mode is soft guidance (a prompt section only; sandbox and
+/// approval enforce restrictions independently), so under always-approve
+/// nothing holds an edit back — say that instead of promising a gate.
 pub(super) const YOLO_ON_UNDER_PLAN_TOAST: &str =
-    "\u{26A0} Always-approve ON: plan mode still blocks file edits until you exit plan mode";
+    "\u{26A0} Always-approve ON: all tools auto-run (plan mode guides but does not block edits)";
 
 /// Build the YOLO toast — ⚠ on ON (destructive), ✓ on OFF (safe default).
 fn yolo_toast(new: bool) -> String {
