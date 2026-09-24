@@ -97,5 +97,9 @@ if [[ -n "${NPM_TOKEN:-}" ]]; then
   export NPM_CONFIG_USERCONFIG="$stage/.npmrc"
 fi
 [[ -z "$OTP" ]] || export NPM_CONFIG_OTP="$OTP"
-npm publish "$stage/dscode-plugin.tgz" --access public --tag "$NPM_TAG"
+# Publish from the stage as its own project root. From any directory below a
+# folder with a package.json (a home directory, say), npm reads that folder's
+# .npmrc as project config, which outranks the user config written above.
+printf '{"private":true}\n' > "$stage/package.json"
+(cd "$stage" && npm publish ./dscode-plugin.tgz --access public --tag "$NPM_TAG")
 echo "published: npm view @hqzhao95/dscode@$NPM_TAG version -> $(npm view "@hqzhao95/dscode@$NPM_TAG" version)"
