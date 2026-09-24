@@ -191,6 +191,16 @@ while the provider is in use. A signed-in DeepSeek account sends its own token
 for the endpoint it covers. `scripts/e2e-native-provider.mjs` exercises the whole
 path against a loopback Messages fixture.
 
+A custom base URL must be a Messages root: the adapter appends `/v1/messages`
+and `/v1/files`, reuses a root that already ends in `/v1`, and does not
+translate a Chat endpoint. Its Files reuse covers image request bytes only, not
+PDF or Office understanding. File ids are scoped to the credential and
+endpoint; an expired id or failed upload falls back to inline bytes and may
+permanently offload the oldest image, and a TUI notice says how to reattach
+it. Generic `anthropic-messages` pi-ai routes are not this adapter.
+`experiments/capabilities/messages-smoke.mjs` covers Files reuse, offload and
+fallback against a loopback fixture.
+
 The default profile remains provider-neutral. OpenAI-compatible gateway routes
 use their own discovered metadata; they do not inherit the native adapter's
 vision or system-prompt capabilities just because model names match. Model
@@ -389,8 +399,10 @@ installed remote profile against a real host over ACP:
 real TUI binary from a local project with its own `.mcp.json`. It runs headless
 and then interactive in tmux, where the header must name the remote workspace. With a TUI that predates these gates,
 the bridge still refuses the host cwd, so an old client fails closed.
-`experiments/capabilities/ssh-smoke.mjs` drives the shipped adapter through
-the SDK: remote PTY, PTC, cancellation and SSH-master loss.
+`scripts/e2e-ssh-smoke.mjs <runtime> <config.json>` drives the shipped adapter
+through the SDK: remote PTY, PTC, cancellation and SSH-master loss.
+`scripts/e2e-ssh-integrity.mjs` checks that a helper or bootstrap with the
+wrong digest is refused before any provider is exposed.
 
 The leader socket is bound in a private directory, restricted to the owner
 and then hard-linked into place, instead of holding a process-wide `0o177`

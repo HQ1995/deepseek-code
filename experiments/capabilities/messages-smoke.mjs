@@ -5,7 +5,7 @@ import { once } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { releaseSdk } from './runtime.mjs'
+import { releaseSdk } from '../../scripts/release-sdk.mjs'
 
 const { sdk, mount } = releaseSdk(process.argv[2])
 const { Context } = await sdk('@deepseek-ai/cordis')

@@ -4,7 +4,6 @@
  * Usage: e2e-browser-smoke.mjs <extracted-runtime> <absolute Chromium executable>
  * Link bridge/grok-leader/node_modules to the runtime's node_modules first. */
 import assert from 'node:assert/strict'
-import { createRequire } from 'node:module'
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -14,13 +13,13 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import * as Browser from '../bridge/grok-leader/browser/index.mjs'
+import { releaseSdk } from './release-sdk.mjs'
 import { allowedTools, prefix } from '../bridge/grok-leader/browser/policy.mjs'
 
 const runtime = resolve(process.argv[2])
 const executablePath = process.argv[3]
 assert.ok(executablePath?.startsWith('/'), 'Pass an absolute Chromium executable path')
-const requireRuntime = createRequire(join(runtime, 'node_modules/@deepseek-ai/dsh/package.json'))
-const sdk = name => import(pathToFileURL(requireRuntime.resolve(name)).href)
+const { sdk } = releaseSdk(runtime)
 const { Context } = await sdk('@deepseek-ai/cordis')
 const { LlmAdapter, ToolCallId } = await sdk('@deepseek-ai/dsh-llm')
 const root = await mkdtemp(join(tmpdir(), 'dscode-browser-smoke-'))

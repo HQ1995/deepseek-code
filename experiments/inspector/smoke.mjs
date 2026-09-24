@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { releaseSdk } from '../capabilities/runtime.mjs'
+import { releaseSdk } from '../../scripts/release-sdk.mjs'
 import * as Inspector from './index.mjs'
 
 const { sdk } = releaseSdk(process.argv[2])

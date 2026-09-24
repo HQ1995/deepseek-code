@@ -1,4 +1,5 @@
-/** Installed dscode ACP + native Messages + Inspector: absent by default, mounted with DSCODE_INSPECTOR=1. */
+/** Installed dscode ACP + native Messages + Inspector: absent by default, mounted with DSCODE_INSPECTOR=1.
+ * Usage: inspector-installed.mjs <runtime> <dsh-home with dscode and the packed ../inspector bundle> */
 import assert from 'node:assert/strict'
 import net from 'node:net'
 import { createServer } from 'node:http'
@@ -45,7 +46,6 @@ try {
     assert.equal(existsSync(socketPath), false)
     let diagnostics = '', socket, inspectorHttp
     const leader = spawn(process.execPath, [join(runtime, 'bin/dsh'), '--profile', 'dscode',
-      '--patch', fileURLToPath(new URL('../native-messages/cordis.patch.yml', import.meta.url)),
       '--patch', fileURLToPath(new URL('./inspector-test.patch.yml', import.meta.url))], {
       env: { ...process.env, DSH_HOME: profileHome, DSCODE_SOCKET: socketPath, DSH_TELEMETRY_DISABLED: '1',
         DSCODE_INSPECTOR: enabled ? '1' : '0', DSCODE_INSPECTOR_UNSAFE_CAPTURE_FETCH: '0',

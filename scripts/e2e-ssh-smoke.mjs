@@ -1,11 +1,17 @@
+#!/usr/bin/env node
+/** SDK-level acceptance of the shipped SSH execution world
+ * (bridge/grok-leader/ssh) against one approved POSIX host.
+ * Usage: e2e-ssh-smoke.mjs <extracted-runtime> <config.json>, config as for
+ * e2e-remote-installed.mjs. Link bridge/grok-leader/node_modules to the
+ * runtime's node_modules first. */
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { releaseSdk } from './runtime.mjs'
+import { releaseSdk } from './release-sdk.mjs'
 // The shipped adapter; its runtime packages resolve beside the bridge's node_modules.
-import * as Remote from '../../bridge/grok-leader/ssh/index.mjs'
+import * as Remote from '../bridge/grok-leader/ssh/index.mjs'
 
 const { sdk, mount } = releaseSdk(process.argv[2])
 const { Context } = await sdk('@deepseek-ai/cordis')

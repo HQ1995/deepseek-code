@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { releaseSdk } from './runtime.mjs'
+import { releaseSdk } from '../../scripts/release-sdk.mjs'
 
 const { sdk, mount } = releaseSdk(process.argv[2])
 const { Context } = await sdk('@deepseek-ai/cordis')

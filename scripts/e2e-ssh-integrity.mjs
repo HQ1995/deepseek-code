@@ -1,6 +1,10 @@
+#!/usr/bin/env node
+/** dsh-ssh must refuse a helper or bootstrap whose digest differs before it
+ * exposes a provider; the SSH execution world relies on this.
+ * Usage: e2e-ssh-integrity.mjs <extracted-runtime> <config.json> */
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { releaseSdk } from './runtime.mjs'
+import { releaseSdk } from './release-sdk.mjs'
 
 const { sdk } = releaseSdk(process.argv[2])
 const { Context } = await sdk('@deepseek-ai/cordis')

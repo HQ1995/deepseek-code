@@ -4,3 +4,9 @@
 - id: tools
   config:
     mode: native
+# The shipped, disabled native DeepSeek row, pointed at the loopback fixture.
+- id: llm-deepseek
+  disabled: false
+  config:
+    apiKeyEnv: DSCODE_NATIVE_DEEPSEEK_API_KEY
+    baseURL: !!js process.env.DSCODE_NATIVE_DEEPSEEK_BASE_URL
