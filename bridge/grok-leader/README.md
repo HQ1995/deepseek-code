@@ -23,16 +23,18 @@ The Cordis plugin maps the TUI's Unix-socket leader protocol onto native DSH
 agents, tools, sessions, and services. Rendering belongs to the Rust TUI;
 model execution and durable storage belong to DSH. `cordis.patch.yml` composes
 the profile with a provider-neutral default. The ordered bundle patch array
-adds the seven shipped preset declarations to the native registry.
+adds the eight shipped preset declarations to the native registry.
 
 The DSH base owns the PTC runtime; shipped workflow presets mount their own
 isolated `workflow-ptc` engine. Native DeepSeek session-log contribution is
 explicitly disabled in the profile, independently of telemetry settings.
-Experimental browser and computer providers are not enabled by default.
+The isolated browser ships as a disabled `dscode-browser` row that `/browser on`
+enables. `@hqzhao95/dscode/ssh` is the execution world that `dscode remote`
+inserts for SSH workspaces.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `socketPath` | `/tmp/dsh-grok-leader.sock` | Leader socket path |
+| `socketPath` | `$DSCODE_SOCKET`, set by the TUI | Leader socket path; `/tmp/dsh-grok-leader.sock` when unset |
 | `provider`, `model` | unset | Initial model route |
 | `combineQueuedPrompts` | `false` | Combine plain queued prompts; `DSCODE_COMBINE_QUEUED=1` also enables it |
 | `followUpBehavior` | `queue` | Queue follow-ups or `steer` at the next native step; overrides `DSCODE_FOLLOW_UP` |
