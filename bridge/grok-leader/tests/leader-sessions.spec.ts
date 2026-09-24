@@ -344,6 +344,19 @@ describe('leader session ownership, history and discovery', () => {
     expect(persistence.closed).toEqual(['persisted-session'])
   })
 
+  it('x.ai/session/delete says DSH keeps sessions instead of method-not-found', async () => {
+    const { registry, client: c } = await start()
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    // The TUI dashboard's delete sends { sessionId, cwd }.
+    // No `data`: the TUI's toast would append it as JSON after the message.
+    expect((await c.request(2, 'x.ai/session/delete', { sessionId, cwd: process.cwd() })).error).toEqual({
+      code: -32603, message: 'dscode sessions cannot be deleted; DSH keeps them. Archive is not supported yet.' })
+    expect(registry.byId.get(sessionId)?.internals.disposed).toBe(false)
+    expect((await c.request(3, 'x.ai/session/info', { sessionId })).error).toBeUndefined()
+  })
+
   it('x.ai/session/list backfills firstPrompt before the query filter', async () => {
     const { persistence, client: c } = await start()
     register(c)

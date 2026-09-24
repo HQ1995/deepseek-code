@@ -575,6 +575,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return artifacts.info(clientId, params)
       case 'x.ai/session/search':
         return await discovery.search(params)
+      // The dashboard's delete (Ctrl+X twice) still sends this. DSH has no
+      // session delete, so say why instead of "method not found". An error
+      // without `data` (grok's delete failures are internal errors too): the
+      // TUI's toast prints the message and would append any data as JSON.
+      case 'x.ai/session/delete':
+        throw internalError('dscode sessions cannot be deleted; DSH keeps them. Archive is not supported yet.')
       case 'x.ai/session/list':
       case 'x.ai/sessions/list':
         return await discovery.list(method, params)

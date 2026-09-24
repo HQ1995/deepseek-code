@@ -82,7 +82,8 @@ The bridge also implements the `x.ai/*` surfaces required by this TUI:
 - models and provider CRUD
 - preset and slash-command discovery
 - session list (durable titles and latest activity), info, history, fork,
-  rename, and `/btw`
+  rename, and `/btw`; `x.ai/session/delete` (the dashboard's delete) fails with
+  an internal error saying DSH keeps sessions, since DSH has no session delete
 - queue edit, reorder, remove, clear, send-now, and steer
 - prompt-complete, interjection, question, and lifecycle notifications
 - exact model image-capability gating, durable image prompt admission, and
