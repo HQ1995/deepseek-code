@@ -772,6 +772,9 @@ fn x11_primary_hint_routes_to_originating_agent() {
     );
 }
 
+/// Opening the dashboard reads `GROK_AGENT_DASHBOARD`, which the
+/// dashboard-disabled tests set to `0`; share their serial key.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn x11_primary_hint_routes_to_originating_dashboard() {
     let mut app = test_app_with_agent();
@@ -840,6 +843,7 @@ fn clipboard_failure_routes_to_originating_agent_without_duplicate() {
     );
 }
 
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn clipboard_failure_routes_to_originating_dashboard() {
     let mut app = test_app_with_agent();

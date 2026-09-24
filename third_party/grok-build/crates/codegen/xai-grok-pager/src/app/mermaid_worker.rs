@@ -2155,6 +2155,10 @@ mod tests {
     /// `mermaid_needs_tick()` flips back to false (the settle invariant).
     #[test]
     fn mermaid_view_miss_dispatches_then_settles() {
+        // The cache key embeds the live theme, read here and again at click
+        // time; hold the theme lock so a parallel `/theme` test cannot
+        // switch it in between and turn the expected key into a miss.
+        let _theme = crate::theme::cache::pin_theme();
         let mut agent = agent_with_session("miss");
         let src = "flowchart LR\nA-->B\n".to_string();
 
@@ -2202,6 +2206,8 @@ mod tests {
     /// dispatches no render, and never even spins up the worker runtime.
     #[test]
     fn mermaid_view_disk_hit_runs_action_without_dispatch() {
+        // Theme pin: see `mermaid_view_miss_dispatches_then_settles`.
+        let _theme = crate::theme::cache::pin_theme();
         let mut agent = agent_with_session("hit");
         let src = "flowchart LR\nA-->B\n".to_string();
         let theme = crate::theme::cache::current_kind();
@@ -2240,6 +2246,8 @@ mod tests {
     /// when the poll resolves the pending entry (two opens / two copies).
     #[test]
     fn mermaid_view_pending_dedup_wins_over_disk_hit_race() {
+        // Theme pin: see `mermaid_view_miss_dispatches_then_settles`.
+        let _theme = crate::theme::cache::pin_theme();
         let mut agent = agent_with_session("race");
         let src = "flowchart LR\nA-->B\n".to_string();
 

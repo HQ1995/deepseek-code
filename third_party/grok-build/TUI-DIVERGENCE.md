@@ -408,6 +408,15 @@ commands before capability discovery; they do not become model prompts.
   and the effects helper restores the variable before its tempdir goes. Worktree
   paths resolve `GROK_HOME` on every call, so a parallel swap could put another
   test's checkout in that tempdir and delete it.
+- Parallel-suite isolation for upstream pager tests (assertions unchanged):
+  tests that read the global theme twice (thinking quote-bar selection, the
+  three Mermaid view cache-key tests) hold `theme::cache::pin_theme()`, and
+  tests that open the dashboard join the `GROK_AGENT_DASHBOARD` serial group
+  (two clipboard-routing tests in `task_result.rs`, six in `dashboard.rs`).
+- Session relocation `load_candidates` (ported from upstream `75810042ca`,
+  with its regression test): a cwd bucket deleted between the sessions readdir
+  and opening it is skipped. Before, a concurrent delete failed
+  `list_summaries`, and resume by title with it.
 - Upstream pager tests that assert what dscode replaces (branding, Kitty
   placement, `/loop` gating, fail-closed images, ACP-owned `/compact`, the
   pre-session model pick, local refusal of unregistered pager names, finished

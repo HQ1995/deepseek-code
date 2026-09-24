@@ -1056,6 +1056,7 @@ fn dashboard_image_dispatch_cancel_rewind_resends_attachment() {
 /// Paste-then-immediate-send race (dashboard dispatch): the same guarantee
 /// for the dashboard's session-spawning input — the new session must carry
 /// the pasted image even when Enter beats the deferred probe.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_dispatch_send_before_paste_probe_keeps_image() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -1151,6 +1152,7 @@ fn dashboard_dispatch_send_before_paste_probe_keeps_image() {
 /// same probe window must both survive (the old single slot let the second
 /// stash silently overwrite the first) and both re-issue on completion —
 /// dispatch first, then peek.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_second_stash_does_not_overwrite_first() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -1376,6 +1378,7 @@ fn dashboard_peek_cycle_does_not_retire_the_nudge() {
         "the dashboard peek must not retire (or attribute) the nudge",
     );
 }
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_open_or_merges_session_is_worktree_when_probe_is_plain() {
     let repo = crate::test_util::TempGitRepo::init("main");
@@ -1397,6 +1400,7 @@ fn dashboard_open_or_merges_session_is_worktree_when_probe_is_plain() {
     );
     assert_eq!(agent.current_branch.as_deref(), Some("main"));
 }
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_open_clears_stale_agent_is_worktree_when_probe_and_session_false() {
     let repo = crate::test_util::TempGitRepo::init("main");
@@ -1418,6 +1422,7 @@ fn dashboard_open_clears_stale_agent_is_worktree_when_probe_and_session_false() 
     );
     assert_eq!(agent.current_branch.as_deref(), Some("main"));
 }
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_open_detects_standalone_grok_worktree() {
     let main = crate::test_util::TempGitRepo::init("main-only");
@@ -4498,6 +4503,7 @@ fn dashboard_row_stop_during_send_over_wake_cancels_wake_not_local_turn() {
         "auto-resend would hit the promoted user turn"
     );
 }
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_stop_double_press_deletes_top_level() {
     let mut app = test_app();

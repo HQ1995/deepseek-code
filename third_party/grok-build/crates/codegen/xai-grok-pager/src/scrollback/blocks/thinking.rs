@@ -606,6 +606,11 @@ mod tests {
     #[test]
     fn thinking_quote_line_selection_excludes_bar_prefix() {
         use crate::scrollback::types::{derive_selection_text, line_plain_text};
+        // The bar is recognized by the theme's `blockquote_outer` style, read
+        // once when the block renders and again when selection is derived.
+        // Hold the theme lock so a parallel palette switch (the terminal-native
+        // test below) cannot land between the two reads.
+        let _theme = crate::theme::cache::pin_theme();
 
         let mut appearance = AppearanceConfig::default();
         appearance.scrollback.blocks.thinking.header = false;
