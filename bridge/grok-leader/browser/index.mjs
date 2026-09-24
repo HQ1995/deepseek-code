@@ -4,7 +4,7 @@
  * `/browser on` enables the row. It does not confine network or host access. */
 import Schema from '@deepseek-ai/schemastery'
 import { importRuntime, playwrightMcpCli } from '../shared/runtime-modules.mjs'
-import { browserLaunchArgs, resolveBrowserExecutable, sandboxRestriction } from './executable.mjs'
+import { browserLaunchArgs, browserServerEnv, resolveBrowserExecutable, sandboxRestriction } from './executable.mjs'
 import { browserDenial, launchDenial, navigationPolicy, prefix } from './policy.mjs'
 import { mountBrowserSessions } from './session-browser.mjs'
 
@@ -53,7 +53,7 @@ export async function apply(ctx, config) {
   }, { prepend: true })
   const cli = playwrightMcpCli()
   const { default: BrowserUse } = await importRuntime('@deepseek-ai/dsh-browser-use')
-  const env = Object.fromEntries(Object.keys(process.env).filter(key => key.toUpperCase().startsWith('PLAYWRIGHT_MCP_')).map(key => [key, '']))
+  const env = browserServerEnv()
   let sessions = 0, lastError
   const executable = () => resolveBrowserExecutable(config.executablePath.get())
   ctx.effect(() => ctx.provide('dscodeBrowser', {

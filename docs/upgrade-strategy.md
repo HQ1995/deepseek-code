@@ -268,6 +268,8 @@ Each Session starts its own Playwright MCP 0.0.80 through DSH's browser-use
 provider, which the plugin loads from the runtime closure rather than declaring
 as peers. It runs `--isolated --headless` with a private output directory
 removed when the Session closes, and always requests the Chromium sandbox.
+Chromium binds a socket under `TMPDIR`, so a `TMPDIR` longer than 60 bytes,
+which would abort it at launch, is replaced by `/tmp` for the browser server.
 `--no-sandbox` requires `--accept-risk`. The browser is `--executable <path>`
 when given. Otherwise it is the first usable system Chrome or Chromium (the
 macOS app bundles; `/opt/google/chrome/chrome`, `/usr/bin/google-chrome[-stable]`

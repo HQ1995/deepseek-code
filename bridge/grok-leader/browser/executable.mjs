@@ -1,7 +1,7 @@
 /** Find the Chromium-family browser the Playwright MCP server launches.
  * Never a daily profile: the server always runs isolated and headless. */
 import { accessSync, constants, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 
 const executableFile = path => {
@@ -85,6 +85,16 @@ export const NO_ORIGIN = 'https://no-origin.invalid'
  * validated origins (request routing, not an OS network sandbox) and blocks
  * service workers, which routing cannot see. The filter is fixed at launch, so
  * an empty allowlist blocks everything rather than filtering nothing. */
+/** Environment overrides for the Playwright MCP server: blank inherited
+ * PLAYWRIGHT_MCP_* settings, which would widen the reviewed launch arguments.
+ * Chromium binds a singleton socket under TMPDIR, and a Unix socket path holds
+ * at most 107 bytes, so a TMPDIR longer than 60 aborts the browser at launch;
+ * such a TMPDIR is replaced by /tmp, where Chromium makes its own private dir. */
+export function browserServerEnv({ env = process.env, tmp = tmpdir() } = {}) {
+  const overrides = Object.fromEntries(Object.keys(env).filter(key => key.toUpperCase().startsWith('PLAYWRIGHT_MCP_')).map(key => [key, '']))
+  return tmp.length > 60 ? { ...overrides, TMPDIR: '/tmp' } : overrides
+}
+
 export function browserLaunchArgs({ cli, executablePath, sandbox, outputDir, origins = [], anyOrigin = false }) {
   const allowed = origins.length > 0 ? origins : [NO_ORIGIN]
   return [cli, '--browser', 'chromium', '--isolated', '--headless', '--executable-path', executablePath,

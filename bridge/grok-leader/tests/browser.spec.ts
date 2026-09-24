@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setImmediate } from 'node:timers/promises'
 import { describe, expect, it } from 'vitest'
-import { NO_ORIGIN, browserCandidates, browserLaunchArgs, resolveBrowserExecutable, sandboxRestriction } from '../browser/executable.mjs'
+import { NO_ORIGIN, browserCandidates, browserLaunchArgs, browserServerEnv, resolveBrowserExecutable, sandboxRestriction } from '../browser/executable.mjs'
 import { browserOperation } from '../browser/operation.mjs'
 import { browserDenial, hiddenTool, launchDenial, navigationPolicy, prefix, withoutAnsi } from '../browser/policy.mjs'
 import { browserAction, browserCardTitle } from '../src/browser-actions.ts'
@@ -199,6 +199,14 @@ describe('browser executable', () => {
       .toEqual(['--allowed-origins', 'https://a.example;http://127.0.0.1:3000', '--block-service-workers'])
     // The request filter is fixed at launch: no origins yet means nothing loads, not everything.
     expect(browserLaunchArgs({ ...base, sandbox: true }).slice(-3)).toEqual(['--allowed-origins', NO_ORIGIN, '--block-service-workers'])
+  })
+
+  it('blanks inherited Playwright MCP settings and keeps Chromium\'s socket path within the Unix limit', () => {
+    const env = { PLAYWRIGHT_MCP_BROWSER: 'firefox', playwright_mcp_headless: 'false', PATH: '/bin' }
+    expect(browserServerEnv({ env, tmp: '/tmp' })).toEqual({ PLAYWRIGHT_MCP_BROWSER: '', playwright_mcp_headless: '' })
+    expect(browserServerEnv({ env: {}, tmp: '/t'.padEnd(60, 'x') })).toEqual({})
+    // One byte longer and Chromium's singleton socket would exceed 107 bytes.
+    expect(browserServerEnv({ env: {}, tmp: '/t'.padEnd(61, 'x') })).toEqual({ TMPDIR: '/tmp' })
   })
 })
 
