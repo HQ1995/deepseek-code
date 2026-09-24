@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Black-box lifecycle test for an already-published dscode npm package.
 # Uses an isolated HOME and a local mock model; no user state or paid API.
+# Defaults to the release this checkout's VERSION names; DSCODE_E2E_PACKAGE_SPEC
+# selects another, e.g. @hqzhao95/dscode@beta.
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/test-environment.sh"
 dscode_clear_test_overrides
 
-PACKAGE_SPEC="${DSCODE_E2E_PACKAGE_SPEC:-@hqzhao95/dscode@beta}"
+PACKAGE_SPEC="${DSCODE_E2E_PACKAGE_SPEC:-@hqzhao95/dscode@$(tr -d '[:space:]' < "$(dirname "${BASH_SOURCE[0]}")/../VERSION")}"
 KEEP="${DSCODE_E2E_KEEP:-0}"
 NODE_BIN="${DSCODE_E2E_NODE_BIN:-$(command -v node || true)}"
 NPM_BIN="${DSCODE_E2E_NPM_BIN:-$(command -v npm || true)}"

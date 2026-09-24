@@ -15,8 +15,12 @@ On Apple Silicon, use native ARM64 Node (`node -p process.arch` should print
 `arm64`); x64 Node under Rosetta does not select the Mac ARM64 payload.
 
 ```sh
-npx @hqzhao95/dscode
+npx @hqzhao95/dscode@alpha
 ```
+
+This page follows `main`, which ships on the alpha channel. Plain
+`npx @hqzhao95/dscode` installs the stable channel, which can lag several
+releases behind and lack features described here.
 
 The launcher verifies and installs the matching TUI, bridge, and pinned DSH
 runtime under `~/.dsh/profiles/dscode`, then links `~/.local/bin/dscode`. Add
