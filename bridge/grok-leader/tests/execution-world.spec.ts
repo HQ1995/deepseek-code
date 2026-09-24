@@ -10,6 +10,9 @@ describe('execution world', () => {
       .toBe('Lost the connection to ssh swoop:/w (SSH helper disconnected). Quit and restart dscode to reconnect.')
     expect(remoteUnavailable(remote, { state: 'failed' }))
       .toBe('Could not connect to ssh swoop:/w. Run `dscode doctor --runtime` in a shell to see why, then restart dscode.')
+    expect(remoteUnavailable(remote, { state: 'failed', reason: 'ssh swoop failed: Permission denied (publickey). Use a key.' }))
+      .toBe('Could not connect to ssh swoop:/w: ssh swoop failed: Permission denied (publickey). Use a key. '
+        + 'Run `dscode doctor --runtime` in a shell to check the host, then restart dscode.')
   })
 
 
@@ -50,5 +53,24 @@ describe('SSH plugin module', () => {
     const plugin = await import('../ssh/index.mjs')
     expect(plugin.name).toBe('dscode-ssh')
     expect(typeof plugin.apply).toBe('function')
+  })
+
+  it('names why a connection failed when dsh-ssh cannot', async () => {
+    const { explainFailure } = await import('../ssh/index.mjs')
+    const config = { host: 'build', workspace: '/w', node: '/n', helper: '/h.js', helperHash: 'a'.repeat(64),
+      bootstrapPath: '/b.js', bootstrapHash: 'b'.repeat(64) }
+    const lost = new Error('SSH helper disconnected; remote outcomes and cleanup are unknown')
+    const answered = (result: object) => async () => result
+    await expect(explainFailure(config, lost, answered({ status: 255, stdout: '',
+      stderr: 'ssh: Could not resolve hostname build: nodename nor servname provided, or not known\n' })))
+      .resolves.toMatch(/^ssh build failed: ssh: Could not resolve hostname build: .* and a known host key\.$/)
+    await expect(explainFailure(config, lost, answered({ status: 0, stderr: '',
+      stdout: JSON.stringify({ node: 'v24.1.0', workspace: false, digests: ['a'.repeat(64), 'b'.repeat(64)] }) })))
+      .resolves.toBe('/w is not a directory on build; create it first.')
+    // The host checks out, or the probe itself broke: what dsh-ssh saw stands.
+    await expect(explainFailure(config, lost, answered({ status: 0, stderr: '',
+      stdout: JSON.stringify({ node: 'v24.1.0', workspace: true, digests: ['a'.repeat(64), 'b'.repeat(64)] }) })))
+      .resolves.toBe(lost.message)
+    await expect(explainFailure(config, lost, async () => { throw new Error('spawn failed') })).resolves.toBe(lost.message)
   })
 })

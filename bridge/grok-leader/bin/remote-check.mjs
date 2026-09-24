@@ -3,7 +3,7 @@
  * non-interactively, the remote Node runs, the workspace exists, and the
  * helper and PTC bootstrap there are byte-identical to the ones this dscode's
  * DSH runtime ships. Those local copies also supply the default digests. */
-import { spawnSync } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFileSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -57,12 +57,30 @@ let directory = false
 try { directory = fs.statSync(workspace).isDirectory() } catch {}
 console.log(JSON.stringify({ node: process.version, workspace: directory, digests: files.map(digest) }))`
 
-/** Run the probe with `ssh` exactly as the leader connects: batch mode and a known host key. */
-export function sshProbe(config, spawn = spawnSync) {
+/** `ssh` arguments that connect exactly as the leader does: batch mode and a known host key. */
+const probeArgs = (config, connectTimeout) => {
   const command = [config.node, '-e', PROBE, config.workspace, config.helper, config.bootstrapPath].map(shellQuote).join(' ')
-  const result = spawn('ssh', ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=15', config.host, command],
-    { encoding: 'utf8', timeout: 60_000 })
+  return ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', `ConnectTimeout=${connectTimeout}`, config.host, command]
+}
+
+/** Run the probe with `ssh` exactly as the leader connects. */
+export function sshProbe(config, spawn = spawnSync) {
+  const result = spawn('ssh', probeArgs(config, 15), { encoding: 'utf8', timeout: 60_000 })
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '', error: result.error }
+}
+
+/** The probe without blocking, for a leader whose connection just failed: one
+ * short look at why. A host that does not answer in time reads as ssh's own
+ * failure, so `checkRemote` names it like any other. */
+export function sshProbeAsync(config, { timeoutMs = 10_000, run = execFile } = {}) {
+  return new Promise(resolve => {
+    run('ssh', probeArgs(config, Math.max(1, Math.floor(timeoutMs / 2000))), { encoding: 'utf8', timeout: timeoutMs }, (error, stdout, stderr) => {
+      const output = { stdout: stdout ?? '', stderr: stderr ?? '' }
+      if (error?.killed === true) resolve({ status: 255, stdout: output.stdout, stderr: `no answer within ${timeoutMs / 1000} seconds` })
+      else if (typeof error?.code === 'string') resolve({ status: null, ...output, error })
+      else resolve({ status: error === null || error === undefined ? 0 : error.code ?? null, ...output })
+    })
+  })
 }
 
 const lastLine = text => text.trim().split('\n').filter(Boolean).at(-1) ?? ''

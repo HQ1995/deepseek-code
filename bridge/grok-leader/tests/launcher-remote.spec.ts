@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { load } from 'js-yaml'
 import { describe, expect, it, vi } from 'vitest'
 import { applyRemote, remoteBlock, remoteCommand, remoteConfig, remoteStatus, removeRemote } from '../bin/remote.mjs'
-import { checkRemote, localHelpers, sshProbe } from '../bin/remote-check.mjs'
+import { checkRemote, localHelpers, sshProbe, sshProbeAsync } from '../bin/remote-check.mjs'
 
 const HASH_A = 'a'.repeat(64), HASH_B = 'B'.repeat(64)
 const flags = ['--host', 'swoop', '--workspace', '/home/u/work/', '--node', '/opt/node/bin/node', '--helper', '/opt/dsh/helper.mjs',
@@ -137,6 +137,23 @@ describe('dscode remote check', () => {
     expect(args.slice(0, 7)).toEqual(['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=15', 'build'])
     expect(args[7]).toMatch(/^'\/opt\/it'\\''s\/node' '-e' 'const fs/)
     expect(args[7]!.endsWith(" '/srv/w' '/d/helper.js' '/d/process.js'")).toBe(true)
+  })
+
+  it('probes without blocking and reads a timeout as ssh failing', async () => {
+    type Done = (error: unknown, stdout?: string, stderr?: string) => void
+    const answer = (error: unknown, stdout = '', stderr = '') => vi.fn((_c: string, _a: string[], _o: object, done: Done) => done(error, stdout, stderr))
+    const ok = answer(null, '{"node":"v24.1.0"}')
+    await expect(sshProbeAsync(config, { run: ok as never })).resolves.toEqual({ status: 0, stdout: '{"node":"v24.1.0"}', stderr: '' })
+    const [command, args, options] = ok.mock.calls[0] as unknown as [string, string[], { timeout: number }]
+    expect(command).toBe('ssh')
+    expect(args.slice(0, 7)).toEqual(['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=5', 'build'])
+    expect(options.timeout).toBe(10_000)
+    await expect(sshProbeAsync(config, { run: answer(Object.assign(new Error('x'), { code: 255 }), '', 'Permission denied (publickey).') as never }))
+      .resolves.toEqual({ status: 255, stdout: '', stderr: 'Permission denied (publickey).' })
+    await expect(sshProbeAsync(config, { run: answer(Object.assign(new Error('x'), { killed: true, code: null })) as never }))
+      .resolves.toEqual({ status: 255, stdout: '', stderr: 'no answer within 10 seconds' })
+    const missing = Object.assign(new Error('spawn ssh ENOENT'), { code: 'ENOENT' })
+    await expect(sshProbeAsync(config, { run: answer(missing) as never })).resolves.toMatchObject({ status: null, error: missing })
   })
 
   it('takes the default digests from the runtime installation', async () => {

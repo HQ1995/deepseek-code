@@ -39,10 +39,12 @@ export type RemoteConnection = { state: 'connected' } | { state: 'lost' | 'faile
 export function remoteUnavailable(remote: RemoteLike | undefined, connection: RemoteConnection): string | undefined {
   if (remote === undefined || connection.state === 'connected') return undefined
   const where = 'ssh ' + remote.host + ':' + remote.workspace
-  const reason = connection.reason === undefined || connection.reason.trim() === '' ? '' : ' (' + connection.reason.trim().replace(/\.$/, '') + ')'
-  return connection.state === 'lost'
-    ? 'Lost the connection to ' + where + reason + '. Quit and restart dscode to reconnect.'
-    : 'Could not connect to ' + where + reason + '. Run `dscode doctor --runtime` in a shell to see why, then restart dscode.'
+  const reason = connection.reason?.trim().replace(/\.$/, '') ?? ''
+  if (connection.state === 'lost') return 'Lost the connection to ' + where + (reason === '' ? '' : ' (' + reason + ')') + '. Quit and restart dscode to reconnect.'
+  // The SSH row names the cause when it can; it may run to several sentences.
+  return reason === ''
+    ? 'Could not connect to ' + where + '. Run `dscode doctor --runtime` in a shell to see why, then restart dscode.'
+    : 'Could not connect to ' + where + ': ' + reason + '. Run `dscode doctor --runtime` in a shell to check the host, then restart dscode.'
 }
 
 export function executionWorld(remote: RemoteLike | undefined): ExecutionWorld {

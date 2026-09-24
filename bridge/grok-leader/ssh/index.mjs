@@ -3,6 +3,7 @@
  * profile inserts this row (`dscode remote init`); the leader reports the
  * remote world from this row's configuration, connected or not, so the TUI
  * refuses host paths. Both endpoints must be POSIX. */
+import { checkRemote, sshProbeAsync } from '../bin/remote-check.mjs'
 import { importRuntime } from '../shared/runtime-modules.mjs'
 
 const { default: SshConnection } = await importRuntime('@deepseek-ai/dsh-ssh')
@@ -18,10 +19,25 @@ export const Config = SshConnection.Config
 /** Why the connection failed; the leader shows it when a session cannot start. */
 const FAILURE = Symbol.for('dscode.ssh.failure')
 
+const message = error => error instanceof Error ? error.message : String(error)
+
+/** dsh-ssh drops ssh's own stderr, so its error only says the helper went
+ * away. One probe run the way `dscode remote status --check` runs it names the
+ * cause: an unknown alias, a refused key, or Node or a helper missing there.
+ * When the host checks out, what dsh-ssh reported stands. */
+export async function explainFailure(config, error, probe = sshProbeAsync) {
+  let result
+  try { result = await probe(config) } catch { return message(error) }
+  try { checkRemote(config, { probe: () => result }) } catch (cause) { return message(cause) }
+  return message(error)
+}
+
 export async function apply(ctx, config) {
   if (!config.bootstrapPath || !config.bootstrapHash) throw new Error('dscode SSH requires a preinstalled, digest-pinned remote PTC bootstrap')
   try { await ctx.plugin(SshConnection, config) } catch (error) {
-    globalThis[FAILURE] = error instanceof Error ? error.message : String(error)
+    // Readable at once; replaced by the named cause when the probe returns.
+    globalThis[FAILURE] = message(error)
+    globalThis[FAILURE] = await explainFailure(config, error)
     throw error
   }
   delete globalThis[FAILURE]
