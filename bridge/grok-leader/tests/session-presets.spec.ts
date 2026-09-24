@@ -113,6 +113,21 @@ describe('session preset ownership', () => {
     expect(f.roster.recompose).not.toHaveBeenCalled()
   })
 
+  it('refuses in-place switches into or out of a preset whose Team tools attach on open', async () => {
+    const f = fixture(), roster = { ...f.roster, attachesOnOpen: vi.fn(async (id: string) => id === 'custom') }
+    f.setRoster(roster)
+    const { record } = f.add()
+    await expect(f.presets.command(record, '/preset custom')).rejects.toThrow('Preset "custom" attaches Agent Team tools when a session opens')
+    const team = f.add('team', 'custom').record
+    await expect(f.presets.command(team, '/preset minimal')).rejects.toThrow('Reopen this session with the preset you want')
+    expect(f.order).toEqual([])
+    // A live reopen recreates the agent under the new preset, so it stays allowed.
+    const live = f.add('live')
+    const prepared = await f.presets.prepare({ kind: 'load', source: live.source, live: live.record, meta: { agentPreset: 'custom' } })
+    expect(prepared.agentPreset).toBe('custom')
+    await expect(f.presets.command(record, '/preset minimal')).resolves.toContain('Switched')
+  })
+
   it('locks all model-visible history but not log-only events; reselecting a busy live session is also locked', async () => {
     const f = fixture()
     for (const type of ['user/message', 'assistant/message', 'tool/result']) {

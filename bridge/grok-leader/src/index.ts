@@ -31,6 +31,8 @@ import { createModelCatalog } from './model-catalog.ts'
 import { createNativeProviders } from './native-provider.ts'
 import { createPluginRows, type PluginManagerLike } from './plugin-rows.ts'
 import { createBrowserControl, type BrowserStatus } from './browser-control.ts'
+import { createNativeTeam, type TeamServiceLike } from './native-team.ts'
+import { TEAM_TOOLS_MODULE } from './team-presets.ts'
 import type { LlmLike, SettingsLike, CredentialsLike, AgentDefaultModelLike } from './native-seams.ts'
 export { providerUserSection, providerUserProfile, hasUserProviderRoute, knownRouteBaseUrls } from './provider-profile.ts'
 /**
@@ -370,6 +372,19 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   /** The dsh plugin command registry, when the composition mounts it. */
   const dshCommands = (): NativeCommands | undefined => ctx.get('commands') as NativeCommands | undefined
 
+  // Agent Teams: the host runtime serves every session; only sessions on a
+  // preset that mounts the Team tools have a Team to show.
+  const teamService = (): TeamServiceLike | undefined => ctx.get('agentTeams') as TeamServiceLike | undefined
+  const hasTeam = (record: SessionRecord) => nativeCapabilities.toolNames(record).has('spawn_teammate')
+  const nativeTeam = createNativeTeam<SessionRecord>({ service: teamService, hasTeam, agent: record => record.agent })
+  const teamMembers = (record: SessionRecord) => {
+    if (!hasTeam(record)) return undefined
+    try { return teamService()?.listMembers(record.agent).filter(member => member.role === 'teammate') } catch (error) {
+      logger.warn('grok-leader: Agent Team roster unavailable: ' + (error instanceof Error ? error.message : String(error)))
+      return undefined
+    }
+  }
+
   const profilePlugins = createProfilePlugins({
     inspectRuntime: name => inspectPluginRuntime(ctx, name),
     installAnchor: () => (ctx.get('profileContext') as { installAnchor?: string } | undefined)?.installAnchor,
@@ -379,6 +394,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     registry: dshCommands, roster: agentPresets,
     skills: record => presetServiceFor(record, 'skills') as NativeSkills | undefined,
     capabilities: nativeCapabilities.capabilities, profile: profilePlugins, preset: sessionPresets.command,
+    team: nativeTeam,
     browser: createBrowserControl({
       rows: pluginRows, settings,
       status: () => (ctx.get('dscodeBrowser') as { status(): BrowserStatus } | undefined)?.status(),
@@ -401,6 +417,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     owned: ownedRecord, profileDirectory: profilePlugins.directory,
     inspector: () => ctx.get('dscodeInspector') as { url: string; captureFetch: boolean } | undefined,
     browser: () => (ctx.get('dscodeBrowser') as { status(): BrowserStatus } | undefined)?.status(),
+    hostTeamRows: async () => (await (ctx.get('pluginManager') as PluginManagerLike | undefined)?.listPlugins() ?? [])
+      .filter(row => row.enabled && row.moduleName === TEAM_TOOLS_MODULE).map(row => row.patchId ?? row.entryId),
     terminals: record => presetServiceFor(record, 'terminals') as NativeTerminals | undefined,
     subprocess: record => presetServiceFor(record, 'subprocess') as NativeExecutionHost | undefined,
     toolNames: nativeCapabilities.toolNames,
@@ -575,6 +593,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     persistence, flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),
     projectImages,
     notify: (record, method, params) => connections.get(record.clientId)?.notify(method, params),
+    teamMembers,
     on: (name, listener) => ctx.on(name as never, listener as never),
     logger,
   })

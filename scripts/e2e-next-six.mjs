@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -216,9 +217,9 @@ export async function nextSixAcceptance(ui) {
   await key('/'); await key('C-u'); await type('missing-preset'); await key('Enter')
   await wait(/No matching presets/)
   await key('Escape')
-  await wait(/Search:\s+\(9\/9\)[\s\S]*\/: search · c: copy/)
+  await wait(/Search:\s+\(10\/10\)[\s\S]*\/: search · c: copy/)
   await key('/'); await wait(/Type to filter/); await type('six-custom'); await key('Enter')
-  await wait(/Search: six-custom\s+\(1\/9\)[\s\S]*\/: search · c: copy/)
+  await wait(/Search: six-custom\s+\(1\/10\)[\s\S]*\/: search · c: copy/)
   await artifact('six-preset-copied', { screen: await capture() })
   const originalPreset = await readFile(customPath, 'utf8')
   await key('c'); await wait(/New preset id/); await type('six-custom'); await key('Enter')
@@ -226,6 +227,16 @@ export async function nextSixAcceptance(ui) {
   assert.equal(await readFile(customPath, 'utf8'), originalPreset, 'Duplicate copy must preserve the existing preset')
   await key('Escape')
   await wait(/\/: search · c: copy/)
+  // A live copy of the Teams preset would give every open session Team tools.
+  await key('/'); await key('C-u'); await type('teams'); await key('Enter')
+  await wait(/Search: teams\s+\(1\/10\)[\s\S]*› Teams \(experimental\)/)
+  await key('c'); await wait(/New preset id/); await type('teams-copy'); await key('Enter')
+  await wait(/carries Agent Team tools/)
+  await key('Escape')
+  await wait(/\/: search · c: copy/)
+  assert.equal(existsSync(join(scratch, 'profiles/dscode/preset-bundles/teams-copy')), false, 'A refused Teams copy must write nothing')
+  await key('/'); await key('C-u'); await type('six-custom'); await key('Enter')
+  await wait(/Search: six-custom\s+\(1\/10\)[\s\S]*› six-custom/)
   await key('e')
   await waitFor(() => readFile(customPath, 'utf8'), content => content.includes('SIX_PRESET_EDITED'), 'six-preset-editor')
   assert.equal(await readFile(customPath, 'utf8'), originalPreset + '\n# SIX_PRESET_EDITED\n')

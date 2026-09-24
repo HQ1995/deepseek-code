@@ -127,6 +127,21 @@
       config:
         socketPath: !!js process.env.DSCODE_SOCKET
 
+# Native Agent Teams runtime: one roster, mailbox and task board per Lead
+# Session. It only observes Sessions until a `teams` preset agent spawns a
+# teammate; the Team tools are rows of presets/teams.patch.yml alone. Row ids
+# match upstream @deepseek-ai/dsh-experimental-agent-team-profile; do not
+# install that profile beside dscode.
+- insert:
+    - id: agent-team
+      name: '@deepseek-ai/dsh-experimental-agent-team'
+      config:
+        maxMembers: 8
+        maxTasks: 256
+        maxPendingMessagesPerMember: 64
+        maxMessageBytes: 65536
+        disposalTimeoutMs: 5000
+
 # Opt-in browser, turned on with /browser on: an isolated headless Chromium per
 # top-level Session with a reviewed operation allowlist and native approval.
 # Browser state is isolated; network and host access are not confined.

@@ -79,6 +79,7 @@ function fixture() {
   }, agent: (id: SessionId) => agents.get(id), subagents: () => service,
   workflow: (record: typeof root) => logs.get(record.agent.session.id)!.reduce(workflowProjection.apply, { runs: [] }),
   persistence: () => store as unknown as Pick<SessionPersistence, 'open' | 'stat'>, flush, projectImages, notify,
+  teamMembers: vi.fn((_record: typeof root): ReadonlyArray<{ id: string; name: string }> | undefined => undefined),
   logger: { warn } }
   const children = createNativeChildren({ ...host, on: (name, listener) => {
     const set = listeners.get(name) ?? new Set()
@@ -499,6 +500,25 @@ describe('native child/workflow ownership', () => {
     await f.command('/subagents steer-queued child-one all')
     expect(queue).toEqual([])
     expect(child.steer).toHaveBeenCalledOnce()
+    await f.children.dispose()
+  })
+
+  it('names Agent Team teammates and protects their Team mailbox deliveries', async () => {
+    const f = fixture(), child = f.add('mate')
+    f.host.teamMembers.mockReturnValue([{ id: 'mate', name: 'reviewer' }])
+    await f.children.snapshot(f.root)
+    expect(f.notes().find(note => note.sessionUpdate === 'subagent_spawned')).toMatchObject({ persona: 'reviewer', role: 'teammate', description: 'worker mate' })
+    const queue = child.inbox.nextTurn as unknown as Array<{ id: string; content: Array<{ type: 'text'; text: string }> }>
+    queue.push({ id: 'delivery', content: [{ type: 'text', text: 'Team message' }] })
+    for (const text of ['/subagents edit mate delivery changed', '/subagents remove mate delivery', '/subagents clear mate', '/subagents steer-queued mate all']) {
+      await expect(f.command(text)).resolves.toMatchObject({ result: { kind: 'error', text: expect.stringContaining('reviewer is an Agent Team member') } })
+    }
+    expect(queue).toHaveLength(1)
+    expect(child.inbox.clear).not.toHaveBeenCalled()
+    await expect(f.children.inbox(1, { sessionId: 'root', childId: 'mate' })).resolves.toMatchObject({ items: [{ id: 'delivery', editable: false }] })
+    // Viewing, a new message and stopping stay available.
+    await expect(f.command('/subagents pending mate')).resolves.toMatchObject({ result: { kind: 'success' } })
+    await expect(f.command('/subagents queue mate hello')).resolves.toMatchObject({ result: { kind: 'success' } })
     await f.children.dispose()
   })
 

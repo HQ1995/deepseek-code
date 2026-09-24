@@ -11,6 +11,7 @@ import type {} from '@deepseek-ai/dsh-config-editor'
 import type {} from '@deepseek-ai/dsh-app-boot'
 import type { AgentPresetsLike } from './session-presets.ts'
 import type { SettingsLike } from './native-seams.ts'
+import { carriesTeamTools } from './team-presets.ts'
 
 const yamlOptions = { schema: entryListSchema, noRefs: true, lineWidth: -1 }
 const readYaml = async (path: string): Promise<unknown> => load(await readFile(path, 'utf8'), yamlOptions)
@@ -191,6 +192,9 @@ return {
       const paths = profile()
       if (paths === undefined) throw new Error('Preset editing requires an installed profile')
       const source = definition(from), root = join(paths.dir, 'preset-bundles'), directory = join(root, id)
+      if (carriesTeamTools(source.definition.plugins)) {
+        throw new Error(`Preset ${from} carries Agent Team tools and cannot be copied while dscode runs: mounting the copy would give every open session Team tools`)
+      }
       const path = join(directory, 'cordis.patch.yml')
       const base = source.path.startsWith('file:') ? source.path : pathToFileURL(source.path).href
       const next = { ...source.definition, id, name: id, plugins: anchorPlugins(source.definition.plugins, base) }
@@ -201,6 +205,12 @@ return {
         await writeFile(join(directory, 'package.json'), JSON.stringify({ name: `dscode-preset-${id}`, version: '1.0.0', private: true, dsh: { bundle: { patch: './cordis.patch.yml' } } }, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
         await register(native, next, path)
       } catch (error) { await rm(directory, { recursive: true, force: true }); throw error }
+    },
+    async attachesOnOpen(id) {
+      await initialize()
+      // No readable declaration (not a dscode-owned or profile preset): the
+      // registry's own recompose rules apply unchanged.
+      try { return carriesTeamTools(definition(id).definition.plugins) } catch { return false }
     },
     async mount(context, id) { await initialize(); return native.mount(context, id) },
     async recompose(context, id) { await initialize(); return native.recompose(context, id) },

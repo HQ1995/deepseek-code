@@ -41,6 +41,7 @@ interface CommandHost<S extends CommandSession> {
   capabilities(record: S): string[]
   profile: { execute(text: string, notify: (message: string) => void): Promise<string> }
   browser: { execute(text: string): Promise<string> }
+  team: { execute(record: S, text: string): string }
   preset(record: S, text: string): Promise<string>
   children: { command(clientId: number, params: unknown): Promise<CommandResult> }
   goals: { goal(clientId: number, params: unknown): Promise<CommandResult> }
@@ -104,6 +105,7 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
       input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' } }]
     if (presets.length > 0) commands.push({ name: 'preset', description: 'Switch the active agent preset', input: { hint: presets.map(preset => preset.id).join(' | ') } })
     if (record === undefined) return commands
+    if (host.capabilities(record).includes('team')) commands.push({ name: 'team', description: 'Show the Agent Team roster and task board' })
     const registry = host.registry()
     check()
     const fromPlugins = registry?.list(record.agent) ?? []
@@ -178,10 +180,10 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
     // would move their admission behind a same-tick cancel or a later prompt.
     if (!text.startsWith('/')) return undefined
     const name = /^\/([^\s]+)/.exec(text)?.[1]?.toLowerCase()
-    const dsh = /^\/dsh(\s|$)/.test(text), preset = /^\/preset(\s|$)/.test(text), browser = /^\/browser(\s|$)/.test(text)
+    const dsh = /^\/dsh(\s|$)/.test(text), preset = /^\/preset(\s|$)/.test(text), browser = /^\/browser(\s|$)/.test(text), team = /^\/team(\s|$)/.test(text)
     const children = /^\/subagents(?:\s|$)/i.test(text)
     const refusal = name === undefined || !Object.hasOwn(unsupported, name) ? undefined : unsupported[name]
-    const reserved = dsh || preset || browser || children || refusal !== undefined || name === 'goal'
+    const reserved = dsh || preset || browser || team || children || refusal !== undefined || name === 'goal'
     const registry = reserved ? undefined : host.registry()
     assertOpen()
     if (!reserved && registry === undefined && name !== 'compact') return undefined
@@ -206,6 +208,10 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
         textOnly('/browser')
         const message = await host.browser.execute(text)
         return settle(record, params, message, scope)
+      }
+      if (team) {
+        textOnly('/team')
+        return settle(record, params, host.team.execute(record, text), scope)
       }
       if (preset) {
         textOnly('/preset')

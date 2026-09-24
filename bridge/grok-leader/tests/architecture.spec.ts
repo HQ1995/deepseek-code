@@ -88,6 +88,8 @@ const declaredDependencies = [
     ['native-execution', ['acp', 'browser-control', 'package-location', 'session-work']],
     ['native-asides', ['acp', 'projection', 'session-work']],
     ['native-capabilities', []],
+    ['native-team', ['acp']],
+    ['team-presets', []],
     ['profile-plugins', ['package-location', 'acp']],
     ['acp', ['protocol']],
     ['protocol', ['codec']],
@@ -104,7 +106,7 @@ const declaredDependencies = [
     ['session-export', []],
     ['session-migration', []],
     ['terminal-signal', []],
-    ['preset-catalog', ['native-seams', 'session-presets']],
+    ['preset-catalog', ['native-seams', 'session-presets', 'team-presets']],
     ['package-location', ['bin/update.mjs']],
 ] as const
 

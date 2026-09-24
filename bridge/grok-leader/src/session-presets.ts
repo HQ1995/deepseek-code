@@ -40,6 +40,9 @@ export interface AgentPresetsLike {
   resolve(id?: string): Promise<{ id: string; path?: string; trust?: 'system' | 'user' }>
   read?(id: string): Promise<string>
   copy?(from: string, id: string): Promise<void>
+  /** Whether the preset's tools attach only as a session opens (Agent Teams),
+   * so it cannot be switched in place. */
+  attachesOnOpen?(id: string): Promise<boolean>
   mount(agentCtx: Context, id?: string): Promise<unknown>
   recompose(agentCtx: Context, id: string): Promise<unknown>
   composedPreset?(agentCtx: Context): string | undefined
@@ -276,6 +279,15 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
     const previous = current(roster, record)
     if (previous !== resolved) {
       if (busy(record) || host.history(record).locked) throw invalidParams(lockedMessage)
+      // Reopening (session/load with the preset) recreates the agent; an
+      // in-place recompose would leave Team tools missing or behind.
+      for (const id of [resolved, previous]) {
+        if (id === undefined || await roster.attachesOnOpen?.(id) !== true) continue
+        assertLive(record)
+        throw invalidParams('Preset "' + id + '" attaches Agent Team tools when a session opens, so it cannot be switched in place.'
+          + ' Reopen this session with the preset you want (the TUI preset picker does this) or start a new session.')
+      }
+      assertLive(record)
       await swap(roster, record, resolved, previous)
     }
     assertLive(record)

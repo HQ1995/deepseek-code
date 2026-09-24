@@ -60,6 +60,32 @@ it('imports old user presets without rewriting them and preserves module paths i
   } finally { await f.dispose(); await rm(f.directory, { recursive: true, force: true }) }
 })
 
+it('refuses to copy a preset carrying Agent Team tools and reports it as attaching on open', async () => {
+  const f = await fixture()
+  try {
+    // Legacy imports resolve first-party modules to file URLs inside the profile.
+    const module = join(f.directory, 'profiles/dscode/node_modules/@deepseek-ai/dsh-experimental-tool-agent-team')
+    await mkdir(module, { recursive: true })
+    await writeFile(join(module, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-experimental-tool-agent-team', main: 'index.js' }))
+    await writeFile(join(module, 'index.js'), 'exports.name = "team"\n')
+    for (const [id, rows] of [['team', "- name: cordis:group\n  group: true\n  config:\n    - name: '@deepseek-ai/dsh-experimental-tool-agent-team'\n"], ['plain', '- name: my-tool\n']] as const) {
+      const root = join(f.directory, '.agent-presets', id)
+      await mkdir(root, { recursive: true })
+      await writeFile(join(root, 'preset.yml'), `name: ${id}\n`)
+      await writeFile(join(root, 'agent.cordis.yml'), rows)
+    }
+    const catalog = f.catalog()!
+    expect(await catalog.attachesOnOpen!('team')).toBe(true)
+    expect(await catalog.attachesOnOpen!('plain')).toBe(false)
+    expect(await catalog.attachesOnOpen!('missing')).toBe(false)
+    await expect(catalog.copy!('team', 'team-copy')).rejects.toThrow('carries Agent Team tools')
+    expect(f.definitions.has('team-copy')).toBe(false)
+    await expect(readFile(join(f.directory, 'profiles/dscode/preset-bundles/team-copy/cordis.patch.yml'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await catalog.copy!('plain', 'plain-copy')
+    expect(f.definitions.has('plain-copy')).toBe(true)
+  } finally { await f.dispose(); await rm(f.directory, { recursive: true, force: true }) }
+})
+
 it('isolates malformed files and rolls back failed native activation without losing valid presets', async () => {
   const f = await fixture()
   try {

@@ -20,7 +20,11 @@ export function createNativeCapabilities<S extends ToolSession>(host: Capability
       const names = toolNames(record), capabilities: string[] = []
       const present = (tools: readonly string[], name: CapabilityService) =>
         tools.some(tool => names.has(tool)) && host.hasService(record, name)
-      if (present(['subagent', 'subagent_fork', 'list_agents', 'send_message'], 'subagents')) capabilities.push('subagents')
+      // Team presets register list_agents/send_message for Team members; their
+      // one-shot children would be taken for Team Leads, so /btw stays off.
+      const team = names.has('spawn_teammate')
+      if (team) capabilities.push('team')
+      else if (present(['subagent', 'subagent_fork', 'list_agents', 'send_message'], 'subagents')) capabilities.push('subagents')
       if (present(['skill'], 'skills')) capabilities.push('skills')
       if (present(['exit_plan_mode'], 'planMode')) capabilities.push('plan')
       if (present(['get_goal', 'create_goal', 'update_goal'], 'goals')) capabilities.push('goal')

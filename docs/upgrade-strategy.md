@@ -150,6 +150,7 @@ forward.
 | Markdown/ZIP export | `/export`; ZIP includes logs and attachments, while `present` stores source-file references rather than copies |
 | Independent text feedback | Native `/feedback <text>` appends feedback without a model turn; upstream telemetry policy may include session context |
 | Feedback rating/category dialogs | Web-only controls; no new TUI rating or category dialog |
+| Experimental Agent Teams | The `teams` preset beside the others, plus `/team`; see [Agent Teams](#agent-teams) |
 | Experimental browser use (Playwright MCP) | `/browser`, off by default: a per-Session isolated headless browser with origin limits and approvals; see [Browser](#browser) |
 | Sidebar tabs, splits, PDF/HTML previews, file icons | Browser UI is not ported; TUI uses transcript links, existing viewers and explicit external opening |
 | Workspace editor/file-manager actions | Existing TUI links/editor handoff; no browser desktop toolbar |
@@ -173,12 +174,39 @@ use their own discovered metadata; they do not inherit the native adapter's
 vision or system-prompt capabilities just because model names match. Model
 catalog and transport tests do not certify a live provider account.
 
-Experimental Agent Teams are published upstream but are not enabled in our
-shipped presets. Their profile only disables global legacy controls; Standard
-still mounts those controls in its preset scope. A safe future integration
-needs a Team-aware preset plus a Team roster/task-board adapter, rather than
-mounting both sets of overlapping tools. No Team-specific TUI board, task claims
-or membership controls are claimed here.
+### Agent Teams
+
+The experimental `teams` preset is History without legacy delegation: no
+`subagent`, `subagent_fork`, `workflow` or `ralph`. In their place are native
+Agent Teams tools: `spawn_teammate`, `send_message`, `list_agents`,
+`wait_agent`, `interrupt_agent` and the `team_task_*` board. Only that preset
+mounts the Team tools (`tool-agent-team` is a preset row), so sessions on the
+other seven presets keep their own delegation tools. The Team runtime
+(`agent-team`) is a host row: it owns each Lead session's roster, mailbox and
+task board. For sessions on other presets it only keeps an empty Team
+projection. Its row ids
+match upstream's `agent-team-profile`; installing that profile as well would
+give every session Team tools, and `/doctor` warns about any host-level Team
+tools row.
+
+Team tools attach when an agent is created, so the preset is chosen as a
+session opens. The TUI picker reopens the session with it, while an in-place
+`/preset` switch into or out of `teams` is refused. Copying it with
+`/preset manage` is refused too: mounting a copy while dscode runs would reach
+every open session. Teammates are continuable children labelled with their
+names. `/team` shows the roster and task board. Hand edits, removals and clears
+of a teammate's queued input are refused, because those are Team mailbox
+deliveries; viewing, new messages and stopping still work. `/btw` is off in
+Teams. All members share one checkout: write scopes are advisory, not locks.
+Reopening a `teams` session needs this dscode version or later.
+
+`scripts/e2e-teams-installed.mjs <runtime> <home>` checks an installed leader
+over ACP against a loopback Messages fixture: preset isolation (also across a
+live plugin-row reconcile), the Team tools and policy, a task and a teammate,
+teammate names, `/team`, the inbox and switch refusals, and a restart.
+`DSCODE_TEAMS_SMOKE_HOST_TOOLS=1` is its negative control and must fail at the
+isolation check. The product E2E audits the `teams` tool roster through the
+headless TUI.
 
 ### Browser
 

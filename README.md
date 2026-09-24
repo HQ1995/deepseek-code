@@ -59,6 +59,7 @@ unless `--force` is explicit. Headless formats are `plain`, `json`,
 | `/skills`, `/mcps` | Browse session skills and MCP servers; `u` inserts a selected skill |
 | `/rewind`, `/undo` | Continue from an earlier prompt in a new session |
 | `/export [filename]` | Copy/save Markdown; `.zip` exports logs, descendants, and attachments |
+| `/team` | Show the roster and task board of a `teams` session's Agent Team |
 | `/browser` | Turn the isolated headless browser on or off and edit its allowed origins |
 | `/doctor` | Check terminal, installation, and optional LSP/PTY dependencies |
 | `Ctrl+P` | Open commands while keeping the current draft |
@@ -75,7 +76,10 @@ without a model turn and may share session context under DSH's telemetry policy.
 
 Optional presets: `history` adds workspace-scoped session search tools;
 `terminal` adds persistent shell/REPL tools; `lsp` adds code navigation and needs
-`typescript-language-server` and `typescript` on `PATH`.
+`typescript-language-server` and `typescript` on `PATH`; `teams` (experimental)
+replaces subagents and workflows with native Agent Teams: named teammates you ask
+for, durable messages and a shared task board, all in one checkout. Pick it when
+a session opens; see the [Agent Teams notes](docs/upgrade-strategy.md#agent-teams).
 Minimal follows DSH's shell-only configuration. See the
 [DSH feature coverage](docs/upgrade-strategy.md#dsh-017-feature-coverage) for
 native DeepSeek-V41-Flash setup and platform/UI limits.

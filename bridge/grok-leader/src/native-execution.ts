@@ -24,6 +24,8 @@ interface ExecutionHost<S extends ExecutionSession> {
   inspector?(): { url: string; captureFetch: boolean } | undefined
   /** Live browser facts while the opt-in browser row is active. */
   browser?(): BrowserStatus | undefined
+  /** Enabled host-level Team tools rows, which reach every session's agents. */
+  hostTeamRows?(): Promise<readonly string[]>
 }
 type InstallationReader = (version: string, directory: string | undefined, signal: AbortSignal) => Promise<string>
 const execute = promisify(execFile)
@@ -120,6 +122,10 @@ export function createNativeExecution<S extends ExecutionSession>(host: Executio
         const browser = host.browser?.()
         if (browser !== undefined) findings.push({ status: browser.executable === undefined || !browser.sandbox ? 'WARN' : 'OK', name: 'Browser',
           detail: describeBrowser(browser).replace(/^Browser: /, '').split('\n').map(line => line.trim().replace(/\.$/, '')).join('; ') + '. Browser state is isolated; network and host access are not confined.' })
+        const hostTeamRows = await host.hostTeamRows?.() ?? []
+        active(record, scope)
+        if (hostTeamRows.length > 0) findings.push({ status: 'WARN', name: 'Agent Teams', detail: `Host-level Team tools (${hostTeamRows.join(', ')})`
+          + ' give every session Team tools beside its own delegation tools. Remove the profile or bundle that added them; dscode mounts Team tools only in the teams preset.' })
         if (inspector !== undefined) findings.push({ status: 'WARN', name: 'Developer Inspector', detail:
           `Full host debugger access on loopback; do not forward its port. Fetch capture ${inspector.captureFetch ? 'ON (raw secrets may be retained)' : 'off'}. Open in Chrome: ${inspector.url}` })
         return { text: ['Dscode runtime diagnostics', ...findings.map(f => `[${f.status}] ${f.name}: ${f.detail}`)].join('\n\n') }

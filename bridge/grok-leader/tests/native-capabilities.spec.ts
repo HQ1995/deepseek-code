@@ -46,6 +46,15 @@ describe('native tool capability views', () => {
     expect(f.host.hasService.mock.calls.map(call => call[1])).toEqual(['subagents', 'skills', 'planMode', 'goals', 'jobs', 'workflowEngine'])
   })
 
+  it('reports an Agent Team instead of subagents when the Team tools are present', () => {
+    const f = fixture()
+    for (const name of ['spawn_teammate', 'send_message', 'list_agents', 'skill']) f.rows.push({ name })
+    f.services.add('subagents'); f.services.add('skills')
+    // Team members answer list_agents/send_message; /btw children would be taken for Leads.
+    expect(f.views.capabilities(f.record)).toEqual(['team', 'skills'])
+    expect(f.host.hasService.mock.calls.map(call => call[1])).toEqual(['skills'])
+  })
+
   it('reflects preset recomposition and service replacement without retaining old views', () => {
     const f = fixture(); f.rows.push({ name: 'skill' }); f.services.add('skills')
     const first = f.views.capabilities(f.record); first.push('mutated client view')

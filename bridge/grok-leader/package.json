@@ -129,7 +129,8 @@
         "./presets/cordis.patch.yml",
         "./presets/history.patch.yml",
         "./presets/lsp.patch.yml",
-        "./presets/terminal.patch.yml"
+        "./presets/terminal.patch.yml",
+        "./presets/teams.patch.yml"
       ]
     },
     "testedVersion": "0.1.7-rc.1",

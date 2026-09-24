@@ -33,6 +33,7 @@ function fixture(disposalError?: string) {
     skills: vi.fn((_record: TestSession) => ({ list: skills })), capabilities: vi.fn(() => ['skills', 'subagents']),
     profile: { execute: vi.fn(async (_text: string, _notify: (message: string) => void) => 'profile done') },
     browser: { execute: vi.fn(async (_text: string) => 'browser done') },
+    team: { execute: vi.fn((_record: TestSession, _text: string) => 'team done') },
     preset: vi.fn(async (_record: TestSession, _text: string) => 'preset done'),
     children: { command: vi.fn(async (_clientId: number, _params: unknown) => ({ result: { kind: 'success', text: 'children done' } })) },
     goals: { goal: vi.fn(async (_clientId: number, _params: unknown) => ({ result: { kind: 'success', text: 'goal done' } })) },
@@ -237,7 +238,17 @@ describe('owned session commands', () => {
     await f.request('/browser on --origin https://example.com')
     expect(f.host.browser.execute).toHaveBeenCalledWith('/browser on --origin https://example.com')
     await expect(f.request('/browser', f.record, true)).rejects.toThrow('image attachments')
+    await f.request('/team')
+    expect(f.host.team.execute).toHaveBeenCalledWith(f.record, '/team')
+    await expect(f.request('/team', f.record, true)).rejects.toThrow('image attachments')
     await expect(f.request('/preset minimal', f.record, true)).rejects.toThrow('image attachments')
+  })
+
+  it('advertises /team only for sessions whose preset has an Agent Team', async () => {
+    const f = fixture()
+    expect((await f.commands.catalog(1, { session_id: 'one' })).commands.map(command => command.name)).not.toContain('team')
+    f.host.capabilities.mockReturnValue(['team', 'skills'])
+    expect((await f.commands.catalog(1, { session_id: 'one' })).commands.map(command => command.name)).toEqual(['dsh', 'browser', 'subagents', 'preset', 'team'])
   })
 
   it('suppresses late profile progress and replies after a failed reload restores the same record', async () => {

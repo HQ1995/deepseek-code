@@ -660,6 +660,11 @@ audit_responses_preset() {
         // the profile manager replaced the model-driven define/run/stop rows.
         ...standard, "plugin_manager", "cordis_inspect_list", "cordis_inspect_query",
       ].sort(),
+      // History without legacy delegation: the Team tools provide send_message,
+      // list_agents and interrupt_agent in place of the subagent-control versions.
+      teams: [...standard.filter(name => !["subagent", "subagent_fork", "workflow"].includes(name)),
+        "session_search", "session_event_search", "session_trace", "session_event_trace", "session_event_read",
+        "spawn_teammate", "wait_agent", "team_task_create", "team_task_get", "team_task_list", "team_task_update"].sort(),
       "fixture-custom": ["bash", "fixture_echo", "schedule_create", "schedule_delete", "schedule_list"],
     }
     const wanted = expected[preset]
@@ -686,7 +691,7 @@ rows.push({ id: 'llm-pi-ai', config: { providers: { 'fake-responses': { displayN
 rows.push({ id: 'agent-default-model', config: { provider: 'fake-responses', model: 'fake-responses-model' } })
 writeFileSync(path, dump(rows, options))
 JS
-  for preset in minimal standard history lsp terminal ptc cordis fixture-custom; do
+  for preset in minimal standard history lsp terminal ptc cordis teams fixture-custom; do
     audit_responses_preset "$preset"
   done
   cat "$PRESET_ROSTER_LOG"

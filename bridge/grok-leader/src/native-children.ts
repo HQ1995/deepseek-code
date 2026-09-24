@@ -39,6 +39,8 @@ interface ChildHost<S extends ChildSession> {
   flush(session: Agent['session']): Promise<unknown>
   projectImages(event: SessionEvent, updates: ProjectedUpdate[]): Promise<ProjectedUpdate[]>
   notify(record: S, method: string, params: unknown): void
+  /** Teammates of the session's Agent Team, when its preset has one. */
+  teamMembers?(record: S): ReadonlyArray<{ id: string; name: string }> | undefined
   on<K extends keyof ChildEventMap>(name: K, listener: (...args: ChildEventMap[K]) => void): () => void
   logger: { warn(message: string): void }
 }
@@ -249,6 +251,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     let known = childStates.get(record)
     if (known === undefined) { known = new Map(); childStates.set(record, known) }
     let discoveredWorkflowChild = false
+    const team = host.teamMembers?.(record)
     for (const row of rows) {
       if (row.kind !== 'child') continue
       const overview = await withChildLog(record, row.id, scope, (index, _meta, _read, status) => childOverview(row.id, index.overviewEvents, status, row.activity))
@@ -265,7 +268,8 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
         continue
       }
       known.set(row.id, { agent: child, label: row.label ?? '', status: 'running', attemptId: overview.attemptId })
-      record.output.notify('x.ai/session_notification', { update: { sessionUpdate: 'subagent_spawned', subagent_id: row.id, child_session_id: row.id, parent_session_id: row.parentId ?? record.agent.session.id, subagent_type: row.mode ?? 'continuable', description: row.label ?? '', ...previous === undefined ? {} : { effective_context_source: 'resumed', resumed_from: row.id } } }, { nativeChildHistory: true, nativeAttemptId: overview.attemptId })
+      const member = team?.find(item => item.id === row.id)
+      record.output.notify('x.ai/session_notification', { update: { sessionUpdate: 'subagent_spawned', subagent_id: row.id, child_session_id: row.id, parent_session_id: row.parentId ?? record.agent.session.id, subagent_type: row.mode ?? 'continuable', description: row.label ?? '', ...member === undefined ? {} : { persona: member.name, role: 'teammate' }, ...previous === undefined ? {} : { effective_context_source: 'resumed', resumed_from: row.id } } }, { nativeChildHistory: true, nativeAttemptId: overview.attemptId })
       if (overview.status !== 'running') emitChildFinished(record, row.id, overview.status, undefined, overview.attemptId)
     }
     if (discoveredWorkflowChild) emitWorkflows(record)
@@ -479,10 +483,11 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       }
       if (!isLive(record)) throw invalidParams('session closed')
       const child = host.agent(SessionId(row.id))
+      const member = host.teamMembers?.(record)?.some(item => item.id === row.id) === true
       return { title: 'Input queue · ' + (row.label || row.id), items: [...child?.inbox.nextTurn ?? [], ...child?.inbox.nextStep ?? []].map(message => ({
         id: message.id, text: textBlocks(message.content).map(block => block.text).join(''),
         detail: child?.inbox.nextTurn.includes(message) ? 'queued for next turn' : 'steering at next step',
-        editable: message.content.every(block => block.type === 'text'),
+        editable: !member && message.content.every(block => block.type === 'text'),
       })) }
     })
   }
@@ -521,6 +526,12 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       }
       const row = resolvePrefix(rows, selector, 'child')
       if (row.mode !== 'continuable') throw new Error('Only continuable children accept these controls.')
+      // Queued Team messages carry mailbox receipts; changing them here would
+      // desynchronize the Team's delivery bookkeeping.
+      const member = host.teamMembers?.(record)?.find(item => item.id === row.id)
+      if (member !== undefined && ['edit', 'remove', 'clear', 'steer-queued'].includes(verb)) {
+        throw new Error(`${member.name} is an Agent Team member; its queued input is Team mailbox delivery. Message it through the Lead, or stop it.`)
+      }
       const childId = SessionId(row.id)
       const child = host.agent(childId)
       if (verb === 'queue' || verb === 'steer') {

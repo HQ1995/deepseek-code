@@ -1,6 +1,7 @@
-# dscode Teams preset: the owned history composition without legacy delegation.
-# Derived from bridge/grok-leader/presets/history.patch.yml; upgrade it
-# deliberately with the supported DSH release.
+# dscode Teams preset: the owned history composition with native Agent Teams in
+# place of legacy delegation. Derived from presets/history.patch.yml; upgrade it
+# deliberately with the supported DSH release. The Team runtime (`agent-team`)
+# is a host row in ../cordis.patch.yml.
 - insert:
     - id: preset-teams
       name: '@deepseek-ai/dsh-agent-preset'
@@ -8,7 +9,7 @@
         id: teams
         name: Teams (experimental)
         description: Explicitly requested teammates with durable messaging and a shared task board. Shared checkout; no automatic merge or file locks.
-        order: 1
+        order: 8
         plugins:
           # The `teams` agent preset: the coding agent, mounted once per process.
           #
@@ -166,9 +167,18 @@
                   headChars: 4096
                   tailChars: 1024
 
-          # Team delegation tools are host-owned by the Teams bundle patch; the
-          # legacy subagent, workflow and Ralph rows are left out so no same-name
-          # tools or one-shot children compete with Team Leads.
+          # ── team ────────────────────────────────────────────────────────────────────
+
+          # The Team tools, for this preset's agents only: this row listens under the
+          # preset's standing scope, so sessions on other presets never receive them.
+          # The roster, mailbox and task board stay on the host plane (`agent-team`).
+          # Legacy subagent, workflow and Ralph rows are left out: they register the
+          # same tool names, and their one-shot children would be taken for Leads.
+          - id: tool-agent-team
+            name: '@deepseek-ai/dsh-experimental-tool-agent-team'
+            config:
+              freshProvider: spawn
+              forkProvider: fork
 
           # ── remaining model-facing rows ─────────────────────────────────────────────
 
