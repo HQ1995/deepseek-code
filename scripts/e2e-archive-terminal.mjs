@@ -154,7 +154,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
   await wait(/DSCODE_PTY_EARLY/); await wait(/DSCODE_PTY_LATE/)
   assert.equal((await state()).jobs.find(row => row.id === job.id).output.earliest, 0)
   await artifact('terminal-live-task-log', { screen: await capture(), state: await state() })
-  await key('q'); await key('C-g'); await key('x')
+  await key('q'); await key('C-g'); await key('x'); await key('x')
   await waitState(value => value.jobs.find(row => row.id === job.id)?.status === 'killed', 'pty-task-killed')
   await key('C-g')
   const release = await fetch(`${process.env.DSCODE_E2E_GATEWAY}/preset-probe/release?key=extra-pty`, { method: 'POST' })

@@ -265,7 +265,8 @@ async function tasksAcceptance() {
   assert.equal(empty.jobs.length, 0)
   assert.equal(empty.descendants.length, 0)
   await key('C-g')
-  await key('x')
+  // A stop arms on the first `x` and fires on the second.
+  await key('x'); await key('x')
   await settle(300)
   assert.deepEqual((await state()).jobs, empty.jobs, 'Empty task control must not manufacture or route a job')
   assert.deepEqual((await state()).descendants, empty.descendants)
@@ -300,7 +301,7 @@ async function tasksAcceptance() {
   await key('Home')
   for (let step = 0; step < 30; step++) {
     await key('Right')
-    await key('x')
+    await key('x'); await key('x')
     await settle(200)
     const value = await state()
     if (value.jobs.find(row => row.id === job.id)?.status === 'killed' && value.descendants.some(row => row.id === child.id && row.activity === 'inactive')) break
@@ -317,7 +318,7 @@ async function tasksAcceptance() {
     await artifact('subprocess-containment-stopped', { escapedPid, reaped: true })
   }
   await key('h')
-  await key('x')
+  await key('x'); await key('x')
   await settle(300)
   assert.equal((await state()).jobs.find(row => row.id === job.id)?.status, 'killed', 'Already-ended control cannot restart a job')
   await artifact('tasks-ended', { state: ended, screen: await capture() })
