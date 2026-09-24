@@ -170,6 +170,29 @@ async fn background_job_holding_stdout_does_not_hold_the_row() {
     );
 }
 
+/// The race behind an intermittently empty row: the shell has exited and been
+/// reaped, its row sits in the pipe, and a grandchild keeps the pipe open.
+#[tokio::test]
+async fn a_row_printed_before_exit_is_collected_without_waiting_for_eof() {
+    #[allow(clippy::disallowed_methods)] // test: the grandchild exits on its own
+    let mut child = tokio::process::Command::new("sh")
+        .args(["-c", "printf row; sleep 2 &"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert!(child.wait().await.unwrap().success());
+    let mut buf = Vec::new();
+    let started = Instant::now();
+
+    collect_buffered(child.stdout.as_ref(), &mut buf);
+
+    assert_eq!(buf, b"row");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the read waited for EOF"
+    );
+}
+
 #[tokio::test]
 async fn capped_runaway_still_has_its_process_group_killed() {
     // The cap returns without a status, which is what leaves the guard armed.

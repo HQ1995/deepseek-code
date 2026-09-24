@@ -120,7 +120,7 @@ async fn pump(
     let mut stderr = child.stderr.take();
     let mut buf = Vec::new();
 
-    let status = {
+    let (status, reading) = {
         // Alongside the reads: a script that fills its stdout before reading stdin
         // would block a write that ran first. Dropping the handle gives it EOF.
         let write_in = async {
@@ -170,7 +170,7 @@ async fn pump(
         let mut writing = true;
         let mut draining = true;
         let mut reading = true;
-        loop {
+        let status = loop {
             tokio::select! {
                 biased;
                 // Each flag retires its branch: `select!` resumes a pinned future
@@ -200,8 +200,12 @@ async fn pump(
                 }
                 waited = child.wait() => break Some(waited.map_err(RunError::Wait)?),
             }
-        }
+        };
+        (status, reading)
     };
+    if status.is_some() && reading {
+        collect_buffered(stdout.as_ref(), &mut buf);
+    }
 
     if buf.len() as u64 > MAX_COMMAND_OUTPUT_BYTES {
         buf.truncate(MAX_COMMAND_OUTPUT_BYTES as usize);
@@ -209,6 +213,38 @@ async fn pump(
     }
     Ok((status, buf))
 }
+
+/// Adds what the script already wrote to stdout, without waiting for EOF.
+///
+/// The exit can win the race with the row printed just before it: another
+/// child's `SIGCHLD` wakes the wait, which reaps the shell before the reactor
+/// has reported the pipe readable, and the run would paint an empty row. The
+/// pipe is non-blocking (the reactor requires it), so a grandchild still
+/// holding it open answers `WouldBlock` rather than stalling the read.
+#[cfg(unix)]
+fn collect_buffered(stdout: Option<&tokio::process::ChildStdout>, buf: &mut Vec<u8>) {
+    use std::io::Read;
+    use std::os::fd::AsFd;
+
+    let Some(Ok(fd)) = stdout.map(|out| out.as_fd().try_clone_to_owned()) else {
+        return;
+    };
+    let mut pipe = std::fs::File::from(fd);
+    let mut chunk = [0u8; 8192];
+    // One read past the cap at most, which the caller reports as a runaway.
+    while buf.len() as u64 <= MAX_COMMAND_OUTPUT_BYTES {
+        match pipe.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => buf.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            // `WouldBlock`: the rest, if any, is a grandchild's to write.
+            Err(_) => break,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn collect_buffered(_stdout: Option<&tokio::process::ChildStdout>, _buf: &mut Vec<u8>) {}
 
 /// Whether the kernel refused to execute the file at all, which is what an
 /// executable script with no `#!` gets. Windows has no such answer.
