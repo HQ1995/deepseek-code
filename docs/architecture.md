@@ -92,6 +92,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `native-capabilities` | Read-only views of the current preset's native tools |
 | `native-team` | `/team`: read-only roster and task board of the Agent Team |
 | `projection` | Pure mapping of session events and tool metadata to TUI wire updates |
+| `tool-titles` | Tool card titles read off argument shapes, never tool names |
 | `image-output` | Resolves tool images through the attachment authority |
 | `browser-actions` | Human wording for browser tool cards and approvals |
 | `browser-control` | `/browser`: toggles the isolated browser row, edits its settings |
@@ -111,7 +112,7 @@ and `session-export`; a runtime dependency only in `native-tasks`,
 `session-migration`, `terminal-signal` and `preset-catalog`; absent elsewhere. The entry builds no maps, sets, abort controllers or timers
 and imports no `node:net`. `dsh-session-projection` and `zod` stay host peers.
 Each `.ts`/`.mjs` file in `src/`, `bin/` and `tests/` is capped at 800 lines;
-on 2026-09-24 none exceeds it (largest: `src/projection.ts`, 795).
+on 2026-09-24 none exceeds it (largest: `src/projection.ts`, 799).
 `browser/`, `ssh/` and `shared/` are not scanned; their files are under 100.
 
 ## Remaining candidates

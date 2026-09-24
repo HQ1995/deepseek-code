@@ -134,7 +134,7 @@ describe('leader native jobs, children, workflows and activity', () => {
     sendRequest(c, 5, 'x.ai/task/kill', { sessionId, taskId: row.id, source: 'clientUi' })
     await waitFor(() => wait.mock.calls.length === 1)
     expect(c.all.some(msg => msg.id === 5)).toBe(false)
-    expect(kill).toHaveBeenCalledWith(row.id, owner.session.id, 'clientUi')
+    expect(kill).toHaveBeenCalledWith(row.id, owner.session.id, 'cancelled by the user')
     expect(wait).toHaveBeenCalledWith(row.id, 5000, owner.session.id)
     Object.assign(row, { status: 'killed', finishedAt: 3000, detail: 'terminated by producer' })
     changed({ type: 'output', owner: typeof owner === 'string' ? owner : owner.session.id, id: 'bash-1', total: 0 }); finish(row)
@@ -417,6 +417,64 @@ describe('leader native jobs, children, workflows and activity', () => {
     expect((await c.request(2, 'x.ai/subagent/cancel', { sessionId, subagentId: 'one-shot' })).error).toBeDefined()
     expect(interrupt).not.toHaveBeenCalled()
     expect(c.all.some(msg => JSON.stringify(msg).includes('subagent_spawned'))).toBe(true)
+    await child.dispose()
+  })
+
+  it('lists a background subagent once, as its child row, and stops it through its job', async () => {
+    type Job = { id: string; kind: string; label: string; owner?: string; status: string; startedAt: number }
+    const jobs: Job[] = [
+      { id: 'subagent-1', kind: 'subagent', label: 'scan repo', status: 'running', startedAt: 1 },
+      { id: 'workflow-1', kind: 'workflow', label: 'review', status: 'running', startedAt: 1 },
+      { id: 'bash-1', kind: 'bash', label: 'sleep 30', status: 'running', startedAt: 1 },
+    ]
+    let changed!: (event: { type: string; owner: string; id: string; total: number }) => void
+    const list = (owner: string) => jobs.filter(job => job.owner === owner)
+    const get = (id: string, owner: string) => list(owner).find(job => job.id === id)!
+    const kill = vi.fn((id: string, owner: string) => { get(id, owner).status = 'stopping'; return 'requested' })
+    const wait = vi.fn(async (id: string, _ms: number, owner: string) => Object.assign(get(id, owner), { status: 'killed' }))
+    const rows: Array<Record<string, string>> = []
+    const interrupt = vi.fn()
+    const { registry, pluginCtx, client: c } = await start({
+      jobs: { list, get, kill, wait, events: { subscribe: (_filter: unknown, fn: typeof changed) => { changed = fn; return () => {} } } },
+      subagents: { listDescendants: async () => rows, interrupt },
+    })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    for (const job of jobs) job.owner = sessionId
+    const child = await registry.create({ sessionId: SessionId('bg-child'), meta: {} })
+    registry.byId.get('bg-child')!.internals.status = 'running'
+    // DSH's background subagent tool starts a `subagent` job whose run spawns a one-shot child.
+    rows.push({ kind: 'child', id: 'bg-child', mode: 'one-shot', label: 'scan repo', parentId: sessionId })
+    pluginCtx.emit('subagent/start', { id: 'bg-child', runId: 'run-bg', provider: 'spawn', local: true })
+    await waitFor(() => typeof changed === 'function')
+    changed({ type: 'output', owner: sessionId, id: 'bash-1', total: 0 })
+    await waitFor(() => c.all.some(msg => JSON.stringify(msg).includes('subagent_spawned'))
+      && c.all.some(msg => msg.method === 'x.ai/task_backgrounded'))
+    await c.request(2, 'x.ai/session/info', { sessionId })
+    // The Tasks pane merges jobs, children and workflows: the child row stands
+    // for the subagent job. A workflow job stays: its workflow row has no stop.
+    expect(c.all.filter(msg => msg.method === 'x.ai/task_backgrounded')
+      .map(msg => (msg.params as { update: { task_id: string } }).update.task_id)).toEqual(['workflow-1', 'bash-1'])
+    // The job names no child: a description another job or running one-shot
+    // child shares refuses rather than guess.
+    jobs.push({ id: 'subagent-2', kind: 'subagent', label: 'scan repo', owner: sessionId, status: 'running', startedAt: 2 })
+    expect((await c.request(3, 'x.ai/subagent/cancel', { sessionId, subagentId: 'bg-child' })).error)
+      .toMatchObject({ message: expect.stringContaining('cannot tell which background job to stop') })
+    jobs.pop()
+    const foreground = await registry.create({ sessionId: SessionId('fg-child'), meta: {} })
+    registry.byId.get('fg-child')!.internals.status = 'running'
+    rows.push({ kind: 'child', id: 'fg-child', mode: 'one-shot', label: 'scan repo', parentId: sessionId })
+    expect((await c.request(4, 'x.ai/subagent/cancel', { sessionId, subagentId: 'fg-child' })).error)
+      .toMatchObject({ message: expect.stringContaining('cannot tell which background job to stop') })
+    expect(kill).not.toHaveBeenCalled()
+    rows.pop(); await foreground.dispose()
+    // The native service cannot interrupt a one-shot child; its job can be killed.
+    expect((await c.request(5, 'x.ai/subagent/cancel', { sessionId, subagentId: 'bg-child' })).result).toEqual({
+      result: { subagentId: 'bg-child', cancelled: true, outcome: { kind: 'cancelled', status: 'cancelled' } } })
+    expect(kill).toHaveBeenCalledWith('subagent-1', sessionId, 'cancelled by the user')
+    expect(wait).toHaveBeenCalledWith('subagent-1', 5000, sessionId)
+    expect(interrupt).not.toHaveBeenCalled()
     await child.dispose()
   })
 

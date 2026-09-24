@@ -13,6 +13,7 @@ import type {} from '@deepseek-ai/dsh-tool-present/types'
 import { isAbsolute, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { browserCardTitle } from './browser-actions.ts'
+import { argumentTitle } from './tool-titles.ts'
 
 /** The grok StopReason vocabulary (agent.rs StopReason). */
 export type StopReasonWire = 'end_turn' | 'max_tokens' | 'cancelled'
@@ -22,7 +23,7 @@ export type GrokSessionUpdate =
     | { sessionUpdate: 'user_message_chunk'; content: { type: 'text'; text: string } }
     | { sessionUpdate: 'agent_message_chunk'; content: { type: 'text'; text: string } }
     | { sessionUpdate: 'agent_thought_chunk'; content: { type: 'text'; text: string } }
-    | { sessionUpdate: 'tool_call'; toolCallId: string; title: string; kind: ToolKindWire; status: 'in_progress'; rawInput?: unknown }
+    | { sessionUpdate: 'tool_call'; toolCallId: string; title: string; kind: ToolKindWire; status: 'in_progress'; rawInput?: unknown; _meta?: { 'x.ai/tool': { name: string } } }
     | { sessionUpdate: 'tool_call_update'; toolCallId: string; status: 'completed' | 'failed'; content?: Array<ToolResultContentBlock>; rawOutput?: unknown; error?: { name: string; code: string } }
     | { sessionUpdate: 'plan'; entries: Array<{ content: string; priority: string; status: string }> }
 /** Non-rendering usage facts carried beside one session update. */
@@ -331,9 +332,12 @@ function deliveredFiles(files: ReadonlyArray<{ path: string; description?: strin
   return [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `\n\n**Delivered files**\n${lines.join('\n')}\n\n` } }]
 }
 
-/** One tool card opening. Native calls and PTC sub-calls share this vocabulary. */
+/** One tool card opening; native calls and PTC sub-calls share it. A card titled by what
+ * it does keeps its tool name in `_meta['x.ai/tool']`, which headless output reads first. */
 function toolCallStarted(toolCallId: string, name: string, args: unknown): GrokSessionUpdate {
-  return { sessionUpdate: 'tool_call', toolCallId, title: browserCardTitle(name, args) ?? name, kind: toolKindForName(name, args), status: 'in_progress', rawInput: rawInputForTool(name, args) }
+  const title = browserCardTitle(name, args) ?? argumentTitle(toolKindForName(name, args), args) ?? name
+  return { sessionUpdate: 'tool_call', toolCallId, title, kind: toolKindForName(name, args), status: 'in_progress', rawInput: rawInputForTool(name, args),
+    ...title === name ? {} : { _meta: { 'x.ai/tool': { name } } } }
 }
 
 /** One tool card settlement: rendered content, typed raw output and the native error identity. */

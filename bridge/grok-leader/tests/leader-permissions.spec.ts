@@ -332,6 +332,54 @@ describe('leader questions and permissions', () => {
     expect(agent.internals.disposed).toBe(false)
   })
 
+  const rejectWithFeedback = async (manualIdle: boolean, followup: string) => {
+    const { registry, pluginCtx, client: c } = await start({ manualIdle })
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId, agent = registry.byId.get(sessionId)!
+    if (manualIdle) {
+      sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'delete the build' }] })
+      await waitFor(() => agent.internals.idleWaiters.length === 1)
+    }
+    const waterfall = pluginCtx.waterfall as unknown as (name: string, ...args: unknown[]) => Promise<unknown>
+    const decision = waterfall('approval/request', { agent, callId: 'rm', toolName: 'bash' }, async () => 'cancelled')
+    await waitFor(() => c.all.some(m => m.method === 'session/request_permission'))
+    const permission = c.all.find(m => m.method === 'session/request_permission')!
+    // The TUI's reject row: the RejectOnce option, the typed text in _meta.
+    c.send({ type: 'acp', payload: JSON.stringify({ jsonrpc: '2.0', id: permission.id,
+      result: { outcome: { outcome: 'selected', optionId: 'reject-once' }, _meta: { followup_message: followup } } }) })
+    await expect(decision).resolves.toBe('rejected')
+    return { c, agent, sessionId }
+  }
+
+  it('steers the feedback typed on a reject into the running turn', async () => {
+    const { c, agent, sessionId } = await rejectWithFeedback(true, 'use git clean instead')
+    await waitFor(() => agent.internals.steered.length === 1)
+    expect(agent.internals.steered).toEqual(['use git clean instead'])
+    expect(agent.internals.followups).toEqual(['delete the build'])
+    expect(agent.internals.cancelCalls).toBe(0)
+    // No interjection id: the pane that typed it renders the block too.
+    await waitFor(() => c.all.some(m => m.method === 'x.ai/session/interjection'))
+    expect(c.all.find(m => m.method === 'x.ai/session/interjection')!.params).toEqual({ sessionId, text: 'use git clean instead' })
+    agent.internals.idleWaiters.shift()!()
+    expect((await waitForId(c, 2)).result).toMatchObject({ stopReason: 'cancelled' })
+  })
+
+  it('queues the reject feedback as the next prompt when no turn is left to steer', async () => {
+    const { c, agent } = await rejectWithFeedback(false, 'try the dry run first')
+    await waitFor(() => agent.internals.followups.includes('try the dry run first'))
+    expect(agent.internals.steered).toEqual([])
+    expect(c.all.some(m => m.method === 'x.ai/session/interjection')).toBe(false)
+  })
+
+  it('a reject without feedback, or with only whitespace, delivers nothing', async () => {
+    const { c, agent } = await rejectWithFeedback(true, '  \n ')
+    await c.request(3, 'x.ai/session/info', { sessionId: agent.session.id })
+    expect(agent.internals.steered).toEqual([])
+    expect(agent.internals.followups).toEqual(['delete the build'])
+    agent.internals.idleWaiters.shift()!()
+  })
+
   it('refuses further input after a partial native permission change until the session is reloaded', async () => {
     const plan = { set: vi.fn() }
     const { registry, client: c } = await start({ planMode: plan, permissionPresets: { set: vi.fn() } })

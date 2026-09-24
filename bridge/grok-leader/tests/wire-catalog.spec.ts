@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assembleCatalog, modelSelectionFromRequest, resolveSelection, type CatalogSources, type ProviderModels } from '../src/wire-catalog.ts'
+import { assembleCatalog, modelSelectionFromRequest, providerNote, resolveSelection, unavailableSelectionNotice, type CatalogSources, type ProviderModels } from '../src/wire-catalog.ts'
 import type { ModelInfo } from '../src/native-seams.ts'
 
 const listing = (provider: string, ids: string[], metadata: Record<string, Partial<ModelInfo>> = {}): ProviderModels => ({
@@ -70,5 +70,41 @@ describe('selection resolution', () => {
     expect(modelSelectionFromRequest({ provider: 'c', model: 'config' }, saved, { model: 'meta' })).toEqual({ provider: 'c', model: 'meta' })
     expect(modelSelectionFromRequest({}, saved, null)).toEqual(saved)
     expect(modelSelectionFromRequest({ provider: '', model: '' }, undefined, {})).toBeUndefined()
+  })
+})
+
+describe('provider notes', () => {
+  it('prefers the configuration error, then a listing failure, then the empty-provider pointer', () => {
+    expect(providerNote('bad profile', 0, 'unreachable')).toBe('bad profile')
+    expect(providerNote(undefined, 0, 'fetch failed\n  at connect')).toBe('could not list models: fetch failed at connect')
+    expect(providerNote(undefined, 0, '   ')).toBe('could not list models: unknown error')
+    expect(providerNote(undefined, 0)).toMatch(/^no models yet/)
+    expect(providerNote(undefined, 3)).toBeUndefined()
+  })
+
+  it('keeps a long listing failure to one bounded line', () => {
+    const note = providerNote(undefined, 0, 'x'.repeat(500))!
+    expect(note.startsWith('could not list models: ')).toBe(true)
+    expect(note.length).toBe('could not list models: '.length + 200)
+    expect(note.endsWith('…')).toBe(true)
+  })
+})
+
+describe('unavailable saved selection notice', () => {
+  const catalog = assembleCatalog(sources({ rows: [listing('a', ['m']), listing('b', ['n'])] })).catalog
+
+  it('names the saved route and its replacement once the catalog lost it', () => {
+    const saved = { provider: 'gone', model: 'old' }
+    const resolved = resolveSelection(catalog, {}, saved, undefined)
+    expect(resolved).toEqual({ provider: 'a', model: 'm' })
+    expect(unavailableSelectionNotice(saved, resolved, catalog)).toBe('Saved model gone/old is unavailable; using a/m. /model to change.')
+    expect(unavailableSelectionNotice(saved, undefined, assembleCatalog(sources({})).catalog))
+      .toBe('Saved model gone/old is unavailable and no other model is available. /provider to add one.')
+  })
+
+  it('says nothing when the saved route resolved, is still listed, or nothing was saved', () => {
+    expect(unavailableSelectionNotice({ provider: 'b', model: 'n' }, { provider: 'b', model: 'n' }, catalog)).toBeUndefined()
+    expect(unavailableSelectionNotice({ provider: 'b', model: 'n' }, { provider: 'a', model: 'm' }, catalog)).toBeUndefined()
+    expect(unavailableSelectionNotice(undefined, { provider: 'a', model: 'm' }, catalog)).toBeUndefined()
   })
 })

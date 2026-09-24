@@ -253,8 +253,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   })
   // The settings service announces recomposed namespaces and profile reloads;
   // the catalog keeps its provider-section snapshot until one of them lands.
+  // Those, the llm adapter topology and the credential seam (dsh-credentials,
+  // not a bridge dependency) are the sources DSH's model picker reloads on:
+  // each schedules one debounced rebuild, published to clients if it changed.
   ctx.on('settings/document-updated', ns => { models.settingsChanged(ns) })
   ctx.on('app-boot/config-reload', () => { models.settingsChanged() })
+  ctx.on('llm/adapters-updated', () => { models.sourcesChanged() })
+  for (const event of ['credentials/reference-updated', 'credentials/record-updated']) {
+    ctx.on(event as never, (() => { models.sourcesChanged() }) as never)
+  }
   const sessionModels = createSessionModels({
     sessions, owned: (clientId, id) => lifecycle.writable(clientId, id), config, catalog: models, defaults: agentDefaultModel,
     clients: () => connections.keys(),
@@ -273,6 +280,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     permissionPresets: () => ctx.get('permissionPresets') as { set(session: Agent['session'], preset: string): void } | undefined,
     planMode: record => presetServiceFor(record, 'planMode') as { set(agent: Agent, active: boolean): unknown } | undefined,
     on: (name, listener, options) => ctx.on(name as never, listener as never, options), logger,
+    // Wired before `input` exists; approvals only arrive once sessions do.
+    rejectionFeedback: (record, text): Promise<unknown> | undefined => input.rejectionFeedback(record, text),
   })
   // DSH's Host Schedule service delivers reminders through `sessionController`,
   // which only the Web app provides. dscode delivers into a session a TUI has
@@ -573,6 +582,12 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return artifacts.info(clientId, params)
       case 'x.ai/session/search':
         return await discovery.search(params)
+      // The dashboard's delete (Ctrl+X twice) still sends this. DSH has no
+      // session delete, so say why instead of "method not found". An error
+      // without `data` (grok's delete failures are internal errors too): the
+      // TUI's toast prints the message and would append any data as JSON.
+      case 'x.ai/session/delete':
+        throw internalError('dscode sessions cannot be deleted; DSH keeps them. Archive is not supported yet.')
       case 'x.ai/session/list':
       case 'x.ai/sessions/list':
         return await discovery.list(method, params)
@@ -625,6 +640,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const children = createNativeChildren({
     sessions, owned: ownedRecord, agent: id => agents.get(id),
     subagents: record => presetServiceFor(record, 'subagents'),
+    jobs: record => presetServiceFor(record, 'jobs'),
     workflow: record => {
       const state = ctx.sessionProjections.stateOf(record.agent.session, 'dscodeWorkflows')
       if (state === undefined) throw internalError('workflow history projection is unavailable')

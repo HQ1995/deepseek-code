@@ -168,8 +168,8 @@ be on PATH; dscode's `/dsh add` uses npm.
 | Existing DeepSeek V4 models | Retained by upstream; saved provider/model selections are preserved |
 | Dynamic system prompts | Native request reconstruction follows the selected adapter/model's declared capability |
 | Model discovery and reasoning/image metadata | `/provider` and `/model`; native discovery plus the existing bounded endpoint capability reader |
-| Invalid pi-ai configurations | Provider remains visible with its native diagnostic; working models remain selectable and saved routes remain editable/removable |
-| Provider Base URL validation | Shared add/edit validation runs before writes; surrounding whitespace is normalized |
+| Invalid pi-ai configurations and failing model listings | Provider remains visible with its native diagnostic or listing error; working models remain selectable and saved routes remain editable/removable |
+| Provider Base URL and API key validation | Shared add/edit validation runs before writes; surrounding whitespace is normalized. As on DSH's Models page, a pasted key that is blank, a `NAME=value` or `export NAME=value` line, quoted, or outside printable ASCII is refused with the reason; `/provider` rows say "key missing" or "key from env" |
 | HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY | Native runtime proxy support; environment is inherited by the managed runtime |
 | Streaming tool-call continuation | Native DeepSeek fix preserves call identifiers and names |
 | MCP tool pagination | Native repeated-cursor rejection; `/mcps` and bridge initialization keep diagnostic behavior |

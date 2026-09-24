@@ -1,7 +1,8 @@
 /** Leader socket spec: leader model catalog and selection. */
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { collectIds, collidingLlm, mockDefaultModel, mockSessionsStore, register, sendRequest, useLeaderHarness, waitFor } from './support/leader-harness.ts'
+import { collectIds, collidingLlm, mockDefaultModel, mockLlm, mockSessionsStore, register, sendRequest, useLeaderHarness, waitFor } from './support/leader-harness.ts'
+import { SOURCE_REFRESH_DEBOUNCE_MS } from '../src/model-catalog.ts'
 
 describe('leader model catalog and selection', () => {
   const start = useLeaderHarness()
@@ -16,6 +17,70 @@ describe('leader model catalog and selection', () => {
     const switched = await c.request(2, 'session/set_model', { sessionId, modelId: 'pi-code' })
     expect(switched.error).toBeUndefined()
     expect(mockDefaultModel.saved.at(-1)).toEqual({ provider: 'pi', model: 'pi-code' })
+  })
+
+  it('initializes and lists models while one provider cannot list its own', async () => {
+    const llm = { ...mockLlm, listModels: async (provider: string) => {
+      if (provider === 'pi') throw new Error('login expired')
+      return mockLlm.listModels(provider)
+    } }
+    const { client: c } = await start({ llm: llm as never })
+    register(c)
+    await c.next()
+    const initialized = await c.request(0, 'initialize', { protocolVersion: 1, clientCapabilities: {} })
+    expect(initialized.error).toBeUndefined()
+    const state = (initialized.result as { _meta: { modelState: {
+      availableModels: Array<{ modelId: string }>; _meta: { providers: Array<Record<string, unknown>> }
+    } } })._meta.modelState
+    expect(state.availableModels.map(model => model.modelId)).toEqual(['deepseek-chat', 'deepseek-reasoner'])
+    expect(state._meta.providers).toEqual([{ id: 'deepseek', name: 'DeepSeek' }, { id: 'pi', name: 'Pi AI', note: 'could not list models: login expired' }])
+    const listed = await c.request(1, 'x.ai/models/list', {})
+    expect(listed.error).toBeUndefined()
+    const created = await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    expect(created.error).toBeUndefined()
+  })
+
+  it('republishes the catalog when the llm, settings or credential sources announce a change', async () => {
+    const providers = [{ id: 'deepseek', name: 'DeepSeek' }]
+    const llm = { ...mockLlm, listProviders: () => [...providers] }
+    const { ctx, client: c } = await start({ llm: llm as never })
+    register(c)
+    await c.next()
+    await c.request(0, 'initialize', { protocolVersion: 1, clientCapabilities: {} })
+    const updates = () => c.all.filter(message => message.method === 'x.ai/models/update')
+      .map(message => message.params as { availableModels: Array<{ modelId: string }>; _meta: { providers: Array<{ id: string }> } })
+    providers.push({ id: 'pi', name: 'Pi AI' })
+    ctx.emit('llm/adapters-updated' as never)
+    await waitFor(() => updates().length === 1)
+    expect(updates()[0]!._meta.providers.map(provider => provider.id)).toEqual(['deepseek', 'pi'])
+    expect(updates()[0]!.availableModels.map(model => model.modelId)).toContain('pi-code')
+    // Events that change nothing a client can see are not rebroadcast.
+    ctx.emit('settings/document-updated' as never, 'ui-theme' as never, 2 as never)
+    ctx.emit('credentials/reference-updated' as never, 'UNRELATED_KEY' as never)
+    ctx.emit('credentials/record-updated' as never, 'plugin/route' as never)
+    await new Promise(resolve => setTimeout(resolve, SOURCE_REFRESH_DEBOUNCE_MS + 100))
+    expect(updates()).toHaveLength(1)
+  })
+
+  it('tells a resumed session once, after the load answer, that its saved model was replaced', async () => {
+    const { persistence, registry, client: c } = await start()
+    register(c)
+    await c.next()
+    persistence.events.push({ type: 'model/selection', seq: 0, time: 0, data: { provider: 'removed', model: 'old-model' } } as SessionEvent)
+    const loaded = await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [] })
+    expect(loaded.error).toBeUndefined()
+    expect(registry.byId.get('persisted-session')?.options).toMatchObject({ provider: 'deepseek', model: 'deepseek-chat' })
+    const answered = c.all.indexOf(loaded)
+    const notes = () => c.all.flatMap((message, index) => message.method === 'x.ai/session_notification'
+      && (message.params as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === 'image_dropped' ? [{ index, message }] : [])
+    await waitFor(() => notes().length === 1)
+    expect(notes()[0]!.index).toBeGreaterThan(answered)
+    expect(notes()[0]!.message.params).toMatchObject({
+      sessionId: 'persisted-session',
+      update: { notes: ['Saved model removed/old-model is unavailable; using deepseek/deepseek-chat. /model to change.'] },
+    })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(notes()).toHaveLength(1)
   })
 
   it('raw model names containing their provider prefix retain the full name', async () => {

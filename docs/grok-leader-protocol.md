@@ -46,6 +46,15 @@ PTC calls and replay. `error` is not an accepted tool status: the TUI decoder
 drops the entire frame, not just its status. Error metadata remains a separate
 field on the failed result.
 
+A `tool_call` is titled by its tool name unless its arguments say what it does:
+a browser action reads `Browser: <action>`, a call whose arguments carry
+`questions: [{question}]` reads `Ask: <question>` (`Ask N questions` for
+several), and an execute call that runs `code` rather than a shell `command`
+(PTC's `run_code`) reads `code: <first non-empty line>`, which the TUI shows as
+`Run code: …`. Its result keeps no Bash-shaped `rawOutput`. Such a card keeps
+its tool name in `_meta['x.ai/tool'].name`, which headless output reads before
+the title.
+
 | Surface | Contract |
 |---|---|
 | `initialize`, `authenticate` | advertise models, commands, capabilities, the execution world, and the bridge-owned auth stub |
@@ -54,7 +63,7 @@ field on the failed result.
 | `session/cancel` | cancel the active turn and reconcile queued prompts |
 | `session/load`, `session/list`, `session/close` | resume, enumerate, and dispose durable dsh sessions |
 | `session/set_model`, `session/set_mode` | switch model/effort and plan mode |
-| `session/request_permission` | wait for the owning client's answer; disconnect/cancel cancels the request without inventing a user rejection. The tool call carries the planned arguments as `rawInput` (`{variant: 'MCPTool', tool_name, tool_input}` for MCP tools) and, for browser tools, a `title` phrase; `_meta.dscodeAlwaysAsks` marks prompts the client must neither auto-approve nor offer always-approve on |
+| `session/request_permission` | wait for the owning client's answer; disconnect/cancel cancels the request without inventing a user rejection. The tool call carries the planned arguments as `rawInput` (`{variant: 'MCPTool', tool_name, tool_input}` for MCP tools) and, for browser tools, a `title` phrase; `_meta.dscodeAlwaysAsks` marks prompts the client must neither auto-approve nor offer always-approve on. A reject whose response carries `_meta.followup_message` resolves as a rejection, then steers that text into the running turn like `x.ai/interject` (broadcast as an `x.ai/session/interjection` without an id); with no turn running it queues as the next prompt |
 
 `initialize` `_meta.dscodeExecutionWorld` says where tools run: `{kind: 'local'}`,
 or `{kind: 'ssh', host, workspace}` for a profile whose SSH adapter owns the
@@ -73,7 +82,8 @@ The bridge also implements the `x.ai/*` surfaces required by this TUI:
 - models and provider CRUD
 - preset and slash-command discovery
 - session list (durable titles and latest activity), info, history, fork,
-  rename, and `/btw`
+  rename, and `/btw`; `x.ai/session/delete` (the dashboard's delete) fails with
+  an internal error saying DSH keeps sessions, since DSH has no session delete
 - queue edit, reorder, remove, clear, send-now, and steer
 - prompt-complete, interjection, question, and lifecycle notifications
 - exact model image-capability gating, durable image prompt admission, and
@@ -155,7 +165,12 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
   or invoke the model.
 - A fresh profile may advertise no providers or models. Provider mutations
   broadcast the refreshed catalog, and model/effort selections persist both as
-  the default for new sessions and as session-local durable events.
+  the default for new sessions and as session-local durable events. Like DSH's
+  own model picker, the bridge also rebuilds the catalog on
+  `llm/adapters-updated`, `settings/document-updated`, `app-boot/config-reload`,
+  `credentials/reference-updated` and `credentials/record-updated`: a burst of
+  events settles into one rebuild, broadcast as `x.ai/models/update` only when
+  what clients were last sent changed.
 - Fresh profiles resolve new sessions to `standard`. A TUI picker selection
   stamped with `_meta.rememberAgentPreset: true`, or raw `/preset`, writes
   `agent-preset-registry.selectedDefault` for later new sessions. Unmarked per-session/headless
@@ -164,6 +179,11 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
 - An explicit wire model id with no explicit provider resolves through the live
   catalog before any saved default route. A removed or renamed saved provider
   therefore cannot poison headless `--model <id>`.
+- A remembered route (a resumed or forked session's last selection, or the
+  saved default for a new session) that the catalog no longer carries falls
+  back to the catalog's current model. Once the open is answered, that session
+  gets one `image_dropped` system note: `Saved model <provider>/<model> is
+  unavailable; using <provider>/<model>. /model to change.`
 - The resolved provider/model route is materialized in the parent dsh
   `AgentOptions` on create, resume, and fork, so native child/subagent sessions
   inherit the actual route rather than an unset model prompt variable.
@@ -190,7 +210,12 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
 - Permission controls use native permission/plan services; an explicit mode
   takes precedence over the legacy YOLO bit. Task rows and terminal status come
   from native jobs/subagents, and cancellation goes through their owning services,
-  not a fabricated shell exit code or success result.
+  not a fabricated shell exit code or success result. A background subagent's
+  `subagent` job gets no task row: its child row stands for it, and
+  `x.ai/subagent/cancel` on that one-shot child kills the job (found by its
+  description among the session's running subagent jobs; a description another
+  job or running one-shot child shares refuses). A `workflow` job keeps its task
+  row, since the workflow row offers no stop.
 - Child controls resolve only descendants of the owning session and require
   continuable mode. Queue/Steer use native `subagents.prompt` with fresh user RPC
   provenance. Edits retain message IDs and source; Stop retains pending input.
@@ -350,6 +375,10 @@ resume and child-history pages; relative paths resolve against the viewed
 session's workspace, including forks. It neither copies nor opens file contents.
 Native configurable-provider diagnostics use the existing provider `note` field,
 including providers with no serviceable models, without hiding healthy routes.
+A provider whose model listing throws (an expired login, an unreachable
+endpoint) stays in the roster with no models and `could not list models: …` as
+its note, as DSH's own catalog reports per-provider failures; initialize,
+`x.ai/models/list` and provider writes keep working.
 
 `x.ai/terminals` requires an owned `sessionId`. `action` defaults to `list`;
 `terminalId` optionally selects a non-consuming preview of the latest 1000

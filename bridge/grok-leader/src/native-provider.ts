@@ -6,6 +6,7 @@
 import { internalError, invalidParams } from './acp.ts'
 import type { CredentialsLike, SettingsLike } from './native-seams.ts'
 import type { PluginRow, PluginRows } from './plugin-rows.ts'
+import { pastedApiKeyValue } from './provider-profile.ts'
 
 export const NATIVE_DEEPSEEK_PROVIDER = 'deepseek-official'
 /** Wire marker for the add-provider form; never a pi-ai `api` value. */
@@ -59,7 +60,9 @@ export function nativeProviderForm(request: Record<string, unknown>): NativeProv
       throw invalidParams('baseURL must be an HTTP(S) root without credentials, query or fragment')
     }
   }
-  const apiKey = typeof request.apiKey === 'string' && request.apiKey.trim() !== '' ? request.apiKey.trim() : undefined
+  const pasted = request.apiKey
+  if (pasted !== undefined && pasted !== null && typeof pasted !== 'string') throw invalidParams('apiKey must be a string')
+  const apiKey = typeof pasted === 'string' && pasted !== '' ? pastedApiKeyValue(pasted) : undefined
   return { ...apiKeyEnv === undefined ? {} : { apiKeyEnv }, ...apiKey === undefined ? {} : { apiKey }, ...baseURL === undefined ? {} : { baseURL } }
 }
 

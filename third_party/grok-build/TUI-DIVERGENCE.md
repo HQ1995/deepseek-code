@@ -928,3 +928,11 @@ Both /resume pickers drop `d delete`: DSH has no session delete, only archive
 `dscode sessions list [--all]` and `search` query the leader
 (`x.ai/session/list`, `x.ai/session/search`) instead of grok's session
 storage; `delete` is hidden and refuses with an explanation (class: behavior).
+
+### Provider key status
+
+`/provider` rows (the dropdown and the picker) follow the model count or note
+with the key state from the bridge's non-secret `credential` facts: "key
+missing" when the key reference resolves to nothing, "key from env" for the
+launch environment or a `.env` file, and nothing for a saved key. Generic over
+the field; no provider is named (class: feature).

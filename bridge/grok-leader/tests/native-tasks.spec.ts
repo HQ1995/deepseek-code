@@ -240,7 +240,18 @@ describe('native task ownership', () => {
     expect(f.jobs.wait).toHaveBeenLastCalledWith('one', 5000, f.owner.agent.session.id)
     row.status = 'killed'; finish.resolve(row)
     await expect(cancelled).resolves.toMatchObject({ result: { outcome: 'killed' } })
-    expect(f.jobs.kill).toHaveBeenCalledWith('one', f.owner.agent.session.id, 'clientUi')
+    // The model reads the reason in the job detail: never the wire's raw source.
+    expect(f.jobs.kill).toHaveBeenCalledWith('one', f.owner.agent.session.id, 'cancelled by the user')
+    await f.tasks.dispose()
+  })
+
+  it('names a headless teardown kill as the session closing', async () => {
+    const f = fixture(), row = f.job('one'), finish = Promise.withResolvers<Job>()
+    f.jobs.wait.mockImplementationOnce(() => finish.promise)
+    const cancelled = f.tasks.kill(1, { ...f.request('one'), source: 'teardown' })
+    row.status = 'killed'; finish.resolve(row)
+    await expect(cancelled).resolves.toMatchObject({ result: { outcome: 'killed' } })
+    expect(f.jobs.kill).toHaveBeenCalledWith('one', f.owner.agent.session.id, 'session closed')
     await f.tasks.dispose()
   })
 

@@ -27,7 +27,10 @@ export interface ModelCatalogDependencies {
   getCredentials(): CredentialsLike | undefined
   getDefaultModel(): AgentDefaultModelLike | undefined
   isProviderInUse(provider: string): boolean
-  onChanged(catalog: ModelCatalog, reason: 'discovery' | 'mutation'): void
+  /** Publish a rebuilt catalog: a background discovery, a provider write of
+   * ours, or a change a native source (settings, adapters, credentials)
+   * announced. */
+  onChanged(catalog: ModelCatalog, reason: CatalogChange): void
   logger: { warn(message: string): void }
   fetch?: typeof fetch
   environment?: Readonly<NodeJS.ProcessEnv>
@@ -36,8 +39,21 @@ export interface ModelCatalogDependencies {
   native?: NativeProviders
 }
 
+/** Why a rebuilt catalog is published. */
+export type CatalogChange = 'discovery' | 'mutation' | 'external'
+
+/** Quiet period before a native source change rebuilds the catalog: one
+ * provider write lands as a burst of settings and credential events. */
+export const SOURCE_REFRESH_DEBOUNCE_MS = 150
+
 type Profile = Record<string, unknown>
 type ProviderRoster = { providers: CatalogProvider[]; currentProviderId: string }
+/** One provider's listing, or why the llm service could not list it. */
+type ProviderListing = ProviderModels & { failure?: string }
+
+/** The client-visible content of one catalog snapshot. */
+const catalogSignature = (current: ModelCatalog): string =>
+  JSON.stringify([current.currentModelId, current.currentProviderId, current.providers, current.availableModels])
 
 /** Own cached catalogs, accepted native reads/discoveries and provider writes.
  * Disposal closes admission/publication immediately and drains real work,
@@ -50,6 +66,11 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
   let disposal: Promise<void> | undefined
   const pending = new Set<Promise<unknown>>()
   let catalog: ModelCatalog | undefined
+  // Overlapping rebuilds may settle out of order; the newest read wins the cache.
+  let refreshGeneration = 0, cachedGeneration = 0
+  /** What clients were last sent, so an unchanged rebuild is not rebroadcast. */
+  let published: string | undefined
+  let sourceRefresh: ReturnType<typeof setTimeout> | undefined
   const discoveredModels = new Map<string, DiscoveredProviderModel[]>()
   const discoveredRoutes = new Map<string, string>()
   const assertOpen = (): void => {
@@ -132,10 +153,20 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
   }
 
   /** One provider's models (a background discovery overrides the static
-   * listing) and their exact metadata, read sequentially inside the drain. */
-  const readProviderModels = (llmService: LlmLike, provider: string): Promise<ProviderModels> => track(async () => {
+   * listing) and their exact metadata, read sequentially inside the drain.
+   * A provider whose listing throws (an expired login, a bad endpoint) keeps
+   * its roster row with no models and the error as its `failure`, like DSH's
+   * own catalog: one broken provider never fails the whole catalog. */
+  const readProviderModels = (llmService: LlmLike, provider: string): Promise<ProviderListing> => track(async () => {
     assertOpen()
-    const listed = await llmService.listModels(provider)
+    let listed: Awaited<ReturnType<LlmLike['listModels']>>
+    try {
+      listed = await llmService.listModels(provider)
+    } catch (error) {
+      assertOpen()
+      logger.warn('grok-leader: could not list models for provider ' + provider + ': ' + errorMessage(error))
+      return { provider, models: [], metadata: new Map(), failure: errorMessage(error) }
+    }
     const native = dependencies.native?.owns(provider) === true
     const staticModels = native ? listed.map(model => model.description !== undefined || NATIVE_MODEL_DESCRIPTIONS[model.id] === undefined
       ? model : { ...model, description: NATIVE_MODEL_DESCRIPTIONS[model.id] }) : listed
@@ -179,10 +210,11 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
   })
 
   /** Rebuild the flattened wire catalog plus the provider ownership the bare
-   * ids hide. Every provider branch stays in the accepted-work drain, even
-   * when a sibling rejects early. */
+   * ids hide. Every provider branch stays in the accepted-work drain; a
+   * provider whose listing fails is reported in its note, not thrown. */
   const refreshCatalog = async (): Promise<ModelCatalog> => {
     assertOpen()
+    const generation = ++refreshGeneration
     const llmService = llm()
     const userSection = displaySection()
     const activeProviders = llmService?.listProviders() ?? []
@@ -194,9 +226,11 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     }
     const rows = llmService === undefined ? [] : await Promise.all(activeProviders.map(provider => readProviderModels(llmService, provider.id)))
     assertOpen()
-    const modelCount = new Map(rows.map(row => [row.provider, row.models.length]))
-    const providers = await Promise.all([...rosterRows.values()].map(row =>
-      describeProvider(row, userSection, providerNote(configured.get(row.id)?.error, modelCount.get(row.id) ?? 0))))
+    const listings = new Map(rows.map(row => [row.provider, row]))
+    const providers = await Promise.all([...rosterRows.values()].map(row => {
+      const listing = listings.get(row.id)
+      return describeProvider(row, userSection, providerNote(configured.get(row.id)?.error, listing?.models.length ?? 0, listing?.failure))
+    }))
     assertOpen()
     const assembled = assembleCatalog({
       rows, providers, config,
@@ -206,8 +240,17 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
       logger.warn('grok-leader: model "' + assembled.missingRequested + '" is not in the catalog; falling back to "' + assembled.catalog.currentModelId + '"')
     }
     assertOpen()
-    catalog = assembled.catalog
-    return catalog
+    if (generation > cachedGeneration) {
+      cachedGeneration = generation
+      catalog = assembled.catalog
+    }
+    return assembled.catalog
+  }
+
+  /** Every published snapshot goes through here, recording what clients saw. */
+  const publish = (current: ModelCatalog, reason: CatalogChange): void => {
+    published = catalogSignature(current)
+    onChanged(current, reason)
   }
 
   /** The most recently refreshed catalog, rebuilt on first use. */
@@ -299,7 +342,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     if (stale()) return
     const refreshed = await refreshCatalog()
     if (closed) return
-    onChanged(refreshed, 'discovery')
+    publish(refreshed, 'discovery')
   }
 
   /** Stale-while-revalidate: endpoint latency must never hold the first frame. */
@@ -401,7 +444,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
       scheduleDynamicCatalogRefresh()
       assertOpen()
     }
-    onChanged(current, 'mutation')
+    publish(current, 'mutation')
     return { providers: current.providers, currentProviderId: current.currentProviderId }
   }
 
@@ -504,6 +547,33 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     return publishMutation(false)
   }
 
+  /** Rebuild after a native source changed and publish the result when it
+   * differs from what clients were last sent. The cache is the newest
+   * settled read, which may be a concurrent caller's. */
+  const refreshFromSources = async (): Promise<void> => {
+    await refreshCatalog()
+    scheduleDynamicCatalogRefresh()
+    const latest = catalog
+    if (closed || latest === undefined || catalogSignature(latest) === published) return
+    publish(latest, 'external')
+  }
+
+  /** DSH's own model picker reloads when the llm adapters, the settings
+   * document or a credential change; so does this catalog. A burst of events
+   * settles into one rebuild; before the first read (the boot-time adapter
+   * and settings events) there is nothing to rebuild. */
+  const sourcesChanged = (): void => {
+    if (closed) return
+    clearTimeout(sourceRefresh)
+    sourceRefresh = setTimeout(() => {
+      sourceRefresh = undefined
+      if (closed || refreshGeneration === 0) return
+      void track(refreshFromSources).catch(error => {
+        if (!closed) logger.warn('grok-leader: model catalog refresh after a provider source change failed: ' + errorMessage(error))
+      })
+    }, SOURCE_REFRESH_DEBOUNCE_MS)
+  }
+
   const modelsList = async (): Promise<unknown> => {
     const current = await refreshCatalog()
     scheduleDynamicCatalogRefresh()
@@ -527,10 +597,14 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
       return names.size === 1 ? [...names][0] : undefined
     },
     /** A settings namespace was recomposed (`ns`), or the profile reloaded
-     * (no `ns`): the next display read recomposes the provider section. */
+     * (no `ns`): the next display read recomposes the provider section, and
+     * the catalog is rebuilt and republished if it changed. */
     settingsChanged(ns?: string): void {
       if (ns === undefined || ns === PROVIDER_SETTINGS_NS) sectionSnapshot = undefined
+      sourcesChanged()
     },
+    /** The llm adapter topology or a credential changed. */
+    sourcesChanged,
     /** Publish an acknowledged default choice without repeating discovery.
      * Resolve against the latest catalog: a concurrent refresh may change wire
      * IDs. Updates the cached snapshot in place, as holders of it observe. */
@@ -559,6 +633,8 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     dispose(): Promise<void> {
       if (disposal !== undefined) return disposal
       closed = true
+      clearTimeout(sourceRefresh)
+      sourceRefresh = undefined
       disposal = Promise.resolve().then(async () => { while (pending.size > 0) await Promise.allSettled([...pending]) })
       discoveredModels.clear(); discoveredRoutes.clear(); catalog = undefined; sectionSnapshot = undefined
       return disposal

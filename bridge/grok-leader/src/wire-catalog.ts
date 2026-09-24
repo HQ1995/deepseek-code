@@ -87,11 +87,22 @@ export function modelSelectionFromRequest(
   return { provider, model, ...reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(reasoningEffort) } }
 }
 
-/** Display-only provider status: the native configuration error, or a generic
- * pointer for an empty provider (the TUI relays notes verbatim, and the bridge
- * carries no plugin-specific knowledge of which login or key it wants). */
-export const providerNote = (configurationError: string | undefined, modelCount: number): string | undefined =>
-  configurationError ?? (modelCount > 0 ? undefined
+/** Longest listing failure a note carries; the TUI shows notes on one row. */
+const NOTE_ERROR_LIMIT = 200
+
+/** One provider's model listing failure as a single display line. */
+const listingFailureNote = (error: string): string => {
+  const line = error.replace(/\s+/g, ' ').trim()
+  const text = line.length > NOTE_ERROR_LIMIT ? line.slice(0, NOTE_ERROR_LIMIT - 1) + '…' : line
+  return 'could not list models: ' + (text === '' ? 'unknown error' : text)
+}
+
+/** Display-only provider status: the native configuration error, the error
+ * its model listing failed with, or a generic pointer for an empty provider
+ * (the TUI relays notes verbatim, and the bridge carries no plugin-specific
+ * knowledge of which login or key it wants). */
+export const providerNote = (configurationError: string | undefined, modelCount: number, listingError?: string): string | undefined =>
+  configurationError ?? (listingError !== undefined ? listingFailureNote(listingError) : modelCount > 0 ? undefined
     : 'no models yet — the provider may need a login or API key (its plugin may register a /login command)')
 
 /** One advertised row. Exact metadata without reasoning (or none resolved)
@@ -202,6 +213,24 @@ export function assembleCatalog(sources: CatalogSources): { catalog: ModelCatalo
     },
     ...missing ? { missingRequested: String(requested) } : {},
   }
+}
+
+/** What to tell the user when a remembered (not explicitly requested) choice
+ * is no longer in the catalog: `resolveSelection` then falls back to the
+ * catalog's current model, which would otherwise switch a resumed session's
+ * model and provider without a word. Undefined when nothing was replaced. */
+export function unavailableSelectionNotice(
+  remembered: Selection | undefined,
+  resolved: ModelSelectionRef['current'],
+  current: Pick<ModelCatalog, 'providerModelToWireId'> | undefined,
+): string | undefined {
+  if (remembered === undefined) return undefined
+  if (resolved !== undefined && resolved.provider === remembered.provider && resolved.model === remembered.model) return undefined
+  if (current?.providerModelToWireId.has(modelEffortKey(remembered.provider, remembered.model)) === true) return undefined
+  const saved = 'Saved model ' + remembered.provider + '/' + remembered.model + ' is unavailable'
+  return resolved === undefined
+    ? saved + ' and no other model is available. /provider to add one.'
+    : saved + '; using ' + resolved.provider + '/' + resolved.model + '. /model to change.'
 }
 
 /** Resolve one session's requested/saved selection against a catalog snapshot.

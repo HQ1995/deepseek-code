@@ -27,6 +27,47 @@ describe('native assistant settlement projection', () => {
     expect(call('mcp__playwright-mcp__browser_navigate', { url: 'https://example.com/' })).toEqual([expect.objectContaining({
       sessionUpdate: 'tool_call', title: 'Browser: open https://example.com/', rawInput: { url: 'https://example.com/' } })])
     expect(call('bash', { command: 'ls' })).toEqual([expect.objectContaining({ title: 'bash' })])
+    expect(call('bash', { command: 'ls' })[0]).not.toHaveProperty('_meta')
+  })
+
+  it('titles a code-runner card by its first line of code and keeps its result unshaped', () => {
+    const args = { code: '\n  // Count TODO markers\nconst files = await tools.glob({ pattern: "**/*.ts" })\nreturn files.length', description: 'Count TODO markers', timeout_ms: 5000 }
+    const start = { type: 'tool/call', data: { turn: 1, step: 1, callId: ToolCallId('rc'), name: 'run_code', arguments: JSON.stringify(args) } } as SessionEvent
+    // The TUI prefixes an execute card's command slot with "Run " (or "$ ").
+    expect(GrokLeader.sessionEventToUpdates(start, { replay: false })).toEqual([{ sessionUpdate: 'tool_call', toolCallId: 'rc',
+      title: 'code: // Count TODO markers', kind: 'execute', status: 'in_progress', rawInput: args,
+      _meta: { 'x.ai/tool': { name: 'run_code' } } }])
+    const result = { type: 'tool/result', data: { message: { role: 'tool', toolCallId: 'rc', content: [{ type: 'text', text: '3' }] } } } as unknown as SessionEvent
+    const settled = GrokLeader.sessionEventToUpdates(result, { replay: false, toolCall: () => ({ name: 'run_code', arguments: args }) })[0]
+    expect(settled).toMatchObject({ sessionUpdate: 'tool_call_update', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: '3' } }] })
+    expect(settled).not.toHaveProperty('rawOutput')
+    const call = (name: string, args: unknown) => GrokLeader.sessionEventToUpdates({ type: 'tool/call',
+      data: { turn: 1, step: 1, callId: ToolCallId('c-' + name), name, arguments: JSON.stringify(args) } } as SessionEvent, { replay: false })[0]
+    expect(call('run_code', { code: 'x'.repeat(200) })).toMatchObject({ title: 'code: ' + 'x'.repeat(79) + '…' })
+    // A shell command, blank code, or a non-execute tool's `code` keeps the tool name.
+    expect(call('bash', { command: 'ls', code: 'ignored' })).toMatchObject({ title: 'bash' })
+    expect(call('run_code', { code: ' \n\t\n' })).toMatchObject({ title: 'run_code' })
+    expect(call('cordis_run', { code: 'run()' })).toMatchObject({ title: 'cordis_run' })
+  })
+
+  it('titles a question card by what it asks, from the arguments\' shape', () => {
+    const call = (name: string, args: unknown) => GrokLeader.sessionEventToUpdates({ type: 'tool/call',
+      data: { turn: 1, step: 1, callId: ToolCallId('c-' + name), name, arguments: JSON.stringify(args) } } as SessionEvent, { replay: false })[0]
+    const one = { questions: [{ id: 'tree', header: 'Choose', question: 'Which tree\nshould we plant?', options: [{ label: 'Cedar' }] }] }
+    // The card keeps the tool's own arguments and, for headless output, its name.
+    expect(call('ask_user_question', one)).toEqual({ sessionUpdate: 'tool_call', toolCallId: 'c-ask_user_question',
+      title: 'Ask: Which tree should we plant?', kind: 'other', status: 'in_progress', rawInput: one,
+      _meta: { 'x.ai/tool': { name: 'ask_user_question' } } })
+    expect(call('ask_user_question', { questions: [{ id: 'a', question: 'First?' }, { id: 'b', question: 'Second?' }] }))
+      .toMatchObject({ title: 'Ask 2 questions' })
+    // By shape, not by name: another plugin's question tool reads the same.
+    expect(call('plugin_ask', { questions: [{ id: 'q', question: 'Proceed?' }] })).toMatchObject({ title: 'Ask: Proceed?' })
+    expect(call('ask_user_question', { questions: [{ id: 'q', question: 'x'.repeat(200) }] }).title).toBe('Ask: ' + 'x'.repeat(79) + '…')
+    // Anything else keeps the tool name.
+    for (const args of [{ questions: [] }, { questions: [{ id: 'q' }] }, { questions: 'Proceed?' }, { questions: [{ id: 'q', question: ' ' }] }]) {
+      expect(call('ask_user_question', args)).toMatchObject({ title: 'ask_user_question' })
+      expect(call('ask_user_question', args)).not.toHaveProperty('_meta')
+    }
   })
 
   it('preserves interrupted reasoning and whitespace from the embedded stream, not only safe message blocks', () => {
