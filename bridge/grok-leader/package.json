@@ -18,7 +18,6 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/types/index.js"
     },
-    "./src/*": "./src/*",
     "./browser": "./browser/index.mjs",
     "./ssh": "./ssh/index.mjs",
     "./package.json": "./package.json",
