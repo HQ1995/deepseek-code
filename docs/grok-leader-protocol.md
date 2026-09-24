@@ -155,7 +155,12 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
   or invoke the model.
 - A fresh profile may advertise no providers or models. Provider mutations
   broadcast the refreshed catalog, and model/effort selections persist both as
-  the default for new sessions and as session-local durable events.
+  the default for new sessions and as session-local durable events. Like DSH's
+  own model picker, the bridge also rebuilds the catalog on
+  `llm/adapters-updated`, `settings/document-updated`, `app-boot/config-reload`,
+  `credentials/reference-updated` and `credentials/record-updated`: a burst of
+  events settles into one rebuild, broadcast as `x.ai/models/update` only when
+  what clients were last sent changed.
 - Fresh profiles resolve new sessions to `standard`. A TUI picker selection
   stamped with `_meta.rememberAgentPreset: true`, or raw `/preset`, writes
   `agent-preset-registry.selectedDefault` for later new sessions. Unmarked per-session/headless

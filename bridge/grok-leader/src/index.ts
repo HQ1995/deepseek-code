@@ -253,8 +253,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   })
   // The settings service announces recomposed namespaces and profile reloads;
   // the catalog keeps its provider-section snapshot until one of them lands.
+  // Those, the llm adapter topology and the credential seam (dsh-credentials,
+  // not a bridge dependency) are the sources DSH's model picker reloads on:
+  // each schedules one debounced rebuild, published to clients if it changed.
   ctx.on('settings/document-updated', ns => { models.settingsChanged(ns) })
   ctx.on('app-boot/config-reload', () => { models.settingsChanged() })
+  ctx.on('llm/adapters-updated', () => { models.sourcesChanged() })
+  for (const event of ['credentials/reference-updated', 'credentials/record-updated']) {
+    ctx.on(event as never, (() => { models.sourcesChanged() }) as never)
+  }
   const sessionModels = createSessionModels({
     sessions, owned: (clientId, id) => lifecycle.writable(clientId, id), config, catalog: models, defaults: agentDefaultModel,
     clients: () => connections.keys(),

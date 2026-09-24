@@ -269,4 +269,17 @@ describe('session model ownership', () => {
     f.notify.mockClear(); f.models.changed(f.view, 'mutation')
     expect(f.notify).not.toHaveBeenCalled()
   })
+
+  it('reconciles a live effort after an external source change, but not after a write of ours', async () => {
+    const f = fixture()
+    const root = await f.add()
+    expect(root.model.current).toMatchObject({ reasoningEffort: 'high' })
+    f.view.availableModels[0]!._meta!.reasoningEfforts = ['low']
+    f.models.changed(f.view, 'mutation')
+    expect(root.model.current).toMatchObject({ reasoningEffort: 'high' })
+    f.models.changed(f.view, 'external')
+    expect(root.model.current).toEqual({ provider: 'alpha', model: 'shared' })
+    expect(f.notify).toHaveBeenCalledWith(1, 'x.ai/models/update', expect.objectContaining({ currentModelId: 'shared' }))
+    await f.models.dispose()
+  })
 })

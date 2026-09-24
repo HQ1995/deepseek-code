@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createModelCatalog, type ModelCatalogDependencies } from '../src/model-catalog.ts'
+import { SOURCE_REFRESH_DEBOUNCE_MS, createModelCatalog, type ModelCatalogDependencies } from '../src/model-catalog.ts'
 import type { LlmLike, SettingsLike } from '../src/native-seams.ts'
 import { modelEffortKey } from '../src/wire-catalog.ts'
 import { tick } from './support/async.ts'
@@ -450,5 +450,77 @@ describe('model catalog module', () => {
     expect((await catalog.refresh()).providers.find(provider => provider.id === 'alpha')?.displayName).toBe('Alpha gateway')
     await catalog.refresh()
     expect(service.describe).toHaveBeenCalledTimes(2)
+  })
+
+  it('rebuilds once after a burst of native source changes and republishes only a changed catalog', async () => {
+    const f = fixture()
+    await f.catalog.current()
+    const reads = vi.mocked(f.llm.listModels).mock.calls.length
+    f.routes.gamma = {}
+    f.catalog.settingsChanged('llm-pi-ai'); f.catalog.sourcesChanged(); f.catalog.sourcesChanged()
+    expect(f.llm.listModels).toHaveBeenCalledTimes(reads)
+    await vi.waitFor(() => expect(f.changed).toHaveBeenCalledOnce())
+    expect(f.changed).toHaveBeenCalledWith(expect.objectContaining({
+      providers: [{ id: 'alpha' }, { id: 'beta' }, { id: 'gamma' }],
+    }), 'external')
+    expect(f.llm.listModels).toHaveBeenCalledTimes(reads + 3)
+    expect(f.catalog.peek()?.availableModels.map(model => model.modelId)).toEqual(['shared', 'beta:shared', 'gamma:shared'])
+    // Nothing new: the rebuild runs, but clients are not sent the same catalog again.
+    f.catalog.sourcesChanged()
+    await vi.waitFor(() => expect(f.llm.listModels).toHaveBeenCalledTimes(reads + 6))
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(f.changed).toHaveBeenCalledOnce()
+    await f.catalog.dispose()
+  })
+
+  it('republishes a credential change after a write of ours without repeating the write', async () => {
+    const f = fixture()
+    await f.catalog.add({ id: 'custom', apiKeyEnv: 'CUSTOM_KEY' })
+    expect(f.changed).toHaveBeenLastCalledWith(expect.anything(), 'mutation')
+    // The settings and credential events our own write caused publish nothing new.
+    f.catalog.settingsChanged('llm-pi-ai'); f.catalog.sourcesChanged()
+    await new Promise(resolve => setTimeout(resolve, SOURCE_REFRESH_DEBOUNCE_MS + 50))
+    expect(f.changed).toHaveBeenCalledOnce()
+    // A key stored elsewhere (another client, a watched credentials file) is published.
+    f.stored.set('CUSTOM_KEY', 'fixture-only')
+    f.catalog.sourcesChanged()
+    await vi.waitFor(() => expect(f.changed).toHaveBeenCalledTimes(2))
+    expect(f.changed).toHaveBeenLastCalledWith(expect.objectContaining({
+      providers: expect.arrayContaining([{ id: 'custom', apiKeyEnv: 'CUSTOM_KEY', credential: { configured: true, source: 'file', writable: true } }]),
+    }), 'external')
+    await f.catalog.dispose()
+  })
+
+  it('leaves the first build to the first read', async () => {
+    const f = fixture()
+    f.catalog.sourcesChanged(); f.catalog.settingsChanged()
+    await new Promise(resolve => setTimeout(resolve, SOURCE_REFRESH_DEBOUNCE_MS + 50))
+    expect(f.llm.listModels).not.toHaveBeenCalled(); expect(f.changed).not.toHaveBeenCalled()
+    await f.catalog.dispose()
+  })
+
+  it('drops a scheduled source rebuild on disposal', async () => {
+    const f = fixture()
+    await f.catalog.current()
+    vi.mocked(f.llm.listModels).mockClear()
+    f.catalog.sourcesChanged()
+    await f.catalog.dispose()
+    await new Promise(resolve => setTimeout(resolve, SOURCE_REFRESH_DEBOUNCE_MS + 50))
+    expect(f.llm.listModels).not.toHaveBeenCalled(); expect(f.changed).not.toHaveBeenCalled()
+  })
+
+  it('keeps the newest read cached when overlapping rebuilds settle out of order', async () => {
+    const f = fixture(), slow = Promise.withResolvers<void>()
+    let first = true
+    f.llm.listModels = vi.fn(async (provider: string) => {
+      if (first && provider === 'alpha') { first = false; await slow.promise; return [{ id: 'old', name: 'Old' }] }
+      return [{ id: 'shared', name: 'Shared model' }]
+    })
+    const older = f.catalog.refresh()
+    const newer = await f.catalog.refresh()
+    slow.resolve()
+    expect((await older).availableModels.some(model => model.modelId === 'old')).toBe(true)
+    expect(f.catalog.peek()).toBe(newer)
+    await f.catalog.dispose()
   })
 })

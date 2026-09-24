@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { collectIds, collidingLlm, mockDefaultModel, mockLlm, mockSessionsStore, register, sendRequest, useLeaderHarness, waitFor } from './support/leader-harness.ts'
+import { SOURCE_REFRESH_DEBOUNCE_MS } from '../src/model-catalog.ts'
 
 describe('leader model catalog and selection', () => {
   const start = useLeaderHarness()
@@ -37,6 +38,28 @@ describe('leader model catalog and selection', () => {
     expect(listed.error).toBeUndefined()
     const created = await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     expect(created.error).toBeUndefined()
+  })
+
+  it('republishes the catalog when the llm, settings or credential sources announce a change', async () => {
+    const providers = [{ id: 'deepseek', name: 'DeepSeek' }]
+    const llm = { ...mockLlm, listProviders: () => [...providers] }
+    const { ctx, client: c } = await start({ llm: llm as never })
+    register(c)
+    await c.next()
+    await c.request(0, 'initialize', { protocolVersion: 1, clientCapabilities: {} })
+    const updates = () => c.all.filter(message => message.method === 'x.ai/models/update')
+      .map(message => message.params as { availableModels: Array<{ modelId: string }>; _meta: { providers: Array<{ id: string }> } })
+    providers.push({ id: 'pi', name: 'Pi AI' })
+    ctx.emit('llm/adapters-updated' as never)
+    await waitFor(() => updates().length === 1)
+    expect(updates()[0]!._meta.providers.map(provider => provider.id)).toEqual(['deepseek', 'pi'])
+    expect(updates()[0]!.availableModels.map(model => model.modelId)).toContain('pi-code')
+    // Events that change nothing a client can see are not rebroadcast.
+    ctx.emit('settings/document-updated' as never, 'ui-theme' as never, 2 as never)
+    ctx.emit('credentials/reference-updated' as never, 'UNRELATED_KEY' as never)
+    ctx.emit('credentials/record-updated' as never, 'plugin/route' as never)
+    await new Promise(resolve => setTimeout(resolve, SOURCE_REFRESH_DEBOUNCE_MS + 100))
+    expect(updates()).toHaveLength(1)
   })
 
   it('raw model names containing their provider prefix retain the full name', async () => {

@@ -4,7 +4,7 @@ import { ReasoningEffortId, errorChain } from '@deepseek-ai/dsh-llm'
 import type { SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
 import { nonEmpty } from './guards.ts'
-import type { createModelCatalog } from './model-catalog.ts'
+import type { CatalogChange, createModelCatalog } from './model-catalog.ts'
 import type { AgentDefaultModelLike } from './native-seams.ts'
 import { acceptedReasoningEffort, modelEffortKey, modelSelectionFromRequest, type ModelCatalog } from './wire-catalog.ts'
 import { LEGACY_MODEL_SELECTION_EVENTS } from './session-migration.ts'
@@ -211,12 +211,13 @@ export function createSessionModels<S extends ModelSession>(host: ModelHost<S>) 
         return work
       })
     },
-    changed(current: ModelCatalog, reason: 'discovery' | 'mutation'): void {
+    changed(current: ModelCatalog, reason: CatalogChange): void {
       if (closed) return
       const awaitingSession = new Set(host.clients())
       for (const record of host.sessions.values()) {
         if (!isLive(record)) continue
-        if (reason === 'discovery') reconcile(record, current)
+        // Metadata may have moved under a live choice unless the write was ours.
+        if (reason !== 'mutation') reconcile(record, current)
         notify(record, current); awaitingSession.delete(record.clientId)
       }
       for (const clientId of awaitingSession) host.notify(clientId, 'x.ai/models/update', {
