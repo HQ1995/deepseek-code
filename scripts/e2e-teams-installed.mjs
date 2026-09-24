@@ -5,15 +5,13 @@
  * DSCODE_TEAMS_SMOKE_HOST_TOOLS=1 is the negative control: a host-level Team
  * tools row (as upstream's agent-team profile adds) must fail the isolation check. */
 import assert from 'node:assert/strict'
-import net from 'node:net'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { existsSync } from 'node:fs'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { spawn } from 'node:child_process'
 import { join } from 'node:path'
-import { encodeJsonFrame, FrameDecoder } from '../bridge/grok-leader/src/codec.ts'
+import { startLeader, writeMessagesReply } from './acp-leader.mjs'
 
 const [runtime, profileHome] = process.argv.slice(2)
 if (!runtime || !profileHome) throw new Error('usage: e2e-teams-installed.mjs <runtime> <dsh-home>')
@@ -71,16 +69,7 @@ const server = createServer((request, response) => {
       // Later Lead turns are wake-ups for the teammate's deliveries; reply only.
       assert.ok(step++ < 8, 'unexpected model loop')
     }
-    response.writeHead(200, { 'content-type': 'text/event-stream' })
-    for (const event of [
-      { type: 'message_start', message: { id: 'msg-' + (phase ?? 'x') + step, model: body.model, usage: { input_tokens: 10, output_tokens: 1 } } },
-      { type: 'content_block_start', index: 0, content_block: tool ? { type: 'tool_use', id: 'call-' + phase + step, name: tool, input: {} } : { type: 'text', text: '' } },
-      { type: 'content_block_delta', index: 0, delta: tool ? { type: 'input_json_delta', partial_json: JSON.stringify(args) } : { type: 'text_delta', text: 'Fixture reply' } },
-      { type: 'content_block_stop', index: 0 },
-      { type: 'message_delta', delta: { stop_reason: tool ? 'tool_use' : 'end_turn' }, usage: { output_tokens: 5 } },
-      { type: 'message_stop' },
-    ]) response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
-    response.end()
+    writeMessagesReply(response, { id: 'msg-' + (phase ?? 'x') + step, callId: 'call-' + phase + step, model: body.model, tool, args, text: 'Fixture reply' })
   })().catch(error => { failure ??= error; response.destroy(error) })
 })
 const toolResultText = body => {
@@ -94,53 +83,13 @@ const testPatch = join(workspace, 'teams-test.patch.yml')
 await writeFile(testPatch, '- id: session-title-llm\n  disabled: true\n- id: tools\n  config:\n    mode: native\n'
   + (process.env.DSCODE_TEAMS_SMOKE_HOST_TOOLS === '1' ? "- insert:\n    - id: host-tool-agent-team\n      name: '@deepseek-ai/dsh-experimental-tool-agent-team'\n" : ''))
 
-async function startLeader(label) {
+async function launch(label) {
   const socketPath = `/tmp/dscode-teams-installed-${process.pid}-${label}.sock`
   assert.equal(existsSync(socketPath), false)
-  const env = { ...process.env, DSH_HOME: profileHome, HOME: profileHome, DSCODE_SOCKET: socketPath, DSH_TELEMETRY_DISABLED: '1' }
-  for (const name of ['DEEPSEEK_API_KEY', 'DEEPSEEK_BASE_URL', 'NODE_OPTIONS']) delete env[name]
-  const leader = spawn(process.execPath, [join(runtime, 'bin/dsh'), '--profile', 'dscode', '--patch', testPatch], { env, stdio: ['ignore', 'pipe', 'pipe'] })
-  const state = { leader, diagnostics: '' }
-  for (const stream of [leader.stdout, leader.stderr]) stream.on('data', bytes => { state.diagnostics = (state.diagnostics + bytes).slice(-65536) })
-  for (let i = 0; !existsSync(socketPath); i++) {
-    assert.ok(i < 150 && leader.exitCode === null, state.diagnostics || 'leader startup timeout')
-    await new Promise(resolve => setTimeout(resolve, 100))
-  }
-  const socket = net.createConnection(socketPath), decoder = new FrameDecoder(), pending = new Map(), notes = []
-  let nextId = 0
-  const send = message => socket.write(encodeJsonFrame({ type: 'acp', payload: JSON.stringify({ jsonrpc: '2.0', ...message }) }))
-  socket.on('data', chunk => {
-    for (const bytes of decoder.push(chunk)) {
-      const frame = JSON.parse(Buffer.from(bytes).toString())
-      if (frame.type !== 'acp') continue
-      const message = JSON.parse(frame.payload)
-      if (message.method === 'session/request_permission') send({ id: message.id, result: { outcome: { outcome: 'selected', optionId: 'allow-once' } } })
-      else if (message.method) notes.push(message)
-      else {
-        const result = pending.get(message.id); pending.delete(message.id)
-        if (message.error) result?.reject(new Error(JSON.stringify(message.error)))
-        else result?.resolve(message.result)
-      }
-    }
-  })
-  const rpc = (method, params = {}) => new Promise((resolve, reject) => {
-    const id = ++nextId
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error('ACP timeout: ' + method)) }, 45_000)
-    pending.set(id, { resolve: result => { clearTimeout(timer); resolve(result) }, reject: error => { clearTimeout(timer); reject(failure ?? error) } })
-    send({ id, method, params })
-  })
-  await once(socket, 'connect')
-  socket.write(encodeJsonFrame({ type: 'register', client_type: 'teams-acceptance', mode: 'stdio', capabilities: {} }))
-  await rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
-  const stop = async () => {
-    socket.destroy()
-    if (leader.exitCode !== null) return
-    const closed = once(leader, 'close')
-    leader.kill('SIGTERM')
-    const timer = setTimeout(() => leader.kill('SIGKILL'), 5000)
-    try { await closed } finally { clearTimeout(timer) }
-  }
-  return { ...state, get diagnostics() { return state.diagnostics }, rpc, notes, stop }
+  const host = startLeader({ runtime, home: profileHome, socketPath, patches: [testPatch], clientType: 'teams-acceptance',
+    onPermission: () => 'allow-once', failure: () => failure, rpcTimeoutMs: 45_000 })
+  await host.ready
+  return host
 }
 
 const nativeModel = async (host, sessionId) => {
@@ -166,7 +115,7 @@ const until = async (label, predicate) => {
   throw new Error('timed out waiting for ' + label)
 }
 
-let host = await startLeader('first')
+let host = await launch('first')
 try {
   const bootstrap = await host.rpc('session/new', { cwd: workspace, mcpServers: [] })
   await host.rpc('x.ai/providers/add', { id: 'deepseek-official', api: 'deepseek-native', apiKey: KEY, baseURL: origin + '/anthropic', credentialSource: 'saved' })
@@ -221,7 +170,7 @@ try {
   assert.doesNotMatch(host.diagnostics, /failed to import|duplicate service|unresolved|did not activate/i)
   await host.stop()
 
-  host = await startLeader('second')
+  host = await launch('second')
   await host.rpc('session/load', { sessionId: team, cwd: workspace, mcpServers: [] })
   await nativeModel(host, team)
   assert.equal((await prompt(host, team, 'team-again')).stopReason, 'end_turn')

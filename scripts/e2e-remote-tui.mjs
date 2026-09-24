@@ -7,16 +7,14 @@
  * e2e-remote-installed.
  * Usage: e2e-remote-tui.mjs <extracted-runtime> <fresh-dsh-home> <config.json> <dscode-tui> */
 import assert from 'node:assert/strict'
-import net from 'node:net'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { execFile, execFileSync, spawn } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
-import { encodeJsonFrame, FrameDecoder } from '../bridge/grok-leader/src/codec.ts'
+import { startLeader, writeMessagesReply } from './acp-leader.mjs'
 
 const [runtime, home, configPath, tui] = process.argv.slice(2)
 if (!runtime || !home || !configPath || !tui) throw new Error('usage: e2e-remote-tui.mjs <runtime> <dsh-home> <config.json> <dscode-tui>')
@@ -36,16 +34,8 @@ const server = createServer((request, response) => {
     const tool = !title && step === 0 ? 'bash' : undefined
     if (!title && step === 1) toolResult = JSON.stringify(results.at(-1))
     if (!title) assert.ok(step++ < 2, 'unexpected model loop')
-    response.writeHead(200, { 'content-type': 'text/event-stream' })
-    for (const event of [
-      { type: 'message_start', message: { id: 'msg-' + step, model: body.model, usage: { input_tokens: 10, output_tokens: 1 } } },
-      { type: 'content_block_start', index: 0, content_block: tool ? { type: 'tool_use', id: 'call-' + step, name: tool, input: {} } : { type: 'text', text: '' } },
-      { type: 'content_block_delta', index: 0, delta: tool ? { type: 'input_json_delta', partial_json: JSON.stringify({ command: 'pwd; uname -s', description: 'Show the remote workspace' }) } : { type: 'text_delta', text: title ? 'Remote title' : MARKER } },
-      { type: 'content_block_stop', index: 0 },
-      { type: 'message_delta', delta: { stop_reason: tool ? 'tool_use' : 'end_turn' }, usage: { output_tokens: 5 } },
-      { type: 'message_stop' },
-    ]) response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
-    response.end()
+    writeMessagesReply(response, { id: 'msg-' + step, callId: 'call-' + step, model: body.model, tool,
+      args: { command: 'pwd; uname -s', description: 'Show the remote workspace' }, text: title ? 'Remote title' : MARKER })
   })().catch(error => { failure ??= error; response.destroy(error) })
 })
 server.listen(0, '127.0.0.1'); await once(server, 'listening')
@@ -113,43 +103,17 @@ async function interactive(modelId) {
 /** Start a leader for the profile, add the loopback native provider, and stop it. */
 async function prepareProvider() {
   const socketPath = `/tmp/dscode-remote-prep-${process.pid}.sock`
-  const leader = spawn(process.execPath, [join(runtime, 'bin/dsh'), '--profile', 'dscode'], { env: { ...baseEnv, DSCODE_SOCKET: socketPath }, stdio: ['ignore', 'pipe', 'pipe'] })
-  let diagnostics = ''
-  for (const stream of [leader.stdout, leader.stderr]) stream.on('data', bytes => { diagnostics = (diagnostics + bytes).slice(-65536) })
-  const client = net.createConnection
+  const host = startLeader({ runtime, socketPath, env: { ...baseEnv, DSCODE_SOCKET: socketPath }, clientType: 'remote-prep', startupPolls: 300, killAfterMs: Infinity })
+  const { rpc } = host
   try {
-    for (let i = 0; !existsSync(socketPath); i++) {
-      assert.ok(i < 300 && leader.exitCode === null, diagnostics || 'leader startup timeout')
-      await new Promise(resolve => setTimeout(resolve, 100))
-    }
-    const socket = client(socketPath), decoder = new FrameDecoder(), pending = new Map()
-    let nextId = 0
-    socket.on('data', chunk => {
-      for (const bytes of decoder.push(chunk)) {
-        const frame = JSON.parse(Buffer.from(bytes).toString())
-        if (frame.type !== 'acp') continue
-        const message = JSON.parse(frame.payload)
-        if (message.method) continue
-        const result = pending.get(message.id); pending.delete(message.id)
-        if (message.error) result?.reject(new Error(JSON.stringify(message.error))); else result?.resolve(message.result)
-      }
-    })
-    const rpc = (method, params = {}) => new Promise((resolve, reject) => {
-      const id = ++nextId
-      pending.set(id, { resolve, reject })
-      socket.write(encodeJsonFrame({ type: 'acp', payload: JSON.stringify({ jsonrpc: '2.0', id, method, params }) }))
-    })
-    await once(socket, 'connect')
-    socket.write(encodeJsonFrame({ type: 'register', client_type: 'remote-prep', mode: 'stdio', capabilities: {} }))
-    await rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
+    await host.ready
     const { sessionId } = await rpc('session/new', { cwd: config.workspace, mcpServers: [] })
     await rpc('x.ai/providers/add', { id: 'deepseek-official', api: 'deepseek-native', apiKey: KEY, baseURL: origin + '/anthropic', credentialSource: 'saved' })
     const model = (await rpc('x.ai/models/list', { sessionId })).availableModels.find(item => item._meta?.provider === 'deepseek-official')
     assert.ok(model, 'native model listed')
     await rpc('session/close', { sessionId })
-    socket.destroy()
     return model.modelId
   } finally {
-    if (leader.exitCode === null) { const closed = once(leader, 'close'); leader.kill('SIGTERM'); await closed }
+    await host.stop()
   }
 }

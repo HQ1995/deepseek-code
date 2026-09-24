@@ -7,17 +7,16 @@
  * where config.json has host, workspace, node, helper, helperHash, bootstrapPath
  * and bootstrapHash. The run creates and removes one file in the workspace. */
 import assert from 'node:assert/strict'
-import net from 'node:net'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { execFile, spawn } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join, posix } from 'node:path'
-import { encodeJsonFrame, FrameDecoder } from '../bridge/grok-leader/src/codec.ts'
+import { startLeader, writeMessagesReply } from './acp-leader.mjs'
 
 const [runtime, home, configPath] = process.argv.slice(2)
 if (!runtime || !home || !configPath) throw new Error('usage: e2e-remote-installed.mjs <runtime> <dsh-home> <config.json>')
@@ -43,16 +42,7 @@ const server = createServer((request, response) => {
     else if (phase === 'write' && step === 0) { tool = 'write'; args = { file_path: posix.join(config.workspace, canary), content: 'REMOTE_CANARY' } }
     else if (phase === 'write' && step === 1) assert.doesNotMatch(JSON.stringify(results.at(-1)), /"is_error":true/)
     assert.ok(step++ < 3, 'unexpected model loop')
-    response.writeHead(200, { 'content-type': 'text/event-stream' })
-    for (const event of [
-      { type: 'message_start', message: { id: 'msg-' + phase + step, model: body.model, usage: { input_tokens: 10, output_tokens: 1 } } },
-      { type: 'content_block_start', index: 0, content_block: tool ? { type: 'tool_use', id: 'call-' + phase + step, name: tool, input: {} } : { type: 'text', text: '' } },
-      { type: 'content_block_delta', index: 0, delta: tool ? { type: 'input_json_delta', partial_json: JSON.stringify(args) } : { type: 'text_delta', text: 'Remote fixture reply' } },
-      { type: 'content_block_stop', index: 0 },
-      { type: 'message_delta', delta: { stop_reason: tool ? 'tool_use' : 'end_turn' }, usage: { output_tokens: 5 } },
-      { type: 'message_stop' },
-    ]) response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
-    response.end()
+    writeMessagesReply(response, { id: 'msg-' + phase + step, callId: 'call-' + phase + step, model: body.model, tool, args, text: 'Remote fixture reply' })
   })().catch(error => { failure ??= error; response.destroy(error) })
 })
 server.listen(0, '127.0.0.1'); await once(server, 'listening')
@@ -66,44 +56,11 @@ await execute(process.execPath, [launcher, 'remote', 'init', ...flags], { env: {
 // Test-only overlay: no title request, native tool calls, and no approval prompts for the fixture's two calls.
 const testPatch = join(local, 'remote-test.patch.yml')
 await writeFile(testPatch, '- id: session-title-llm\n  disabled: true\n- id: tools\n  config:\n    mode: native\n')
-const socketPath = `/tmp/dscode-remote-installed-${process.pid}.sock`
-const env = { ...process.env, DSH_HOME: home, HOME: home, DSCODE_SOCKET: socketPath, DSH_TELEMETRY_DISABLED: '1' }
-for (const name of ['DEEPSEEK_API_KEY', 'DEEPSEEK_BASE_URL', 'NODE_OPTIONS']) delete env[name]
-const leader = spawn(process.execPath, [join(runtime, 'bin/dsh'), '--profile', 'dscode', '--patch', testPatch], { env, stdio: ['ignore', 'pipe', 'pipe'] })
-let diagnostics = '', socket
-for (const stream of [leader.stdout, leader.stderr]) stream.on('data', bytes => { diagnostics = (diagnostics + bytes).slice(-65536) })
+const host = startLeader({ runtime, home, socketPath: `/tmp/dscode-remote-installed-${process.pid}.sock`, patches: [testPatch], clientType: 'remote-acceptance',
+  onPermission: () => 'allow-once', failure: () => failure, rpcTimeoutMs: 60_000, startupPolls: 300, killAfterMs: 8000 })
+const { rpc } = host
 try {
-  for (let i = 0; !existsSync(socketPath); i++) {
-    assert.ok(i < 300 && leader.exitCode === null, diagnostics || 'leader startup timeout')
-    await new Promise(resolve => setTimeout(resolve, 100))
-  }
-  socket = net.createConnection(socketPath)
-  const decoder = new FrameDecoder(), pending = new Map(), notes = []
-  let nextId = 0
-  const send = message => socket.write(encodeJsonFrame({ type: 'acp', payload: JSON.stringify({ jsonrpc: '2.0', ...message }) }))
-  socket.on('data', chunk => {
-    for (const bytes of decoder.push(chunk)) {
-      const frame = JSON.parse(Buffer.from(bytes).toString())
-      if (frame.type !== 'acp') continue
-      const message = JSON.parse(frame.payload)
-      if (message.method === 'session/request_permission') send({ id: message.id, result: { outcome: { outcome: 'selected', optionId: 'allow-once' } } })
-      else if (message.method) notes.push(message)
-      else {
-        const result = pending.get(message.id); pending.delete(message.id)
-        if (message.error) result?.reject(new Error(JSON.stringify(message.error)))
-        else result?.resolve(message.result)
-      }
-    }
-  })
-  const rpc = (method, params = {}) => new Promise((resolve, reject) => {
-    const id = ++nextId
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error('ACP timeout: ' + method)) }, 60_000)
-    pending.set(id, { resolve: result => { clearTimeout(timer); resolve(result) }, reject: error => { clearTimeout(timer); reject(failure ?? error) } })
-    send({ id, method, params })
-  })
-  await once(socket, 'connect')
-  socket.write(encodeJsonFrame({ type: 'register', client_type: 'remote-acceptance', mode: 'stdio', capabilities: {} }))
-  const init = await rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
+  const init = await host.ready
   assert.deepEqual(init._meta.dscodeExecutionWorld, { kind: 'ssh', host: config.host, workspace: config.workspace })
   checks.push('initialize advertises the SSH world')
 
@@ -132,20 +89,14 @@ try {
   await rpc('x.ai/session/export', { sessionId, prompt: [{ type: 'text', text: archive }] })
   assert.ok(existsSync(join(home, archive)), 'relative export lands under the home directory on this computer')
   checks.push('doctor names the remote workspace; exports stay on this computer')
-  assert.doesNotMatch(diagnostics, /failed to import|duplicate service|unresolved|did not activate/i)
+  assert.doesNotMatch(host.diagnostics, /failed to import|duplicate service|unresolved|did not activate/i)
   if (failure) throw failure
   await rpc('session/close', { sessionId })
   console.log(JSON.stringify({ node: process.version, passed: true, checks, host: config.host }))
 } catch (error) {
-  throw new Error(`${error.message}\n--- leader diagnostics ---\n${diagnostics}`, { cause: error })
+  throw new Error(`${error.message}\n--- leader diagnostics ---\n${host.diagnostics}`, { cause: error })
 } finally {
-  socket?.destroy()
-  if (leader.exitCode === null) {
-    const closed = once(leader, 'close')
-    leader.kill('SIGTERM')
-    const timer = setTimeout(() => leader.kill('SIGKILL'), 8000)
-    try { await closed } finally { clearTimeout(timer) }
-  }
+  await host.stop()
   await remote(`rm -f ${JSON.stringify(join(config.workspace, canary))}`).catch(() => {})
   server.closeAllConnections(); await new Promise(resolve => server.close(resolve))
   await rm(local, { recursive: true, force: true })

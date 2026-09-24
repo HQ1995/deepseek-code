@@ -5,15 +5,13 @@
  * Usage: e2e-browser-installed.mjs <extracted-runtime> <fresh-dsh-home-with-dscode> <chromium-executable|discover>
  * `discover` leaves the executable to dscode's discovery and requires it to succeed. */
 import assert from 'node:assert/strict'
-import net from 'node:net'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { spawn } from 'node:child_process'
 import { join } from 'node:path'
-import { encodeJsonFrame, FrameDecoder } from '../bridge/grok-leader/src/codec.ts'
+import { startLeader, writeMessagesReply } from './acp-leader.mjs'
 
 const [runtime, profileHome, executablePath] = process.argv.slice(2)
 const discover = executablePath === 'discover'
@@ -60,16 +58,7 @@ const server = createServer((request, response) => {
       assert.match(JSON.stringify(results.at(-1)), /Saved: empty/)
     }
     assert.ok(step++ < 4, 'unexpected model loop')
-    response.writeHead(200, { 'content-type': 'text/event-stream' })
-    for (const event of [
-      { type: 'message_start', message: { id: 'msg-' + phase + step, model: body.model, usage: { input_tokens: 10, output_tokens: 1 } } },
-      { type: 'content_block_start', index: 0, content_block: tool ? { type: 'tool_use', id: 'call-' + phase + step, name: prefix + tool, input: {} } : { type: 'text', text: '' } },
-      { type: 'content_block_delta', index: 0, delta: tool ? { type: 'input_json_delta', partial_json: JSON.stringify(args) } : { type: 'text_delta', text: 'Installed ' + phase + ' passed' } },
-      { type: 'content_block_stop', index: 0 },
-      { type: 'message_delta', delta: { stop_reason: tool ? 'tool_use' : 'end_turn' }, usage: { output_tokens: 5 } },
-      { type: 'message_stop' },
-    ]) response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
-    response.end()
+    writeMessagesReply(response, { id: 'msg-' + phase + step, callId: 'call-' + phase + step, model: body.model, tool: tool && prefix + tool, args, text: 'Installed ' + phase + ' passed' })
   })().catch(error => { failure ??= error; response.destroy(error) })
 })
 server.listen(0, '127.0.0.1'); await once(server, 'listening')
@@ -77,47 +66,17 @@ const origin = `http://127.0.0.1:${server.address().port}`
 // Test-only overlay: no title request, native tool calls. Never a deployment policy.
 const testPatch = join(workspace, 'browser-test.patch.yml')
 await writeFile(testPatch, '- id: session-title-llm\n  disabled: true\n- id: tools\n  config:\n    mode: native\n')
-const socketPath = `/tmp/dscode-browser-installed-${process.pid}.sock`
-let diagnostics = '', socket
-const env = { ...process.env, DSH_HOME: profileHome, HOME: profileHome, DSCODE_SOCKET: socketPath, DSH_TELEMETRY_DISABLED: '1' }
-for (const name of ['DEEPSEEK_API_KEY', 'DEEPSEEK_BASE_URL', 'NODE_OPTIONS']) delete env[name]
-const leader = spawn(process.execPath, [join(runtime, 'bin/dsh'), '--profile', 'dscode', '--patch', testPatch], { env, stdio: ['ignore', 'pipe', 'pipe'] })
-for (const stream of [leader.stdout, leader.stderr]) stream.on('data', bytes => { diagnostics = (diagnostics + bytes).slice(-65536) })
+let approve = true, approvals = 0
+const host = startLeader({ runtime, home: profileHome, socketPath: `/tmp/dscode-browser-installed-${process.pid}.sock`, patches: [testPatch],
+  clientType: 'browser-acceptance', failure: () => failure, rpcTimeoutMs: 45_000,
+  onPermission: message => {
+    assert.ok(message.params.toolCall.displayName.startsWith(prefix))
+    approvals++
+    return approve ? 'allow-once' : 'reject-once'
+  } })
+const { rpc, send, notes } = host
 try {
-  for (let i = 0; !existsSync(socketPath); i++) {
-    assert.ok(i < 150 && leader.exitCode === null, diagnostics || 'leader startup timeout')
-    await new Promise(resolve => setTimeout(resolve, 100))
-  }
-  socket = net.createConnection(socketPath)
-  const decoder = new FrameDecoder(), pending = new Map(), notes = []
-  let nextId = 0, approve = true, approvals = 0
-  const send = message => socket.write(encodeJsonFrame({ type: 'acp', payload: JSON.stringify({ jsonrpc: '2.0', ...message }) }))
-  socket.on('data', chunk => {
-    for (const bytes of decoder.push(chunk)) {
-      const frame = JSON.parse(Buffer.from(bytes).toString())
-      if (frame.type !== 'acp') continue
-      const message = JSON.parse(frame.payload)
-      if (message.method === 'session/request_permission') {
-        assert.ok(message.params.toolCall.displayName.startsWith(prefix))
-        approvals++
-        send({ id: message.id, result: { outcome: { outcome: 'selected', optionId: approve ? 'allow-once' : 'reject-once' } } })
-      } else if (message.method) notes.push(message)
-      else {
-        const result = pending.get(message.id); pending.delete(message.id)
-        if (message.error) result?.reject(new Error(JSON.stringify(message.error)))
-        else result?.resolve(message.result)
-      }
-    }
-  })
-  const rpc = (method, params = {}) => new Promise((resolve, reject) => {
-    const id = ++nextId
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error('ACP timeout: ' + method)) }, 45_000)
-    pending.set(id, { resolve: result => { clearTimeout(timer); resolve(result) }, reject: error => { clearTimeout(timer); reject(failure ?? error) } })
-    send({ id, method, params })
-  })
-  await once(socket, 'connect')
-  socket.write(encodeJsonFrame({ type: 'register', client_type: 'browser-acceptance', mode: 'stdio', capabilities: {} }))
-  await rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
+  await host.ready
   const open = async () => {
     const { sessionId } = await rpc('session/new', { cwd: workspace, mcpServers: [] })
     const model = (await rpc('x.ai/models/list', { sessionId })).availableModels.find(item => item._meta?.provider === 'deepseek-official')
@@ -185,18 +144,12 @@ try {
   assert.doesNotMatch((await rpc('x.ai/doctor', { sessionId: after, tuiVersion: '0.0.14-alpha.12' })).text, /\] Browser:/)
   checks.push('/browser off removes browser tools and the doctor finding')
   for (const id of [first, sessionId, after]) await rpc('session/close', { sessionId: id }).catch(() => {})
-  assert.doesNotMatch(diagnostics, /failed to import|duplicate service|unresolved|did not activate/i)
+  assert.doesNotMatch(host.diagnostics, /failed to import|duplicate service|unresolved|did not activate/i)
   if (failure) throw failure
   console.log(JSON.stringify({ node: process.version, passed: true, checks, workspace }))
 } catch (error) {
-  throw new Error(`${error.message}\n--- leader diagnostics ---\n${diagnostics}`, { cause: error })
+  throw new Error(`${error.message}\n--- leader diagnostics ---\n${host.diagnostics}`, { cause: error })
 } finally {
-  socket?.destroy()
-  if (leader.exitCode === null) {
-    const closed = once(leader, 'close')
-    leader.kill('SIGTERM')
-    const timer = setTimeout(() => leader.kill('SIGKILL'), 5000)
-    try { await closed } finally { clearTimeout(timer) }
-  }
+  await host.stop()
   slowResponse?.destroy(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve))
 }
