@@ -40,7 +40,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 53 modules; `index.ts` is the composition root.
+`src/` has 54 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
@@ -77,6 +77,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `execution-world` | Where tools run: local, or the SSH workspace a profile configures |
 | `mcp` | ACP MCP declarations to agent-scoped DSH MCP clients, loaded lazily |
 | `native-children` | Workflow membership, child views, bounded history, `/subagents` controls |
+| `child-controls` | Child overview, `/subagents` grammar and verbs, inbox views; native calls through ports |
 | `child-history` | Append-only child tool/turn metadata index; no transcript copy |
 | `workflows` | Read-only projection of tool-workflow durable records (`dscodeWorkflows`) |
 | `native-tasks` | Task controls, reminder views from `ctx.schedule`, passive job-output snapshots; no own timer |
