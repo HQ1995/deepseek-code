@@ -40,14 +40,15 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 53 modules; `index.ts` is the composition root.
+`src/` has 54 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
-| `index` | Composition: module assembly, ACP routing (`dispatchRequest`), native event forwarding |
+| `index` | Composition: module assembly, native event forwarding; routing goes through `leader-routes` |
 | `codec` | Frame codec: 4-byte big-endian length plus JSON payload, 64 MiB cap |
 | `protocol` | Envelope types and wire mapping; ACP JSON-RPC strings inside `acp` frames |
 | `acp` | Shared ACP request validation and JSON-RPC errors |
+| `leader-routes` | ACP method registry: requests and notifications to their owners; unknown requests are METHOD_NOT_FOUND |
 | `leader-transport` | Unix socket, registration, ACP request/reply and reverse-request lifetimes; no DSH |
 | `leader-lifecycle` | Host heartbeat, no-client grace, shutdown that joins every owner's drain |
 | `model-catalog` | Catalog snapshots, accepted native reads, discovery, route writes, disposal; no socket or Cordis |
