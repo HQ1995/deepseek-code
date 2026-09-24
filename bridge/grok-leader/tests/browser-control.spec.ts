@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createBrowserControl, describeBrowser, type BrowserStatus } from '../src/browser-control.ts'
 import type { SettingsLike } from '../src/native-seams.ts'
 import type { PluginRows } from '../src/plugin-rows.ts'
+import { navigationPolicy } from '../browser/policy.mjs'
 
 function fixture(options: { executable?: string } = {}) {
   let enabled = false
@@ -99,5 +100,20 @@ describe('/browser', () => {
     expect(report).toContain('allowed origins: any HTTP(S) origin')
     expect(await f.control.execute('/browser off')).toContain('Browser turned off')
     expect(f.isEnabled()).toBe(false)
+  })
+
+  // /browser validates origins in the leader; the browser row re-validates them
+  // at launch in browser/policy.mjs, which src cannot import. The two copies of
+  // the rule must agree, or a saved origin would fail every browser start.
+  it('accepts exactly the origins the browser row accepts', async () => {
+    const origins = ['https://example.com', 'http://127.0.0.1:3000', 'http://[::1]:8080', 'http://localhost', 'https://ex_ample.test',
+      'https://example.com/', 'https://example.com/path', 'https://example.com:443', 'https://EXAMPLE.com', 'https://user@example.com',
+      'ftp://example.com', 'file:///tmp', 'https://a;b.example', 'https://a,b.example', 'https://*.example.com', 'example.com', 'https://']
+    for (const origin of origins) {
+      let policy = true
+      try { navigationPolicy([origin]) } catch { policy = false }
+      const control = await fixture().control.execute('/browser on --origin ' + origin).then(() => true, () => false)
+      expect(control, origin).toBe(policy)
+    }
   })
 })
