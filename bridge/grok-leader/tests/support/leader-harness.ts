@@ -17,7 +17,6 @@ import { SessionPersistenceRevision, type SessionAccess, type SessionHandle, typ
 import { encodeJsonFrame, FrameDecoder } from '../../src/codec.ts'
 import * as GrokLeader from '../../src/index.ts'
 import type {} from '@deepseek-ai/dsh-attachment'
-import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 
 export const packageVersion = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version
@@ -498,7 +497,7 @@ export async function makeHarness(
   } } as unknown as Context['sessions'])
   Object.assign(new SessionProjectionRegistry(ctx), options.sessionProjections)
   if (presets !== undefined) Object.assign(new (class extends Service {})(ctx, 'agentPresets'), presets)
-  ctx.provide('agentDefaultModel', mockDefaultModel as unknown as Context['agentDefaultModel'])
+  ctx.provide('agentDefaultModel', mockDefaultModel as never)
   ctx.provide('appExit', mockAppExit.exit)
   const socketPath = resolve('/tmp', 'dgl-' + String(process.pid) + '-' + randomUUID().slice(0, 12) + '.sock')
   // The bridge lists MCP servers from the mcp-client fibers that `session/new`
