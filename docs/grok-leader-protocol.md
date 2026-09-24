@@ -46,6 +46,12 @@ PTC calls and replay. `error` is not an accepted tool status: the TUI decoder
 drops the entire frame, not just its status. Error metadata remains a separate
 field on the failed result.
 
+A `tool_call` is titled by its tool name unless its arguments say what it does:
+a browser action reads `Browser: <action>`, and a call whose arguments carry
+`questions: [{question}]` reads `Ask: <question>` (`Ask N questions` for
+several). Such a card keeps its tool name in `_meta['x.ai/tool'].name`, which
+headless output reads before the title.
+
 | Surface | Contract |
 |---|---|
 | `initialize`, `authenticate` | advertise models, commands, capabilities, the execution world, and the bridge-owned auth stub |
