@@ -4,7 +4,7 @@ import type { Agent, AgentHandle, AgentRegistry, CreateAgentOptions } from '@dee
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import { SessionId, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionPersistenceNotFoundError, type SessionInspection, type SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
-import { internalError, invalidParams, paramRecord } from './acp.ts'
+import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
 import { assertMcpTransports, sessionCwd, type ExecutionWorld } from './execution-world.ts'
 import { AcpMcpConfigError, mountMcpConfigs, resolveAcpMcpConfigs, type McpClientConfig } from './mcp.ts'
 import { createPromptQueues, type PromptQueue } from './prompt-queue.ts'
@@ -265,7 +265,7 @@ export function createSessionLifecycle(host: LifecycleHost) {
   }
   const loadSession = async (clientId: number, params: unknown) => {
     const p = paramRecord(params, 'session/load')
-    const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
+    const sessionId = sessionIdParam(p.sessionId)
     if (sessionId === undefined) throw invalidParams('session/load requires a sessionId')
     const { mcpConfigs } = await workspaceParams(p)
     return reserved(sessionId, async () => {
@@ -287,7 +287,7 @@ export function createSessionLifecycle(host: LifecycleHost) {
   const forkSession = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'x.ai/session/fork')
     host.permissions.validateMeta(p, 'x.ai/session/fork')
-    const sourceId = typeof p.sourceSessionId === 'string' ? SessionId(p.sourceSessionId) : undefined
+    const sourceId = sessionIdParam(p.sourceSessionId)
     if (sourceId === undefined) throw invalidParams('unknown source session: ' + String(p.sourceSessionId))
     const liveSource = sessions.get(sourceId)
     if (liveSource !== undefined && ownedRecord(clientId, sourceId) !== liveSource) {
@@ -375,7 +375,7 @@ export function createSessionLifecycle(host: LifecycleHost) {
 
   const rewindPoints = async (clientId: number, params: unknown): Promise<Record<string, unknown>> => {
     const p = paramRecord(params, 'x.ai/rewind/points')
-    const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
+    const sessionId = sessionIdParam(p.sessionId)
     const record = ownedRecord(clientId, sessionId)
     if (sessionId === undefined || record === undefined) {
       throw invalidParams('unknown session: ' + String(p.sessionId))
@@ -401,7 +401,7 @@ export function createSessionLifecycle(host: LifecycleHost) {
 
   const executeRewind = async (clientId: number, params: unknown): Promise<Record<string, unknown>> => {
     const p = paramRecord(params, 'x.ai/rewind/execute')
-    const sourceSessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
+    const sourceSessionId = sessionIdParam(p.sessionId)
     const source = ownedRecord(clientId, sourceSessionId)
     if (sourceSessionId === undefined || source === undefined) {
       throw invalidParams('unknown session: ' + String(p.sessionId))
@@ -451,7 +451,7 @@ export function createSessionLifecycle(host: LifecycleHost) {
     assertReady, writable,
     async close(clientId: number, params: unknown) {
       const p = paramRecord(params, 'session/close')
-      const record = ownedRecord(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+      const record = ownedRecord(clientId, sessionIdParam(p.sessionId))
       if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
       await registry.close(record)
       return {}

@@ -38,7 +38,7 @@ export interface NativeTeamHost<S> {
   modelName?(id: string, provider?: string): string | undefined
 }
 
-export const TEAM_USAGE = 'Usage: /team'
+const TEAM_USAGE = 'Usage: /team'
 
 const STATUS: Record<string, string> = { running: 'running', inactive: 'idle', provisioning: 'starting' }
 const CONTEXT: Record<string, string> = { fresh: 'new context', fork: 'forked context' }

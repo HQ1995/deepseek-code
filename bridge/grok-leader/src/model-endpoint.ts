@@ -1,5 +1,6 @@
 /** OpenAI-compatible endpoint capability probe. The only outbound HTTP the
  * catalog performs itself; model identity still comes from native discovery. */
+import { nonEmpty } from './guards.ts'
 
 /** Canonical levels accepted by dsh-llm-pi-ai's reasoningEfforts schema. */
 const PI_AI_REASONING_EFFORTS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
@@ -13,8 +14,6 @@ export type PiAiReasoningEfforts = Record<string, string | null>
 
 /** Per-model effort support: `false` means the endpoint declares none. */
 export type EndpointCapabilities = Map<string, false | PiAiReasoningEfforts>
-
-const nonEmpty = (value: unknown): value is string => typeof value === 'string' && value.length > 0
 
 /** One list entry: `{id, value?, wire_value?}` objects or bare level strings. */
 function listedEffort(item: unknown): [string, string | null] | undefined {
@@ -51,7 +50,7 @@ export function endpointReasoningEfforts(entry: Record<string, unknown>): false 
 }
 
 /** Parse only per-model capability metadata from a `/models` listing. */
-export function endpointModelCapabilities(value: unknown): EndpointCapabilities {
+function endpointModelCapabilities(value: unknown): EndpointCapabilities {
   const data = value !== null && typeof value === 'object'
     ? (value as { data?: unknown }).data
     : undefined

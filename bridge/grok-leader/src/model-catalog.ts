@@ -6,12 +6,13 @@
 import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { RpcError } from './protocol.ts'
 import { JSONRPC_INVALID_PARAMS, internalError, paramRecord } from './acp.ts'
+import { errorMessage, nonEmpty } from './guards.ts'
 import { discoverEndpointModelCapabilities, type EndpointCapabilities } from './model-endpoint.ts'
 import { NATIVE_DEEPSEEK_NAME, NATIVE_MODEL_DESCRIPTIONS, nativeProviderForm, type NativeProviders } from './native-provider.ts'
 import { nativeInstance, type AgentDefaultModelLike, type CredentialInfo, type CredentialsLike, type LlmLike, type ModelInfo, type SettingsLike } from './native-seams.ts'
 import {
   NO_MODELS_MARKER, PROVIDER_SETTINGS_NS, discoveredModelUpdate, editableProfile, hasUserProviderRoute, isDiscoverableApi,
-  knownRouteBaseUrls, mergeEditable, nonEmpty, normalizeProviderForm, pastedApiKey, pastedKeyRef, providerUserProfile,
+  knownRouteBaseUrls, mergeEditable, normalizeProviderForm, pastedApiKey, pastedKeyRef, providerUserProfile,
   providerUserSection, requireProviderId, routeSignature, sharesCredentialRef, type DiscoveredProviderModel,
 } from './provider-profile.ts'
 import {
@@ -37,8 +38,6 @@ export interface ModelCatalogDependencies {
 
 type Profile = Record<string, unknown>
 type ProviderRoster = { providers: CatalogProvider[]; currentProviderId: string }
-
-const message = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
 /** Own cached catalogs, accepted native reads/discoveries and provider writes.
  * Disposal closes admission/publication immediately and drains real work,
@@ -114,7 +113,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
       const value = await credentials?.resolve?.(ref)
       if (nonEmpty(value?.value)) return value.value
     } catch (error) {
-      logger.warn('grok-leader: could not resolve credential reference ' + ref + ': ' + message(error))
+      logger.warn('grok-leader: could not resolve credential reference ' + ref + ': ' + errorMessage(error))
     }
     const value = (dependencies.environment ?? process.env)[ref]
     return nonEmpty(value) ? value : undefined
@@ -127,7 +126,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     try {
       return await credentials?.describe?.(ref)
     } catch (error) {
-      logger.warn('grok-leader: could not describe credential reference ' + ref + ': ' + message(error))
+      logger.warn('grok-leader: could not describe credential reference ' + ref + ': ' + errorMessage(error))
       return undefined
     }
   }
@@ -143,14 +142,12 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     const discovered = discoveredModels.get(provider)
     const models = discovered === undefined ? staticModels : discovered.map(model => ({ id: model.id, name: model.name ?? model.id }))
     const metadata = new Map<string, ModelInfo>()
-    if (llmService.resolveModelInfo !== undefined) {
-      for (const model of models) {
-        assertOpen()
-        if (metadata.has(model.id)) continue
-        try { metadata.set(model.id, await llmService.resolveModelInfo(provider, model.id)) }
-        catch (error) {
-          logger.warn('grok-leader: could not resolve model metadata for ' + provider + '/' + model.id + ': ' + message(error))
-        }
+    for (const model of models) {
+      assertOpen()
+      if (metadata.has(model.id)) continue
+      try { metadata.set(model.id, await llmService.resolveModelInfo(provider, model.id)) }
+      catch (error) {
+        logger.warn('grok-leader: could not resolve model metadata for ' + provider + '/' + model.id + ': ' + errorMessage(error))
       }
     }
     return { provider, models, metadata }
@@ -189,7 +186,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     const llmService = llm()
     const userSection = displaySection()
     const activeProviders = llmService?.listProviders() ?? []
-    const configured = new Map((llmService?.listConfigurableProviders?.() ?? []).map(row => [row.provider, row]))
+    const configured = new Map((llmService?.listConfigurableProviders() ?? []).map(row => [row.provider, row]))
     // A configurable provider whose configuration failed stays visible with its diagnostic.
     const rosterRows = new Map<string, { id: string; name?: string }>(activeProviders.map(row => [row.id, row]))
     for (const row of configured.values()) {
@@ -203,7 +200,6 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     assertOpen()
     const assembled = assembleCatalog({
       rows, providers, config,
-      hasMetadataResolver: llmService?.resolveModelInfo !== undefined,
       defaultSelection: getDefaultModel()?.currentSelection?.(),
     })
     if (assembled.missingRequested !== undefined) {
@@ -234,13 +230,13 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
   /** Endpoint effort extensions for an OpenAI-compatible route already known
    * to this bridge; a failed probe keeps the native catalog metadata. */
   const probeEndpointCapabilities = async (
-    id: string, llmService: LlmLike, draft: Profile, knownEndpoint: boolean, apiKey: string | undefined,
+    id: string, draft: Profile, knownEndpoint: boolean, apiKey: string | undefined,
   ): Promise<EndpointCapabilities> => {
-    if (!knownEndpoint || !nonEmpty(draft.baseURL) || !isDiscoverableApi(draft.api) || llmService.resolveModelInfo === undefined) return new Map()
+    if (!knownEndpoint || !nonEmpty(draft.baseURL) || !isDiscoverableApi(draft.api)) return new Map()
     try {
       return await discoverEndpointModelCapabilities(draft.baseURL, apiKey, dependencies.fetch)
     } catch (error) {
-      logger.warn('grok-leader: model capability discovery failed for ' + id + '; keeping catalog metadata: ' + message(error))
+      logger.warn('grok-leader: model capability discovery failed for ' + id + '; keeping catalog metadata: ' + errorMessage(error))
       return new Map()
     }
   }
@@ -270,10 +266,10 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
         ...nonEmpty(apiKey) ? { apiKey } : {},
       })
     } catch (error: unknown) {
-      throw internalError('cannot add provider "' + id + '": model discovery failed: ' + message(error))
+      throw internalError('cannot add provider "' + id + '": model discovery failed: ' + errorMessage(error))
     }
     if (models.length === 0) throw internalError('cannot add provider "' + id + '": its endpoint listed no models')
-    const capabilities = await probeEndpointCapabilities(id, llmService, draft, knownEndpoint, apiKey)
+    const capabilities = await probeEndpointCapabilities(id, draft, knownEndpoint, apiKey)
     return models.map(model => ({
       id: model.id,
       ...model.name === undefined ? {} : { name: model.name },
@@ -321,7 +317,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
       if (discoveredModels.has(provider.id) || discoveredRoutes.get(provider.id) === signature) continue
       discoveredRoutes.set(provider.id, signature)
       void track(() => refreshDynamicRoute(providerService, provider.id, profile, signature)).catch(error => {
-        logger.warn('grok-leader: background model discovery failed for ' + provider.id + '; using configured models: ' + message(error))
+        logger.warn('grok-leader: background model discovery failed for ' + provider.id + '; using configured models: ' + errorMessage(error))
       })
     }
   }
@@ -370,7 +366,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
       const info = await credentials.describe(ref)
       if (info.source === 'file' && info.writable) await credentials.unset(ref)
     } catch (error) {
-      logger.warn('grok-leader: could not clean unused credential reference ' + ref + ': ' + message(error))
+      logger.warn('grok-leader: could not clean unused credential reference ' + ref + ': ' + errorMessage(error))
     }
   }
 
@@ -386,14 +382,14 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
       await writeProviderSettings(providerService, [{ op: 'set', path: ['providers', id], value: profile }])
       return
     } catch (error: unknown) {
-      if (!message(error).includes(NO_MODELS_MARKER)) throw internalError('failed to ' + verb + ' provider "' + id + '": ' + message(error))
+      if (!errorMessage(error).includes(NO_MODELS_MARKER)) throw internalError('failed to ' + verb + ' provider "' + id + '": ' + errorMessage(error))
     }
     const models = await discoverProviderModels(id, draft)
     try {
       await writeProviderSettings(providerService, [{ op: 'set', path: ['providers', id], value: { ...profile, models } }])
       if (!closed) discoveredModels.set(id, models)
     } catch (retryError: unknown) {
-      throw internalError('failed to ' + verb + ' provider "' + id + '": ' + message(retryError))
+      throw internalError('failed to ' + verb + ' provider "' + id + '": ' + errorMessage(retryError))
     }
   }
 
@@ -500,7 +496,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     try {
       await writeProviderSettings(providerService, [{ op: 'unset', path: ['providers', id] }])
     } catch (error: unknown) {
-      throw internalError('failed to remove provider "' + id + '": ' + message(error))
+      throw internalError('failed to remove provider "' + id + '": ' + errorMessage(error))
     }
     await cleanupUnsharedCredential(providerService, credentialRef, id)
     discoveredModels.delete(id)

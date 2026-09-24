@@ -1,12 +1,11 @@
 /** Human wording for dscode's browser tools: tool cards read "Browser: open
  * https://…" and approvals read "Allow the browser to open https://…?". The
  * raw arguments still travel beside it, so this text only summarizes them. */
+import { isRecord } from './guards.ts'
 
 const PREFIX = 'mcp__playwright-mcp__'
 const MAX = 96
 
-const record = (value: unknown): Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const text = (value: unknown): string | undefined => {
   if (typeof value !== 'string') return undefined
   const clean = value.replace(/[\x00-\x1f\x7f]+/g, ' ').trim()
@@ -26,7 +25,7 @@ export function isBrowserTool(name: string | undefined): boolean {
 /** What one browser call does, as a verb phrase ("open https://…"). */
 export function browserAction(name: string, args: unknown): string | undefined {
   if (!isBrowserTool(name)) return undefined
-  const a = record(args)
+  const a = isRecord(args) ? args : {}
   const element = text(a.element) ?? (text(a.ref) === undefined ? 'an element' : 'element ' + text(a.ref))
   switch (name.slice(PREFIX.length)) {
     case 'browser_navigate': return 'open ' + (text(a.url) ?? 'a page')

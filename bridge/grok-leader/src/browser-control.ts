@@ -3,11 +3,12 @@
  * browser keeps the origins, executable and sandbox it started with; removing
  * an origin also stops navigation there at once. Replies are Markdown. */
 import { invalidParams, internalError } from './acp.ts'
+import { errorMessage } from './guards.ts'
 import type { SettingsLike } from './native-seams.ts'
 import type { PluginRows } from './plugin-rows.ts'
 import { parseCommandLine } from './profile-plugins.ts'
 
-export const BROWSER_ROW = { id: 'dscode-browser', module: '@hqzhao95/dscode/browser', label: 'browser' }
+const BROWSER_ROW = { id: 'dscode-browser', module: '@hqzhao95/dscode/browser', label: 'browser' }
 
 /** Live facts the browser plugin reports (its `dscodeBrowser` service). */
 export interface BrowserStatus {
@@ -31,7 +32,7 @@ export interface BrowserControlDependencies {
 }
 
 // Code spans keep placeholders literal: a bare <word> is raw HTML in Markdown.
-export const BROWSER_USAGE = 'Usage:\n'
+const BROWSER_USAGE = 'Usage:\n'
   + '- `/browser` shows the status.\n'
   + '- `/browser on [--origin URL]... [--any-origin] [--executable PATH] [--sandbox | --no-sandbox --accept-risk]` turns it on for new sessions.\n'
   + '- `/browser origins add URL` and `/browser origins remove URL` edit the allowed origins.\n'
@@ -47,7 +48,7 @@ const usageError = (message: string) => invalidParams(message + '\n\n' + BROWSER
 const PLAIN_HOST = /^(?:\[[0-9a-f:.]+\]|[a-z0-9_-]+(?:\.[a-z0-9_-]+)*)$/
 
 /** Same rule as the plugin's policy: HTTP(S), a plain host, no credentials, path or trailing slash. */
-export function browserOrigin(value: string): string {
+function browserOrigin(value: string): string {
   let url: URL | undefined
   try { url = new URL(value) } catch { url = undefined }
   if (url === undefined || !['http:', 'https:'].includes(url.protocol) || url.origin !== value || url.username !== '' || url.password !== ''
@@ -142,7 +143,7 @@ export function createBrowserControl(dependencies: BrowserControlDependencies) {
     async execute(text: string): Promise<string> {
       let words: string[]
       try { words = parseCommandLine(text).slice(1) } catch (error) {
-        throw invalidParams('Could not parse /browser command: ' + (error instanceof Error ? error.message : String(error)))
+        throw invalidParams('Could not parse /browser command: ' + errorMessage(error))
       }
       const [verb = 'status', ...rest] = words
       switch (verb) {

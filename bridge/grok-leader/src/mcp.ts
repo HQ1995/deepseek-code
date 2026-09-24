@@ -7,6 +7,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type * as McpClient from '@deepseek-ai/dsh-mcp-client'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { scopeChainOf, scopeOf } from '@deepseek-ai/dsh-scope'
+import { errorMessage } from './guards.ts'
 
 const VALID_SERVER_NAME = /^[A-Za-z0-9_-]{1,32}$/
 
@@ -183,7 +184,6 @@ function parseClientConfig(Config: typeof McpClient.Config, index: number, input
   try {
     return Config(input as McpClient.Config)
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    throw new AcpMcpConfigError(`mcpServers[${index}] is invalid: ${detail}`)
+    throw new AcpMcpConfigError(`mcpServers[${index}] is invalid: ${errorMessage(error)}`)
   }
 }

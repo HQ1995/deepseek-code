@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { errorChain } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalRequestEvent } from '@deepseek-ai/dsh-user-approval/types'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
-import { internalError, invalidParams, paramRecord } from './acp.ts'
+import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
 import { browserAction, isBrowserTool } from './browser-actions.ts'
+import { isRecord } from './guards.ts'
 import type { LeaderClient } from './leader-transport.ts'
 
 interface InteractionSession { agent: Agent; clientId: number; yolo: boolean; queue: { cancel(): void }; work: { cancel(): void } }
@@ -28,8 +29,7 @@ interface InteractionHost<S extends InteractionSession> {
 }
 type Meta = Record<string, unknown> | null | undefined
 const permissionModes = new Set(['default', 'ask', 'workspace-write', 'plan', 'bypassPermissions', 'always-approve'])
-const object = (value: unknown): Record<string, unknown> | undefined =>
-  typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+const object = (value: unknown): Record<string, unknown> | undefined => isRecord(value) ? value : undefined
 const cancelledQuestion = () => new UserQuestionError('the user cancelled ask_user_question', 'ASK_CANCELLED')
 /** Calls whose arguments an approval prompt may still show. */
 const RECENT_CALLS = 64
@@ -222,7 +222,7 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
   }
   const mode = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'session/set_mode')
-    const record = closed ? undefined : host.owned(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+    const record = closed ? undefined : host.owned(clientId, sessionIdParam(p.sessionId))
     if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
     assertReady(record); host.assertReady(record)
     const plan = host.planMode(record)
@@ -233,7 +233,7 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
   }
   const notification = (clientId: number, params: unknown): void => {
     const outer = object(params), p = object(outer?.params) ?? outer
-    const record = closed || typeof p?.sessionId !== 'string' ? undefined : host.owned(clientId, SessionId(p.sessionId))
+    const record = closed ? undefined : host.owned(clientId, sessionIdParam(p?.sessionId))
     if (record === undefined) return
     try {
       host.assertReady(record)

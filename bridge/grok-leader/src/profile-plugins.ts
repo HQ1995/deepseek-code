@@ -15,6 +15,7 @@ import { errorChain } from '@deepseek-ai/dsh-llm'
 import { load as loadYaml } from 'js-yaml'
 import { withProfileLock } from './package-location.ts'
 import { invalidParams } from './acp.ts'
+import { errorMessage } from './guards.ts'
 
 /** Composition rows a third-party layer should not touch silently: the
  *  sandbox/approval/permission spine. Patch layers apply AFTER dsh-base, so
@@ -426,7 +427,7 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
     try {
       words = parseCommandLine(text).slice(1)
     } catch (error) {
-      return 'Could not parse /dsh command: ' + (error instanceof Error ? error.message : String(error))
+      return 'Could not parse /dsh command: ' + errorMessage(error)
     }
     const [verb, ...rest] = words
     const dir = dshProfileDir()
@@ -568,7 +569,7 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
             await npmUninstall(dir, [name])
           } catch (error) {
             return 'Unregistered ' + name + ', but npm could not remove the inert dependency: '
-              + (error instanceof Error ? error.message : String(error))
+              + errorMessage(error)
           }
           return 'Removed ' + name + '.\nRestart dscode to unload it.'
         }
@@ -580,7 +581,7 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
       const mutates = verb === 'add' || verb === 'remove' || verb === 'allow-version' || verb === 'revoke-version'
       return mutates ? await withProfileLock(dir, execute) : await execute()
     } catch (error: unknown) {
-      throw invalidParams('/dsh ' + String(verb) + ' failed: ' + (error instanceof Error ? error.message : String(error)))
+      throw invalidParams('/dsh ' + String(verb) + ' failed: ' + errorMessage(error))
     }
   }
 

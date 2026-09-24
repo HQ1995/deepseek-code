@@ -14,7 +14,7 @@ export const allowedTools = new Set([
 const plainHost = /^(?:\[[0-9a-f:.]+\]|[a-z0-9_-]+(?:\.[a-z0-9_-]+)*)$/
 
 /** One configured direct-navigation origin: HTTP(S), a plain host, no credentials, path or trailing slash. */
-export function navigationOrigin(value) {
+function navigationOrigin(value) {
   let url
   try { url = new URL(value) } catch { url = undefined }
   if (url === undefined || !['http:', 'https:'].includes(url.protocol) || url.origin !== value || url.username || url.password

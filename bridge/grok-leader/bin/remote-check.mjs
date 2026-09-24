@@ -9,8 +9,8 @@ import { readFileSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, sep } from 'node:path'
 
-export const HELPER_PACKAGE = '@deepseek-ai/dsh-ssh'
-export const BOOTSTRAP_PACKAGE = '@deepseek-ai/dsh-ptc-runtime-node'
+const HELPER_PACKAGE = '@deepseek-ai/dsh-ssh'
+const BOOTSTRAP_PACKAGE = '@deepseek-ai/dsh-ptc-runtime-node'
 const HELPER_FILE = 'lib/helper.js'
 const BOOTSTRAP_FILE = 'lib/process.js'
 const MIN_NODE_MAJOR = 22
@@ -43,7 +43,7 @@ export function localHelpers(dshBin) {
 }
 
 /** How to install the matching packages: one command when the directory is known. */
-export const installHint = (host, install) => install.dir === undefined
+const installHint = (host, install) => install.dir === undefined
   ? `Install ${HELPER_PACKAGE}@${install.version} and ${BOOTSTRAP_PACKAGE}@${install.version} there.`
   : `Install them with: ssh ${host} "mkdir -p '${install.dir}' && cd '${install.dir}' && npm install ${HELPER_PACKAGE}@${install.version} ${BOOTSTRAP_PACKAGE}@${install.version}"`
 

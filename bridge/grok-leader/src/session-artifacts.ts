@@ -1,7 +1,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionReferenceResolver } from '@deepseek-ai/dsh-session-reference'
-import { internalError, invalidParams, paramRecord } from './acp.ts'
+import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
 import { contextInfoFromProjection } from './projection.ts'
 import type { SessionOutput } from './session-output.ts'
 import type { SessionOperation, SessionWork } from './session-work.ts'
@@ -50,7 +50,7 @@ export function createSessionArtifacts<S extends ArtifactSession>(host: Artifact
   }
   const owned = (clientId: number, id: unknown) => {
     assertOpen()
-    const record = host.owned(clientId, typeof id === 'string' ? SessionId(id) : undefined)
+    const record = host.owned(clientId, sessionIdParam(id))
     assertOpen()
     return record
   }

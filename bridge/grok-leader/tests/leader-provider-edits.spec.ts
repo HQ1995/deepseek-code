@@ -30,6 +30,7 @@ const makeManageSettings = (): ManageSettingsMock => {
 }
 
 const manageLlm = (settings: ManageSettingsMock) => ({
+  listConfigurableProviders: () => [],
   listProviders: () => {
     const rows = [{ id: 'deepseek', name: 'DeepSeek' }]
     for (const id of Object.keys(settings.providers)) rows.push({ id, name: (settings.providers[id] as { displayName?: string }).displayName ?? id })

@@ -1,5 +1,5 @@
 /** Leader provider management over the socket: adding routes. */
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { makeClient, makeHarness, mockDefaultModel, register, waitFor, type ClientHandle, type LeaderHarness } from './support/leader-harness.ts'
 
@@ -43,6 +43,7 @@ describe('x.ai/providers/add', () => {
     const discoveries: Array<{ provider?: string; baseURL?: string; api?: string; apiKey?: string }> = []
     return {
       discoveries,
+      listConfigurableProviders: () => [],
       listProviders: () => {
         const rows = [...providerRows]
         for (const id of Object.keys(settings.providers)) rows.push({ id, name: (settings.providers[id] as { displayName?: string }).displayName ?? id })
@@ -62,7 +63,11 @@ describe('x.ai/providers/add', () => {
   let harness: LeaderHarness | undefined
   let client: ClientHandle | undefined
 
+  // Known OpenAI-compatible routes are probed at <baseURL>/models; answer
+  // with an empty listing instead of reaching the network.
+  beforeEach(() => { vi.stubGlobal('fetch', vi.fn(async () => Response.json({ data: [] }))) })
   afterEach(async () => {
+    vi.unstubAllGlobals()
     client?.socket.destroy()
     await harness?.ctx.fiber.dispose()
     harness = undefined
@@ -243,6 +248,7 @@ describe('x.ai/providers/add', () => {
       ],
     }
     const llm = {
+      listConfigurableProviders: () => [],
       listProviders: () => [
         { id: 'deepseek', name: 'DeepSeek' },
         { id: 'ocx', name: 'OpenCodex' },
@@ -297,6 +303,7 @@ describe('x.ai/providers/add', () => {
       models: [{ id: 'deepseek-v4-flash' }],
     }
     const llm = {
+      listConfigurableProviders: () => [],
       listProviders: () => [{ id: 'ocx', name: 'OpenCodex' }],
       listModels: async () => [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }],
       discoverModels: async () => [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }],
@@ -410,6 +417,7 @@ describe('x.ai/providers/add', () => {
     let releaseDiscovery!: (models: Array<{ id: string; name?: string }>) => void
     const discovery = new Promise<Array<{ id: string; name?: string }>>(resolve => { releaseDiscovery = resolve })
     const llm = {
+      listConfigurableProviders: () => [],
       listProviders: () => [{ id: 'ocx', name: 'OpenCodex' }],
       listModels: async () => [{ id: 'persisted-model', name: 'Persisted Model' }],
       discoverModels: async () => {

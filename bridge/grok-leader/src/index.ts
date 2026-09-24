@@ -24,9 +24,10 @@ import { createNativeTasks } from './native-tasks.ts'
 import { createSessionRegistry } from './session-registry.ts'
 import { PACKAGE_VERSION } from './package-location.ts'
 import { createProfilePlugins, inspectPluginRuntime } from './profile-plugins.ts'
-export { analyzeBundlePatch, parseCommandLine, inspectPluginRuntime, type BundlePatchAnalysis } from './profile-plugins.ts'
+export { analyzeBundlePatch } from './profile-plugins.ts'
 import { protectTerminalSignals } from './terminal-signal.ts'
-import { JSONRPC_METHOD_NOT_FOUND, internalError, paramRecord } from './acp.ts'
+import { JSONRPC_METHOD_NOT_FOUND, internalError, paramRecord, sessionIdParam } from './acp.ts'
+import { errorMessage } from './guards.ts'
 import { createModelCatalog } from './model-catalog.ts'
 import { createNativeProviders } from './native-provider.ts'
 import { createPluginRows, type PluginManagerLike } from './plugin-rows.ts'
@@ -68,21 +69,21 @@ import { errorChain } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm-retry'
 import type {} from '@deepseek-ai/dsh-settings'
 import { readProfilePatches, reconcileProfilePatches, type ProfileContext } from '@deepseek-ai/dsh-app-boot'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { RpcError } from './protocol.ts'
 import { jobOutputSnapshot } from './job-output.ts'
 import { createImageOutputProjector } from './image-output.ts'
 import { exportSessionArchive } from './session-export.ts'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
-import { acpPromptToText, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, sessionEventToUpdates, toolKindForName, turnEndToStopReason, type DecodeSpeed, type GrokSessionUpdate, type ProjectedUpdate, type StopReasonWire, type ToolKindWire } from './projection.ts'
 
-export { acpPromptToText, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, sessionEventToUpdates, toolKindForName, turnEndToStopReason }
-export type { DecodeSpeed, GrokSessionUpdate, ProjectedUpdate, StopReasonWire, ToolKindWire }
-export type { ToolResultContentBlock } from './projection.ts'
+export { cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, sessionEventToUpdates, type GrokSessionUpdate, type ToolResultContentBlock } from './projection.ts'
 
 export const name = 'grok-leader'
 /** Agents, maintained policy state and durable discovery must exist before accepting clients. */
 export const inject = ['agents', 'sessionPersistence', 'sessionProjections', 'attachments']
+
+/** Leader socket when the config names none. */
+const DEFAULT_SOCKET_PATH = '/tmp/dsh-grok-leader.sock'
 
 /** Plugin config: socket path and the provider/model selection used for created agents. */
 export interface GrokLeaderConfig {
@@ -110,7 +111,7 @@ export const Config: Schema<GrokLeaderConfig> = Schema.object({
   // `config value ?? env ?? fallback` in apply(), which requires ABSENCE to
   // be observable — a schema default would fill the slot before the env
   // layer could speak.
-  socketPath: Schema.string().default('/tmp/dsh-grok-leader.sock'),
+  socketPath: Schema.string().default(DEFAULT_SOCKET_PATH),
   provider: Schema.string(),
   model: Schema.string(),
   combineQueuedPrompts: Schema.boolean(),
@@ -130,10 +131,7 @@ const WIRE = {
   sessionSetModel: 'session/set_model',
   sessionSetMode: 'session/set_mode',
   sessionClose: 'session/close',
-  sessionUpdate: 'session/update',
   modelsList: 'x.ai/models/list',
-  modelsUpdate: 'x.ai/models/update',
-  sessionsList: 'x.ai/sessions/list',
   providersAdd: 'x.ai/providers/add',
   providersUpdate: 'x.ai/providers/update',
   providersRemove: 'x.ai/providers/remove',
@@ -211,7 +209,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     },
   })
   const transport = createLeaderTransport({
-    socketPath: config.socketPath ?? '/tmp/dsh-grok-leader.sock',
+    socketPath: config.socketPath ?? DEFAULT_SOCKET_PATH,
     version: PACKAGE_VERSION,
     async request(clientId, method, params) {
       try { return await dispatchRequest(clientId, method, params) }
@@ -394,7 +392,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const teamMembers = (record: SessionRecord) => {
     if (!hasTeam(record)) return undefined
     try { return teamService()?.listMembers(record.agent).filter(member => member.role === 'teammate') } catch (error) {
-      logger.warn('grok-leader: Agent Team roster unavailable: ' + (error instanceof Error ? error.message : String(error)))
+      logger.warn('grok-leader: Agent Team roster unavailable: ' + errorMessage(error))
       return undefined
     }
   }
@@ -540,7 +538,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
         return await sessionCommands.skills(clientId, params)
       case 'x.ai/mcp/list': {
         const p = paramRecord(params, 'x.ai/mcp/list')
-        const sessionId = typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined
+        const sessionId = sessionIdParam(p.sessionId)
         const record = sessionId === undefined ? undefined : ownedRecord(clientId, sessionId)
         return await listMcpServers(ctx, record?.agent)
       }

@@ -12,6 +12,7 @@ import type {} from '@deepseek-ai/dsh-app-boot'
 import type { AgentPresetsLike } from './session-presets.ts'
 import type { SettingsLike } from './native-seams.ts'
 import { carriesTeamTools } from './team-presets.ts'
+import { errorMessage } from './guards.ts'
 
 const yamlOptions = { schema: entryListSchema, noRefs: true, lineWidth: -1 }
 const readYaml = async (path: string): Promise<unknown> => load(await readFile(path, 'utf8'), yamlOptions)
@@ -95,7 +96,7 @@ function nativeCatalog(ctx: Context, native: AgentPresetRegistry, assertOpen: ()
   }
   const importOne = async (id: string, work: () => Promise<void>) => {
     try { await work() }
-    catch (error) { assertOpen(); diagnostics.set(id, error instanceof Error ? error.message : String(error)) }
+    catch (error) { assertOpen(); diagnostics.set(id, errorMessage(error)) }
   }
   const migrateDefault = async (native: AgentPresetRegistry) => {
     const paths = profile(), settings: SettingsLike | undefined = ctx.get('settings')

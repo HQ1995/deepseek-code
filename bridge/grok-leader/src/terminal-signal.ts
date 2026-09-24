@@ -1,8 +1,10 @@
 import { symbols, type Context } from '@deepseek-ai/cordis'
 import type { SubprocessRuntime, SubprocessTerminalHandle } from '@deepseek-ai/dsh-subprocess'
 
-/** DSH 0.1.5 can lose the inspected foreground group before kill(2). Reinspect
- * through the provider once; never reuse a stale pgid or hide permission errors. */
+/** DSH 0.1.7-rc.1's local subprocess provider still inspects the foreground
+ * group and then signals it without retrying, so the group can exit in between
+ * (ESRCH). Reinspect through the provider once; never reuse a stale pgid or
+ * hide permission errors. Drop once signalForeground retries ESRCH itself. */
 export function retryForegroundSignal(handle: SubprocessTerminalHandle): void {
   const signal = handle.signalForeground.bind(handle)
   handle.signalForeground = async value => {

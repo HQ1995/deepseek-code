@@ -3,6 +3,7 @@
  * without `hmr`, so it reports `restart-required`; the caller's reload then
  * reconciles the Loader now and fails if a required row does not activate. */
 import { internalError } from './acp.ts'
+import { errorMessage } from './guards.ts'
 
 /** Structural read of the plugin manager's row toggle (dsh 0.1.7). */
 export interface PluginManagerLike {
@@ -60,9 +61,9 @@ export function createPluginRows(dependencies: PluginRowDependencies) {
           await dependencies.reload([])
         } catch (rollback) {
           throw internalError('the ' + row.label + ' did not start and could not be turned off again: '
-            + (error instanceof Error ? error.message : String(error)) + '; ' + (rollback instanceof Error ? rollback.message : String(rollback)))
+            + errorMessage(error) + '; ' + errorMessage(rollback))
         }
-        throw internalError('the ' + row.label + ' did not start and was turned off again: ' + (error instanceof Error ? error.message : String(error)))
+        throw internalError('the ' + row.label + ' did not start and was turned off again: ' + errorMessage(error))
       }
     },
   }

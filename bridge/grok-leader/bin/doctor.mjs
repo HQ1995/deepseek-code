@@ -5,12 +5,11 @@ import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync
 import { homedir, release } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parseCliVersion, unsupportedPlatformMessage, validateRuntime } from './update.mjs'
+import { json, parseCliVersion, unsupportedPlatformMessage, validateRuntime } from './update.mjs'
 import { remoteSettings } from './remote.mjs'
 import { checkRemote, localHelpers } from './remote-check.mjs'
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const json = path => JSON.parse(readFileSync(path, 'utf8'))
 const executable = command => {
   for (const path of isAbsolute(command) ? [command] : (process.env.PATH ?? '').split(delimiter).map(dir => resolve(dir, command))) {
     try { accessSync(path, constants.X_OK); if (statSync(path).isFile()) return path } catch {}
@@ -79,7 +78,7 @@ emit({ runtimeVersion: boot.getDshRuntimeVersion(), checked, issues, warnings: c
 `
 
 /** The DSH installation (package.json of `@deepseek-ai/dsh`) behind an executable. */
-export const dshInstallAnchor = bin => {
+const dshInstallAnchor = bin => {
   let dir
   try { dir = dirname(realpathSync(bin)) } catch { return undefined }
   for (;;) {

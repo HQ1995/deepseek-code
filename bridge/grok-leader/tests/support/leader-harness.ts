@@ -17,7 +17,6 @@ import { SessionPersistenceRevision, type SessionAccess, type SessionHandle, typ
 import { encodeJsonFrame, FrameDecoder } from '../../src/codec.ts'
 import * as GrokLeader from '../../src/index.ts'
 import type {} from '@deepseek-ai/dsh-attachment'
-import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 
 export const packageVersion = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version
@@ -139,8 +138,13 @@ export function makeMockRegistry(ctx: Context, manualIdle = false): MockRegistry
   }
 }
 
+/** Exact metadata for fake routes: the full effort menu, defaulting to high. */
+export const resolveEffortMenu = async (provider: string, id: string) =>
+  ({ provider, id, reasoning: { defaultEffort: 'high', efforts: ['low', 'medium', 'high', 'xhigh', 'max'].map(effort => ({ id: effort })) } })
+
 export const mockLlm = {
   listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' }, { id: 'pi', name: 'Pi AI' }],
+  listConfigurableProviders: () => [],
   listModels: async (provider: string) => provider === 'deepseek'
     ? [
       { provider: 'deepseek', id: 'deepseek-chat', name: 'DeepSeek Chat' },
@@ -149,10 +153,12 @@ export const mockLlm = {
     : provider === 'pi'
       ? [{ provider: 'pi', id: 'pi-code', name: 'Pi Code' }]
       : [],
+  resolveModelInfo: resolveEffortMenu,
 }
 
 export const mockVisionLlm = {
   listProviders: () => [{ id: 'vision', name: 'Vision Provider' }],
+  listConfigurableProviders: () => [],
   listModels: async () => [{
     provider: 'vision',
     id: 'vision-model',
@@ -170,9 +176,11 @@ export const mockVisionLlm = {
 /** Two providers that both list the id "shared": exercises the catalog dedup. */
 export const collidingLlm = {
   listProviders: () => [{ id: 'a' }, { id: 'b' }],
+  listConfigurableProviders: () => [],
   listModels: async (provider: string) => provider === 'a'
     ? [{ id: 'shared', name: 'Shared A' }, { id: 'only-a', name: 'Only A' }]
     : [{ id: 'shared', name: 'Shared B' }, { id: 'only-b', name: 'Only B' }],
+  resolveModelInfo: resolveEffortMenu,
 }
 
 export function makeMockPersistence() {
@@ -489,7 +497,7 @@ export async function makeHarness(
   } } as unknown as Context['sessions'])
   Object.assign(new SessionProjectionRegistry(ctx), options.sessionProjections)
   if (presets !== undefined) Object.assign(new (class extends Service {})(ctx, 'agentPresets'), presets)
-  ctx.provide('agentDefaultModel', mockDefaultModel as unknown as Context['agentDefaultModel'])
+  ctx.provide('agentDefaultModel', mockDefaultModel as never)
   ctx.provide('appExit', mockAppExit.exit)
   const socketPath = resolve('/tmp', 'dgl-' + String(process.pid) + '-' + randomUUID().slice(0, 12) + '.sock')
   // The bridge lists MCP servers from the mcp-client fibers that `session/new`

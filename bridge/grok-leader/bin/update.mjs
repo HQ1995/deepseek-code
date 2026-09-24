@@ -67,7 +67,7 @@ export const needsUpdateWithChannel = (current, target, channel) => {
   if (!channelAccepts(lane, current)) return true
   return comparison > 0
 }
-export const readChannelConfig = profile => {
+const readChannelConfig = profile => {
   const path = join(profile, 'config.toml')
   const config = existsSync(path) ? parse(readFileSync(path, 'utf8')) : {}
   const channel = config.cli?.channel, format = config.cli?.channel_format
@@ -112,7 +112,7 @@ export const resolveRelease = async ({ channel, version }, fetcher = fetch) => {
   if (!versions.length) throw new Error(`no release available for ${channel}`)
   return versions.at(-1)
 }
-const json = path => JSON.parse(readFileSync(path, 'utf8'))
+export const json = path => JSON.parse(readFileSync(path, 'utf8'))
 const run = (command, args, options = {}) => {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout: 600000, maxBuffer: 64 * 1024 * 1024, ...options })
   if (result.error || result.status !== 0) throw new Error(`${command} failed: ${result.error?.message ?? result.stderr ?? result.status}`)

@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { EncodedImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { internalError, invalidParams, paramRecord } from './acp.ts'
+import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
+import { errorMessage } from './guards.ts'
 import type { AgentPresetsLike } from './session-presets.ts'
 import type { SessionWork, SessionOperation } from './session-work.ts'
 import type { SessionOutput } from './session-output.ts'
@@ -131,7 +132,7 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
   }
   const warn = (error: unknown) => {
     if (closed) return
-    try { host.logger.warn('command discovery failed: ' + (error instanceof Error ? error.message : String(error))) } catch { /* observer logging must not veto native registry changes */ }
+    try { host.logger.warn('command discovery failed: ' + errorMessage(error)) } catch { /* observer logging must not veto native registry changes */ }
   }
   const refresh = (record: S): Promise<void> => {
     if (closed) return Promise.resolve()
@@ -265,7 +266,7 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
     skills(clientId: number, params: unknown): Promise<{ skills: Array<Record<string, unknown>> }> {
       return accepted(async () => {
         const p = paramRecord(params, 'x.ai/skills/list')
-        const record = host.owned(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+        const record = host.owned(clientId, sessionIdParam(p.sessionId))
         if (record === undefined) throw invalidParams('skills/list requires an owned sessionId')
         return record.work.read(async scope => {
           active(record, scope)

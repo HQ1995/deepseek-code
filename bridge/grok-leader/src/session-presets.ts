@@ -1,8 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { internalError, invalidParams, paramRecord } from './acp.ts'
+import type { SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
+import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
+import { errorMessage, isRecord } from './guards.ts'
 import type { SettingsLike } from './native-seams.ts'
 import { presetHistory, type PresetHistory } from './preset-history.ts'
 
@@ -76,7 +77,7 @@ const presetRequestFromMeta = (meta: Record<string, unknown> | null | undefined)
     }
     return profile
   }
-  if (typeof profile === 'object' && profile !== null && !Array.isArray(profile)) {
+  if (isRecord(profile)) {
     // Verified divergence: upstream parses an inline grok AgentDefinition
     // object (upload/turn.rs parse_agent_profile_from_meta ->
     // AgentDefinition::from_json). dsh has no AgentDefinition equivalent, so
@@ -163,7 +164,7 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
     const user = service.describe?.().find(entry => entry.ns === 'agent-preset-registry')?.user
     if (user !== null && typeof user === 'object' && (user as Record<string, unknown>).selectedDefault === preset) return
     try { await service.mutate('agent-preset-registry', [{ op: 'set', path: ['selectedDefault'], value: preset }]) }
-    catch (error) { throw internalError('failed to remember preset "' + preset + '": ' + (error instanceof Error ? error.message : String(error))) }
+    catch (error) { throw internalError('failed to remember preset "' + preset + '": ' + errorMessage(error)) }
   }
   const resolveReal = async (roster: AgentPresetsLike | undefined, request: string) => {
     try { return (await roster?.resolve(request))?.id } catch { return undefined }
@@ -173,7 +174,7 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
     let resolved: { id: string }
     try { resolved = await roster.resolve(request) } catch (error) {
       if (request === undefined || !GROK_PROFILE_FALLBACKS.has(request)) {
-        throw invalidParams('unknown agent preset "' + String(request) + '": ' + (error instanceof Error ? error.message : String(error)))
+        throw invalidParams('unknown agent preset "' + String(request) + '": ' + errorMessage(error))
       }
       resolved = await roster.resolve(undefined)
     }
@@ -354,7 +355,7 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
     controls(clientId: number, params: unknown) {
       return run(async () => {
         const p = paramRecord(params, 'x.ai/presets')
-        const record = host.owned(clientId, typeof p.sessionId === 'string' ? SessionId(p.sessionId) : undefined)
+        const record = host.owned(clientId, sessionIdParam(p.sessionId))
         if (record === undefined) throw invalidParams('presets requires an owned sessionId')
         return run(() => controls(record, p), record)
       })

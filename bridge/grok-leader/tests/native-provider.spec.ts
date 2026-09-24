@@ -103,10 +103,12 @@ describe('native DeepSeek provider', () => {
     const f = fixture()
     let liveProvider: string | undefined
     const llm: LlmLike = {
+      listConfigurableProviders: () => [],
       listProviders: () => [{ id: 'alpha' }, ...f.isEnabled() ? [{ id: NATIVE_DEEPSEEK_PROVIDER, name: 'DeepSeek' }] : []],
       listModels: async provider => provider === NATIVE_DEEPSEEK_PROVIDER
         ? [{ id: 'deepseek-flash', name: 'DeepSeek-V41-Flash' }, { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', description: 'Stronger.' }]
         : [{ id: 'deepseek-flash', name: 'Same id elsewhere' }, { id: 'shared', name: 'Shared' }],
+      resolveModelInfo: async (provider, id) => ({ provider, id }),
     }
     const piAi: SettingsLike = { describe: () => [{ ns: 'llm-pi-ai', user: { providers: {} } }, ...f.settings.describe!()], mutate: f.settings.mutate }
     const catalog = createModelCatalog({
