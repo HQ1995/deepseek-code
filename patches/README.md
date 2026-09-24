@@ -4,7 +4,8 @@ The release manifest pins the official DSH commit and, when present, the SHA-256
 of `dsh-<sourceCommit>.patch` in this directory. The builder verifies the clean
 base and patch bytes, applies the patch in its own temporary clone, then runs
 the official source build. It never patches an installed runtime or the source
-checkout passed with `--source`.
+checkout passed with `--source`. Only the patch for the pinned commit lives
+here; earlier backports are in Git history.
 
 `sourcePatchSha256` is part of consumer provenance, the runtime descriptor and
 installed-package matching. Unpatched and differently patched consumers are not
@@ -39,25 +40,15 @@ The results are identical: removing a config key an entry's patches do not
 carry leaves the patch list unchanged. A settings test pins the composition
 count; the existing inheritance, reset, group and secret tests cover values.
 
-The Linux scope-settlement correction that earlier revisions of this patch
-carried is now upstream: `0.1.6-alpha.2` owns `TasksCurrent` scope accounting in
-`subprocess-local/src/linux-scope.ts`, the early-bootstrap test fixture and the
-authored `bash-startup-timeout` recorded session, so the backport no longer
-touches Linux. The acceptance that validated it on a real user systemd remains
-recorded in
-[the combined Linux settlement acceptance](../docs/linux-acceptance-2026-09-17.md)
+Earlier revisions also carried a Linux scope-settlement correction; it is
+upstream since `0.1.6-alpha.2`, so the backport no longer touches Linux. The
+patch moved from `0.1.7-alpha.1` through `0.1.7-alpha.2` to `46a7f68b...`
+(`0.1.7-rc.1`) with no source, test or decision-note changes (only README
+context); the rc.1 bytes, and so `sourcePatchSha256`, equal alpha.2's. Settings readiness, the macOS
+kernel process table, the JSONL helper extraction and the shared config-editor
+composition are still not upstream. The rc.1 Linux acceptance is recorded in
+[the DSH 0.1.7 adaptation](../docs/dsh-upstream-refresh-2026-09-22.md#linux-acceptance)
 and is re-run for every payload that bumps the runtime.
-
-Rebasing this backport from `c36a83ff...` (`0.1.7-alpha.1`) to `00102833...`
-(`0.1.7-alpha.2`) changed only the `subprocess-local` README context, where
-upstream documented best-effort spill collection, and that README pair's
-translation hashes. The source, test and decision-note hunks are unchanged.
-
-Moving it from `00102833...` (`0.1.7-alpha.2`) to `46a7f68b...` (`0.1.7-rc.1`)
-needed no rebase: upstream touched none of the patched files in between, and
-the patch regenerated on rc.1 is byte-identical, so `sourcePatchSha256` is
-unchanged. Settings readiness, the macOS kernel process table, the JSONL helper
-extraction and the shared config-editor composition are still not upstream.
 
 When upgrading the upstream source, review whether the change is already
 included. Remove the patch digest if it is; otherwise rebase the source change,

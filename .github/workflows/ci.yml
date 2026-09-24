@@ -61,6 +61,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/dscode-runtime"
           tar -xzf "$RUNNER_TEMP"/dscode-payload/dscode-runtime-*.tar.gz -C "$RUNNER_TEMP/dscode-runtime"
           ln -s "$RUNNER_TEMP/dscode-runtime/node_modules" bridge/grok-leader/node_modules
+      - name: Launcher install selection
+        run: node --test scripts/install-selection.test.mjs
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: third_party/grok-build
