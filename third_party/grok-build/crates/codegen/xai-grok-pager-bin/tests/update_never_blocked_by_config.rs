@@ -6,11 +6,9 @@
 //! The pointer must equal the current version: the installer converges in
 //! both directions, so an older pointer triggers a downgrade attempt.
 //!
-//! DIVERGENCE(dscode): `dscode update` reads its release channel strictly,
-//! in Rust (`build_update_config`) and in the managed JS updater, so a
-//! corrupt `config.toml` stops it with the parse error instead of falling
-//! back to the version's default channel. dscode also drops inherited
-//! `GROK_*` values: the profile comes from `DSCODE_HOME` and the release
+//! DIVERGENCE(dscode): the corrupt run also names the file it ignored on
+//! stderr (in Rust `build_update_config` and in the managed JS updater), and
+//! dscode drops inherited `GROK_*` values: the profile comes from `DSCODE_HOME` and the release
 //! from the loopback `DSC_UPDATE_BASE_URL` seam, in GitHub-release form.
 //! `PATH` is not passed: the updater installs through `npx`, and a test must
 //! not reach npm.
@@ -84,7 +82,7 @@ fn run_update(base: &str, config_toml: &str, extra_args: &[&str]) -> std::proces
 /// The valid run proves the environment resolves to success, so a nonzero
 /// corrupt run can only mean a config failure aborted the update.
 #[test]
-fn corrupt_config_stops_update_with_the_parse_error() {
+fn corrupt_config_never_changes_update_outcome() {
     let body = Arc::new(Mutex::new("0.0.1".to_owned()));
     let (_listener, base) = spawn_pointer_server(body.clone());
 
@@ -109,8 +107,8 @@ fn corrupt_config_stops_update_with_the_parse_error() {
     let corrupt = run_update(&base, "this is not toml {{{[[[", &[]);
     let stderr = String::from_utf8_lossy(&corrupt.stderr);
     assert!(
-        !corrupt.status.success() && stderr.contains("TOML parse error"),
-        "a corrupt config.toml must stop dscode update with the parse error\nstdout:\n{}\nstderr:\n{stderr}",
+        corrupt.status.success() && stderr.contains("ignoring the saved update channel"),
+        "a corrupt config.toml must not block dscode update, and must be named\nstdout:\n{}\nstderr:\n{stderr}",
         String::from_utf8_lossy(&corrupt.stdout),
     );
 }

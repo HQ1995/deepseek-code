@@ -5,7 +5,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { migrateLegacyTuiHome, nodeVersionSupported } from '../bin/dscode.mjs'
-import { channelAccepts, commitInstallation, extractArchive, resolveRelease, updateOptions, withProfileLock } from '../bin/update.mjs'
+import { channelAccepts, commitInstallation, extractArchive, resolveRelease, saveUpdateChannel, updateOptions, withProfileLock } from '../bin/update.mjs'
+import { parse } from 'smol-toml'
 import { create as createTar } from 'tar'
 import { fixtureEnvironment } from './fixtures/environment.ts'
 
@@ -230,7 +231,24 @@ esac
     writeFileSync(join(profile, 'config.toml'), '[cli]\nchannel = "alpha"\nchannel_format = 1\n')
     expect(updateOptions([], profile, '1.0.0').channel).toBe('alpha')
     writeFileSync(join(profile, 'config.toml'), '[cli]\nchannel_format = 2\n')
-    expect(() => updateOptions([], profile, '1.0.0')).toThrow('invalid cli.channel_format')
+    expect(updateOptions([], profile, '1.0.0')).toMatchObject({ channel: 'stable', problem: expect.stringContaining('invalid cli.channel_format') })
+  })
+
+  it('updates through an unreadable config without rewriting it', async () => {
+    const profile = mkdtempSync(join(tmpdir(), 'dscode-channel-'))
+    homes.push(profile)
+    const broken = '[cli\nchannel = "alpha"\n'
+    writeFileSync(join(profile, 'config.toml'), broken)
+    // The release's own channel, or an explicit one, still applies.
+    expect(updateOptions([], profile, '1.0.0-alpha.3')).toMatchObject({ channel: 'alpha', problem: expect.stringContaining('config.toml is unreadable') })
+    expect(updateOptions(['--beta'], profile, '1.0.0-alpha.3').channel).toBe('beta')
+    await saveUpdateChannel(profile, 'beta')
+    expect(readFileSync(join(profile, 'config.toml'), 'utf8')).toBe(broken)
+    // A parseable file with an invalid channel is repaired by the next save.
+    writeFileSync(join(profile, 'config.toml'), '[cli]\nchannel = "nightly"\n[other]\nsetting = "kept"\n')
+    expect(updateOptions([], profile, '1.0.0').problem).toContain('invalid cli.channel')
+    await saveUpdateChannel(profile, 'stable')
+    expect(parse(readFileSync(join(profile, 'config.toml'), 'utf8'))).toEqual({ cli: { channel: 'stable', channel_format: 1 }, other: { setting: 'kept' } })
   })
 
   it('rolls back previously committed components when a later rename fails', async () => {

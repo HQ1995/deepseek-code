@@ -433,6 +433,7 @@ export const main = async () => {
       return
     }
     const options = updateOptions(updateArgs, profileDir, pkg.version)
+    if (options.problem !== undefined) console.error(`dscode: warning: ${options.problem}; updating the ${options.channel} channel and leaving the file as it is`)
     if (options.channel !== 'enterprise') {
       const current = cachedVersion() ?? installedProfileVersion() ?? pkg.version
       if (options.check) {

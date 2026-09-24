@@ -67,16 +67,23 @@ export const needsUpdateWithChannel = (current, target, channel) => {
   if (!channelAccepts(lane, current)) return true
   return comparison > 0
 }
+/** The saved channel. An unreadable config.toml or invalid saved channel is a
+ * `problem`, not an error: updating is how a broken install recovers. `config`
+ * is undefined when the file does not parse, so nothing rewrites (and loses)
+ * what it could not read. */
 const readChannelConfig = profile => {
   const path = join(profile, 'config.toml')
-  const config = existsSync(path) ? parse(readFileSync(path, 'utf8')) : {}
+  let config
+  try { config = existsSync(path) ? parse(readFileSync(path, 'utf8')) : {} } catch (error) {
+    return { config: undefined, channel: undefined, problem: `${path} is unreadable (${error.message.split('\n')[0]})` }
+  }
   const channel = config.cli?.channel, format = config.cli?.channel_format
-  if (channel !== undefined && !['stable', 'beta', 'alpha', 'enterprise'].includes(channel)) throw new Error(`invalid cli.channel: ${channel}`)
-  if (format !== undefined && (!Number.isInteger(format) || ![0, 1].includes(format))) throw new Error(`invalid cli.channel_format: ${format}`)
+  if (channel !== undefined && !['stable', 'beta', 'alpha', 'enterprise'].includes(channel)) return { config, channel: undefined, problem: `invalid cli.channel in ${path}: ${channel}` }
+  if (format !== undefined && (!Number.isInteger(format) || ![0, 1].includes(format))) return { config, channel: undefined, problem: `invalid cli.channel_format in ${path}: ${format}` }
   return { config, channel: channel === 'alpha' && format !== 1 ? 'beta' : channel }
 }
 export const updateOptions = (args, profile, currentVersion) => {
-  const { config, channel: saved } = readChannelConfig(profile)
+  const { config, channel: saved, problem } = readChannelConfig(profile)
   const channels = ['stable', 'beta', 'alpha', 'enterprise'].filter(value => args.includes(`--${value}`))
   if (channels.length > 1) throw new Error('choose only one of --stable, --beta, --alpha, --enterprise')
   let version
@@ -92,7 +99,7 @@ export const updateOptions = (args, profile, currentVersion) => {
       if (!['user_command', 'auto_background', 'leader_converge'].includes(trigger)) throw new Error('invalid --trigger')
     } else if (!['--stable', '--beta', '--alpha', '--enterprise', '--check', '--force', '--force-reinstall', '--json', '--debug', '--auto'].includes(arg)) throw new Error(`unknown update argument: ${arg}`)
   }
-  return { channel: channels[0] ?? saved ?? /-(alpha|beta|enterprise)(?:\.|$)/.exec(currentVersion)?.[1] ?? 'stable', version, check: args.includes('--check'), json: args.includes('--json'), force: args.includes('--force') || args.includes('--force-reinstall'), trigger, autoUpdate: typeof config.cli?.auto_update === 'boolean' ? config.cli.auto_update : null }
+  return { channel: channels[0] ?? saved ?? /-(alpha|beta|enterprise)(?:\.|$)/.exec(currentVersion)?.[1] ?? 'stable', version, check: args.includes('--check'), json: args.includes('--json'), force: args.includes('--force') || args.includes('--force-reinstall'), trigger, autoUpdate: typeof config?.cli?.auto_update === 'boolean' ? config.cli.auto_update : null, ...problem === undefined ? {} : { problem } }
 }
 export const resolveRelease = async ({ channel, version }, fetcher = fetch) => {
   if (version !== undefined) return version
@@ -409,7 +416,7 @@ export const commitInstallation = (profile, stage, entries) => withProfileLock(p
 
 export const saveUpdateChannel = (profile, channel) => withProfileLock(profile, () => {
   const { config } = readChannelConfig(profile)
-  if (config.cli?.channel === channel && config.cli?.channel_format === 1) return
+  if (config === undefined || config.cli?.channel === channel && config.cli?.channel_format === 1) return
   config.cli = { ...config.cli, channel, channel_format: 1 }
   atomicWrite(join(profile, 'config.toml'), stringify(config))
 })
@@ -506,7 +513,7 @@ export const installRelease = async ({ profile, packageName, version, channel, a
     }
     if (!existsSync(join(destination, 'bin', 'dscode.mjs'))) throw new Error('plugin launcher missing')
     const { config } = readChannelConfig(profile)
-    const channelChanged = config.cli?.channel !== channel || config.cli?.channel_format !== 1
+    const channelChanged = config !== undefined && (config.cli?.channel !== channel || config.cli?.channel_format !== 1)
     if (channelChanged) {
       config.cli = { ...config.cli, channel, channel_format: 1 }
       writeFileSync(join(prepared, 'config.toml'), stringify(config), { mode: (lstatSync(join(profile, 'config.toml'), { throwIfNoEntry: false })?.mode ?? 0o600) & 0o777 })

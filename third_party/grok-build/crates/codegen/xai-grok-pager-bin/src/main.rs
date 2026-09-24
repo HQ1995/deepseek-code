@@ -2260,7 +2260,7 @@ fn main() {
     {
         let result = (|| -> Result<()> {
             let _ = rustls::crypto::ring::default_provider().install_default();
-            let config = build_update_config()?;
+            let config = build_update_config();
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?
@@ -2475,7 +2475,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     } else {
         xai_grok_workspace::permission::ClientType::Generic
     });
-    let update_config = build_update_config()?;
+    let update_config = build_update_config();
     if let Some(command) = args.command.take() {
         match command {
             Command::Version { json } => {
@@ -2818,7 +2818,10 @@ async fn finish_update_on_exit(
     }
 }
 /// Build an [`UpdateConfig`] from the current environment and config files.
-fn build_update_config() -> Result<UpdateConfig> {
+/// An unreadable config or saved channel keeps the release's own channel:
+/// updating is how a broken install recovers, so it cannot depend on the file
+/// it may be repairing, and neither can startup.
+fn build_update_config() -> UpdateConfig {
     let environment = xai_grok_shell::env::GrokBuildEnvironment::from_flags(false, false);
     let mut config = UpdateConfig::from_environment(&environment);
     config.channel = default_update_channel(xai_grok_version::VERSION).to_string();
@@ -2831,11 +2834,19 @@ fn build_update_config() -> Result<UpdateConfig> {
     config.npm_registry = std::env::var(obfstr::obfstr!("GROK_NPM_REGISTRY"))
         .ok()
         .or_else(xai_grok_shell::util::config::load_npm_registry_sync);
-    let root = xai_grok_shell::config::load_effective_config_disk_only()?;
-    if let Some(ch) = xai_grok_shell::util::config::channel_from_toml_opt(&root)? {
-        config.channel = ch;
+    let saved = xai_grok_shell::config::load_effective_config_disk_only()
+        .map_err(anyhow::Error::from)
+        .and_then(|root| xai_grok_shell::util::config::channel_from_toml_opt(&root));
+    match saved {
+        Ok(Some(ch)) => config.channel = ch,
+        Ok(None) => {}
+        Err(error) => eprintln!(
+            "warning: ignoring the saved update channel ({error:#}); using {}. Fix or remove {}.",
+            config.channel,
+            xai_grok_shell::util::config::user_config_path().display()
+        ),
     }
-    Ok(config)
+    config
 }
 
 fn default_update_channel(version: &str) -> &'static str {
