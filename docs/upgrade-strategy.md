@@ -31,15 +31,32 @@ The supported runtime is declared in `bridge/grok-leader/package.json`:
 - `dsh.testedVersion`: exact runtime used by the launcher
 - `dsh.supportedRange`: compatibility range for profile plugins
 - `dsh.sourceCommit`: full upstream revision for a source-built SDK/runtime
+- `dsh.sourcePatchSha256`: SHA-256 of the source backport
+  `patches/dsh-<sourceCommit>.patch`, when one exists
 
 To upgrade dsh:
 
-1. bump the tested version and range when needed;
-2. update the entire `@deepseek-ai/dsh-*` SDK family; update the registry lockfile
-   only when that family is published, otherwise build the pinned source family;
-3. mirror that pinned dsh dependency tree's Node floor in the launcher and npm
-   metadata, but never install or switch the user's Node runtime;
-4. rebuild the bridge and run the complete E2E suite;
+1. Bump `dsh.testedVersion`, `dsh.sourceCommit` and, when needed,
+   `dsh.supportedRange`.
+2. Update the entire `@deepseek-ai/dsh-*` SDK family, plus Cordis, Schemastery
+   and `cordis-plugin-include`, to exact versions in both `peerDependencies`
+   and `devDependencies` of `bridge/grok-leader/package.json`. Update the
+   registry lockfile only when that family is published; otherwise build the
+   pinned source family.
+3. Move the pinned family's entries in `minimumReleaseAgeExclude` in
+   `bridge/grok-leader/pnpm-workspace.yaml` to the new version.
+4. Rebase the backport onto the new commit, or drop it once upstream carries
+   the change (see `patches/README.md`). Update or remove
+   `dsh.sourcePatchSha256`, and delete the old `patches/dsh-<commit>.patch`.
+5. Update the DSH version `scripts/e2e-contracts.mjs` asserts.
+6. Mirror the pinned dsh dependency tree's Node floor in the launcher and npm
+   metadata, but never install or switch the user's Node runtime.
+7. Audit the upstream diff of every package, service, event, bundle row and CLI
+   flag the bridge uses.
+8. Build both platform payloads, rebuild the bridge against them and run the
+   complete E2E suite.
+9. Run macOS and [Linux acceptance](#linux-acceptance), and redeploy the
+   [remote SSH helper](#remote-workspace-over-ssh) on each host.
 
 The current source pin is `0.1.7-rc.1` at
 `46a7f68b0922371ce7144b668b90e377d8e799f4`. The builder uses the official upstream
@@ -113,6 +130,11 @@ Exemptions are exact package and DSH versions, stored in the profile's
 `compatibility.json`; a dscode update to a new DSH version does not carry them
 forward.
 
+Since alpha.2, permission presets refuse to activate when the composed sandbox
+and approval defaults match no preset; a profile must then set
+`defaultPreset`. DSH's own `dsh plugin add` installs through `pnpm`, which must
+be on PATH; dscode's `/dsh add` uses npm.
+
 | Upstream capability | dscode integration |
 |---|---|
 | V4 logs, immutable migration, SessionHandle and process locks | Native persistence, legacy model-selection adapter and tool-role replay; resume/fork/archive tests |
@@ -174,20 +196,27 @@ use their own discovered metadata; they do not inherit the native adapter's
 vision or system-prompt capabilities just because model names match. Model
 catalog and transport tests do not certify a live provider account.
 
+The profile also disables `session-log-deepseek`, which would add the
+session's raw events to native DeepSeek requests. It has no hostname
+allowlist, so a custom native gateway would receive that field too.
+
 ### Agent Teams
 
 The experimental `teams` preset is History without legacy delegation: no
 `subagent`, `subagent_fork`, `workflow` or `ralph`. In their place are native
 Agent Teams tools: `spawn_teammate`, `send_message`, `list_agents`,
-`wait_agent`, `interrupt_agent` and the `team_task_*` board. Only that preset
+`wait_agent`, `interrupt_agent` and the `team_task_*` board. Legacy delegation
+cannot share a preset with them: `tool-subagent-control` registers the same
+`send_message`, `list_agents` and `interrupt_agent` names, and legacy one-shot
+children would be taken for Leads. Only that preset
 mounts the Team tools (`tool-agent-team` is a preset row), so sessions on the
 other seven presets keep their own delegation tools. The Team runtime
 (`agent-team`) is a host row: it owns each Lead session's roster, mailbox and
 task board. For sessions on other presets it only keeps an empty Team
-projection. Its row ids
-match upstream's `agent-team-profile`; installing that profile as well would
-give every session Team tools, and `/doctor` warns about any host-level Team
-tools row.
+projection. Its row ids match upstream's
+`@deepseek-ai/dsh-experimental-agent-team-profile`; installing that profile as
+well would give every session Team tools, and `/doctor` warns about any
+host-level Team tools row.
 
 Team tools attach when an agent is created, so the preset is chosen as a
 session opens. Before a session has history the TUI picker reopens it with the
@@ -301,7 +330,10 @@ installed outside the workspace, plus an absolute path to Node 22 or newer.
 ran (`--helper` and `--bootstrap` name the files instead). The pinned digests
 default to this dscode's own runtime copies of `dsh-ssh/lib/helper.js` and
 `dsh-ptc-runtime-node/lib/process.js`, which are byte-identical to the
-release's; `--helper-hash` and `--bootstrap-hash` override them. Before writing
+release's; `--helper-hash` and `--bootstrap-hash` override them. Reinstall both
+on every host at each DSH bump: the default digests follow this dscode's
+runtime, and a release can change the helper (alpha.2's imports new subprocess
+modules). Before writing
 anything, `init` connects the way the leader will and checks the remote Node,
 the workspace and both digests, naming the fix and the exact `npm install`
 command when a file is missing or different; `--no-check` skips it.
@@ -400,7 +432,10 @@ Product and release checks:
 
 ```sh
 scripts/check.sh
-node --test scripts/release-payload.test.mjs scripts/test-runtime.test.mjs
+node --test scripts/release-payload.test.mjs scripts/test-runtime.test.mjs \
+  scripts/e2e-gateway-hold.test.mjs
+# Needs bridge/grok-leader/node_modules linked to the runtime's node_modules:
+node --test scripts/install-selection.test.mjs
 scripts/check-rust.sh
 scripts/e2e-product.sh
 scripts/e2e-product.sh --full --provider-ui
@@ -419,11 +454,13 @@ build `dscode-linux-x86_64` and `dscode-macos-aarch64` in
 
 Linux Rust tests require user/PID namespace isolation; `scripts/check-rust.sh`
 fails if `unshare` cannot provide it. Process-lifecycle tests must not share the
-host PID namespace. The full product suite on both platforms also needs tmux
->=3.4 and the
+host PID namespace. `scripts/check-rust.sh` reports two tests ignored on
+purpose: `picker_visual_smoke_debug` is a manual layout helper, and
+`test_groknight_theme` expects accents that drift from the runtime theme. The
+full product suite on both platforms also needs tmux >=3.4 and the
 [LSP dependencies](../bridge/grok-leader/README.md#optional-lsp).
 Mac table links use keyboard acceptance; physical Cmd-click requires a GUI
-runner. See [macOS review and validation boundaries](macos-review.md).
+runner. See [macOS validation boundaries](#macos-validation-boundaries).
 
 `DSCODE_RELEASE_DIR` selects existing payloads for product E2Es.
 `DSCODE_E2E_DSH_BIN` and `DSCODE_E2E_PLUGIN_TGZ` select explicit runtime/plugin
@@ -455,6 +492,71 @@ TUI captures and per-scenario pass/fail/skip records in `results.json`.
 vision-understanding test; headless cases are not visual TUI coverage. Neither
 a passing finite matrix nor the absence of a credentialed run establishes
 exhaustive model compatibility.
+
+### Linux acceptance
+
+Linux acceptance runs on the `swoop` host; get the maintainer's approval before
+each use. Run every gate at `nice -n 15` with one worker, in a private root
+with private caches, `DSH_HOME` and test homes, without sudo or global
+installs. The gates:
+
+- the 15-case built-provider matrix on Node 22.19.0 and 24.19.0 (a test-only
+  program, not in this repository): ordinary and PTY cancellation, immediate
+  disposals, pre-exec ENOENT/EACCES and escaped-descendant cleanup, each
+  checked against its systemd scope;
+- `scripts/check.sh` and the script and bridge suites on both Node versions,
+  `scripts/check-rust.sh`, and the managed-update, provider, update-channel and
+  full product E2Es, the last under `DSCODE_E2E_CONTAINMENT=1`;
+- the patched DSH source tests: Linux scope and containment on the host;
+  subprocess, bash, terminal and JSONL persistence in a PID namespace
+  (`unshare --user --map-root-user --pid --fork --mount-proc`). That lane needs
+  an init reaper such as tini: Node as PID 1 does not reap orphan zombies, and
+  host-exit assertions fail;
+- the snapshot replay corpus. It needs a full `pnpm run build:lib` (host and
+  client faces), `TMPDIR` and `HOME` outside any Git repository, links for nine
+  optional built workspace packages under the clone's ignored
+  `snapshots/node_modules`, and Playwright's Chromium headless shell;
+- a post-run audit: no new user scope, no residual process from the run, and
+  every recorded PID stopped.
+
+Any change to what ships reopens Linux acceptance. The minimum re-run is the
+matrix, `scripts/check.sh`, and the script and bridge suites on Node 22.19.0
+and 24.19.0. Add `scripts/check-rust.sh` when `third_party/grok-build`
+changes. Its filters miss the `dashboard_subcommand_*` tests, so run
+`cargo test -p xai-grok-pager-bin --bin dscode -- dashboard_subcommand`
+separately in the same `unshare` lane.
+
+- `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY` means pnpm tried to purge a
+  copied modules directory without a TTY; run
+  `CI=true pnpm install --frozen-lockfile`.
+- A source-only handoff lacks the bridge dependencies the script and product
+  harnesses read; link the runtime's `node_modules` into `bridge/grok-leader/`
+  for those gates, then remove exactly that link.
+
+Linux acceptance does not certify older glibc distributions or Linux ARM64.
+
+### macOS validation boundaries
+
+Neither platform certifies physical Cmd-click, Kitty graphics (skipped unless
+`DSCODE_E2E_KITTY_BIN` is set), IME or the host clipboard. On macOS, clipboard
+image paste, Finder drag and drop, Terminal.app/iTerm2/Ghostty, Intel/Rosetta,
+older macOS versions, sleep/wake and network switching are not certified
+either. The ignored Rust clipboard tests write the global clipboard; run them
+only as an isolated test user or runner. An earlier wrapped-table-copy failure
+is intermittent and unexplained; see
+[Coverage limits](architecture.md#coverage-limits).
+
+When running the upstream DSH source tests:
+
+- Unset `NoDefaultCurrentDirectoryInExePath` if the shell exports it; the
+  Windows executable-search test reads it and fails.
+- Run from the physical path, not through the `/tmp` symlink; otherwise
+  `bash-local`'s `defaults cwd to process.cwd()` compares `/tmp` with
+  `/private/tmp` and fails.
+- The full suite, last run at the 0.1.5-rc.2 pin, failed four specs that fail
+  identically on the pristine pin: `browser-bundled-externals` (Vite on the
+  `/private/var/folders` temp path), the `/tmp` cwd test, `webworker-runtime`
+  transform-corpus baselines, and `pdf-license-bundle` without `pnpm` on PATH.
 
 ## Release
 

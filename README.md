@@ -167,5 +167,7 @@ keeps working.
 - [Bridge development](bridge/grok-leader/README.md)
 - [Protocol contract](docs/grok-leader-protocol.md)
 - [Upgrade, testing, and release](docs/upgrade-strategy.md)
-- [Repository maintenance review](docs/maintenance-review.md)
+- [Architecture](docs/architecture.md) and [performance](docs/performance.md)
+- Current records: [DSH 0.1.7 adaptation](docs/dsh-upstream-refresh-2026-09-22.md)
+  and [capability port and UX audit](docs/dsh-capability-candidate.md)
 - [License and third-party notices](THIRD_PARTY_NOTICES.md)
