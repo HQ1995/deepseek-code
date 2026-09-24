@@ -287,6 +287,11 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
       rawOutput: jobOutputPatch(before, output),
     }, false)
   }
+  /** DSH appends the kill reason to the job detail the model reads. A stop
+   * from the Tasks pane uses the official job controller's wording, and the
+   * headless reaper's `teardown` says the session ended; the wire's raw
+   * `source` means nothing to the model. */
+  const killReasons = { clientUi: 'cancelled by the user', teardown: 'session closed' } as const
   const killTask = async (clientId: number, params: unknown): Promise<unknown> => {
     const p = paramRecord(params, 'x.ai/task/kill')
     if (!nonEmpty(p.sessionId) || !nonEmpty(p.taskId) || (p.source !== 'clientUi' && p.source !== 'teardown')) throw invalidParams('x.ai/task/kill requires sessionId, taskId and source')
@@ -300,7 +305,7 @@ export function createNativeTasks<T extends TaskSession>(host: TaskHost<T>) {
       if (!jobIsRunning(before)) { emitJobsForRecord(record); return { result: { taskId, outcome: 'already_exited' } } }
       scope.assertActive()
       if (!isLive(record)) throw invalidParams('session closed')
-      const requested = jobs.kill(taskId, record.agent.session.id, source)
+      const requested = jobs.kill(taskId, record.agent.session.id, killReasons[source])
       const settled = requested === 'already-finished' ? jobs.get(taskId, record.agent.session.id) : await jobs.wait(taskId, 5000, record.agent.session.id)
       if (!isLive(record)) throw invalidParams('session closed')
       emitJobsForRecord(record)

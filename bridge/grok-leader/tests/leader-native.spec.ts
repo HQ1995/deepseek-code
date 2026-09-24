@@ -134,7 +134,7 @@ describe('leader native jobs, children, workflows and activity', () => {
     sendRequest(c, 5, 'x.ai/task/kill', { sessionId, taskId: row.id, source: 'clientUi' })
     await waitFor(() => wait.mock.calls.length === 1)
     expect(c.all.some(msg => msg.id === 5)).toBe(false)
-    expect(kill).toHaveBeenCalledWith(row.id, owner.session.id, 'clientUi')
+    expect(kill).toHaveBeenCalledWith(row.id, owner.session.id, 'cancelled by the user')
     expect(wait).toHaveBeenCalledWith(row.id, 5000, owner.session.id)
     Object.assign(row, { status: 'killed', finishedAt: 3000, detail: 'terminated by producer' })
     changed({ type: 'output', owner: typeof owner === 'string' ? owner : owner.session.id, id: 'bash-1', total: 0 }); finish(row)
