@@ -24,12 +24,13 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22.19.0'
+          package-manager-cache: false
       - name: Use the product version for all Rust checks and builds
         run: echo "GROK_VERSION=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_ENV"
       - name: Install source runtime toolchains
@@ -100,15 +101,11 @@ jobs:
           DSCODE_E2E_OUT_DIR: ${{ runner.temp }}/dscode-e2e
           DSCODE_TUI_BIN: ${{ github.workspace }}/third_party/grok-build/target/release/dscode
         run: bash scripts/e2e-tui-bridge.sh
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: product-e2e-${{ runner.os }}
-          path: ${{ runner.temp }}/dscode-e2e
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: runner.os == 'macOS'
         with:
           node-version: '24'
+          package-manager-cache: false
       - name: Bridge compatibility on Node 24
         if: runner.os == 'macOS'
         working-directory: bridge/grok-leader
@@ -117,3 +114,11 @@ jobs:
           DSCODE_E2E_PLUGIN_TGZ: ${{ runner.temp }}/dscode-payload/dscode-plugin.tgz
           DSCODE_TUI_BIN: ${{ github.workspace }}/third_party/grok-build/target/release/dscode
         run: node node_modules/vitest/vitest.mjs run --maxWorkers 2
+      # Evidence only, and last: an artifact-service timeout must neither fail
+      # a passing run nor skip the checks after it.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        continue-on-error: true
+        with:
+          name: product-e2e-${{ runner.os }}
+          path: ${{ runner.temp }}/dscode-e2e
