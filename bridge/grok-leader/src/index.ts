@@ -10,7 +10,7 @@ import { createSessionDiscovery, type SessionProjectionCacheLike, type SessionQu
 import { createNativeInteractions } from './native-interactions.ts'
 import { createSessionLifecycle, type SessionRecord } from './session-lifecycle.ts'
 import { createPresetCatalog } from './preset-catalog.ts'
-import { createSessionPresets, type AgentPresetsLike } from './session-presets.ts'
+import { createSessionPresets } from './session-presets.ts'
 import { presetHistoryProjection } from './preset-history.ts'
 import { workflowProjection } from './workflows.ts'
 import { createSessionModels } from './session-models.ts'
@@ -74,9 +74,9 @@ import { jobOutputSnapshot } from './job-output.ts'
 import { createImageOutputProjector } from './image-output.ts'
 import { exportSessionArchive } from './session-export.ts'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
-import { acpPromptToText, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, promptHasUnsupportedContent, sessionEventToUpdates, toolKindForName, turnEndToStopReason, type DecodeSpeed, type GrokSessionUpdate, type ProjectedUpdate, type StopReasonWire, type ToolKindWire } from './projection.ts'
+import { acpPromptToText, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, sessionEventToUpdates, toolKindForName, turnEndToStopReason, type DecodeSpeed, type GrokSessionUpdate, type ProjectedUpdate, type StopReasonWire, type ToolKindWire } from './projection.ts'
 
-export { acpPromptToText, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, promptHasUnsupportedContent, sessionEventToUpdates, toolKindForName, turnEndToStopReason }
+export { acpPromptToText, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, sessionEventToUpdates, toolKindForName, turnEndToStopReason }
 export type { DecodeSpeed, GrokSessionUpdate, ProjectedUpdate, StopReasonWire, ToolKindWire }
 export type { ToolResultContentBlock } from './projection.ts'
 
@@ -295,11 +295,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       commands: record => { void sessionCommands.refresh(record) },
     },
   })
-  // The one-time COMPAT SHIM (/dsh login + /dsh code for the pre-registry
-  // subscriptions plugin) is RETIRED: @hqzhao95/dsh-subscriptions-commands
-  // registers /login, /logout, /code, /subscriptions-status through the dsh
-  // command registry, so they auto-surface as slash commands with zero
-  // bridge involvement. The bridge carries no plugin-specific code.
 
   const ownedAgentRecord = registry.ownedAgent
   const ownedRecord = registry.owned

@@ -440,7 +440,7 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
         case 'list': {
           const { dependencies, bundles } = await readProfileManifest(dir)
           const lines = bundles.map(name => {
-            const core = name === '@deepseek-ai/dsh-base' || name === '@hqzhao95/dscode' || name === 'dscode' || name === '@deepseek-ai/dsh-grok-leader' ? ' (core)' : ''
+            const core = CORE_PLUGIN_NAMES.has(name) ? ' (core)' : ''
             const version = dependencies[name] === undefined ? '' : ' ' + dependencies[name]
             return '- ' + name + version + core
           })

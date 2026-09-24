@@ -86,5 +86,3 @@ export function createNativeTeam<S>(host: NativeTeamHost<S>) {
     },
   }
 }
-
-export type NativeTeam = ReturnType<typeof createNativeTeam>

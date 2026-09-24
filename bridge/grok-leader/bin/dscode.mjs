@@ -25,12 +25,12 @@
 // marker files to drift). Older cache → download the pin; newer or -dev
 // cache → left alone (developer-managed).
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { installationReport, formatInstallationReport } from './doctor.mjs'
-import { healLauncherLink as repairLauncherLink } from './launcher-files.mjs'
+import { healLauncherLink as repairLauncherLink, readJsonFile } from './launcher-files.mjs'
 import { atomicWrite, compareVersions, downloadVerified, parseCliVersion, installationFilesMatch, installationMatches, installRelease, needsUpdateWithChannel, resolveRelease, saveUpdateChannel, unsupportedPlatformMessage, updateOptions, validateRuntime, withProfileLock } from './update.mjs'
 
 const RELEASE_REPO = 'HQ1995/deepseek-code'
@@ -203,14 +203,6 @@ const PROFILE_PATCH_TEMPLATE = `# Your patch layer for this dsh profile, applied
 const pluginDir = join(profileDir, 'node_modules', ...pkg.name.split('/'))
 const pluginManifestPath = join(pluginDir, 'package.json')
 const profileManifestPath = join(profileDir, 'package.json')
-
-const readJsonFile = (path) => {
-  try {
-    return JSON.parse(readFileSync(path, 'utf8'))
-  } catch {
-    return undefined
-  }
-}
 
 export const packageNeedsInstall = (installedVersion, desiredVersion) =>
   installedVersion !== desiredVersion

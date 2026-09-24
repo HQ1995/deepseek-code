@@ -141,20 +141,6 @@ export function acpPromptToText(prompt: unknown): string {
   }).join('')
 }
 
-/**
- * Whether a prompt carries content beyond text, resource_link, and image
- * blocks. Shape validation and image admission happen at the RPC boundary.
- * @param prompt - prompt content blocks to inspect.
- * @returns true when any block has an unsupported content type.
- */
-export function promptHasUnsupportedContent(prompt: unknown): boolean {
-  if (!Array.isArray(prompt)) return true
-  return prompt.some((block) => {
-    const t = (block as Record<string, unknown>).type
-    return t !== 'text' && t !== 'resource_link' && t !== 'image'
-  })
-}
-
 /** Integer cache percentage with positive midpoint ties rounded up. */
 function roundedIntegerPercent(cacheReadTokens: number, denominator: number): number {
   const denominatorQuotient = Math.floor(denominator / 200)

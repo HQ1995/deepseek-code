@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-const readJsonFile = path => { try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return undefined } }
+export const readJsonFile = path => { try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return undefined } }
 export const syncDirectory = path => {
   const fd = openSync(path, constants.O_RDONLY)
   try { fsyncSync(fd) } finally { closeSync(fd) }

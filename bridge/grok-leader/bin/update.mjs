@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { accessSync, chmodSync, closeSync, constants, cpSync, createWriteStream, existsSync, fsync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, cpSync, createWriteStream, existsSync, fsync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { promisify } from 'node:util'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { createRequire } from 'node:module'

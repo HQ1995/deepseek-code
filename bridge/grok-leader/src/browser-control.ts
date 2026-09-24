@@ -163,5 +163,3 @@ export function createBrowserControl(dependencies: BrowserControlDependencies) {
     },
   }
 }
-
-export type BrowserControl = ReturnType<typeof createBrowserControl>
