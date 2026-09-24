@@ -4739,3 +4739,63 @@ fn other_tool_expanded_shows_capped_input_and_content() {
     assert!(bare.input.is_none());
     assert!(!bare.is_foldable());
 }
+/// An answered question tool whose result is structured JSON renders as
+/// question → answer pairs (question text from rawInput, matched by id), not
+/// as the raw `{"answers":[…]}` string.
+#[test]
+fn structured_question_answers_render_as_qa_pairs() {
+    let _theme = crate::theme::cache::pin_theme();
+    let call = |result: &str| {
+        acp::ToolCall::new(acp::ToolCallId::new(Arc::from("q1")), "ask_user_question")
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Completed)
+            .content(text_content(result))
+            .raw_input(Some(serde_json::json!({"questions": [
+                {"id": "lang", "question": "Which language?", "options": [{"label": "Rust"}, {"label": "Go"}]},
+                {"id": "extras", "header": "Extras", "question": "Anything else?", "multi_select": true},
+                {"id": "skipped", "question": "Deploy now?"},
+            ]})))
+    };
+    let answered = r#"{"answers":[{"id":"extras","selected":["tests","docs"],"custom":"and a README"},{"id":"lang","selected":["Rust"]}]}"#;
+    let RenderBlock::ToolCall(ToolCallBlock::Other(block)) =
+        tool_call_to_block(&call(answered), None)
+    else {
+        panic!("expected an other card");
+    };
+    assert_eq!(
+        block.qa_pairs.as_deref(),
+        Some(
+            &[
+                ("Which language?".to_owned(), "Rust".to_owned()),
+                (
+                    "Anything else?".to_owned(),
+                    "tests, docs, and a README".to_owned()
+                ),
+                ("Deploy now?".to_owned(), String::new()),
+            ][..]
+        )
+    );
+    assert!(
+        block.input.is_none(),
+        "the pairs already show the questions"
+    );
+    let shown = expanded_text(&block);
+    assert!(shown.contains("1. Which language?"), "{shown}");
+    assert!(shown.contains("\u{2192} Rust"), "{shown}");
+    assert!(shown.contains("(no answer)"), "{shown}");
+    assert!(!shown.contains("\"answers\""), "no raw JSON: {shown}");
+
+    // Not that shape (or answering none of the questions): rendered as before.
+    for other in [
+        r#"{"answers":[{"id":"nope","selected":["x"]}]}"#,
+        "plain text",
+    ] {
+        let RenderBlock::ToolCall(ToolCallBlock::Other(block)) =
+            tool_call_to_block(&call(other), None)
+        else {
+            panic!("expected an other card");
+        };
+        assert!(block.qa_pairs.is_none(), "{other}");
+        assert_eq!(block.output.as_deref(), Some(other));
+    }
+}

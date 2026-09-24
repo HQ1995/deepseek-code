@@ -2258,6 +2258,11 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
                     ct.clone()
                 });
             }
+            if success && let Some(pairs) = answered_questions(tc, &ct) {
+                // The questions are in the pairs; the raw input would repeat them.
+                block.qa_pairs = Some(pairs);
+                block.input = None;
+            }
             if !ct.is_empty() {
                 block.set_output_text(ct);
             }
@@ -2350,6 +2355,54 @@ fn raw_input_display(tc: &acp::ToolCall, skip: &[&str]) -> Option<String> {
         lines.push(format!("\u{2026} +{} lines", total - lines.len()));
     }
     Some(lines.join("\n"))
+}
+/// DIVERGENCE(dscode): `(question, answer)` pairs of an answered question
+/// tool, from its structured result rather than grok's text formats: the call's
+/// `rawInput.questions[] {id, question}` matched by id to a result
+/// `{"answers": [{id, selected: [..], custom?}]}`. Keyed on that generic
+/// question/answer shape, never a tool name. `None` when the result is not
+/// that shape or answers none of the questions, so the card renders as usual.
+fn answered_questions(tc: &acp::ToolCall, result: &str) -> Option<Vec<(String, String)>> {
+    use serde_json::Value;
+    let questions = tc.raw_input.as_ref()?.get("questions")?.as_array()?;
+    let result: Value = serde_json::from_str(result.trim()).ok()?;
+    let answers = result.get("answers")?.as_array()?;
+    let text = |value: &Value, key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    let mut matched = false;
+    let mut pairs = Vec::with_capacity(questions.len());
+    for question in questions {
+        let id = question.get("id").and_then(Value::as_str)?;
+        let asked = text(question, "question")
+            .or_else(|| text(question, "header"))
+            .unwrap_or_else(|| id.to_owned());
+        let answer = answers
+            .iter()
+            .find(|answer| answer.get("id").and_then(Value::as_str) == Some(id));
+        matched |= answer.is_some();
+        let reply = answer
+            .map(|answer| {
+                let mut parts: Vec<String> = answer
+                    .get("selected")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect();
+                parts.extend(text(answer, "custom"));
+                parts.join(", ")
+            })
+            .unwrap_or_default();
+        pairs.push((asked, reply));
+    }
+    matched.then_some(pairs)
 }
 /// Display title for a tool call: its title, or the kind name when empty.
 fn tool_call_title(tc: &acp::ToolCall) -> Cow<'_, str> {
