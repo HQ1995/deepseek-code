@@ -11,8 +11,8 @@ vi.mock('node:child_process', async () => {
   return { execFile: Object.assign(() => {}, { [promisify.custom]: processAdapter.execute }) }
 })
 import { createNativeExecution } from '../src/native-execution.ts'
+import { tick } from './support/async.ts'
 
-const tick = async () => { for (let i = 0; i < 30; i++) await Promise.resolve() }
 function fixture() {
   const child = new EventEmitter()
   let resolve!: (value: { stdout: string }) => void, reject!: (error: unknown) => void
@@ -63,7 +63,7 @@ describe('diagnostic child-process completion', () => {
     const f = fixture()
     let done = false
     const request = f.doctor().then(value => { done = true; return value })
-    f.resolve({ stdout: '[]' }); await tick()
+    f.resolve({ stdout: '[]' }); await tick(30)
     const early = done, continuedEarly = f.subprocess.mock.calls.length
     f.child.emit('close', 0)
     await expect(request).resolves.toHaveProperty('text')
@@ -77,7 +77,7 @@ describe('diagnostic child-process completion', () => {
     let done = false
     if (owner === 'session') f.record.work.cancel()
     const disposal = (owner === 'session' ? f.record.work.settle() : f.execution.dispose()).then(() => { done = true })
-    await tick(); const early = done
+    await tick(30); const early = done
     expect(f.signal().aborted).toBe(true)
     f.child.emit('close', null, 'SIGTERM')
     await rejected; await disposal; await f.execution.dispose(); await f.record.work.dispose()

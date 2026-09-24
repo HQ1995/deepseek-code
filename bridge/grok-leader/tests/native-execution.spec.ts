@@ -5,10 +5,10 @@ import { TerminalSessionId } from '@deepseek-ai/dsh-terminal'
 import type { BrowserStatus } from '../src/browser-control.ts'
 import { createNativeExecution, type NativeTerminals } from '../src/native-execution.ts'
 import { createSessionWork } from '../src/session-work.ts'
+import { tick } from './support/async.ts'
 
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { for (const stop of stops.splice(0)) await stop() })
-const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
 function fixture() {
   const ready = { value: true }, live = { value: true }, terminalAvailable = { value: true }
   const agent = { session: { id: SessionId('one'), header: { agentPreset: 'standard' } } } as Agent

@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { SessionId, SessionLogOffset, SessionStore, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset, SessionStore } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { presetHistory, presetHistoryProjection } from '../src/preset-history.ts'
+import { event } from './support/session-events.ts'
 
 const contexts: Context[] = []
 afterEach(async () => { for (const ctx of contexts.splice(0)) await ctx.fiber.dispose() })
@@ -13,7 +14,6 @@ function fixture() {
   const stop = projections.register(presetHistoryProjection)
   return { ctx, store, projections, stop, state: (session: Parameters<typeof projections.stateOf>[0]) => projections.stateOf(session, 'dscodePresetHistory') }
 }
-const event = (type: string, data: unknown = {}) => ({ type, data, seq: 0, time: 0 }) as SessionEvent
 
 describe('native preset history projection', () => {
   it('keeps the exact history policy and latest valid selection without retaining event content', () => {

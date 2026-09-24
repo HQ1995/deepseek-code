@@ -6,19 +6,19 @@ import {
   SessionPersistenceRevision, type SessionHandle, type SessionPersistence,
 } from '@deepseek-ai/dsh-session-persistence'
 import { createSessionDiscovery, type SessionProjectionCacheLike, type SessionQueryLike } from '../src/session-discovery.ts'
+import { tick } from './support/async.ts'
+import { event } from './support/session-events.ts'
 
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(stops.splice(0).map(stop => stop())) })
-const tick = async () => { for (let i = 0; i < 16; i++) await Promise.resolve() }
 /** The wrapper cordis puts in front of a service on every ctx lookup: a fresh
  * proxy per call whose only contract here is that symbols.original names the
  * instance it stands for. */
 const traceable = <T extends object>(value: T): T => new Proxy(value, {
   get: (target, property, receiver) => property === symbols.original ? target : Reflect.get(target, property, receiver),
 })
-const event = (type: string, data: unknown, time: number): SessionEvent => ({ type, data, time, seq: time }) as SessionEvent
-const prompt = (text: string, time = 1) => event('user/message', { source: { kind: 'user' }, content: [{ type: 'text', text }] }, time)
-const title = (text: string, time = 2) => event('session/title', { title: text }, time)
+const prompt = (text: string, time = 1) => event('user/message', { source: { kind: 'user' }, content: [{ type: 'text', text }] }, time, time)
+const title = (text: string, time = 2) => event('session/title', { title: text }, time, time)
 function fixture(cleanupError?: string) {
   const headers = new Map<string, SessionHeader>(), logs = new Map<string, readonly SessionEvent[]>()
   const revisions = new Map<string, string>(), owned = new Set<Session>()
@@ -186,7 +186,7 @@ describe('owned session discovery', () => {
     const roster = f.discovery.list('x.ai/sessions/list')
     const legacy = f.discovery.list('session/list')
     const picker = f.picker({ cwd: '/work' })
-    await tick()
+    await tick(16)
     expect(f.list).toHaveBeenCalledTimes(1)
     gate.resolve()
     expect((await picker)[0]).toMatchObject({ sessionId: 'a', firstPrompt: 'kept' })
@@ -249,7 +249,7 @@ describe('owned session discovery', () => {
     const list = f.list.getMockImplementation()!
     f.list.mockImplementation(async options => { await gate.promise; return list(options) })
     const inFlight = f.roster()
-    await tick()
+    await tick(16)
     f.add('b', '/work')
     f.announce({ header: f.headers.get('b')! } as Session)
     gate.resolve()
@@ -366,10 +366,10 @@ describe('owned session discovery', () => {
     const list = f.list.getMockImplementation()!
     f.list.mockImplementation(async options => { await gate.promise; return list(options) })
     const first = f.discovery.list('x.ai/sessions/list')
-    await tick()
+    await tick(16)
     f.replace({ open: f.open, list: f.list })
     const second = f.discovery.list('x.ai/sessions/list')
-    await tick()
+    await tick(16)
     expect(f.list).toHaveBeenCalledTimes(2)
     gate.resolve()
     await expect(Promise.all([first, second])).resolves.toHaveLength(2)
@@ -381,7 +381,7 @@ describe('owned session discovery', () => {
     const read = f.read.getMockImplementation()!
     f.read.mockImplementation(async id => { await gate.promise; return read(id) })
     const first = f.picker(), second = f.picker({ limit: 1_000 })
-    await tick(); const held = f.active
+    await tick(16); const held = f.active
     gate.resolve()
     const [a, b] = await Promise.all([first, second])
     expect(held).toBe(2); expect(f.peak).toBe(2); expect(f.active).toBe(0)
@@ -488,7 +488,7 @@ describe('owned session discovery', () => {
     const f = fixture(), gate = Promise.withResolvers<void>(); f.add('a', '/work', [prompt('old'), title('old title')])
     const oldRead = f.read.getMockImplementation()!
     f.read.mockImplementationOnce(async id => { const result = await oldRead(id); await gate.promise; return result })
-    const old = f.picker(); await tick()
+    const old = f.picker(); await tick(16)
     const store = f.store()
     f.replace({ list: store.list, open: async (...args) => {
       const handle = await store.open(...args)
@@ -505,7 +505,7 @@ describe('owned session discovery', () => {
     const f = fixture(), gate = Promise.withResolvers<void>(), header = f.add('a', '/work', [prompt('old'), title('old title')])
     await f.picker()
     f.query.mockImplementationOnce(async () => { await gate.promise; return { items: [{ header, bestMatch: { time: 10, snippet: 'old match', type: 'user/message' } }] } })
-    const pending = f.discovery.search({ query: 'old' }); await tick()
+    const pending = f.discovery.search({ query: 'old' }); await tick(16)
     f.replace({ ...f.store() })
     f.query.mockResolvedValue({ items: [{ header, bestMatch: { time: 40, snippet: 'replacement match', type: 'user/message' } }] })
     const fresh = await f.discovery.search({ query: 'replacement' })
@@ -520,7 +520,7 @@ describe('owned session discovery', () => {
     f.close.mockImplementationOnce(async () => gate.promise)
     let done = false
     const read = f.discovery.inspect(SessionId('a')).then(value => { done = true; return value })
-    await tick(); const early = done; gate.resolve()
+    await tick(16); const early = done; gate.resolve()
     expect(await read).toEqual({ meta: header, inheritedEventCount: 3, events: [prompt('a')] })
     expect(early).toBe(false)
     const failure = new Error('read failed'), close = new Error('close failed')
@@ -542,7 +542,7 @@ describe('owned session discovery', () => {
     const open = f.open.getMockImplementation()!
     f.open.mockImplementationOnce(async (...args) => { const handle = await open(...args); await gate.promise; return handle })
     const request = f.discovery.inspect(SessionId('a'), { signal: controller.signal }), failed = request.catch(error => error)
-    await tick(); controller.abort(new Error('caller closed'))
+    await tick(16); controller.abort(new Error('caller closed'))
     expect(f.open.mock.calls[0]![2]!.signal!.aborted).toBe(true)
     gate.resolve(); expect(await failed).toMatchObject({ message: 'caller closed' })
     expect(f.read).not.toHaveBeenCalled(); expect(f.active).toBe(0)
@@ -557,7 +557,7 @@ describe('owned session discovery', () => {
   })
 
   it('selects compact values from bounded contiguous pages with one handle and a fixed end', async () => {
-    const f = fixture(), events = Array.from({ length: 1030 }, (_, seq) => event('session/title', { title: 'body'.repeat(2048) }, seq))
+    const f = fixture(), events = Array.from({ length: 1030 }, (_, seq) => event('session/title', { title: 'body'.repeat(2048) }, seq, seq))
     f.add('a', '/work', events)
     const selected = await f.discovery.select(SessionId('a'), { end: SessionLogOffset(1027) }, event => event.seq % 256 === 0 ? event.seq : undefined)
     expect(selected).toEqual([0, 256, 512, 768, 1024])
@@ -625,10 +625,10 @@ describe('owned session discovery', () => {
     const list = f.list.getMockImplementation()!
     f.list.mockImplementationOnce(async options => { await gate.promise; return list(options) })
     const request = f.picker(), rejected = expect(request).rejects.toThrow('disposed')
-    await tick()
+    await tick(16)
     const signal = f.list.mock.calls[0]![0]!.signal!
     let done = false; const disposal = f.discovery.dispose().then(() => { done = true })
-    await tick(); const early = done
+    await tick(16); const early = done
     gate.resolve(); await rejected; await disposal
     expect(signal.aborted).toBe(true); expect(early).toBe(false)
     expect(f.open).not.toHaveBeenCalled(); expect(f.unsubscribe).toHaveBeenCalledOnce()
@@ -640,8 +640,8 @@ describe('owned session discovery', () => {
     f.open.mockImplementationOnce(async (...args) => { const handle = await open(...args); await openGate.promise; return handle })
     f.close.mockImplementationOnce(async () => closeGate.promise)
     const request = f.discovery.inspect(SessionId('a')), rejected = expect(request).rejects.toThrow('disposed')
-    await tick(); let done = false; const disposal = f.discovery.dispose().then(() => { done = true })
-    openGate.resolve(); await tick(); const early = done
+    await tick(16); let done = false; const disposal = f.discovery.dispose().then(() => { done = true })
+    openGate.resolve(); await tick(16); const early = done
     closeGate.resolve(); await rejected; await disposal
     expect(early).toBe(false); expect(f.read).not.toHaveBeenCalled(); expect(f.close).toHaveBeenCalledOnce()
   })
@@ -654,7 +654,7 @@ describe('owned session discovery', () => {
     await expect(f.picker()).rejects.toBe(failure)
     const opened = f.open.mock.calls.length
     let done = false; const disposal = f.discovery.dispose().then(() => { done = true })
-    await tick(); const early = done
+    await tick(16); const early = done
     gate.resolve(); await disposal
     expect(early).toBe(false); expect(f.active).toBe(0)
     expect(f.open).toHaveBeenCalledTimes(opened)
@@ -667,7 +667,7 @@ describe('owned session discovery', () => {
     f.read.mockImplementationOnce(async () => { await gate.promise; return { events: [], eventState: 'owned' } })
     f.close.mockRejectedValueOnce(close)
     const request = f.discovery.inspect(SessionId('a')), failed = request.catch(error => error)
-    await tick()
+    await tick(16)
     let reentered!: Promise<void>
     f.unsubscribe.mockImplementationOnce(() => { reentered = f.discovery.dispose(); throw unsubscribe })
     f.unsubscribeCreated.mockImplementationOnce(() => { throw createdFeed })
@@ -684,8 +684,8 @@ describe('owned session discovery', () => {
     const f = fixture(), gate = Promise.withResolvers<void>()
     f.query.mockImplementationOnce(async () => { await gate.promise; return { items: [] } })
     const request = f.discovery.search({ query: 'query' }), rejected = expect(request).rejects.toThrow('disposed')
-    await tick(); let done = false; const disposal = f.discovery.dispose().then(() => { done = true })
-    await tick(); const early = done
+    await tick(16); let done = false; const disposal = f.discovery.dispose().then(() => { done = true })
+    await tick(16); const early = done
     gate.resolve(); await rejected; await disposal
     expect(early).toBe(false); expect(f.query.mock.calls[0]![1]!.signal!.aborted).toBe(true)
     const other = fixture()

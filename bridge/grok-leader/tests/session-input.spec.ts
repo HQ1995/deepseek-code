@@ -7,10 +7,10 @@ import { createPromptQueues, type PromptQueue, type PromptSettleResult } from '.
 import { modelEffortKey, type ModelCatalog } from '../src/wire-catalog.ts'
 import type { ParsedPrompt } from '../src/prompt-content.ts'
 import type { SessionModel } from '../src/session-models.ts'
+import { tick } from './support/async.ts'
 
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { for (const stop of stops.splice(0)) await stop() })
-const tick = async () => { for (let i = 0; i < 25; i++) await Promise.resolve() }
 function fixture() {
   const followup = vi.fn(), steer = vi.fn(), cancelAgent = vi.fn(), ready = { value: true }
   const agent = { session: { id: SessionId('one') }, status: 'idle', followup, steer, cancel: cancelAgent,
@@ -106,7 +106,7 @@ describe('session input routing', () => {
     const request = f.prompt('/command'), rejected = expect(request).rejects.toBe(failure)
     f.input.cancelPrompt(1, { sessionId: 'one', promptId: 'request' })
     let drained = false; const disposal = f.input.dispose().then(() => { drained = true })
-    await tick(); const early = drained
+    await tick(25); const early = drained
     gate.reject(failure); await rejected; await disposal
     expect(early).toBe(false)
   })
@@ -115,11 +115,11 @@ describe('session input routing', () => {
     const f = fixture(), gate = Promise.withResolvers<ModelCatalog>()
     f.host.models.current.mockReturnValueOnce(gate.promise)
     const request = f.prompt('image', true)
-    await tick()
+    await tick(25)
     expect(f.input.cancelPrompt(1, { sessionId: 'one', promptId: 'request' })).toEqual({ status: 'cancelled' })
     await expect(request).resolves.toMatchObject({ stopReason: 'cancelled' })
     await f.prompt('fresh')
-    gate.resolve(f.catalog); await tick()
+    gate.resolve(f.catalog); await tick(25)
     expect(f.saveImages).not.toHaveBeenCalled()
     expect(f.followup).toHaveBeenCalledOnce()
     expect(f.followup.mock.calls[0]![0].content).toEqual([{ type: 'text', text: 'fresh' }])
@@ -129,7 +129,7 @@ describe('session input routing', () => {
   it('still cancels the running owner human request and pauses its goal when native cancellation fails', async () => {
     const f = fixture(), gate = Promise.withResolvers<void>(), error = new Error('native cancel failed')
     vi.spyOn(f.record.agent, 'whenIdle').mockReturnValue(gate.promise)
-    const request = f.prompt(); await tick()
+    const request = f.prompt(); await tick(25)
     f.cancelAgent.mockImplementationOnce(() => { throw error })
     expect(() => f.input.cancelPrompt(1, { sessionId: 'one', promptId: 'request' })).toThrow(error)
     gate.resolve(); await expect(request).resolves.toMatchObject({ stopReason: 'cancelled' })
@@ -204,7 +204,7 @@ describe('session input routing', () => {
     const f = fixture(), gate = Promise.withResolvers<ModelCatalog>()
     f.host.models.current.mockReturnValueOnce(gate.promise)
     const request = f.prompt('image', true)
-    await tick(); expect(f.host.models.current).toHaveBeenCalledOnce()
+    await tick(25); expect(f.host.models.current).toHaveBeenCalledOnce()
     f.input.cancel(1, { sessionId: 'one' }); gate.resolve(f.catalog)
     await expect(request).resolves.toMatchObject({ stopReason: 'cancelled' })
     expect(f.saveImages).not.toHaveBeenCalled(); expect(f.followup).not.toHaveBeenCalled()
@@ -221,9 +221,9 @@ describe('session input routing', () => {
     const f = fixture(), gate = Promise.withResolvers<ModelCatalog>()
     f.host.models.current.mockReturnValueOnce(gate.promise)
     const request = f.prompt('image', true), rejected = expect(request).rejects.toThrow('disposed')
-    await tick()
+    await tick(25)
     let done = false; const disposal = f.input.dispose().then(() => { done = true })
-    await tick(); const early = done
+    await tick(25); const early = done
     gate.resolve(f.catalog); await rejected; await disposal
     expect(early).toBe(false); expect(f.saveImages).not.toHaveBeenCalled(); expect(f.followup).not.toHaveBeenCalled()
   })
@@ -232,7 +232,7 @@ describe('session input routing', () => {
     const f = fixture(), gate = Promise.withResolvers<Awaited<ReturnType<typeof f.saveImages>>>()
     f.saveImages.mockReturnValueOnce(gate.promise)
     const request = f.prompt('image', true)
-    await tick(); expect(f.saveImages).toHaveBeenCalledOnce()
+    await tick(25); expect(f.saveImages).toHaveBeenCalledOnce()
     f.input.cancel(1, { sessionId: 'one' })
     expect(f.record.queue.busy).toBe(true)
     gate.resolve([{ attachmentId: 'image', mediaType: 'image/png', bytes: 1, width: 1, height: 1 }])
@@ -284,7 +284,7 @@ describe('session input routing', () => {
       disposal = f.input.dispose(); void disposal.then(() => { done = true }); return gate.promise
     })
     const request = f.prompt('/command'), rejected = expect(request).rejects.toBe(failure)
-    await tick(); const early = done
+    await tick(25); const early = done
     gate.reject(failure); await rejected; await disposal
     expect(early).toBe(false); expect(f.input.dispose()).toBe(disposal)
     await expect(f.prompt()).rejects.toThrow('disposed')

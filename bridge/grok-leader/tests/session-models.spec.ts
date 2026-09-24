@@ -5,6 +5,7 @@ import { KNOWN_SESSION_EVENT_TYPES, SessionId, type SessionEvent } from '@deepse
 import type { AgentDefaultModelLike } from '../src/native-seams.ts'
 import { acceptedReasoningEffort, modelEffortKey, modelSelectionFromRequest, type ModelCatalog } from '../src/wire-catalog.ts'
 import { createSessionModels, type SessionModel } from '../src/session-models.ts'
+import { event } from './support/session-events.ts'
 
 interface Record { clientId: number; agent: Agent; model: SessionModel }
 function fixture(config: { provider?: string; model?: string } = {}) {
@@ -62,7 +63,6 @@ function fixture(config: { provider?: string; model?: string } = {}) {
   return { models, host, view, sessions, clients, catalog, defaults, notify, flush, order, add, set,
     setDefault: (value: typeof defaultSelection) => { defaultSelection = value } }
 }
-const event = (type: string, data: unknown): SessionEvent => ({ type, data, seq: 0, time: 0 }) as SessionEvent
 
 describe('session model ownership', () => {
   it('prepares independent runtime references from latest native/legacy choices and exact per-model effort memory', async () => {

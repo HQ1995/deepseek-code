@@ -2,8 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createModelCatalog, type ModelCatalogDependencies } from '../src/model-catalog.ts'
 import type { LlmLike, SettingsLike } from '../src/native-seams.ts'
 import { modelEffortKey } from '../src/wire-catalog.ts'
-
-const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
+import { tick } from './support/async.ts'
 
 function fixture() {
   const routes: Record<string, Record<string, unknown>> = {}
@@ -207,7 +206,7 @@ describe('model catalog module', () => {
     expect(set).toHaveBeenCalledOnce()
     let closed = false
     const closing = Promise.resolve(catalog.dispose()).then(() => { closed = true })
-    for (let i = 0; i < 20; i++) await Promise.resolve()
+    await tick()
     const closedBeforeWrite = closed
     gate.resolve(); await request; await closing; f.catalog.dispose()
     expect(closedBeforeWrite).toBe(false)
@@ -222,10 +221,10 @@ describe('model catalog module', () => {
     await vi.waitFor(() => expect(f.settings.mutate).toHaveBeenCalledOnce())
     let closed = false
     const closing = Promise.resolve(f.catalog.dispose()).then(() => { closed = true })
-    for (let i = 0; i < 20; i++) await Promise.resolve()
+    await tick()
     const closedBeforeWrite = closed
     gate.resolve(); await closing
-    for (let i = 0; i < 20; i++) await Promise.resolve()
+    await tick()
     expect(f.changed).not.toHaveBeenCalled()
     expect(closedBeforeWrite).toBe(false)
   })
