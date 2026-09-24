@@ -57,6 +57,15 @@ pub(crate) enum RunStep {
 /// collapsed thought without prompt or hook chrome folds in as
 /// [`RunStep::ThoughtMember`]; hidden, still-streaming, opened, or
 /// chrome-carrying thinking is transparent.
+/// DIVERGENCE(dscode): a teammate's rows group under their own noun.
+fn subagent_group_kind(block: &crate::scrollback::blocks::SubagentBlock) -> VerbGroupKind {
+    if block.role.as_deref() == Some("teammate") {
+        VerbGroupKind::Teammate
+    } else {
+        VerbGroupKind::Subagent
+    }
+}
+
 pub(crate) fn run_step(entry: &ScrollbackEntry, show_thinking: bool) -> RunStep {
     let is_claimable_thinking = entry.display_mode == DisplayMode::Collapsed
         && !entry.is_pending_user_input
@@ -73,9 +82,9 @@ pub(crate) fn run_step(entry: &ScrollbackEntry, show_thinking: bool) -> RunStep 
             // member of an expanded group never dissolves the group.
             RunStep::Transparent
         }
-    } else if matches!(entry.block, RenderBlock::Subagent(_)) {
+    } else if let RenderBlock::Subagent(sb) = &entry.block {
         if entry.display_mode == DisplayMode::Collapsed && !entry.is_pending_user_input {
-            RunStep::Member(VerbGroupKind::Subagent)
+            RunStep::Member(subagent_group_kind(sb))
         } else {
             // Subagent rows are always collapsed single-row entries; prompt
             // chrome keeps them standalone and breaks the run.
@@ -293,7 +302,7 @@ pub fn truncation_header_label(
         }
         match &entry.block {
             RenderBlock::ToolCall(block) => acc.push(block.label_kind()?, entry, false),
-            RenderBlock::Subagent(_) => acc.push(VerbGroupKind::Subagent, entry, false),
+            RenderBlock::Subagent(sb) => acc.push(subagent_group_kind(sb), entry, false),
             // A participant the vocabulary can't name would leave the label
             // dishonest about what's hidden; decline so the numerically
             // exact plain count renders instead.
@@ -790,6 +799,21 @@ mod tests {
         let l = truncation_header_label(&refs, 0..refs.len(), Some(2), false, &Theme::current())
             .expect("buckets");
         assert_eq!(l.text, "Ran 2 commands");
+    }
+
+    #[test]
+    fn teammate_rows_are_named_teammates() {
+        // DIVERGENCE(dscode): a teammate's started and terminal rows share
+        // its role, so the run names one teammate beside other subagents.
+        let teammate = |block: SubagentBlock| {
+            subagent(SubagentBlock { role: Some("teammate".into()), persona: Some("reviewer".into()), ..block })
+        };
+        let entries = vec![
+            teammate(SubagentBlock::started("Review", "mate", "continuable", None, None, None, true)),
+            sub_started("child-A"),
+            teammate(SubagentBlock::completed("Review", "mate", Some(std::time::Duration::from_secs(1)))),
+        ];
+        assert_eq!(label(&entries).text, "Ran 1 teammate, Ran 1 subagent");
     }
 
     #[test]

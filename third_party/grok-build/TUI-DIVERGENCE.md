@@ -802,3 +802,9 @@ reloads with the picked preset.
 `subagent_finished` with `_meta.subagentDurationAvailable: true` supplies the
 child's settled run length even when its other metrics are unavailable, so a
 finished row stops counting up (class: feature).
+
+### Teammate rows in tool groups
+
+Subagent rows whose role is `teammate` group under their own noun ("Ran 1
+teammate"), and a terminal row keeps its started row's persona and role so one
+teammate counts once (class: feature).

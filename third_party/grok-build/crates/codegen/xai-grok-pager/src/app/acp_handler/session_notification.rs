@@ -939,7 +939,7 @@ pub(super) fn handle_session_notification_with_origin(
                     }
                     entry.invalidate_cache();
                 } else {
-                    let block = match status.as_str() {
+                    let mut block = match status.as_str() {
                         "completed" => RenderBlock::Subagent(
                             crate::scrollback::blocks::SubagentBlock::completed(
                                 description.as_ref(),
@@ -963,6 +963,14 @@ pub(super) fn handle_session_notification_with_origin(
                             ))
                         }
                     };
+                    // DIVERGENCE(dscode): the terminal row keeps the started row's
+                    // identity, so a teammate groups as one teammate.
+                    if let RenderBlock::Subagent(ref mut sb) = block
+                        && let Some(info) = agent.subagent_sessions.get(&child_session_id)
+                    {
+                        sb.persona = info.persona.as_deref().map(str::to_owned);
+                        sb.role = info.role.as_deref().map(str::to_owned);
+                    }
                     agent.scrollback.push_block(block);
                 }
             } else if let Some(eid) = entry_id

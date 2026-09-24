@@ -101,6 +101,9 @@ pub enum VerbGroupKind {
     IntegrationSearch,
     /// Subagent lifecycle rows (`RenderBlock::Subagent`).
     Subagent,
+    /// DIVERGENCE(dscode): Agent Team teammates, the subagent rows whose role
+    /// is `teammate`, named as such ("Ran 1 teammate").
+    Teammate,
     /// Shell commands. Label-only: commands never fold eagerly
     /// ([`ToolCallBlock::verb_group_kind`] excludes them), but a truncation
     /// header describing hidden rows buckets them ("Ran 6 commands").
@@ -124,9 +127,10 @@ impl VerbGroupKind {
             | VerbGroupKind::IntegrationSearch => ("Searched", "Searching"),
             VerbGroupKind::Dir => ("Listed", "Listing"),
             VerbGroupKind::WebFetch => ("Fetched", "Fetching"),
-            VerbGroupKind::Subagent | VerbGroupKind::Command | VerbGroupKind::OtherTool => {
-                ("Ran", "Running")
-            }
+            VerbGroupKind::Subagent
+            | VerbGroupKind::Teammate
+            | VerbGroupKind::Command
+            | VerbGroupKind::OtherTool => ("Ran", "Running"),
             VerbGroupKind::EditFile => ("Edited", "Editing"),
             VerbGroupKind::McpCall => ("Called", "Calling"),
         };
@@ -144,6 +148,7 @@ impl VerbGroupKind {
             VerbGroupKind::MemorySearch => ("memory", "memories"),
             VerbGroupKind::IntegrationSearch | VerbGroupKind::McpCall => ("MCP tool", "MCP tools"),
             VerbGroupKind::Subagent => ("subagent", "subagents"),
+            VerbGroupKind::Teammate => ("teammate", "teammates"),
             VerbGroupKind::Command => ("command", "commands"),
             VerbGroupKind::OtherTool => ("tool", "tools"),
         };
