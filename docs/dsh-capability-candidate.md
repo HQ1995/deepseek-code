@@ -1,5 +1,68 @@
 # DSH capability candidate
 
+## Product integration — 2026-09-24
+
+Branch **`dsh-integration`**, on `dsh-capabilities-rc.1` (`0050882d`). The
+capability experiments become product features. Each is off, or a separate
+choice, until the user picks it:
+
+| Commit | Feature |
+| --- | --- |
+| `e06bf64e` | `/provider` adds the official DeepSeek adapter (`deepseek-official`, Messages API) and reconciles it live |
+| `c7b8c5f1`, `6973b4ea` | `/browser`: a private headless browser per top-level session, with origin limits, approvals, `/doctor` findings and a Linux AppArmor sandbox warning |
+| `e737b8c1` | The `teams` preset beside the other seven, `/team`, teammate names on child rows, and refusal of switches, copies and inbox edits that would break Team bookkeeping |
+| `b46ebf7f` | TUI divergence ledger entry for the native provider template |
+| `5e9e13f9` | Remote workspace over SSH: `dscode remote`, a fail-closed TUI for remote paths, and the leader socket published without a process-wide umask |
+
+Details, limits and acceptance scripts are in the
+[upgrade notes](upgrade-strategy.md#browser).
+
+### Verification
+
+**macOS arm64** (rc.1 runtime, evidence root `/Users/hqzhao/AI/dsh-rc171/run-20260923`):
+- Bridge suite on Node 24.19.0 and 22.19.0: 71 files, 1,099 tests each (4 compiled-CLI skips).
+- `scripts/check-rust.sh` passes, as do the remote-world and trust unit tests.
+- `control/int-verify-all.sh s2` (logs `all-*-s2`), on both Node versions:
+  - the SDK browser smoke, whose any-origin negative control fails at the outside-origin check;
+  - the installed browser smoke;
+  - the Teams smoke, whose host-row negative control fails at the isolation check;
+  - the installed Inspector smoke.
+- The same run passed the provider E2E and full TUI E2E run **19869**.
+- The native provider E2E passed on both Node versions with the final plugin.
+- Remote workspace against swoop:
+  - `e2e-remote-installed.mjs`: 5 checks;
+  - `e2e-remote-tui.mjs`: headless, then interactive in tmux;
+  - SDK `ssh-smoke.mjs` (8 checks) and `ssh-integrity-smoke.mjs` (2 checks).
+  - A TUI binary without the gates fails at the host-cwd refusal.
+
+**Linux** (swoop, Ubuntu 24.04.3, `nice -n 15`, one worker, private caches and
+homes, no sudo, run root `/home/hanqing/dscode-int-acceptance.a9plOe`). Pass 1
+at `c7b8c5f1` passed:
+- on both Node versions: setup, plugin build, bridge suites, script tests,
+  native provider E2E, and the browser SDK smoke with its negative control;
+- the installed browser smoke, with executable discovery through a private
+  `PLAYWRIGHT_BROWSERS_PATH`;
+- the TUI build, the provider E2E and the full TUI E2E.
+
+A Chrome for Testing 153 renderer was measured in its own user namespace under
+seccomp-bpf mode 2 (swoop has the AppArmor restriction off).
+
+Pass 2 at `5e9e13f9` covered everything above plus Teams and the remote
+workspace code. It ran all 15 gates, and all passed:
+- the clone update from a verified bundle, and the plugin build;
+- on each Node version: bridge suites (1,103 tests, compiled-CLI tests
+  included), script tests and the native provider E2E;
+- on each Node version: the browser smokes and the Teams smoke, whose negative
+  controls failed as designed;
+- the incremental TUI build, provider E2E run **3881589** and full TUI E2E run
+  **3883762**.
+
+Not covered: live model accounts, a second remote host, and remote Phase 2 (a
+remote read API for `@` completion, the line viewer, full-file highlighting and
+the git branch display). The pager test
+`dragging_image_while_scrollback_focused_attaches_to_composer` fails with and
+without these changes, and is outside the release gate's filter.
+
 ## Port to DSH 0.1.7 — 2026-09-23
 
 Branch **`dsh-capabilities-rc.1`**, rebased without conflicts onto the
