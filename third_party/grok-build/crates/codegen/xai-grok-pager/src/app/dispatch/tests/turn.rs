@@ -1649,6 +1649,46 @@ fn reconcile_finishes_cancelling_turn_after_grace() {
     );
 }
 
+/// A lost-RPC reconcile of a `max_tokens` end warns that the reply was cut
+/// off, right before the "Worked for" marker (same as the driver rail).
+#[test]
+fn reconcile_max_tokens_turn_completion_warns_reply_was_cut_off() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("pid-long".into());
+    }
+    arm_reconcile(
+        &mut app,
+        id,
+        "pid-long",
+        "max_tokens",
+        TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1),
+    );
+
+    assert!(reconcile_overdue_turn_ends(&mut app).is_some());
+    let agent = &app.agents[&id];
+    let events: Vec<&SessionEvent> = (0..agent.scrollback.len())
+        .filter_map(|i| match agent.scrollback.entry(i).map(|e| &e.block) {
+            Some(RenderBlock::SessionEvent(ev)) => Some(&ev.event),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(
+            events.as_slice(),
+            [
+                ..,
+                SessionEvent::OutputTokenLimit,
+                SessionEvent::TurnCompleted { .. }
+            ]
+        ),
+        "{events:?}"
+    );
+}
+
 /// A lost-RPC reconcile for a send-now cancel (`_meta.cancelTrigger: "send_now"`) pushes no marker.
 #[test]
 fn reconcile_suppresses_send_now_cancel_marker() {

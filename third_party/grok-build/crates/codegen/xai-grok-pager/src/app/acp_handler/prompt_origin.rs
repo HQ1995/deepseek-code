@@ -172,7 +172,12 @@ pub(super) fn finish_wake_turn(
             elapsed.unwrap_or_default(),
         )),
         _ if !had_output => None,
-        _ => Some(SessionEvent::TurnCompleted { elapsed }),
+        _ => {
+            if stop_reason == crate::app::turn_completion::MAX_TOKENS_STOP_REASON {
+                crate::app::turn_completion::push_output_limit_notice(agent);
+            }
+            Some(SessionEvent::TurnCompleted { elapsed })
+        }
     };
     if event.is_some() {
         crate::app::turn_completion::push_turn_terminal_marker(agent, event, Some(prompt_id));

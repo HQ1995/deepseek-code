@@ -25,6 +25,21 @@ pub(crate) const CANCEL_TRIGGER_KEY: &str = "cancelTrigger";
 /// [`HOOK_DENIED_CATEGORY`]).
 pub(crate) const CANCELLATION_CATEGORY_KEY: &str = "cancellationCategory";
 
+/// Wire `stopReason` of a turn whose reply hit the model's output-token limit.
+pub(crate) const MAX_TOKENS_STOP_REASON: &str = "max_tokens";
+
+/// DIVERGENCE(dscode): a turn that stopped at the output-token limit ends like
+/// a completed one ("Worked for …"), but its reply is truncated. Every rail
+/// that maps such an end to [`SessionEvent::TurnCompleted`] calls this first,
+/// so an actionable notice sits between the cut-off reply and the marker.
+pub(in crate::app) fn push_output_limit_notice(agent: &mut AgentView) {
+    agent
+        .scrollback
+        .push_block(crate::scrollback::block::RenderBlock::session_event(
+            SessionEvent::OutputTokenLimit,
+        ));
+}
+
 /// The turn-cancelled terminal marker for a cancel of `category`: the
 /// hook-denied category renders [`SessionEvent::TurnBlockedByHook`], anything
 /// else the user-cancel copy. One chooser for all rails so the wording can't
@@ -351,10 +366,16 @@ pub(super) fn finalize_turn_from_terminal(
         // from a viewer — don't surface a stray "Turn failed" line.
         Some("rate_limit") => None,
         Some("error") => turn_failed_event(&agent.scrollback, agent_result, elapsed),
-        // end_turn / max_tokens / max_turn_requests / refusal / unknown → done.
-        _ => Some(SessionEvent::TurnCompleted {
-            elapsed: Some(elapsed),
-        }),
+        // end_turn / max_tokens / max_turn_requests / refusal / unknown → done;
+        // a max_tokens end first says the reply was cut off.
+        _ => {
+            if stop_reason == Some(MAX_TOKENS_STOP_REASON) {
+                push_output_limit_notice(agent);
+            }
+            Some(SessionEvent::TurnCompleted {
+                elapsed: Some(elapsed),
+            })
+        }
     };
     push_turn_terminal_marker(agent, event, ending_prompt_id.as_deref());
 

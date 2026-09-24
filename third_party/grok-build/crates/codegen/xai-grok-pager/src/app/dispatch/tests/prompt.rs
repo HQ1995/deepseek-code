@@ -1365,6 +1365,53 @@ fn turn_end_drains_next_queued_prompt() {
     assert_eq!(app.agents[&id].scrollback.len(), 3);
 }
 
+/// Driver rail: a `MaxTokens` PromptResponse warns that the reply was cut off
+/// before the "Worked for" marker; an `EndTurn` response does not.
+#[test]
+fn prompt_response_max_tokens_turn_completion_warns_reply_was_cut_off() {
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::blocks::SessionEvent;
+
+    let events = |app: &AppView| -> Vec<SessionEvent> {
+        let sb = &app.agents[&AgentId(0)].scrollback;
+        (0..sb.len())
+            .filter_map(|i| match sb.entry(i).map(|e| &e.block) {
+                Some(RenderBlock::SessionEvent(b)) => Some(b.event.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    for (stop_reason, warns) in [
+        (acp::StopReason::MaxTokens, true),
+        (acp::StopReason::EndTurn, false),
+    ] {
+        let mut app = test_app_with_agent();
+        dispatch(Action::SendPrompt("write a lot".into()), &mut app);
+        dispatch(
+            Action::TaskComplete(TaskResult::PromptResponse {
+                agent_id: AgentId(0),
+                result: Ok(acp::PromptResponse::new(stop_reason)),
+                http_status: None,
+                prompt_id: None,
+            }),
+            &mut app,
+        );
+        let events = events(&app);
+        assert!(
+            matches!(events.last(), Some(SessionEvent::TurnCompleted { .. })),
+            "{stop_reason:?}: {events:?}"
+        );
+        let notice = events
+            .iter()
+            .position(|e| matches!(e, SessionEvent::OutputTokenLimit));
+        if warns {
+            assert_eq!(notice, Some(events.len() - 2), "{events:?}");
+        } else {
+            assert_eq!(notice, None, "{events:?}");
+        }
+    }
+}
+
 /// PromptResponse FIFO handoff must forward `combined_texts` (one bubble each).
 #[test]
 fn prompt_response_fifo_handoff_paints_multi_bubble_combined() {
