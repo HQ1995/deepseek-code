@@ -629,6 +629,12 @@ impl AcpUpdateTracker {
             .get(tool_call_id)
             .map(|pending| pending.base.title.as_str())
     }
+    /// Identity of a pending tool: `_meta['x.ai/tool'].name`, else its title.
+    pub fn tool_name(&self, tool_call_id: &str) -> Option<&str> {
+        self.pending_tools
+            .get(tool_call_id)
+            .map(|pending| tool_name(&pending.base))
+    }
     /// Get the scrollback entry_id for a pending tool by tool_call_id.
     ///
     /// Used by demotion to find the execute block to swap.
@@ -1335,6 +1341,7 @@ impl AcpUpdateTracker {
             let defer_as_bg = if let Some(pending) = self.pending_tools.get_mut(&tc_id) {
                 let bash_output = extract_bash_output_from_value(&tcu.fields.raw_output);
                 pending.base.update(tcu.fields);
+                pending.base.meta = merge_tool_meta(pending.base.meta.take(), tcu.meta);
                 if pending.entry_id.is_none() && is_bg_tool(&pending.base) {
                     let desc = extract_raw_field(&pending.base, "description");
                     Some((tc_id.clone(), desc, false))
@@ -1715,6 +1722,7 @@ fn extract_cron_prompt_body(text: &str) -> Option<String> {
 /// Merge ToolCallUpdate fields with the base ToolCall.
 /// Update fields take precedence when present.
 fn merge_tool_call_update(base: acp::ToolCall, update: acp::ToolCallUpdate) -> acp::ToolCall {
+    let meta = merge_tool_meta(base.meta, update.meta);
     acp::ToolCall::new(
         update.tool_call_id,
         update.fields.title.unwrap_or(base.title),
@@ -1725,7 +1733,32 @@ fn merge_tool_call_update(base: acp::ToolCall, update: acp::ToolCallUpdate) -> a
     .raw_input(update.fields.raw_input.or(base.raw_input))
     .raw_output(update.fields.raw_output.or(base.raw_output))
     .locations(update.fields.locations.unwrap_or(base.locations))
-    .meta(base.meta)
+    .meta(meta)
+}
+/// DIVERGENCE(dscode): a tool call update's `_meta` keys override the base
+/// call's, key by key, so result-side metadata survives the merge instead of
+/// being dropped in favour of the start's.
+fn merge_tool_meta(base: Option<acp::Meta>, update: Option<acp::Meta>) -> Option<acp::Meta> {
+    match (base, update) {
+        (Some(mut base), Some(update)) => {
+            base.extend(update);
+            Some(base)
+        }
+        (base, update) => update.or(base),
+    }
+}
+/// DIVERGENCE(dscode): the tool's identity, as opposed to its display title:
+/// `_meta['x.ai/tool'].name` when the host stamped one, else the title. A host
+/// may title a card by what it does ("Update todo list"), so suppression and
+/// other name checks read this rather than `title`.
+fn tool_name(tc: &acp::ToolCall) -> &str {
+    tc.meta
+        .as_ref()
+        .and_then(|m| m.get("x.ai/tool"))
+        .and_then(|v| v.get("name"))
+        .and_then(|v| v.as_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&tc.title)
 }
 /// Peeled display form when a redundant leading `cd <cwd>` was stripped, else None.
 fn peeled_if_changed(command: &str, session_cwd: Option<&Path>) -> Option<String> {
@@ -2194,7 +2227,7 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
             RenderBlock::ToolCall(ToolCallBlock::MemorySearch(block))
         }
         _ => {
-            if is_execute_tool_function_name(&tc.title) {
+            if is_execute_tool_function_name(tool_name(tc)) {
                 let command = execute_command_from_tool_call(tc);
                 let header_display = peeled_if_changed(&command, session_cwd);
                 if let Some(bash) = extract_bash_output_from_value(&tc.raw_output) {
@@ -2239,6 +2272,7 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
             let (label, ctor): (String, fn(OtherToolCallBlock) -> ToolCallBlock) = if name
                 .eq_ignore_ascii_case("skill")
                 || name.to_ascii_lowercase().starts_with("skill:")
+                || tool_name(tc).eq_ignore_ascii_case("skill")
             {
                 let label = match name.find(':') {
                     Some(i) => format!("Skill{}", &name[i..]),
@@ -2480,7 +2514,7 @@ fn content_text(tc: &acp::ToolCall) -> String {
 /// visibility into task status and output.
 fn is_bg_plumbing_tool(tc: &acp::ToolCall) -> bool {
     matches!(
-        tc.title.as_str(),
+        tool_name(tc),
         // Current names (post-rename)
         "get_command_or_subagent_output" | "kill_command_or_subagent" | "wait_commands_or_subagents"
         // Old names (persisted sessions / replay)
@@ -2505,6 +2539,7 @@ fn is_bg_plumbing_tool(tc: &acp::ToolCall) -> bool {
 /// [`is_bg_plumbing_tool`] so the spinner can name the wait instead of falling
 /// back to a generic "Waiting…".
 fn blocking_wait_reason(tc: &acp::ToolCall) -> Option<WaitingReason> {
+    let name = tool_name(tc);
     let title = tc.title.as_str();
     let variant = tc
         .raw_input
@@ -2512,7 +2547,7 @@ fn blocking_wait_reason(tc: &acp::ToolCall) -> Option<WaitingReason> {
         .and_then(|v| v.get("variant"))
         .and_then(|v| v.as_str());
     if matches!(
-        title,
+        name,
         "get_command_or_subagent_output" | "get_task_output" | "get_task_or_subagent_output"
     ) || variant == Some("TaskOutput")
     {
@@ -2528,14 +2563,14 @@ fn blocking_wait_reason(tc: &acp::ToolCall) -> Option<WaitingReason> {
         });
     }
     if matches!(
-        title,
+        name,
         "wait_commands_or_subagents" | "wait_tasks" | "wait_tasks_or_subagents"
     ) || title.starts_with("Wait tasks:")
         || variant == Some("WaitTasks")
     {
         return Some(WaitingReason::TasksComplete);
     }
-    if matches!(title, "Await" | "AwaitShell")
+    if matches!(name, "Await" | "AwaitShell")
         || title.starts_with("Await:")
         || title.starts_with("Sleep ")
     {
@@ -2584,7 +2619,7 @@ fn task_ids_from_raw_input(raw: &serde_json::Value) -> Vec<String> {
 /// when `raw_input` requests background so we don't flash the function name.
 fn is_bg_tool(tc: &acp::ToolCall) -> bool {
     let looks_like_execute =
-        tc.kind == acp::ToolKind::Execute || is_execute_tool_function_name(&tc.title);
+        tc.kind == acp::ToolKind::Execute || is_execute_tool_function_name(tool_name(tc));
     looks_like_execute
         && tc
             .raw_input
@@ -2630,10 +2665,9 @@ fn is_todo_variant(variant: Option<&str>) -> bool {
 /// better visibility. Covers the `todo_write` / `TodoWrite` ids, the
 /// `Updating plan` title, and TodoWrite-family variant tags.
 fn is_todo_tool(tc: &acp::ToolCall) -> bool {
-    matches!(
-        tc.title.as_str(),
-        "todo_write" | "TodoWrite" | "Updating plan"
-    ) || is_todo_variant(extract_variant(tc))
+    matches!(tool_name(tc), "todo_write" | "TodoWrite")
+        || tc.title == "Updating plan"
+        || is_todo_variant(extract_variant(tc))
 }
 /// Check if a tool call is a task tool (subagent spawn).
 ///
@@ -2641,15 +2675,16 @@ fn is_todo_tool(tc: &acp::ToolCall) -> bool {
 /// SubagentSpawned notification) provides better visibility. Covers the
 /// `task` / `Task` / `spawn_subagent` ids and Task-family variant tags.
 fn is_task_tool(tc: &acp::ToolCall) -> bool {
-    xai_grok_tools::is_task_tool_id(&tc.title) || is_task_variant(extract_variant(tc))
+    xai_grok_tools::is_task_tool_id(tool_name(tc)) || is_task_variant(extract_variant(tc))
 }
 fn is_goal_tool(tc: &acp::ToolCall) -> bool {
-    tc.title == "update_goal"
+    tool_name(tc) == "update_goal"
         || tc.title.starts_with("Goal:")
         || matches!(extract_variant(tc), Some("UpdateGoal" | "WorkflowSignal"))
 }
 fn is_workflow_tool(tc: &acp::ToolCall) -> bool {
-    let is_workflow = tc.title == "workflow" || matches!(extract_variant(tc), Some("Workflow"));
+    let is_workflow =
+        tool_name(tc) == "workflow" || matches!(extract_variant(tc), Some("Workflow"));
     if !is_workflow {
         return false;
     }
@@ -2667,7 +2702,7 @@ fn is_workflow_tool(tc: &acp::ToolCall) -> bool {
 /// Suppressed from scrollback because the tasks pane provides visibility.
 /// Uses convention-based prefixes rather than exhaustive names.
 fn is_scheduler_tool(tc: &acp::ToolCall) -> bool {
-    tc.title.starts_with("scheduler_")
+    tool_name(tc).starts_with("scheduler_")
         || extract_variant(tc).is_some_and(|v| v.starts_with("Scheduler"))
 }
 /// Extract a string field from raw_input JSON.

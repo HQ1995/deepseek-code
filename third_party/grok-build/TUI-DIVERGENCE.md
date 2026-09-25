@@ -940,3 +940,14 @@ with the key state from the bridge's non-secret `credential` facts: "key
 missing" when the key reference resolves to nothing, "key from env" for the
 launch environment or a `.env` file, and nothing for a saved key. Generic over
 the field; no provider is named (class: feature).
+
+### Tool identity comes from `_meta['x.ai/tool']`
+
+A tool card's identity is `_meta['x.ai/tool'].name` when the host stamps one,
+else its title, as headless output already reads it. The checks that hide
+todo, goal, workflow, scheduler, task and background-wait cards, the execute
+and skill detection, and the inline plan-review source use that identity, so a
+host may title a card by what it does ("Update todo list") without the card
+reappearing. Title-shaped checks (`Goal:`, `Await:`, `Validating workflow`)
+still read the title. A `tool_call_update`'s `_meta` keys now override the
+start's key by key, streamed or final, instead of being dropped (class: feature).

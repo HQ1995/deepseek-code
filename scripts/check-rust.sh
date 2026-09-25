@@ -22,7 +22,7 @@ cargo test -p xai-grok-pager -p xai-grok-pager-render --lib -- \
   to_meta_ native_controls native_question dsh_patch dsh_mcp_patch dsh_leader model_switch switch_model slash:: slash_ default_model question_view doctor tasks shortcuts_help subagent mode_switch prompt_stash overlay_post_flush mcps_modal startup_failure \
   presenter_ send_now_awaiting_current background_tasks queue_and_adoption turn_completion \
   settings_modal theme open_settings_focus open_settings_enter_picker prompt_ack headless \
-  scrollback_paste_focus_forward \
+  scrollback_paste_focus_forward tool_identity_ \
   sessions_cmd plan_aware_toast non_shell_execute other_tool_expanded structured_question_answers \
   d_is_not_a_delete_key session_picker_footer_offers_no_delete delete_session_complete
 echo 'PASS Rust product contracts'

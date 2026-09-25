@@ -52,8 +52,9 @@ a browser action reads `Browser: <action>`, a call whose arguments carry
 several), and an execute call that runs `code` rather than a shell `command`
 (PTC's `run_code`) reads `code: <first non-empty line>`, which the TUI shows as
 `Run code: …`. Its result keeps no Bash-shaped `rawOutput`. Such a card keeps
-its tool name in `_meta['x.ai/tool'].name`, which headless output reads before
-the title.
+its tool name in `_meta['x.ai/tool'].name`, which the TUI (to hide todo, goal,
+workflow and scheduler cards) and headless output read before the title. A
+`tool_call_update`'s `_meta` keys override the call's own, key by key.
 
 | Surface | Contract |
 |---|---|
