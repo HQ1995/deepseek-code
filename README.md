@@ -110,8 +110,9 @@ discovery, the Chromium sandbox and origin filtering.
 
 dscode runs as a DSH profile, and its plugins are DSH bundles: npm packages whose
 patch layer adds or changes rows (components) of that profile. `/dsh plugins`
-lists them as DSH's own Plugins page does: title and one-line description,
-package and version, on or off, kind (`core`, `official · optional`,
+lists them as DSH's own Plugins page does: title and one-line description
+(in the language of `LC_ALL`, `LC_MESSAGES` or `LANG` when the bundle has it,
+else English), package and version, on or off, kind (`core`, `official · optional`,
 `installed`, `removable`, `experimental`) and the rows by state (`18 rows · 17
 running · 1 off`), then the reason for each problem bundle. The pinned runtime
 ships three official bundles switched off: Agent Teams, Voice input and Auto

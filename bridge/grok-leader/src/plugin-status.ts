@@ -1,14 +1,12 @@
 /** Read-only plugin views for `/dsh` and `/doctor`: the plugin table over the
- * DSH plugin manager, English wording for its outcomes and refusals (the copy
- * of DSH's own Plugins page), Loader rows that did not activate, and the
- * bundles boot skipped with the one-time notice that names them. No writes. */
+ * DSH plugin manager, with each bundle's own title and description in the
+ * process locale, English wording for its outcomes and refusals (the copy of
+ * DSH's own Plugins page), Loader rows that did not activate, and the bundles
+ * boot skipped with the one-time notice that names them. No writes. */
 import { loadProfileDirectory } from '@deepseek-ai/dsh-app-boot'
 import { errorMessage } from './guards.ts'
-import type { BundleLike, LocalizedTextLike, ManagementErrorLike, PluginEntryLike, PluginManagerLike, SwitchOutcome } from './plugin-rows.ts'
-
-/** English of a localized display text. */
-export const english = (text: LocalizedTextLike | undefined): string | undefined =>
-  text === undefined ? undefined : typeof text === 'string' ? text : text.en
+import { environmentLocale, pick } from './localized-text.ts'
+import type { BundleLike, ManagementErrorLike, PluginEntryLike, PluginManagerLike, SwitchOutcome } from './plugin-rows.ts'
 
 /** What a person calls a package: unscoped, without the harness prefixes. */
 export function shortName(name: string): string {
@@ -16,11 +14,15 @@ export function shortName(name: string): string {
   return unscoped.replace(/^dsh-(?:host-|client-)?/, '')
 }
 
-/** A bundle's display title: its locale title, else its short name. */
-export function bundleTitle(bundle: Pick<BundleLike, 'name' | 'meta'>): string {
-  const title = english(bundle.meta?.title)
+/** A bundle's display title in `locale`: its localized title, else its short name. */
+export function bundleTitle(bundle: Pick<BundleLike, 'name' | 'meta'>, locale: string | undefined = environmentLocale()): string {
+  const title = pick(bundle.meta?.title, locale)
   return title === undefined || title === bundle.name ? shortName(bundle.name) : title
 }
+
+/** A bundle's description in `locale`: its localized one, else its package's. */
+export const bundleDescription = (bundle: Pick<BundleLike, 'meta' | 'description'>, locale: string | undefined = environmentLocale()): string | undefined =>
+  pick(bundle.meta?.description, locale) ?? pick(bundle.description, locale)
 
 const oneLine = (text: string, limit = 120): string => {
   const line = text.replace(/\s+/g, ' ').trim()
@@ -79,6 +81,8 @@ export interface PluginTable {
   order: readonly string[]
   core: ReadonlySet<string>
   skipped: readonly SkippedBundle[]
+  /** Lower-case BCP 47 tag of the display text; defaults to the process locale. */
+  locale?: string
 }
 
 const cell = (text: string): string => text.replace(/\|/g, '\\|').replace(/\s+/g, ' ')
@@ -94,7 +98,7 @@ function kinds(bundle: BundleLike, core: ReadonlySet<string>): string[] {
 
 /** `/dsh plugins`: every bundle this profile runs, holds or may switch on, as
  * one aligned table, then the reason for each problem bundle. */
-export function pluginTable({ dir, bundles, plugins, order, core, skipped }: PluginTable): string {
+export function pluginTable({ dir, bundles, plugins, order, core, skipped, locale = environmentLocale() }: PluginTable): string {
   const shown = bundles.filter(bundle => (core.has(bundle.name) && bundle.enabled)
     || (!BUILTIN_BUNDLES.has(bundle.name) && (bundle.installed || bundle.optional || bundle.error !== undefined)))
   const position = (bundle: BundleLike) => bundle.enabled && order.includes(bundle.name) ? order.indexOf(bundle.name) : order.length
@@ -108,10 +112,10 @@ export function pluginTable({ dir, bundles, plugins, order, core, skipped }: Plu
     + (problems.size > 0 ? ' · ' + String(problems.size) + (problems.size === 1 ? ' problem' : ' problems') : ''), '',
   '| State | Plugin | Package | Kind | Rows |', '| --- | --- | --- | --- | --- |']
   for (const bundle of shown) {
-    const description = english(bundle.meta?.description) ?? bundle.description
+    const description = bundleDescription(bundle, locale)
     lines.push('| ' + [
       (bundle.enabled ? 'on' : 'off') + (problems.has(bundle.name) ? ' · problem' : ''),
-      '**' + cell(bundleTitle(bundle)) + '**' + (description === undefined || description === '' ? '' : ': ' + cell(oneLine(description))),
+      '**' + cell(bundleTitle(bundle, locale)) + '**' + (description === undefined ? '' : ': ' + cell(oneLine(description))),
       '`' + bundle.name + (bundle.version === undefined ? '' : '@' + bundle.version) + '`',
       kinds(bundle, core).join(' · ') || '-',
       rowSummary(bundle, plugins),
@@ -125,11 +129,11 @@ export function pluginTable({ dir, bundles, plugins, order, core, skipped }: Plu
 }
 
 /** `/dsh inspect <bundle>`: its rows, their live state and switch address. */
-export function bundleDetail(bundle: BundleLike, plugins: readonly PluginEntryLike[], core: ReadonlySet<string>): string {
-  const description = english(bundle.meta?.description) ?? bundle.description
-  const lines = ['**' + bundleTitle(bundle) + '** `' + bundle.name + (bundle.version === undefined ? '' : '@' + bundle.version) + '`: '
+export function bundleDetail(bundle: BundleLike, plugins: readonly PluginEntryLike[], core: ReadonlySet<string>, locale: string | undefined = environmentLocale()): string {
+  const description = bundleDescription(bundle, locale)
+  const lines = ['**' + bundleTitle(bundle, locale) + '** `' + bundle.name + (bundle.version === undefined ? '' : '@' + bundle.version) + '`: '
     + [bundle.enabled ? 'on' : 'off', ...kinds(bundle, core)].join(' · ')]
-  if (description !== undefined && description !== '') lines.push('', oneLine(description, 400))
+  if (description !== undefined) lines.push('', oneLine(description, 400))
   if (bundle.error !== undefined) lines.push('', 'Problem: ' + managementText(bundle.error))
   lines.push('', 'Components (' + rowSummary(bundle, plugins) + '):')
   for (const row of bundle.rows) {

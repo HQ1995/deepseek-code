@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { OPTIONAL_BUNDLES, bundlePatchPaths, composeEntries, loadOverlayPatches, readPluginMeta } from '@deepseek-ai/dsh-app-boot'
 import type { BundleInfo, PluginInfo } from '@deepseek-ai/dsh-plugin-manager'
 import {
-  bundleDetail, createPluginStatus, inactiveRows, leaderLogPath, managementText, outcomeText, pluginTable, rowSummary, skipReason, skippedNotice,
+  bundleDetail, bundleTitle, createPluginStatus, inactiveRows, leaderLogPath, managementText, outcomeText, pluginTable, rowSummary, skipReason, skippedNotice,
   type LoaderEntryLike,
 } from '../src/plugin-status.ts'
 
@@ -47,7 +47,7 @@ describe('the plugin table', () => {
       bundles: [installed('@deepseek-ai/dsh-web-app'), review, installed('@deepseek-ai/dsh-experimental-agent-team-profile'), broken, mine, dscode, base,
         installed('@deepseek-ai/dsh-experimental-voice-input-bundle')],
       plugins: [entry('grok-leader', '@hqzhao95/dscode'), entry('dscode-browser', '@hqzhao95/dscode/browser', false, null)],
-      skipped: [{ packageName: 'dsh-plugin-gone', reason: 'cannot resolve profile bundle "dsh-plugin-gone"' }],
+      skipped: [{ packageName: 'dsh-plugin-gone', reason: 'cannot resolve profile bundle "dsh-plugin-gone"' }], locale: 'en-us',
     })
     const lines = table.split('\n')
     expect(lines[0]).toBe('Plugins in `/p`: 3 on · 4 off · 2 problems')
@@ -81,13 +81,26 @@ describe('the plugin table', () => {
   it('details a bundle\'s components with their switch address', () => {
     const bundle = installed('@deepseek-ai/dsh-experimental-agent-team-profile', { enabled: true, live: true, overrides: ['tool-subagent'] })
     const detail = bundleDetail(bundle, [entry('agent-team', '@deepseek-ai/dsh-experimental-agent-team'), { ...entry('tool-agent-team', 'x', false, null) },
-      { ...entry('ui-agent-team', 'x'), readOnlyReason: 'unaddressable', patchId: undefined } as unknown as PluginInfo], CORE)
+      { ...entry('ui-agent-team', 'x'), readOnlyReason: 'unaddressable', patchId: undefined } as unknown as PluginInfo], CORE, 'en')
     expect(detail).toContain('**Agent Teams** `@deepseek-ai/dsh-experimental-agent-team-profile@0.1.7-rc.2`: on · official · optional · experimental')
     expect(detail).toContain('- `agent-team` @deepseek-ai/dsh-experimental-agent-team · running')
     expect(detail).toContain('- `tool-agent-team` @deepseek-ai/dsh-experimental-tool-agent-team · off')
     expect(detail).toContain('- `ui-agent-team` @deepseek-ai/dsh-experimental-client-ui-agent-team · running · locked: The profile patch cannot address this one uniquely.')
     expect(detail).toContain('Changes built-in rows: tool-subagent')
     expect(detail).toContain('`/dsh enable|disable @deepseek-ai/dsh-experimental-agent-team-profile#<row>`')
+  })
+
+  it('shows each bundle\'s own title and description in the process locale, else English, else its package', () => {
+    const review = installed('@deepseek-ai/dsh-experimental-auto-review')
+    const table = pluginTable({ dir: '/p', order: [], core: CORE, bundles: [review], plugins: [], skipped: [], locale: 'zh-cn' })
+    expect(table).toContain('| off | **自动授权审查**: 提供自动审查权限模式，由模型在每次工具调用前判断是否授权。 |')
+    expect(bundleDetail(review, [], CORE, 'zh')).toMatch(/^\*\*自动授权审查\*\* `@deepseek-ai\/dsh-experimental-auto-review@0\.1\.7-rc\.2`: off[^\n]*\n\n提供自动审查权限模式/)
+    expect(bundleTitle(review, 'fr')).toBe('Auto Authorization Review')
+    expect(bundleTitle({ name: '@acme/dsh-plugin-x', meta: { title: { en: ' ', zh: '甲' } } }, 'de')).toBe('plugin-x')
+    const plain = { name: 'dsh-plugin-plain', description: 'Its package description', enabled: false, installed: true, optional: false, removable: true, rows: [], overrides: [],
+      meta: { description: { en: '', zh: '中文说明' } } } as unknown as BundleInfo
+    expect(pluginTable({ dir: '/p', order: [], core: CORE, bundles: [plain], plugins: [], skipped: [], locale: 'en' })).toContain('**plugin-plain**: Its package description |')
+    expect(pluginTable({ dir: '/p', order: [], core: CORE, bundles: [plain], plugins: [], skipped: [], locale: 'zh-cn' })).toContain('**plugin-plain**: 中文说明 |')
   })
 })
 

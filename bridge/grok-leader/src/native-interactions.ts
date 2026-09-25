@@ -9,6 +9,7 @@ import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp
 import { browserAction, isBrowserTool } from './browser-actions.ts'
 import { isRecord } from './guards.ts'
 import type { LeaderClient } from './leader-transport.ts'
+import { environmentLocale, pick } from './localized-text.ts'
 
 interface InteractionSession { agent: Agent; clientId: number; yolo: boolean; queue: { cancel(): void }; work: { cancel(): void } }
 interface PendingCall { readonly callId?: string; readonly name: string; readonly arguments: unknown }
@@ -45,29 +46,12 @@ const RECENT_CALLS = 64
 export const REVIEWER_DENIED = 'Auto review denied tool "'
 const REASON_LIMIT = 500
 
-/** The message locale by POSIX precedence (LC_ALL, LC_MESSAGES, LANG), as a
- * lower-case BCP 47 tag; undefined for the C/POSIX locale or none. */
-export function environmentLocale(env: Readonly<Record<string, string | undefined>> = process.env): string | undefined {
-  for (const key of ['LC_ALL', 'LC_MESSAGES', 'LANG']) {
-    const value = env[key]
-    if (value === undefined || value === '') continue
-    const tag = value.split(/[.@]/)[0]!.replace(/_/g, '-').toLowerCase()
-    return tag === '' || tag === 'c' || tag === 'posix' ? undefined : tag
-  }
-  return undefined
-}
-
 /** One prompt line for why an approval is asked: `displayReason` in the
- * locale (exact tag, then its language), then in English, then the audited
- * `reason`. Control and format characters (bidi overrides included) and line
- * breaks collapse to spaces; the text is bounded by code points. */
+ * locale (see `pick`), then the audited `reason`. Control and format
+ * characters (bidi overrides included) and line breaks collapse to spaces;
+ * the text is bounded by code points. */
 export function approvalReason(request: Pick<ApprovalRequestEvent, 'reason' | 'displayReason'>, locale?: string): string | undefined {
-  const display: Readonly<Record<string, unknown>> | undefined = isRecord(request.displayReason) ? request.displayReason : undefined
-  const text = (key: string | undefined): string | undefined => {
-    const value = key !== undefined && display !== undefined && Object.hasOwn(display, key) ? display[key] : undefined
-    return typeof value === 'string' && value.trim() !== '' ? value : undefined
-  }
-  const chosen = text(locale) ?? text(locale?.split('-')[0]) ?? text('en')
+  const chosen = pick(request.displayReason, locale)
     ?? (typeof request.reason === 'string' && request.reason.trim() !== '' ? request.reason : undefined)
   if (chosen === undefined) return undefined
   const line = [...chosen.replace(/[\p{Cc}\p{Cf}\s]+/gu, ' ').trim()]

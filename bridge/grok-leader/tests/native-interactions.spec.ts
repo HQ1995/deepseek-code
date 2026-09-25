@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { approvalReason, createNativeInteractions, environmentLocale, REVIEWER_DENIED } from '../src/native-interactions.ts'
+import { approvalReason, createNativeInteractions, REVIEWER_DENIED } from '../src/native-interactions.ts'
 
 const stops: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(stops.splice(0).map(stop => stop())) })
@@ -106,7 +106,7 @@ describe('native interaction ownership', () => {
     expect(f.request.mock.calls[3]![1]).toMatchObject({ toolCall: { title: 'the browser to open http://127.0.0.1:3000/a' }, _meta: { dscodeAlwaysAsks: true } })
   })
 
-  it('resolves the reason text and the process locale defensively', () => {
+  it('resolves the reason text defensively', () => {
     const displayReason = { en: 'English', zh: '中文', 'zh-tw': '繁體' }
     expect(approvalReason({ reason: 'audit', displayReason }, 'zh-tw')).toBe('繁體')
     expect(approvalReason({ reason: 'audit', displayReason }, 'zh-cn')).toBe('中文')
@@ -115,10 +115,6 @@ describe('native interaction ownership', () => {
     expect(approvalReason({}, 'en')).toBeUndefined()
     expect(approvalReason({ reason: 'x'.repeat(600) })).toHaveLength(500)
     expect([...approvalReason({ reason: '😀'.repeat(600) })!]).toHaveLength(500)
-    expect(environmentLocale({ LC_ALL: 'zh_CN.UTF-8', LANG: 'en_US.UTF-8' })).toBe('zh-cn')
-    expect(environmentLocale({ LC_ALL: '', LC_MESSAGES: 'de_DE@euro', LANG: 'en_US' })).toBe('de-de')
-    expect(environmentLocale({ LANG: 'C.UTF-8' })).toBeUndefined()
-    expect(environmentLocale({})).toBeUndefined()
   })
 
   it('recognizes the denial reason the installed auto-review package writes', () => {

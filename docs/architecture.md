@@ -40,7 +40,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 66 modules; `index.ts` is the composition root.
+`src/` has 67 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
@@ -108,6 +108,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `plugin-bundles` | Bundle patch analysis, isolated npm audit, install verification and rollback; no command parsing |
 | `plugin-rows` | Switches bundles and rows through the DSH plugin manager and applies them to the live Loader, rolling back an enable that does not start |
 | `plugin-status` | Read-only plugin views: the `/dsh plugins` table and outcome wording, inactive Loader rows for `/doctor`, bundles boot skipped and their one-time note |
+| `localized-text` | DSH `LocalizedText` in the process locale: exact tag, its language, then English |
 | `package-location` | Package provenance; lazy updater resolution and profile lock |
 | `guards` | Leaf value guards shared across the bridge; no imports |
 

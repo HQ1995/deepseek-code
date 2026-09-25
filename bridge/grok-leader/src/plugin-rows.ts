@@ -6,6 +6,7 @@
  * row does not activate. An enable that cannot activate is turned off again. */
 import { internalError } from './acp.ts'
 import { errorMessage } from './guards.ts'
+import type { LocalizedText } from './localized-text.ts'
 
 /** A refusal or failure as the plugin manager reports it (`ManagementError`). */
 export interface ManagementErrorLike {
@@ -13,10 +14,8 @@ export interface ManagementErrorLike {
   diagnostic?: string
   incompatible?: ReadonlyArray<{ name: string; version: string; runtimeVersion: string; peers: Record<string, string> }>
 }
-/** Literal text, or translations with a required English fallback (`LocalizedText`). */
-export type LocalizedTextLike = string | { readonly en: string; readonly [locale: string]: string }
 /** Local package display metadata (`PluginLocalizedMeta`). */
-export interface PluginMetaLike { readonly title?: LocalizedTextLike; readonly description?: LocalizedTextLike; readonly error?: string }
+export interface PluginMetaLike { readonly title?: LocalizedText; readonly description?: LocalizedText; readonly error?: string }
 /** One Loader entry and its profile-patch address (`PluginInfo`). */
 export interface PluginEntryLike {
   entryId: string
