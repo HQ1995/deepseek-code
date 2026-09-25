@@ -1,9 +1,9 @@
 /**
  * Turn lifecycle facts the TUI already renders from its xAI session updates:
  * model-request retries, typed turn failures, tool calls the model is still
- * writing and automatic compaction. Pure mapping of native events and stream
- * chunks; the owning session output keeps their state and decides when to
- * send them.
+ * writing, automatic compaction, plan mode and why a turn started. Pure mapping
+ * of native events and stream chunks; the owning session output keeps their
+ * state and decides when to send them.
  *
  * @module dscode/turn-notices
  */
@@ -209,4 +209,49 @@ export function planModeNotice(event: SessionEvent): ModeUpdate | undefined {
   if (String(event.type) !== 'plan/mode') return undefined
   const active = (event.data as { active?: unknown } | null)?.active
   return typeof active === 'boolean' ? planModeUpdate(active) : undefined
+}
+
+/** The next-turn inbox as its durable splices leave it, and the batch its
+ * latest claim took: the messages that woke the current turn. */
+export interface TriggerFold { pending: string[]; claimed: Set<string> }
+export const emptyTriggers = (): TriggerFold => ({ pending: [], claimed: new Set() })
+
+/** DSH's own client titles for what woke a turn, by message source kind
+ * (ui-chat `turn-trigger.ts`); an unlisted producer reads as a request. */
+const TRIGGER_TITLES: Readonly<Record<string, string>> = {
+  goal: 'Continuing goal', 'agent-message': 'Task message received', 'team-message': 'Team message received',
+  'subagent-settled': 'Subtask status updated', webhook: 'External event received', schedule: 'Scheduled task',
+  'tool-jobs': 'Background task updated', 'cordis-host-runner': 'Plugin status updated',
+}
+const line = (text: string, limit: number): string => {
+  const chars = [...text.replace(/[\p{Cc}\p{Cf}\s]+/gu, ' ').trim()]
+  return chars.length > limit ? chars.slice(0, limit - 1).join('') + '…' : chars.join('')
+}
+
+/**
+ * A display-only note naming why a turn started when no human prompt did: a
+ * reminder, a finished background job, a teammate's or subagent's message, a
+ * goal round. Mirrors DSH's client: a non-user `user/message` is a turn
+ * trigger when the latest next-turn inbox claim took it. Its line is DSH's
+ * title for the source kind, then the producer's one-line `notice` summary or
+ * the sender's name when the source carries one.
+ */
+export function triggerNotes(fold: TriggerFold, event: SessionEvent): string[] | undefined {
+  if (String(event.type) === 'agent/inbox/spliced') {
+    const splice = event.data as { target?: unknown; start?: unknown; removedCount?: unknown; inserted?: unknown; outcome?: unknown } | null
+    if (splice?.target !== 'next-turn' || typeof splice.start !== 'number') return undefined
+    const inserted = (Array.isArray(splice.inserted) ? splice.inserted : []).map(message => String((message as { id?: unknown } | null)?.id))
+    const removed = fold.pending.splice(splice.start, typeof splice.removedCount === 'number' ? splice.removedCount : 0, ...inserted)
+    if (removed.length > 0 && splice.outcome !== 'canceled') fold.claimed = new Set(removed)
+    else for (const id of inserted) fold.claimed.delete(id)
+    return undefined
+  }
+  if (event.type !== 'user/message') return undefined
+  const source = event.data.source as { kind?: unknown; form?: unknown; summary?: unknown; senderName?: unknown; provider?: unknown }
+  if (source.kind === 'user' || !fold.claimed.delete(String(event.data.id))) return undefined
+  const title = source.kind === 'webhook' && source.provider === 'github' ? 'GitHub event received'
+    : (typeof source.kind === 'string' ? TRIGGER_TITLES[source.kind] : undefined) ?? 'Execution requested'
+  const summary = source.form === 'notice' && typeof source.summary === 'string' ? line(source.summary, 120) : ''
+  const sender = typeof source.senderName === 'string' ? line(source.senderName, 60) : ''
+  return [title + (summary !== '' ? ': ' + summary : sender !== '' ? ' from ' + sender : '')]
 }

@@ -2,7 +2,7 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { errorChain, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { hasToolImages } from './image-output.ts'
-import { compactionNotices, isXaiNotice, planModeNotice, toolCallWriting, turnNotices, type CompactionFold, type ContextTokens, type ModeUpdate, type WritingCalls, type XaiNotice } from './turn-notices.ts'
+import { compactionNotices, emptyTriggers, isXaiNotice, planModeNotice, toolCallWriting, triggerNotes, turnNotices, type CompactionFold, type ContextTokens, type ModeUpdate, type WritingCalls, type XaiNotice } from './turn-notices.ts'
 import { assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, parseJsonObject, sessionEventToUpdates, systemNotes, contextInfoFromProjection, type ContextProjectionValues, type DecodeSpeed, type ProjectedUpdate } from './projection.ts'
 
 export interface SessionOutputHost {
@@ -61,6 +61,7 @@ export function createSessionOutput(host: SessionOutputHost) {
    * turn's todos, so the last plan is sent again after the completion. */
   let lastPlan: ProjectedUpdate | undefined
   const compactions: CompactionFold = new Map()
+  const triggers = emptyTriggers()
   const state: OutputState = {
     lastSeq: -1,
     turnStartMs: undefined,
@@ -318,7 +319,7 @@ export function createSessionOutput(host: SessionOutputHost) {
   }
   /** The xAI notices one event carries; folds see every event, sent or not. */
   const notices = (event: SessionEvent, replay: boolean): OutputUpdate[] => {
-    const notes = systemNotes(event), mode = planModeNotice(event)
+    const trigger = triggerNotes(triggers, event), notes = systemNotes(event) ?? trigger, mode = planModeNotice(event)
     const compaction = compactionNotices(compactions, event, replay, occupancy(replay))
     return [
       ...notes === undefined ? [] : [{ sessionUpdate: 'image_dropped' as const, notes }], ...mode === undefined ? [] : [mode],

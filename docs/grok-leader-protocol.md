@@ -172,6 +172,17 @@ already exist; nothing here adds a TUI code path.
   projection, it is the last reported prompt size minus the summary's shadowed
   tokens plus its output. The TUI shows the completion at the turn's end and
   empties its todo pane, so the bridge sends the turn's last plan again.
+- A turn no human prompt started gets an `image_dropped` system note naming
+  why, live and on replay, as DSH's own client heads it: a non-user
+  `user/message` that the latest next-turn inbox claim (`agent/inbox/spliced`)
+  took is the turn's trigger. The line is DSH's title for the source kind
+  (`Scheduled task`, `Background task updated`, `Task message received`,
+  `Team message received`, `Subtask status updated`, `Continuing goal`,
+  `External event received`/`GitHub event received`, `Plugin status updated`;
+  any other kind reads `Execution requested`), then the producer's one-line
+  `notice` summary or the sender's name when the source carries one. The
+  message body (reminder or job framing written for the model) is not shown.
+  Context injected into a running turn is not a trigger.
 
 ## Plan mode
 

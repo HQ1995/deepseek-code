@@ -494,6 +494,26 @@ describe('leader prompt turns, content and usage', () => {
     expect(JSON.stringify(info.result)).toContain('"compactionCount":2')
   })
 
+  it('heads a turn a finished background job woke with a system note, not the job\'s framing', async () => {
+    const { registry, pluginCtx, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const emit = (type: string, data: unknown) => pluginCtx.emit('session/event', agent.session, agent.session.append(type, data as never))
+    emit('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [{ id: 'job-done' }] })
+    emit('turn/start', { turn: 3 })
+    emit('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+    emit('user/message', { id: 'job-done', source: { kind: 'tool-jobs', form: 'notice', summary: 'bash build ok (exit 0)' },
+      content: [{ type: 'text', text: 'background job j1 finished. Read its output with job_output.' }] })
+    await waitFor(() => c.all.some(message => JSON.stringify(message).includes('image_dropped')))
+    const note = c.all.find(message => JSON.stringify(message).includes('image_dropped'))!
+    expect(note).toMatchObject({ method: 'x.ai/session_notification', params: { sessionId,
+      update: { sessionUpdate: 'image_dropped', notes: ['Background task updated: bash build ok (exit 0)'] } } })
+    expect(JSON.stringify(c.all)).not.toContain('job_output')
+  })
+
   it('rejects a prompt only when agent/error names its in-flight turn', async () => {
     const { registry, pluginCtx, client: c } = await start({ manualIdle: true })
     register(c)

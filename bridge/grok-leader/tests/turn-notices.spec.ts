@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { compactionNotices, describeFailure, isXaiNotice, toolCallWriting, turnFailure, turnNotices, WRITING_REFRESH_MS, type CompactionFold, type WritingCalls } from '../src/turn-notices.ts'
+import { compactionNotices, describeFailure, emptyTriggers, isXaiNotice, toolCallWriting, triggerNotes, turnFailure, turnNotices, WRITING_REFRESH_MS, type CompactionFold, type WritingCalls } from '../src/turn-notices.ts'
 import { event } from './support/session-events.ts'
 
 const retry = (data: Record<string, unknown>) => event('llm/retry', {
@@ -106,6 +106,32 @@ describe('turn notices', () => {
     expect(compactionNotices(fold, event('compaction/end', { compactionId: 'b', turn: 1 }, 0, 9), false, () => ({ used: 4, native: true })))
       .toEqual([{ sessionUpdate: 'auto_compact_completed', tokens_before: 10, tokens_after: 4, elapsed_ms: 4 }])
     expect(isXaiNotice({ sessionUpdate: 'auto_compact_completed' })).toBe(true)
+  })
+
+  it('names what woke a turn only for the message the next-turn claim took', () => {
+    const fold = emptyTriggers()
+    const splice = (target: string, start: number, removedCount: number, inserted: string[], outcome?: string) => triggerNotes(fold,
+      event('agent/inbox/spliced', { target, start, ...removedCount === 0 ? {} : { removedCount }, inserted: inserted.map(id => ({ id })), ...outcome === undefined ? {} : { outcome } }))
+    const message = (id: string, source: Record<string, unknown>) => triggerNotes(fold, event('user/message', { id, source, content: [{ type: 'text', text: 'framed' }] }))
+    const job = { kind: 'tool-jobs', form: 'notice', summary: 'bash sleep 1 completed\n(exit 0)' }
+    expect(splice('next-turn', 0, 0, ['job', 'dropped', 'human'])).toBeUndefined()
+    // Removing a queued message cancels it; it wakes nothing.
+    splice('next-turn', 1, 1, [], 'canceled')
+    splice('next-step', 0, 0, ['steer'])
+    splice('next-turn', 0, 1, [])
+    expect(message('job', job)).toEqual(['Background task updated: bash sleep 1 completed (exit 0)'])
+    expect(message('job', job)).toBeUndefined()
+    // Injected context in a running turn is not a trigger.
+    expect(message('steer', { kind: 'time-context' })).toBeUndefined()
+    splice('next-turn', 0, 1, [])
+    expect(message('human', { kind: 'user' })).toBeUndefined()
+    const woke = (source: Record<string, unknown>) => { splice('next-turn', 0, 0, ['m']); splice('next-turn', 0, 1, []); return message('m', source) }
+    expect(woke({ kind: 'schedule' })).toEqual(['Scheduled task'])
+    expect(woke({ kind: 'team-message', senderName: 'alice\u202e' })).toEqual(['Team message received from alice'])
+    expect(woke({ kind: 'subagent-settled', form: 'notice', summary: 'reviewer finished', senderSessionId: 's' })).toEqual(['Subtask status updated: reviewer finished'])
+    expect(woke({ kind: 'goal', goalId: 'g', revision: 1, round: 2 })).toEqual(['Continuing goal'])
+    expect(woke({ kind: 'webhook', provider: 'github', form: 'notice', summary: 'push to main' })).toEqual(['GitHub event received: push to main'])
+    expect(woke({ kind: 'someone-elses-plugin' })).toEqual(['Execution requested'])
   })
 
   it('routes only xAI session updates to the xAI notification', () => {

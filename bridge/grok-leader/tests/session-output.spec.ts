@@ -203,6 +203,27 @@ describe('session output ownership', () => {
     expect(restored.notes.map(note => [note.params.update, note.params._meta.isReplay])).toEqual(f.notes.map(note => [note.params.update, true]))
   })
 
+  it('heads a turn no human started with why it started, live and on replay', async () => {
+    const log = [
+      event(0, 'agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [{ id: 'wake' }] }),
+      event(1, 'turn/start', { turn: 2 }),
+      event(2, 'agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }),
+      event(3, 'user/message', { id: 'wake', source: { kind: 'schedule' }, content: [{ type: 'text', text: '[SCHEDULE REMINDER]' }] }),
+      assistantEvent(4, 'Reminder: stretch'),
+    ]
+    const f = fixture()
+    f.setPrompt(undefined)
+    for (const item of log) f.output.live(item)
+    expect(f.notes.map(note => [note.method, note.params.update.sessionUpdate])).toEqual([
+      ['session/update', 'plan'], ['x.ai/session_notification', 'image_dropped'], ['session/update', 'agent_message_chunk']])
+    expect(f.notes[1]!.params.update).toEqual({ sessionUpdate: 'image_dropped', notes: ['Scheduled task'] })
+    expect(JSON.stringify(f.notes)).not.toContain('SCHEDULE REMINDER')
+    const restored = fixture()
+    await restored.output.restore(log)
+    expect(restored.notes.map(note => note.params.update)).toEqual(f.notes.map(note => note.params.update))
+    expect(restored.output.stats.messageCount).toBe(1)
+  })
+
   it('replaces same-step usage but keeps separately billed retry attempts', () => {
     const f = fixture()
     f.output.live(assistantEvent(0, 'first', { inputTokens: 10, outputTokens: 2 }))
