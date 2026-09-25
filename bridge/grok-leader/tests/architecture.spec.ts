@@ -70,6 +70,7 @@ const declaredDependencies = [
     ['provider-profile', ['acp', 'model-endpoint', 'native-seams', 'guards']],
     ['wire-catalog', ['acp', 'native-seams', 'guards']],
     ['leader-routes', ['acp', 'protocol', 'execution-world', 'wire-catalog']],
+    ['host-services', ['native-seams', 'browser-control', 'execution-world', 'native-asides', 'native-capabilities', 'native-execution', 'native-session-status', 'native-tasks', 'native-team', 'plugin-rows', 'plugin-status', 'session-artifacts', 'session-commands', 'session-controller', 'session-discovery', 'session-presets']],
     ['leader-transport', ['acp', 'codec', 'protocol', 'guards']],
     ['leader-lifecycle', []],
     ['prompt-queue', ['acp', 'projection', 'prompt-content', 'queue-controls', 'turn-notices', 'guards']],
@@ -263,6 +264,11 @@ describe('architecture ownership and dependency gate', () => {
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
         && ts.isIdentifier(node.expression.expression) && ['sessions', 'connections'].includes(node.expression.expression.text)
         && ['set', 'delete', 'clear'].includes(node.expression.name.text)) violations.push(node.expression.getText(source))
+      // Optional host services are read through host-services, the one
+      // declared list of what the bridge consumes; the root names none itself.
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+        && ts.isIdentifier(node.expression.expression) && node.expression.expression.text === 'ctx'
+        && node.expression.name.text === 'get') violations.push(node.getText(source))
       ts.forEachChild(node, visit)
     }
     visit(source)

@@ -1,12 +1,12 @@
-import { createNativeCapabilities, type NativeToolSchemas } from './native-capabilities.ts'
+import { createNativeCapabilities } from './native-capabilities.ts'
 import { listMcpServers } from './mcp.ts'
 import { createLeaderLifecycle } from './leader-lifecycle.ts'
-import { createNativeAsides, type NativeAsideRuntime } from './native-asides.ts'
+import { createNativeAsides } from './native-asides.ts'
 import { createSessionInput } from './session-input.ts'
-import { createSessionArtifacts, type NativeSessionTitles, type NativeSessionReferences } from './session-artifacts.ts'
-import { createNativeExecution, type NativeExecutionHost, type NativeTerminals } from './native-execution.ts'
-import { createSessionCommands, type NativeCommands, type NativeSkills } from './session-commands.ts'
-import { createSessionDiscovery, type SessionProjectionCacheLike, type SessionQueryLike } from './session-discovery.ts'
+import { createSessionArtifacts } from './session-artifacts.ts'
+import { createNativeExecution } from './native-execution.ts'
+import { createSessionCommands } from './session-commands.ts'
+import { createSessionDiscovery } from './session-discovery.ts'
 import { createNativeInteractions } from './native-interactions.ts'
 import { createSessionLifecycle, type SessionRecord } from './session-lifecycle.ts'
 import { createPresetCatalog } from './preset-catalog.ts'
@@ -14,16 +14,16 @@ import { createSessionPresets } from './session-presets.ts'
 import { presetHistoryProjection } from './preset-history.ts'
 import { workflowProjection } from './workflows.ts'
 import { legacyRemindersProjection } from './legacy-reminders.ts'
-import { createSessionController, provideSessionController, type ScheduleDeliveryLike } from './session-controller.ts'
+import { createSessionController, provideSessionController } from './session-controller.ts'
 import { createSessionModels } from './session-models.ts'
 // Keep durable event augmentations reachable through the published type entry.
 export type {} from './session-models.ts'
 export type {} from './preset-history.ts'
 export type {} from './workflows.ts'
 export type {} from './legacy-reminders.ts'
-import { createNativeSessionStatus, type NativeStatusProjections, type NativeGoalAuthority } from './native-session-status.ts'
+import { createNativeSessionStatus } from './native-session-status.ts'
 import { createNativeChildren } from './native-children.ts'
-import { createNativeTasks, type ScheduleServiceLike } from './native-tasks.ts'
+import { createNativeTasks } from './native-tasks.ts'
 import { createSessionRegistry } from './session-registry.ts'
 import { PACKAGE_VERSION } from './package-location.ts'
 import { createProfilePlugins, inspectPluginRuntime } from './profile-plugins.ts'
@@ -33,13 +33,13 @@ import { internalError, paramRecord, sessionIdParam } from './acp.ts'
 import { errorMessage } from './guards.ts'
 import { createModelCatalog } from './model-catalog.ts'
 import { createNativeProviders } from './native-provider.ts'
-import { createPluginRows, type PluginManagerLike } from './plugin-rows.ts'
-import { createPluginStatus, type LoaderEntryLike } from './plugin-status.ts'
-import { createBrowserControl, type BrowserStatus } from './browser-control.ts'
-import { createNativeTeam, type TeamServiceLike } from './native-team.ts'
+import { createPluginRows } from './plugin-rows.ts'
+import { createPluginStatus } from './plugin-status.ts'
+import { createBrowserControl } from './browser-control.ts'
+import { createNativeTeam } from './native-team.ts'
 import { TEAM_TOOLS_MODULE } from './team-presets.ts'
-import { configuredRemote, executionWorld, remoteUnavailable, SSH_FAILURE, type ConfigEntryLike, type RemoteConnection, type RemoteLike } from './execution-world.ts'
-import type { LlmLike, SettingsLike, CredentialsLike, AgentDefaultModelLike } from './native-seams.ts'
+import { configuredRemote, executionWorld, remoteUnavailable, SSH_FAILURE, type RemoteConnection, type RemoteLike } from './execution-world.ts'
+import { createHostServices } from './host-services.ts'
 /**
  * Grok leader-protocol unix-socket server driving harness agents.
  *
@@ -63,14 +63,12 @@ import { fileURLToPath } from 'node:url'
 
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import { installLegacySessionMigration } from './session-migration.ts'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
-import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm-retry'
 import type {} from '@deepseek-ai/dsh-settings'
-import { readProfilePatches, reconcileProfilePatches, type ProfileContext } from '@deepseek-ai/dsh-app-boot'
+import { readProfilePatches, reconcileProfilePatches } from '@deepseek-ai/dsh-app-boot'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { RpcError } from './protocol.ts'
 import { jobOutputSnapshot } from './job-output.ts'
@@ -120,11 +118,6 @@ export const Config: Schema<GrokLeaderConfig> = Schema.object({
   idleExitMs: Schema.number().default(2000),
 })
 
-/** Structural read of the session store: this bridge needs only one flush entry point. */
-interface SessionsLike {
-  flush(session: object): Promise<unknown>
-}
-
 /**
  * Mount the grok leader server.
  * @param ctx - Cordis context carrying the agent factory and harness services.
@@ -138,15 +131,15 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   protectTerminalSignals(ctx)
   const jobOutput = jobOutputSnapshot
   const projectImages = createImageOutputProjector(ctx)
-  ctx.effect(() => installLegacySessionMigration(ctx.get('sessionPersistence')))
+  // Every optional host service is read at call time through this one seam.
+  const host = createHostServices(ctx, { roster: () => agentPresets() })
+  ctx.effect(() => installLegacySessionMigration(host.persistence()))
   const logger = ctx.logger
   // The configured SSH row decides the world, connected or not.
-  const remote = (): RemoteLike | undefined => configuredRemote((ctx.get('configEditor') as { entries(): Iterable<ConfigEntryLike> } | undefined)?.entries() ?? [])
+  const remote = (): RemoteLike | undefined => configuredRemote(host.configEditor()?.entries() ?? [])
   const world = () => executionWorld(remote())
-  // dsh-ssh keeps a lost connection's error on the service (`failure`); it never
-  // reconnects. A connection that never came up leaves no service at all.
   const sshState = (): RemoteConnection => {
-    const ssh = ctx.get('ssh') as { failure?: unknown } | undefined
+    const ssh = host.ssh()
     if (ssh === undefined) {
       const failure = (globalThis as Record<symbol, unknown>)[SSH_FAILURE]
       return { state: 'failed', ...typeof failure === 'string' ? { reason: failure } : {} }
@@ -163,30 +156,20 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     const self = fileURLToPath(import.meta.url)
     process.stderr.write('grok-leader: loaded ' + self + ' (built ' + statSync(self).mtime.toISOString() + ')\n')
   } catch { /* provenance only; never block mounting */ }
-  // Read lazily like the other optional services: the settings provider
-  // (dsh-settings-file) publishes asynchronously after apply.
-  const settings = (): SettingsLike | undefined => ctx.get('settings') as SettingsLike | undefined
-  // Read lazily so teardown cannot retain a stale service instance. Static
-  // injection above prevents the socket from opening before persistence mounts.
-  const persistence = () => ctx.get('sessionPersistence')
-  // Read lazily too: agent-default-model depends on the settings provider and
-  // can mount after apply, so an eager capture would make session/set_model
-  // silently skip saveSelection (and /effort would not persist).
-  const agentDefaultModel = (): AgentDefaultModelLike | undefined => ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
   /** Read the preset roster on demand: it mounts asynchronously after apply. */
   const agentPresets = createPresetCatalog(ctx)
   const registry = createSessionRegistry<SessionRecord>({
     clientIsLive: id => connections.get(id)?.closed === false,
-    flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),
+    flush: host.flush,
     cancelRequests: (clientId, sessionId) => interactions.cancel(clientId, sessionId),
     unblocked: record => { sessionController.deliverable(record) },
     logger,
   })
   const sessions = registry.records
   const sessionPresets = createSessionPresets<SessionRecord>({
-    roster: agentPresets, settings, owned: registry.owned,
+    roster: agentPresets, settings: host.settings, owned: registry.owned,
     isLive: record => !registry.closed && registry.ownedAgent(record.agent) === record,
-    flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),
+    flush: host.flush,
     history: record => {
       const state = ctx.sessionProjections.stateOf(record.agent.session, 'dscodePresetHistory')
       if (state === undefined) throw internalError('preset history projection is unavailable')
@@ -211,32 +194,27 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   // Shipped-disabled rows (native DeepSeek adapter, browser) toggle through the
   // plugin manager and are applied to the live Loader without hmr.
   const pluginRows = createPluginRows({
-    pluginManager: () => ctx.get('pluginManager') as PluginManagerLike | undefined,
+    pluginManager: host.pluginManager,
     reload: async requiredIds => {
-      const profile = ctx.get('profileContext') as ProfileContext | undefined
+      const profile = host.profileContext()
       if (profile === undefined) throw new Error('no profile context: restart dscode to apply the change')
       await reconcileProfilePatches(ctx.root, readProfilePatches('dsh', profile), 'dsh', requiredIds)
     },
   })
   // Plugin health: bundles this start skipped (told once to the next opened
   // session), and rows that did not activate (for /doctor).
-  const pluginStatus = createPluginStatus({
-    manager: () => ctx.get('pluginManager') as PluginManagerLike | undefined,
-    loader: () => ctx.get('loader') as unknown as { entries(): Iterable<LoaderEntryLike> } | undefined,
-    profile: () => ctx.get('profileContext') as ProfileContext | undefined,
-    logger,
-  })
+  const pluginStatus = createPluginStatus({ manager: host.pluginManager, loader: host.loader, profile: host.profileContext, logger })
   const models = createModelCatalog({
     config,
-    llm: () => ctx.get('llm') as LlmLike | undefined,
-    settings,
-    getCredentials: () => ctx.get('credentials') as CredentialsLike | undefined,
+    llm: host.llm,
+    settings: host.settings,
+    getCredentials: host.credentials,
     native: createNativeProviders({
       rows: pluginRows,
-      credentials: () => ctx.get('credentials') as CredentialsLike | undefined,
-      settings,
+      credentials: host.credentials,
+      settings: host.settings,
     }),
-    getDefaultModel: agentDefaultModel,
+    getDefaultModel: host.agentDefaultModel,
     isProviderInUse: id => sessionModels.isProviderInUse(id),
     onChanged: (current, reason) => sessionModels.changed(current, reason),
     logger,
@@ -253,10 +231,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     ctx.on(event as never, (() => { models.sourcesChanged() }) as never)
   }
   const sessionModels = createSessionModels({
-    sessions, owned: (clientId, id) => lifecycle.writable(clientId, id), config, catalog: models, defaults: agentDefaultModel,
+    sessions, owned: (clientId, id) => lifecycle.writable(clientId, id), config, catalog: models, defaults: host.agentDefaultModel,
     clients: () => connections.keys(),
     notify: (clientId, method, params) => connections.get(clientId)?.notify(method, params),
-    flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),
+    flush: host.flush,
   })
   // grok's ui.combine_queued_prompts (default off); env override for dev shells.
   const combineQueued = config.combineQueuedPrompts === true || process.env.DSCODE_COMBINE_QUEUED === '1'
@@ -267,8 +245,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     owned: registry.owned, ownedAgent: registry.ownedAgent,
     assertReady: record => lifecycle.assertReady(record),
     client: id => connections.get(id),
-    permissionPresets: () => ctx.get('permissionPresets') as { set(session: Agent['session'], preset: string): void } | undefined,
-    planMode: record => presetServiceFor(record, 'planMode') as { set(agent: Agent, active: boolean): unknown } | undefined,
+    permissionPresets: host.permissionPresets,
+    planMode: record => host.presetService(record.agent, 'planMode'),
     on: (name, listener, options) => ctx.on(name as never, listener as never, options), logger,
     // Wired before `input` exists; approvals only arrive once sessions do.
     rejectionFeedback: (record, text): Promise<unknown> | undefined => input.rejectionFeedback(record, text),
@@ -283,21 +261,20 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   }
   const sessionController = createSessionController<SessionRecord>({
     record: id => sessions.get(id), ready: sessionReady,
-    schedule: () => ctx.get('schedule') as ScheduleDeliveryLike | undefined, logger,
+    schedule: host.schedule, logger,
   })
   provideSessionController(ctx, sessionController, logger)
   const discovery = createSessionDiscovery({
-    persistence, query: () => ctx.get('sessionQuery') as SessionQueryLike | undefined,
-    projectionCache: () => ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined,
+    persistence: host.persistence, query: host.sessionQuery, projectionCache: host.sessionProjectionCache,
     log: message => logger.warn(message),
     owns: session => sessions.get(session.header.id)?.agent.session === session,
     onEvent: listener => ctx.on('session/event', listener),
     onCreated: listener => ctx.on('session/created', listener),
   })
   const lifecycle = createSessionLifecycle({
-    agents, registry, models: sessionModels, presets: sessionPresets, persistence, discovery, world,
+    agents, registry, models: sessionModels, presets: sessionPresets, persistence: host.persistence, discovery, world,
     remoteUnavailable: remoteProblem,
-    flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),
+    flush: host.flush,
     client: id => connections.get(id),
     queue: { combineQueued, followUpSteer },
     permissions: interactions,
@@ -350,27 +327,18 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     return initializeReply({ version: PACKAGE_VERSION, world: world(), commands: (await sessionCommands.catalog()).commands, catalog })
   }
 
-  const presetServiceFor = (record: SessionRecord, name: string): unknown =>
-    agentPresets()?.serviceFor?.(record.agent, name)
-      ?? record.agent.ctx.get(name)
-      ?? ctx.get(name)
-
   const nativeCapabilities = createNativeCapabilities<SessionRecord>({
-    tools: record => record.agent.ctx.get('tools') as NativeToolSchemas | undefined,
-    hasService: (record, name) => presetServiceFor(record, name) !== undefined,
+    tools: record => host.agentTools(record.agent),
+    hasService: (record, name) => host.presetService(record.agent, name) !== undefined,
   })
-
-  /** The dsh plugin command registry, when the composition mounts it. */
-  const dshCommands = (): NativeCommands | undefined => ctx.get('commands') as NativeCommands | undefined
 
   // Agent Teams: the host runtime serves every session; only sessions on a
   // preset that mounts the Team tools have a Team to show.
-  const teamService = (): TeamServiceLike | undefined => ctx.get('agentTeams') as TeamServiceLike | undefined
   const hasTeam = (record: SessionRecord) => nativeCapabilities.toolNames(record).has('spawn_teammate')
-  const nativeTeam = createNativeTeam<SessionRecord>({ service: teamService, hasTeam, agent: record => record.agent, modelName: models.modelName })
+  const nativeTeam = createNativeTeam<SessionRecord>({ service: host.agentTeams, hasTeam, agent: record => record.agent, modelName: models.modelName })
   const teamMembers = (record: SessionRecord) => {
     if (!hasTeam(record)) return undefined
-    try { return teamService()?.listMembers(record.agent).filter(member => member.role === 'teammate') } catch (error) {
+    try { return host.agentTeams()?.listMembers(record.agent).filter(member => member.role === 'teammate') } catch (error) {
       logger.warn('grok-leader: Agent Team roster unavailable: ' + errorMessage(error))
       return undefined
     }
@@ -378,20 +346,20 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   const profilePlugins = createProfilePlugins({
     inspectRuntime: name => inspectPluginRuntime(ctx, name),
-    installAnchor: () => (ctx.get('profileContext') as { installAnchor?: string } | undefined)?.installAnchor,
-    pluginManager: () => ctx.get('pluginManager') as PluginManagerLike | undefined,
+    installAnchor: () => host.profileContext()?.installAnchor,
+    pluginManager: host.pluginManager,
     switches: pluginRows, skipped: pluginStatus.skipped,
   })
   const sessionCommands = createSessionCommands<SessionRecord>({
     sessions, owned: ownedRecord, client: id => connections.get(id),
-    registry: dshCommands, roster: agentPresets,
-    skills: record => presetServiceFor(record, 'skills') as NativeSkills | undefined,
+    registry: host.commands, roster: agentPresets,
+    skills: record => host.presetService(record.agent, 'skills'),
     capabilities: nativeCapabilities.capabilities, profile: profilePlugins, preset: sessionPresets.command,
     team: nativeTeam,
     browser: createBrowserControl({
-      rows: pluginRows, settings,
-      status: () => (ctx.get('dscodeBrowser') as { status(): BrowserStatus } | undefined)?.status(),
-      startOpen: async () => { await (ctx.get('dscodeBrowser') as { startOpen?(): Promise<void> } | undefined)?.startOpen?.() },
+      rows: pluginRows, settings: host.settings,
+      status: () => host.browser()?.status(),
+      startOpen: async () => { await host.browser()?.startOpen?.() },
     }),
     children: { command: (clientId, params) => children.command(clientId, params) },
     goals: { goal: (clientId, params) => nativeStatus.goal(clientId, params) },
@@ -401,7 +369,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const input = createSessionInput<SessionRecord>({
     owned: ownedRecord, assertReady: lifecycle.assertReady,
     commands: sessionCommands, models,
-    attachments: () => ctx.get('attachments') as AttachmentStore | undefined,
+    attachments: host.attachments,
     notify: (record, method, params) => connections.get(record.clientId)?.notify(method, params),
     cancelHuman: interactions.cancel,
     goal: { pauseGoal: record => nativeStatus.pauseGoal(record), refresh: record => nativeStatus.refresh(record) },
@@ -410,35 +378,34 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   const execution = createNativeExecution<SessionRecord>({
     owned: ownedRecord, profileDirectory: profilePlugins.directory,
-    inspector: () => ctx.get('dscodeInspector') as { url: string; captureFetch: boolean } | undefined,
-    browser: () => (ctx.get('dscodeBrowser') as { status(): BrowserStatus } | undefined)?.status(),
+    inspector: host.inspector,
+    browser: () => host.browser()?.status(),
     remote: () => { const configured = remote(); return configured === undefined ? undefined : { ...configured, connected: sshState().state === 'connected' } },
-    hostTeamRows: async () => (await (ctx.get('pluginManager') as PluginManagerLike | undefined)?.listPlugins() ?? [])
+    hostTeamRows: async () => (await host.pluginManager()?.listPlugins() ?? [])
       .filter(row => row.enabled && row.moduleName === TEAM_TOOLS_MODULE).map(row => row.patchId ?? row.entryId),
     plugins: () => pluginStatus.findings(),
-    terminals: record => presetServiceFor(record, 'terminals') as NativeTerminals | undefined,
-    subprocess: record => presetServiceFor(record, 'subprocess') as NativeExecutionHost | undefined,
+    terminals: record => host.presetService(record.agent, 'terminals'),
+    subprocess: record => host.presetService(record.agent, 'subprocess'),
     toolNames: nativeCapabilities.toolNames,
   })
 
   const asides = createNativeAsides<SessionRecord>({
     owned: ownedRecord, canDelegate: record => nativeCapabilities.capabilities(record).includes('subagents'),
-    subagents: record => presetServiceFor(record, 'subagents') as NativeAsideRuntime | undefined,
+    subagents: record => host.presetService(record.agent, 'subagents'),
   })
 
   const artifacts = createSessionArtifacts<SessionRecord>({
     owned: ownedRecord, client: id => connections.get(id),
-    titles: () => ctx.get('sessionTitle') as NativeSessionTitles | undefined,
-    references: () => ctx.get('sessionReferenceResolver') as NativeSessionReferences | undefined,
+    titles: host.sessionTitles, references: host.sessionReferences,
     // Archives are written on this computer: a remote cwd names no host directory.
     archive: (id, cwd, filename, signal) => exportSessionArchive(ctx, id, world().kind === 'local' ? cwd : homedir(), filename, signal),
   })
 
   const tasks = createNativeTasks({
     sessions, owned: ownedRecord,
-    jobs: record => presetServiceFor(record, 'jobs'),
-    toolNames: record => record.agent.ctx.get('tools') === undefined ? undefined : nativeCapabilities.toolNames(record),
-    schedule: () => ctx.get('schedule') as ScheduleServiceLike | undefined,
+    jobs: record => host.presetService(record.agent, 'jobs'),
+    toolNames: record => host.agentTools(record.agent) === undefined ? undefined : nativeCapabilities.toolNames(record),
+    schedule: host.schedule,
     legacyReminders: record => ctx.sessionProjections.stateOf(record.agent.session, 'dscodeLegacyReminders'),
     ready: sessionReady,
     output: jobOutput, logger,
@@ -453,14 +420,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   })
   const children = createNativeChildren({
     sessions, owned: ownedRecord, agent: id => agents.get(id),
-    subagents: record => presetServiceFor(record, 'subagents'),
-    jobs: record => presetServiceFor(record, 'jobs'),
+    subagents: record => host.presetService(record.agent, 'subagents'),
+    jobs: record => host.presetService(record.agent, 'jobs'),
     workflow: record => {
       const state = ctx.sessionProjections.stateOf(record.agent.session, 'dscodeWorkflows')
       if (state === undefined) throw internalError('workflow history projection is unavailable')
       return state
     },
-    persistence, flush: async session => (ctx.get('sessions') as SessionsLike | undefined)?.flush(session),
+    persistence: host.persistence, flush: host.flush,
     projectImages,
     notify: (record, method, params) => connections.get(record.clientId)?.notify(method, params),
     teamMembers,
@@ -475,9 +442,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (record !== undefined) lifecycle.assertReady(record)
       return record
     },
-    goals: record => presetServiceFor(record, 'goals') as NativeGoalAuthority | undefined,
-    commands: dshCommands,
-    projections: () => ctx.get('sessionProjections') as NativeStatusProjections | undefined,
+    goals: record => host.presetService(record.agent, 'goals'),
+    commands: host.commands,
+    projections: host.sessionProjections,
     on: (name, listener) => ctx.on(name as never, listener as never),
   })
 
@@ -560,7 +527,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     pollers: [tasks, children, nativeStatus],
     // A leader whose remote connection is gone exits at once, so restarting dscode reconnects.
     idleExitMs: () => remoteProblem() === undefined ? config.idleExitMs ?? 2000 : 0,
-    appExit: () => ctx.get('appExit') as ((code: number) => void) | undefined, logger,
+    appExit: host.appExit, logger,
   })
   // Register cleanup before listen can fail synchronously.
   ctx.effect(() => () => leaderHost.dispose(), 'grok-leader.socket')
