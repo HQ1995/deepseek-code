@@ -305,7 +305,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     unblocked: record => { sessionController.deliverable(record) },
     notice: pluginStatus.notice,
     views: {
-      status: (record, replay) => nativeStatus.snapshot(record, replay),
+      status: (record, replay) => nativeStatus.snapshot(record, replay), mode: record => nativeStatus.mode(record),
       children: (record, replay) => children.snapshot(record, replay),
       tasks: record => tasks.snapshot(record),
       commands: record => { void sessionCommands.refresh(record) },

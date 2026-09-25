@@ -70,6 +70,16 @@ describe('native assistant settlement projection', () => {
     }
   })
 
+  it('titles a lone markdown plan as a plan submitted for review', () => {
+    const call = (name: string, args: unknown) => GrokLeader.sessionEventToUpdates({ type: 'tool/call',
+      data: { turn: 1, step: 1, callId: ToolCallId('c-' + name), name, arguments: JSON.stringify(args) } } as SessionEvent, { replay: false })[0]
+    expect(call('exit_plan_mode', { plan: '# Ship it\n\n1. Step' })).toMatchObject({ title: 'Plan: Submit for approval', kind: 'other',
+      _meta: { 'x.ai/tool': { name: 'exit_plan_mode' } } })
+    for (const args of [{ plan: 'no heading' }, { plan: '# Plan', extra: 1 }, { plan: 3 }]) {
+      expect(call('exit_plan_mode', args)).toMatchObject({ title: 'exit_plan_mode' })
+    }
+  })
+
   it('preserves interrupted reasoning and whitespace from the embedded stream, not only safe message blocks', () => {
     const event = { type: 'assistant/message', data: {
       turn: 0, step: 0, interrupted: true,

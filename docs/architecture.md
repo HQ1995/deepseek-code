@@ -66,7 +66,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `queue-controls` | `x.ai/queue/*` row controls (interject, steer, remove, edit, holds, reorder, clear) over the queue's state |
 | `prompt-content` | ACP prompt validation; commits images to durable storage in block order |
 | `session-output` | Stream state: seq-based replay/live dedup, usage, decode speed, pending tool facts |
-| `turn-notices` | Pure: xAI turn notices from native events and stream chunks (retry and typed failure states, tool calls being written, automatic compaction) |
+| `turn-notices` | Pure: xAI turn notices from native events and stream chunks (retry and typed failure states, tool calls being written, automatic compaction, plan mode) |
 | `session-models` | Runtime model references, durable choice/effort memory, catalog fan-out |
 | `session-presets` | Preset preparation, `/preset` switching, English copy for shipped presets |
 | `preset-history` | Native projection of preset policy state (`dscodePresetHistory`) |
@@ -89,8 +89,8 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `reminders` | Reminder input parsing, titles and display; validation and mutation stay in dsh-schedule |
 | `session-controller` | `sessionController` for Schedule delivery into sessions open in dscode |
 | `legacy-reminders` | Projection of rc.1 session-event reminders and their one-time notice |
-| `native-session-status` | Goal, activity and context observations; reads never arm a goal |
-| `native-interactions` | Permission modes and approvals, user questions, reverse-request admission |
+| `native-session-status` | Goal, activity, plan-mode and context observations; reads never arm a goal |
+| `native-interactions` | Permission modes and approvals, user questions and plan reviews, reverse-request admission |
 | `native-execution` | Runtime doctor and persistent-terminal controls |
 | `terminal-signal` | Retries a foreground-group signal once through the provider |
 | `native-asides` | One-shot `/btw` asides, including late handles |

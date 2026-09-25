@@ -2,7 +2,7 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { errorChain, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { hasToolImages } from './image-output.ts'
-import { compactionNotices, isXaiNotice, toolCallWriting, turnNotices, type CompactionFold, type ContextTokens, type WritingCalls, type XaiNotice } from './turn-notices.ts'
+import { compactionNotices, isXaiNotice, planModeNotice, toolCallWriting, turnNotices, type CompactionFold, type ContextTokens, type ModeUpdate, type WritingCalls, type XaiNotice } from './turn-notices.ts'
 import { assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, parseJsonObject, sessionEventToUpdates, systemNotes, contextInfoFromProjection, type ContextProjectionValues, type DecodeSpeed, type ProjectedUpdate } from './projection.ts'
 
 export interface SessionOutputHost {
@@ -42,7 +42,7 @@ interface OutputState {
 /** xAI-only updates: system notes (the pager renders `image_dropped` notes as
  * one plain system block, so every neutral notice rides it), retry/failure
  * states, tool calls being written and automatic compaction. No meters. */
-type NoticeUpdate = XaiNotice & { totalTokens?: never; cacheHitPercent?: never; tokensPerSecond?: never }
+type NoticeUpdate = (XaiNotice | ModeUpdate) & { totalTokens?: never; cacheHitPercent?: never; tokensPerSecond?: never }
 type OutputUpdate = ProjectedUpdate | NoticeUpdate
 
 /** Per-attached-agent output ownership: revision/replay dedup, meter folding,
@@ -318,10 +318,10 @@ export function createSessionOutput(host: SessionOutputHost) {
   }
   /** The xAI notices one event carries; folds see every event, sent or not. */
   const notices = (event: SessionEvent, replay: boolean): OutputUpdate[] => {
-    const notes = systemNotes(event)
+    const notes = systemNotes(event), mode = planModeNotice(event)
     const compaction = compactionNotices(compactions, event, replay, occupancy(replay))
     return [
-      ...notes === undefined ? [] : [{ sessionUpdate: 'image_dropped' as const, notes }],
+      ...notes === undefined ? [] : [{ sessionUpdate: 'image_dropped' as const, notes }], ...mode === undefined ? [] : [mode],
       ...turnNotices(event, replay), ...compaction,
       ...lastPlan !== undefined && compaction.some(item => item.sessionUpdate === 'auto_compact_completed') ? [lastPlan] : [],
     ]

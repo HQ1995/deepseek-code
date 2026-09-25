@@ -68,6 +68,7 @@ interface LifecycleHost {
   notice?: { pending(): boolean; take(): string | undefined }
   views: {
     status(record: SessionRecord, replay?: boolean): void
+    mode(record: SessionRecord): void
     children(record: SessionRecord, replay: boolean): Promise<void>
     tasks(record: SessionRecord): void | Promise<void>
     commands(record: SessionRecord): void
@@ -193,7 +194,7 @@ export function createSessionLifecycle(host: LifecycleHost) {
     record.mcpInitTimer = setTimeout(() => {
       record.mcpInitTimer = undefined
       if (ownedRecord(record.clientId, record.agent.session.id) !== record || host.client(record.clientId) !== conn) return
-      if (creation.kind !== 'load') conn.notify('_x.ai/mcp_initialized', { sessionId: record.agent.session.id })
+      if (creation.kind !== 'load') { conn.notify('_x.ai/mcp_initialized', { sessionId: record.agent.session.id }); views.mode(record) }
       // The TUI's display-only system notes: this session's own, and a
       // leader-wide one only the first session to get here takes.
       const leader = host.notice?.take()

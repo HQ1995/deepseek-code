@@ -206,11 +206,47 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
     void decided.then(outcome => { if (outcome === 'rejected' && feedback !== undefined) deliverFeedback(record, feedback) }, () => {})
     return decided
   }
+  /** A plan-review question (DSH's `exit_plan_mode`) opens the TUI's plan
+   * approval view, and its decision answers the question: approve selects the
+   * approve label; request changes selects the other option, with the feedback
+   * as the custom answer; abandon turns plan mode off and dismisses the review,
+   * which DSH tells the model means stop and wait. */
+  const planReview = async (record: S, client: NonNullable<ReturnType<InteractionHost<S>['client']>>, item: AskUserQuestionRequest['questions'][number],
+    intent: { approve: string; callId?: string }, signal: AbortSignal): Promise<AskUserQuestionAnswer> => {
+    let response: unknown
+    try {
+      response = await client.request<unknown>('_x.ai/exit_plan_mode', {
+        sessionId: record.agent.session.id, toolCallId: intent.callId ?? randomUUID(), planContent: item.detail ?? '',
+      }, record.agent.session.id, Infinity, signal)
+    } catch (error) {
+      if (signal.aborted || !live(record)) throw cancelledQuestion()
+      throw error
+    }
+    if (signal.aborted || !live(record)) throw cancelledQuestion()
+    const outcome = object(response)?.outcome, feedback = object(response)?.feedback
+    if (outcome === 'approved') return { answers: [{ id: item.id, selected: [intent.approve] }] }
+    const revise = item.options?.find(option => option.label !== intent.approve)?.label
+    if (outcome === 'cancelled' && revise !== undefined) {
+      return { answers: [{ id: item.id, selected: [revise], ...typeof feedback === 'string' && feedback.trim() !== '' ? { custom: feedback } : {} }] }
+    }
+    if (outcome === 'abandoned') {
+      try { host.planMode(record)?.set(record.agent, false) } catch (error) { host.logger.warn('grok-leader: leaving plan mode failed: ' + errorChain(error)) }
+    }
+    throw cancelledQuestion()
+  }
   const question: InteractionEvents['user-questions/request'] = (request, next) => {
     if (closed) return Promise.reject(cancelledQuestion())
     const record = request.agent === undefined ? undefined : host.ownedAgent(request.agent)
     const client = record === undefined ? undefined : host.client(record.clientId)
     if (record === undefined || client === undefined) return next()
+    const review = request.questions.length === 1 ? request.questions[0] : undefined
+    const intent = review?.intent?.kind === 'plan-review' ? review.intent : undefined
+    if (review !== undefined && intent !== undefined) {
+      return accepted(record, request.signal, async signal => {
+        if (signal.aborted || !live(record)) throw cancelledQuestion()
+        return planReview(record, client, review, intent, signal)
+      })
+    }
     return accepted(record, request.signal, async signal => {
       if (signal.aborted || !live(record)) throw cancelledQuestion()
       // Native IDs are stable; legacy heading keys must be unambiguous.

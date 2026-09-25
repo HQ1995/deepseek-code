@@ -173,6 +173,26 @@ already exist; nothing here adds a TUI code path.
   tokens plus its output. The TUI shows the completion at the turn's end and
   empties its todo pane, so the bridge sends the turn's last plan again.
 
+## Plan mode
+
+- A DSH question whose single item carries `intent.kind: 'plan-review'` (the
+  `exit_plan_mode` review) is sent as the TUI's `_x.ai/exit_plan_mode` reverse
+  request `{sessionId, toolCallId: intent.callId, planContent: detail}`
+  instead of `_x.ai/ask_user_question`, so the TUI opens its full plan
+  approval view. Its answer maps back onto the question: `approved` selects
+  `intent.approve`; `cancelled` ("request changes") selects the other option,
+  with the typed feedback as the custom answer; `abandoned` turns plan mode off
+  and dismisses the review (`ASK_CANCELLED`), which DSH tells the model means
+  stop and wait. Any other reply dismisses it. The tool card of a call whose
+  only argument is a markdown `plan` reads `Plan: Submit for approval`, so the
+  view quotes the commented plan lines in its feedback.
+- Each durable `plan/mode` event sends ACP `current_mode_update`
+  (`plan` or `default`), live and on replay: `/plan`, `session/set_mode`, an
+  approved plan and an abandoned review's exit all reach the TUI indicator once
+  DSH commits them. Session snapshots send the committed mode from the native
+  `plan` projection; a new or forked session gets it once more after its
+  response, when the TUI knows its id.
+
 ## Invariants
 
 - `session/new` and `session/load` require an absolute cwd. ACP `mcpServers`

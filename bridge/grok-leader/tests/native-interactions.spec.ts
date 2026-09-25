@@ -273,6 +273,36 @@ describe('native interaction ownership', () => {
     await expect(f.emit('user-questions/request', { questions: [] }, async () => ({ answers: ['fallback'] }))).resolves.toEqual({ answers: ['fallback'] })
   })
 
+  it('reviews a plan in the TUI plan view and answers with its approve, revise or abandon decision', async () => {
+    const f = fixture()
+    const review = () => f.emit<{ answers: unknown[] }>('user-questions/request', { agent: f.root.agent, questions: [{
+      id: 'plan-review', header: 'Plan review', question: 'Approve this plan and leave plan mode?', detail: '# Plan\n\n1. Do it',
+      options: [{ label: 'Approve' }, { label: 'Keep planning' }], intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan' } }],
+    }, async () => ({ answers: [] }))
+    f.replies.mockResolvedValueOnce({ outcome: 'approved' })
+    await expect(review()).resolves.toEqual({ answers: [{ id: 'plan-review', selected: ['Approve'] }] })
+    expect(f.request).toHaveBeenLastCalledWith('_x.ai/exit_plan_mode', { sessionId: 'root', toolCallId: 'call-plan', planContent: '# Plan\n\n1. Do it' },
+      'root', Infinity, expect.any(AbortSignal))
+    f.replies.mockResolvedValueOnce({ outcome: 'cancelled', feedback: 'Split step 1' })
+    await expect(review()).resolves.toEqual({ answers: [{ id: 'plan-review', selected: ['Keep planning'], custom: 'Split step 1' }] })
+    f.replies.mockResolvedValueOnce({ outcome: 'cancelled', feedback: '  ' })
+    await expect(review()).resolves.toEqual({ answers: [{ id: 'plan-review', selected: ['Keep planning'] }] })
+    expect(f.plan.set).not.toHaveBeenCalled()
+    // Abandon: plan mode off, and the review dismissed so the model stops.
+    f.replies.mockResolvedValueOnce({ outcome: 'abandoned' })
+    await expect(review()).rejects.toMatchObject({ code: 'ASK_CANCELLED' })
+    expect(f.plan.set).toHaveBeenCalledExactlyOnceWith(f.root.agent, false)
+    for (const response of [null, { outcome: 'chat_about_this' }]) {
+      f.replies.mockResolvedValueOnce(response)
+      await expect(review()).rejects.toMatchObject({ code: 'ASK_CANCELLED' })
+    }
+    expect(f.request.mock.calls.map(call => call[0])).toEqual(Array.from({ length: 6 }, () => '_x.ai/exit_plan_mode'))
+    // Without the intent the same question stays a generic question card.
+    f.replies.mockResolvedValueOnce({ outcome: 'accepted', answers: { 'Title\nProceed?\nDetail': ['Yes'] } })
+    await f.ask()
+    expect(f.request.mock.calls.at(-1)![0]).toBe('_x.ai/ask_user_question')
+  })
+
   it('fails closed on malformed question responses and preserves non-cancellation transport errors', async () => {
     const f = fixture()
     for (const response of [null, [], { outcome: 'cancelled' }, { outcome: 'chat_about_this' }, { outcome: 'skip_interview' }, { outcome: 'accepted', answers: [] }]) {

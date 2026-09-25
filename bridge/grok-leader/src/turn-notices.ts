@@ -197,3 +197,16 @@ export function compactionNotices(fold: CompactionFold, event: SessionEvent, rep
     ...open?.before === undefined ? {} : { tokens_before: open.before },
     ...open?.preview === undefined ? {} : { summary_preview: open.preview } }]
 }
+
+/** ACP's session-mode update, which drives the TUI's plan-mode indicator. */
+export type ModeUpdate = { sessionUpdate: 'current_mode_update'; currentModeId: 'plan' | 'default' }
+export const planModeUpdate = (active: boolean): ModeUpdate => ({ sessionUpdate: 'current_mode_update', currentModeId: active ? 'plan' : 'default' })
+
+/** A durable `plan/mode` selection (the last one wins), live and on replay:
+ * `/plan`, the TUI's own mode switch, an approved plan and the queued exit of
+ * an abandoned review all land here once DSH commits them. */
+export function planModeNotice(event: SessionEvent): ModeUpdate | undefined {
+  if (String(event.type) !== 'plan/mode') return undefined
+  const active = (event.data as { active?: unknown } | null)?.active
+  return typeof active === 'boolean' ? planModeUpdate(active) : undefined
+}

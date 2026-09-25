@@ -82,6 +82,7 @@ function fixture() {
   }
   const views = {
     status: vi.fn((_record: SessionRecord, _replay?: boolean) => { order.push('status') }),
+    mode: vi.fn((_record: SessionRecord) => { order.push('mode') }),
     children: vi.fn(async (_record: SessionRecord, _replay: boolean) => { order.push('children') }),
     tasks: vi.fn((_record: SessionRecord) => { order.push('tasks') }),
     commands: vi.fn((_record: SessionRecord) => { order.push('commands') }),
@@ -139,6 +140,8 @@ describe('session lifecycle ownership', () => {
     expect(loaded.mcpInitTimer).toBeDefined(); expect(notes()).toHaveLength(1)
     await vi.waitFor(() => expect(notes()).toHaveLength(2))
     expect(f.notify.mock.calls.filter(([method]) => method === '_x.ai/mcp_initialized')).toHaveLength(1)
+    // Only the new session resends its plan mode once its id is known; a load replays it.
+    expect(f.views.mode).toHaveBeenCalledOnce()
     // A load with nothing to say arms no deferred notification.
     await f.lifecycle.close(1, { sessionId: 'root' })
     await f.lifecycle.load(1, { sessionId: 'root', cwd: '/tmp/workspace', mcpServers: [] })

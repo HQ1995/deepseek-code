@@ -191,6 +191,18 @@ describe('session output ownership', () => {
     expect(restored.notes[1]!.params.update).toMatchObject({ tokens_before: 80, tokens_after: 35 })
   })
 
+  it('keeps the TUI plan-mode indicator on DSH\'s committed plan mode, live and on replay', async () => {
+    const f = fixture()
+    const on = event(0, 'plan/mode', { active: true }), off = event(1, 'plan/mode', { active: false })
+    f.output.live(on); f.output.live(off)
+    expect(f.notes.map(note => [note.method, note.params.update])).toEqual([
+      ['session/update', { sessionUpdate: 'current_mode_update', currentModeId: 'plan' }],
+      ['session/update', { sessionUpdate: 'current_mode_update', currentModeId: 'default' }]])
+    const restored = fixture()
+    await restored.output.restore([on, off, event(2, 'plan/mode', { active: 'yes' })])
+    expect(restored.notes.map(note => [note.params.update, note.params._meta.isReplay])).toEqual(f.notes.map(note => [note.params.update, true]))
+  })
+
   it('replaces same-step usage but keeps separately billed retry attempts', () => {
     const f = fixture()
     f.output.live(assistantEvent(0, 'first', { inputTokens: 10, outputTokens: 2 }))

@@ -22,7 +22,7 @@ function titleExcerpt(text: string): string {
  * the projection derived) that runs `code` rather than a shell `command` names
  * its first line: the TUI puts the title in the command slot of an execute
  * card, after its own "Run " (or "$ ") prefix, and shows the whole program in
- * the expanded card from rawInput. */
+ * the expanded card from rawInput. A lone markdown `plan` is a plan review. */
 export function argumentTitle(kind: string, args: unknown): string | undefined {
   if (args === null || typeof args !== 'object') return undefined
   const questions = (args as { questions?: unknown }).questions
@@ -31,6 +31,11 @@ export function argumentTitle(kind: string, args: unknown): string | undefined {
     const first = titleExcerpt((questions[0] as { question: string }).question)
     return questions.length > 1 ? `Ask ${questions.length} questions` : first === '' ? undefined : 'Ask: ' + first
   }
+  // A markdown plan submitted for review (`plan` alone, opening with a `#`
+  // heading). With this title the TUI's plan approval view quotes the plan
+  // lines a review comment is on, rather than citing a plan file.
+  const plan = (args as { plan?: unknown }).plan
+  if (typeof plan === 'string' && Object.keys(args).length === 1 && /^#\s+\S/.test(plan.trimStart())) return 'Plan: Submit for approval'
   const { code, command } = args as { code?: unknown; command?: unknown }
   if (kind === 'execute' && typeof code === 'string' && command === undefined) {
     const first = code.split('\n').map(titleExcerpt).find(line => line !== '')

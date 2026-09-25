@@ -90,7 +90,7 @@ const declaredDependencies = [
     ['native-tasks', ['acp', 'reminders', 'legacy-reminders', 'session-output', 'session-work', 'job-output', 'guards']],
     ['session-controller', []],
     ['native-children', ['acp', 'child-controls', 'child-history', 'workflows', 'prompt-content', 'projection', 'session-output', 'session-work', 'image-output', 'guards']],
-    ['native-session-status', ['acp', 'prompt-content', 'projection', 'session-output', 'session-work']],
+    ['native-session-status', ['acp', 'prompt-content', 'projection', 'session-output', 'session-work', 'turn-notices']],
     ['native-interactions', ['acp', 'browser-actions', 'leader-transport', 'guards']],
     ['native-execution', ['acp', 'browser-control', 'package-location', 'session-work']],
     ['native-asides', ['acp', 'projection', 'session-work']],
