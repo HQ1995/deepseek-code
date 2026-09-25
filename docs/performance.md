@@ -15,6 +15,30 @@ Optimizations still in the code, newest first. Bridge paths are relative to
 `bridge/grok-leader/`, Rust crates to `third_party/grok-build/crates/codegen/`;
 runtime items are in the source backport `patches/dsh-477b4f42….patch`.
 
+### 2026-09-25: one context reading per log position while a reply streams
+
+- Every update the leader sends stamps `_meta.contextInfo`, read from three
+  token-meter projections through a traced native service call: Cordis
+  extends a context per call, about 145µs each. Once per streamed delta, it
+  was 43.0% of the leader's non-idle CPU samples under a streaming reply (the
+  bridge as a whole 52.1%).
+- `src/session-output.ts` keeps the last `contextInfo` while the session log
+  position (`contextRevision`, from `src/session-lifecycle.ts`) and the
+  counters it carries are unchanged; `contextChanged()`, which
+  `src/native-session-status.ts` calls on a projection change, drops it and
+  sends the meter refresh. The token-meter units fold committed events only,
+  so the deltas between two events share an exact reading.
+- `bench-leader-stream.mjs`, Linux x86-64 at loadavg 22-32, 8 turns of 1500
+  text and 300 reasoning deltas, three interleaved pairs: leader CPU
+  3450-4130 → 1260-1480ms, 238-285 → 87-102µs per notification, median turn
+  371-473 → 100-118ms. Profile: the context reads 43.0% → 0.6%, the bridge
+  52.1% → 14.8%.
+- Reloading a history of 400 tool calls (40 turns of 10 reads, 6121 replayed
+  notifications): 1317-1435 → 594-613ms, leader CPU 1790-1840 → 1060-1170ms.
+  Live tool turns stay at about 28s of leader CPU for the 40: the runtime's
+  request building, tool-result pruning and clones of a context that grows by
+  10KiB per read dominate.
+
 ### 2026-09-23: a settings read no longer recomposes the profile once per plugin
 
 - `settings.describe()` recomposed every bundle layer and profile patch per
@@ -158,7 +182,22 @@ runtime items are in the source backport `patches/dsh-477b4f42….patch`.
 - **No SDK backport for the containment promise.** The inflated memory
   reading was parked microtasks, removed by a drain before sampling.
 - **Cordis hot-path overhead was deprioritized** (2026-09-13 profiles); since
-  2026-09-23 its service lookups rank beside compilation and GC.
+  2026-09-23 its service lookups rank beside compilation and GC. A traced
+  method call costs about 130µs; the reads left after the context memo (one
+  per committed event) pay it, and removing it is an SDK change.
+- **`contextInfo` stays on every update.** The pager keeps its last reading
+  when a frame omits it, so sending it only on change would save 340 of about
+  900 bytes per delta frame, but its serialization is a few percent of the
+  leader's CPU (an estimate, not measured), and a frame the pager drops by
+  sequence would leave a stale reading until the next change.
+- **No write coalescing.** Corking the socket for one tick left the leader's
+  CPU within noise (1310-1410 vs 1260-1420ms on the streaming bench).
+- **The goal status read on every committed event stays.** Its traced
+  lookups are 3.8% of the leader's non-idle samples on the tool bench and
+  nothing measurable while text streams. The goal projection,
+  `goal/changed` and `goal/activation-changed` announce goal changes, but a
+  `/preset` switch that mounts the goal service announces itself only through
+  that read.
 
 ## Benchmarks
 
@@ -170,6 +209,12 @@ dependencies installed; `bridgeRoot` defaults to `../bridge/grok-leader/`.
   cold and warm, asserted; the home holds `profiles/dscode`, no settings.
 - `bench-launcher.mjs <before-package> <after-package> <runtime-dir>
   <tui-bin>`: managed `dscode --version` startup, validation included.
+- `bench-leader-stream.mjs <extracted-runtime> <dscode-plugin.tgz> [--turns=12]
+  [--deltas=1500] [--reasoning=300] [--chunk=4] [--tools=0] [--load]
+  [--prof=DIR]`: a real leader in a fresh profile against a loopback
+  OpenAI-compatible stream; leader CPU, per-turn wall time and notifications
+  by kind and size. `--tools` reads workspace files before each reply,
+  `--load` then times the session's reload, `--prof` writes `--cpu-prof`.
 - `bench-leader-boot.mjs <dsh-bin> <before-home> <after-home> [pairs=8]
   [--census]`: leader spawn → `registered` A/B; `--census` lists modules.
 - `bench-leader-compile-cache.mjs <dsh-bin> <dsh-home> [pairs=8] [--census]`:

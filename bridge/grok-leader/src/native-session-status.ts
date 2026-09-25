@@ -12,7 +12,7 @@ import { planModeUpdate } from './turn-notices.ts'
 interface StatusSession {
   work: Pick<SessionWork, 'run'>
   agent: Agent
-  output: Pick<SessionOutput, 'notify' | 'update' | 'activity'>
+  output: Pick<SessionOutput, 'notify' | 'update' | 'activity' | 'contextChanged'>
 }
 export interface NativeStatusProjections {
   snapshot(session: unknown, keys: readonly string[]): { values: ContextProjectionValues }
@@ -98,7 +98,7 @@ export function createNativeSessionStatus<S extends StatusSession>(host: StatusH
       for (const record of host.sessions.values()) {
         if (record.agent.session !== session) continue
         if (key === 'goal') { queueMicrotask(() => refresh(record)); continue }
-        record.output.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '' } }, false)
+        record.output.contextChanged()
       }
     }))
   } catch (error) {

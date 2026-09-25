@@ -14,6 +14,10 @@ export interface SessionOutputHost {
   notify(method: string, params: unknown): void
   drain?(): Promise<void> | undefined
   contextValues(): ContextProjectionValues
+  /** The session log position `contextValues` is folded to. They fold committed
+   * events only, so the streamed deltas between two events share one reading;
+   * `contextChanged` also drops it. Without a position every update reads afresh. */
+  contextRevision?(): number
   projectImages(event: SessionEvent, updates: ProjectedUpdate[]): Promise<ProjectedUpdate[]>
   /** The attached agent's tool presenters: live and restored cards carry the same views. */
   presenter?: ToolPresenter
@@ -86,7 +90,21 @@ export function createSessionOutput(host: SessionOutputHost) {
   }
   const stats = () => ({ compactionCount: state.compactionCount, turnCount: state.turnCount,
     toolCallCount: state.toolCallCount, messageCount: state.messageCount })
-  const context = (): Record<string, unknown> => ({ ...contextInfoFromProjection(host.contextValues()), ...stats() })
+  /** The last `contextInfo`, valid while the log position and the counters it
+   * carries are unchanged and no context change was announced. A read goes
+   * through a traced native service call; once per streamed delta, it cost
+   * about 40% of the leader's CPU. */
+  let contextMemo: { revision: number; turnCount: number; toolCallCount: number; messageCount: number; compactionCount: number
+    value: Record<string, unknown> } | undefined
+  const context = (): Record<string, unknown> => {
+    const revision = host.contextRevision?.(), memo = contextMemo
+    if (memo !== undefined && memo.revision === revision && memo.turnCount === state.turnCount && memo.toolCallCount === state.toolCallCount
+      && memo.messageCount === state.messageCount && memo.compactionCount === state.compactionCount) return memo.value
+    const value = { ...contextInfoFromProjection(host.contextValues()), ...stats() }
+    contextMemo = revision === undefined ? undefined : { revision, turnCount: state.turnCount, toolCallCount: state.toolCallCount,
+      messageCount: state.messageCount, compactionCount: state.compactionCount, value }
+    return value
+  }
 
   /**
    * Admit a dsh event once, before projecting its items. Replay/live overlap
@@ -365,12 +383,18 @@ export function createSessionOutput(host: SessionOutputHost) {
     if (closed || !host.isLive()) return
     host.notify(method, { ...params, sessionId: host.sessionId, _meta: { ...meta, eventSeq: state.eventSeq++ } })
   }
+  /** The context projections changed: send the TUI's meters a fresh reading,
+   * an empty text chunk that renders nothing. */
+  const contextChanged = (): void => {
+    contextMemo = undefined
+    update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '' } }, false)
+  }
   const flush = async (): Promise<void> => {
     while (outputTail !== undefined) await outputTail
   }
   return {
     get stats() { return stats() },
-    context, update, notify, live, assistant, flush,
+    context, contextChanged, update, notify, live, assistant, flush,
     activity(running: boolean) {
       notify('session/update', { update: { sessionUpdate: 'session_info_update' } }, { sessionRunning: running })
     },
