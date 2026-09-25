@@ -30,6 +30,8 @@ interface ExecutionHost<S extends ExecutionSession> {
   plugins?(): Promise<ReadonlyArray<{ status: string; name: string; detail: string }>>
   /** The remote workspace identity when this profile runs tools over SSH. */
   remote?(): { host: string; workspace: string; helperHash?: string; connected: boolean } | undefined
+  /** Whether DSH's Remote gateway is running: `x.ai/remote/invoke` calls plugin Remote methods through it. */
+  remoteGateway?(): boolean
 }
 type InstallationReader = (version: string, directory: string | undefined, signal: AbortSignal) => Promise<string>
 const execute = promisify(execFile)
@@ -137,6 +139,9 @@ export function createNativeExecution<S extends ExecutionSession>(host: Executio
           + (remote.connected
             ? '. Tools, shells and file edits run there; session paths are never opened on this computer. Losing the SSH connection needs a leader restart.'
             : '. NOT connected: no tool can run. Check the SSH alias, helper and digests, then restart dscode.') })
+        if (host.remoteGateway?.() === false) findings.push({ status: 'WARN', name: 'Remote gateway', detail: 'DSH\'s Remote gateway is not running'
+          + ' (the typert and typert-gateway rows of the base layer), so the TUI cannot call plugin Remote methods.'
+          + ' Restore those rows in the dscode profile and restart, or run dscode update --force-reinstall.' })
         const hostTeamRows = await host.hostTeamRows?.() ?? []
         active(record, scope)
         if (hostTeamRows.length > 0) findings.push({ status: 'WARN', name: 'Agent Teams', detail: `Host-level Team tools (${hostTeamRows.join(', ')})`

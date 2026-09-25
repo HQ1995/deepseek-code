@@ -8,7 +8,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ProfileContext } from '@deepseek-ai/dsh-app-boot'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
-import type { AgentDefaultModelLike, CredentialsLike, LlmLike, SettingsLike } from './native-seams.ts'
+import type { AgentDefaultModelLike, CredentialsLike, LlmLike, SettingsLike, TypertGatewayLike } from './native-seams.ts'
 import type { BrowserStatus } from './browser-control.ts'
 import type { SessionActivityLike } from './client-activity.ts'
 import type { ConfigEntryLike } from './execution-world.ts'
@@ -114,6 +114,8 @@ export interface HostServices {
    * family provider (Agent turn, jobs, subagents, Schedule, plugins) adds
    * what keeps it active. No listener, or no dispatch, answers none. */
   sessionActivity(sessionId: string): Promise<readonly SessionActivityLike[]>
+  /** DSH's in-process Remote dispatcher, from the base `typert-gateway` row. */
+  typertGateway(): TypertGatewayLike | undefined
   /** The tool registry scoped to one agent: its preset's tools. */
   agentTools(agent: Agent): NativeToolSchemas | undefined
   /** A native service for one session: the preset's own scope first, then
@@ -160,6 +162,7 @@ export function createHostServices(ctx: ServiceReads, dependencies: HostServiceD
       const waterfall = ctx.waterfall as Waterfall | undefined
       return typeof waterfall === 'function' ? await waterfall.call(ctx, 'workspace/session-activity', { sessionId }, async () => []) : []
     },
+    typertGateway: read<TypertGatewayLike>('typertGateway'),
     agentTools: agent => agent.ctx.get('tools') as NativeToolSchemas | undefined,
     presetService: ((agent: Agent, name: string): unknown =>
       dependencies.roster()?.serviceFor?.(agent, name) ?? agent.ctx.get(name) ?? ctx.get(name)) as HostServices['presetService'],

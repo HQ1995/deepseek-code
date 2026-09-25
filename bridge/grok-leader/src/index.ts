@@ -387,6 +387,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     terminals: record => host.presetService(record.agent, 'terminals'),
     subprocess: record => host.presetService(record.agent, 'subprocess'),
     toolNames: nativeCapabilities.toolNames,
+    remoteGateway: () => host.typertGateway() !== undefined,
   })
 
   const asides = createNativeAsides<SessionRecord>({

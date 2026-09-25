@@ -87,6 +87,22 @@ export interface AgentDefaultModelLike {
   saveSelection(next: { provider: string; model: string; reasoningEffort?: string }): Promise<unknown>
 }
 
+/** One Remote call as DSH's Typert gateway takes it in process: exact named
+ * wire arguments, answered as the operator when the request names no peer. */
+export interface RemoteInvocationLike {
+  readonly namespace: string
+  readonly method: string
+  readonly args: Readonly<Record<string, unknown>>
+  /** Injected only into a cancellation-aware method (one declaring `signal`). */
+  readonly signal?: AbortSignal
+}
+
+/** Structural read of DSH's in-process Remote dispatcher (`ctx.typertGateway`). */
+export interface TypertGatewayLike {
+  /** The business value; rejects with a `RemoteError` (marked `isDSHRemoteError`) or the owner's own error. */
+  invoke(request: RemoteInvocationLike): Promise<unknown>
+}
+
 /** Cordis registers the wrapper-to-instance symbol globally; it is read
  * structurally so modules keep no framework dependency of their own. */
 const TRACEABLE_ORIGINAL = Symbol.for('cordis.original')

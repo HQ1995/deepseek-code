@@ -58,7 +58,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `provider-profile` | Pure llm-pi-ai rules: settings reads, `/provider` form validation, profile merge |
 | `model-endpoint` | The catalog's only outbound HTTP: bounded `/models` probe, injected `fetch` |
 | `native-provider` | The official DeepSeek Messages adapter as an explicit `/provider` route |
-| `native-seams` | Types only: structural llm, settings, credentials and default-model contracts |
+| `native-seams` | Types only: structural llm, settings, credentials, default-model and Remote gateway contracts |
 | `session-registry` | Sole owner of accepted sessions; a retiring id stays reserved until flush and disposal |
 | `session-lifecycle` | Session records and new/load/fork/rewind/close flows over the registry |
 | `session-work` | One session's accepted async work: admission generations, cancellation, real drains |
