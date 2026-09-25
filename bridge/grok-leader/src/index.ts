@@ -58,7 +58,7 @@ import type { LlmLike, SettingsLike, CredentialsLike, AgentDefaultModelLike } fr
 import { statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { createLeaderTransport } from './leader-transport.ts'
-import { WIRE, createLeaderRoutes, registerFixedReplies, type RequestRoute } from './leader-routes.ts'
+import { WIRE, createLeaderRoutes, initializeReply, registerFixedReplies, type RequestRoute } from './leader-routes.ts'
 import { fileURLToPath } from 'node:url'
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -346,46 +346,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   })
 
   const initializeResponse = async (): Promise<unknown> => {
-    const current = await models.initialize()
-    return {
-      protocolVersion: 1,
-      agentCapabilities: {
-        loadSession: true,
-        promptCapabilities: { embeddedContext: false },
-        mcpCapabilities: { http: true },
-        sessionCapabilities: { list: {}, close: {} },
-      },
-      // Advertise the api-key method so the pager's fail-closed empty-list
-      // auth gate treats the leader as authenticated; the harness providers
-      // own credentials, so the bridge answers authenticate with no meta.
-      authMethods: [{ id: 'xai.api_key', name: 'API key' }],
-      agentInfo: { name: 'deepseek-harness-grok-leader', version: PACKAGE_VERSION },
-      // cancelRewind is false: the bridge cancels turns but does not implement
-      // the client-side rewind composer restore, so it stays unadvertised.
-      // modelState flattens provider-scoped dsh model ids into one global
-      // catalog of modelId strings (agent.rs SessionModelState); the
-      // leader-side routesByModel map keeps provider ownership for
-      // session/set_model.
-      _meta: {
-        grokShell: true,
-        // A remote world tells the TUI that session paths are not host paths.
-        dscodeExecutionWorld: world(),
-        cancelRewind: false,
-        sessionRecap: false,
-        availableCommands: (await sessionCommands.catalog()).commands,
-        modelState: {
-          currentModelId: current.currentModelId,
-          availableModels: current.availableModels,
-          // SessionModelState carries only currentModelId/availableModels; the
-          // provider roster and current-provider id ride in modelState._meta
-          // (the ACP extension point the pager reads back as ModelState meta).
-          _meta: {
-            currentProviderId: current.currentProviderId,
-            providers: current.providers,
-          },
-        },
-      },
-    }
+    const catalog = await models.initialize()
+    return initializeReply({ version: PACKAGE_VERSION, world: world(), commands: (await sessionCommands.catalog()).commands, catalog })
   }
 
   const presetServiceFor = (record: SessionRecord, name: string): unknown =>

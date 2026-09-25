@@ -69,7 +69,7 @@ const declaredDependencies = [
     ['native-seams', []],
     ['provider-profile', ['acp', 'model-endpoint', 'native-seams', 'guards']],
     ['wire-catalog', ['acp', 'native-seams', 'guards']],
-    ['leader-routes', ['acp', 'protocol']],
+    ['leader-routes', ['acp', 'protocol', 'execution-world', 'wire-catalog']],
     ['leader-transport', ['acp', 'codec', 'protocol', 'guards']],
     ['leader-lifecycle', []],
     ['prompt-queue', ['acp', 'projection', 'prompt-content', 'queue-controls', 'turn-notices', 'guards']],
