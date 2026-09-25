@@ -448,6 +448,27 @@ describe('leader prompt turns, content and usage', () => {
     expect(c.all.indexOf(states[1]!)).toBeLessThan(c.all.indexOf(response))
   })
 
+  it('shows a tool call while the model writes it, then its durable card', async () => {
+    const { registry, pluginCtx, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const frame = (value: unknown) => pluginCtx.emit('agent/assistant-stream', { agent, frame: value } as never)
+    frame({ type: 'start', attemptId: 'a', revision: 1, turn: 1, step: 1 })
+    frame({ type: 'chunk', attemptId: 'a', revision: 2, index: 0, time: 10, chunk: { type: 'tool-call-delta', index: 0, id: 'call-w', name: 'write', argumentsDelta: '{"path":"a.txt","content":"' } })
+    frame({ type: 'chunk', attemptId: 'a', revision: 3, index: 1, time: 20, chunk: { type: 'tool-call-delta', index: 0, id: 'call-w', argumentsDelta: 'long body' } })
+    pluginCtx.emit('session/event', agent.session, agent.session.append('tool/call', { turn: 1, step: 1, callId: 'call-w', name: 'write', arguments: '{"path":"a.txt","content":"long body"}' } as never))
+    await waitFor(() => c.all.some(message => (message.params as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate === 'tool_call'))
+    const updates = c.all.filter(message => ['tool_call_delta_chunk', 'tool_call'].includes((message.params as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate ?? ''))
+      .map(message => [message.method, (message.params as { update: { sessionUpdate: string } }).update])
+    expect(updates.map(([method, update]) => [method, (update as { sessionUpdate: string }).sessionUpdate])).toEqual([
+      ['x.ai/session_notification', 'tool_call_delta_chunk'], ['session/update', 'tool_call'],
+    ])
+    expect(updates[0]![1]).toEqual({ sessionUpdate: 'tool_call_delta_chunk', tool_index: 0, name: 'write' })
+  })
+
   it('rejects a prompt only when agent/error names its in-flight turn', async () => {
     const { registry, pluginCtx, client: c } = await start({ manualIdle: true })
     register(c)

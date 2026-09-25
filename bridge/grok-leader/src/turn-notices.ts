@@ -1,10 +1,12 @@
 /**
  * Turn lifecycle facts the TUI already renders from its xAI session updates:
- * model-request retries and typed turn failures. Pure mapping of durable
- * native events; the owning session output decides when to send them.
+ * model-request retries, typed turn failures and tool calls the model is still
+ * writing. Pure mapping of native events and stream chunks; the owning session
+ * output decides when to send them.
  *
  * @module dscode/turn-notices
  */
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-llm-retry/types'
 
@@ -21,10 +23,13 @@ export type RetryStateUpdate =
   | { sessionUpdate: 'retry_state'; type: 'retrying'; attempt: number; max_retries: number; reason: string }
   | { sessionUpdate: 'retry_state'; type: 'failed'; error_type: string; message: string }
 
-/** Updates that ride `x.ai/session_notification` rather than ACP `session/update`. */
-export type XaiNotice = { sessionUpdate: 'image_dropped'; notes: string[] } | RetryStateUpdate
+/** A tool call the model is still writing: its position and, once known, its name. */
+export type ToolCallWriting = { sessionUpdate: 'tool_call_delta_chunk'; tool_index: number; name?: string }
 
-const XAI_NOTICES: ReadonlySet<string> = new Set<XaiNotice['sessionUpdate']>(['image_dropped', 'retry_state'])
+/** Updates that ride `x.ai/session_notification` rather than ACP `session/update`. */
+export type XaiNotice = { sessionUpdate: 'image_dropped'; notes: string[] } | RetryStateUpdate | ToolCallWriting
+
+const XAI_NOTICES: ReadonlySet<string> = new Set<XaiNotice['sessionUpdate']>(['image_dropped', 'retry_state', 'tool_call_delta_chunk'])
 export const isXaiNotice = (update: { sessionUpdate: string }): update is XaiNotice => XAI_NOTICES.has(update.sessionUpdate)
 
 /** A model call DSH refused for want of a usable key fails the same way on
@@ -105,4 +110,28 @@ export function turnNotices(event: SessionEvent, replay: boolean): XaiNotice[] {
     return failed === undefined ? [] : [failed]
   }
   return []
+}
+
+/** The TUI treats a write whose deltas stop for 10 s as a dead stream, so a
+ * long write is refreshed well inside that; forwarding every delta would put
+ * one socket frame per argument fragment. */
+export const WRITING_REFRESH_MS = 2000
+
+/** Live tool-call deltas of one streamed attempt, by content-block index. */
+export type WritingCalls = Map<number, { named: boolean; at: number }>
+
+/**
+ * The TUI's "Writing file…"/"Preparing <tool>…" status for a tool call the
+ * model is still streaming, which reaches no transcript until its durable
+ * `tool/call` opens the card. Name and position only: the arguments stay with
+ * the card. Sent for a new call, when its name first arrives, and then at most
+ * every {@link WRITING_REFRESH_MS} while the call keeps streaming.
+ */
+export function toolCallWriting(calls: WritingCalls, chunk: StreamChunk, time: number): ToolCallWriting | undefined {
+  if (chunk.type !== 'tool-call-delta') return undefined
+  const name = typeof chunk.name === 'string' && chunk.name !== '' ? chunk.name : undefined
+  const seen = calls.get(chunk.index)
+  if (seen !== undefined && (name === undefined || seen.named) && time - seen.at < WRITING_REFRESH_MS) return undefined
+  calls.set(chunk.index, { named: seen?.named === true || name !== undefined, at: time })
+  return { sessionUpdate: 'tool_call_delta_chunk', tool_index: chunk.index, ...name === undefined ? {} : { name } }
 }

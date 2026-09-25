@@ -148,6 +148,24 @@ describe('session output ownership', () => {
     expect(f.content()).toEqual(['live', 'other'])
   })
 
+  it('shows a tool call the model is still writing, live only, without its arguments', async () => {
+    const f = fixture()
+    f.frame({ type: 'start', attemptId: 'w', revision: 1, turn: 1, step: 1 })
+    const delta = (index: number, time: number, extra: Record<string, unknown> = {}) => f.frame({ type: 'chunk', attemptId: 'w', revision: 2 + index, index, time,
+      chunk: { type: 'tool-call-delta', index: 1, id: 'call', argumentsDelta: '{"path":"/secret', ...extra } })
+    delta(0, 1000, { name: 'write' }); delta(1, 1100); delta(2, 1200)
+    expect(f.notes.map(note => [note.method, note.params.update, note.params._meta.promptId])).toEqual([
+      ['x.ai/session_notification', { sessionUpdate: 'tool_call_delta_chunk', tool_index: 1, name: 'write' }, 'prompt'],
+    ])
+    delta(3, 4000)
+    expect(f.notes.at(-1)!.params.update).toEqual({ sessionUpdate: 'tool_call_delta_chunk', tool_index: 1 })
+    expect(JSON.stringify(f.notes)).not.toContain('secret')
+    // The durable settlement replays no writing status.
+    const restored = fixture()
+    await restored.output.restore([event(0, 'assistant/message', { turn: 1, step: 1, stream: [], message: { role: 'assistant', content: [] } })])
+    expect(restored.notes).toEqual([])
+  })
+
   it('replaces same-step usage but keeps separately billed retry attempts', () => {
     const f = fixture()
     f.output.live(assistantEvent(0, 'first', { inputTokens: 10, outputTokens: 2 }))

@@ -2,7 +2,7 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { errorChain, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { hasToolImages } from './image-output.ts'
-import { isXaiNotice, turnNotices, type XaiNotice } from './turn-notices.ts'
+import { isXaiNotice, toolCallWriting, turnNotices, type WritingCalls, type XaiNotice } from './turn-notices.ts'
 import { assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, parseJsonObject, sessionEventToUpdates, systemNotes, contextInfoFromProjection, type ContextProjectionValues, type DecodeSpeed, type ProjectedUpdate } from './projection.ts'
 
 export interface SessionOutputHost {
@@ -57,7 +57,7 @@ export function createSessionOutput(host: SessionOutputHost) {
   let outputTail: Promise<void> | undefined
   const outputQueue: Array<(() => void | Promise<void>) | undefined> = []
   let outputHead = 0
-  let streamState: { attemptId: string; revision: number; turn: number; step: number; delivered: Set<number>; closed: boolean; pending: SessionEvent[] } | undefined
+  let streamState: { attemptId: string; revision: number; turn: number; step: number; delivered: Set<number>; closed: boolean; pending: SessionEvent[]; writing: WritingCalls } | undefined
   let lastUsage: { turn: number; step: number; usage: TokenUsage } | undefined
   const state: OutputState = {
     lastSeq: -1,
@@ -283,7 +283,7 @@ export function createSessionOutput(host: SessionOutputHost) {
       drainAssistantEvents()
       streamState = {
         attemptId: frame.attemptId, revision: frame.revision, turn: frame.turn, step: frame.step,
-        delivered: new Set(), closed: false, pending: [],
+        delivered: new Set(), closed: false, pending: [], writing: new Map(),
       }
       return
     }
@@ -294,10 +294,13 @@ export function createSessionOutput(host: SessionOutputHost) {
       previous.closed = true
       drainAssistantEvents(frame.outcome.kind === 'committed' ? frame.outcome : undefined)
       previous.delivered.clear()
+      previous.writing.clear()
       return
     }
     if (previous.delivered.has(frame.index)) return
     for (const item of assistantChunkToUpdates(frame.chunk)) update(item, false, frame.time)
+    const writing = toolCallWriting(previous.writing, frame.chunk, frame.time)
+    if (writing !== undefined) update(writing, false, frame.time)
     previous.delivered.add(frame.index)
   }
 

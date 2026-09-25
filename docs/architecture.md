@@ -66,7 +66,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `queue-controls` | `x.ai/queue/*` row controls (interject, steer, remove, edit, holds, reorder, clear) over the queue's state |
 | `prompt-content` | ACP prompt validation; commits images to durable storage in block order |
 | `session-output` | Stream state: seq-based replay/live dedup, usage, decode speed, pending tool facts |
-| `turn-notices` | Pure: xAI turn notices from native events (retry and typed failure states) |
+| `turn-notices` | Pure: xAI turn notices from native events and stream chunks (retry and typed failure states, tool calls being written) |
 | `session-models` | Runtime model references, durable choice/effort memory, catalog fan-out |
 | `session-presets` | Preset preparation, `/preset` switching, English copy for shipped presets |
 | `preset-history` | Native projection of preset policy state (`dscodePresetHistory`) |

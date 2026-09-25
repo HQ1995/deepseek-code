@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { describeFailure, isXaiNotice, turnFailure, turnNotices } from '../src/turn-notices.ts'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import { describeFailure, isXaiNotice, toolCallWriting, turnFailure, turnNotices, WRITING_REFRESH_MS, type WritingCalls } from '../src/turn-notices.ts'
 import { event } from './support/session-events.ts'
 
 const retry = (data: Record<string, unknown>) => event('llm/retry', {
@@ -47,6 +48,21 @@ describe('turn notices', () => {
     expect(quota.type === 'failed' && quota.message).toBe('API error (HTTP 402): Insufficient Balance (HTTP 402, QUOTA)')
     expect(describeFailure({ message: 'Payment Required (402) and Unauthorized (401)' }))
       .toBe('Payment Required, HTTP 402 and Unauthorized, HTTP 401')
+  })
+
+  it('forwards a tool call being written by name and position, throttled per call', () => {
+    const calls: WritingCalls = new Map()
+    const delta = (index: number, name?: string) => ({ type: 'tool-call-delta', index, id: 'call-' + index, argumentsDelta: '{"pa', ...name === undefined ? {} : { name } }) as StreamChunk
+    expect(toolCallWriting(calls, delta(1), 0)).toEqual({ sessionUpdate: 'tool_call_delta_chunk', tool_index: 1 })
+    expect(toolCallWriting(calls, delta(1, 'write'), 10)).toEqual({ sessionUpdate: 'tool_call_delta_chunk', tool_index: 1, name: 'write' })
+    expect(toolCallWriting(calls, delta(1), 20)).toBeUndefined()
+    expect(toolCallWriting(calls, delta(1, 'write'), 30)).toBeUndefined()
+    expect(toolCallWriting(calls, delta(3, 'bash'), 40)).toEqual({ sessionUpdate: 'tool_call_delta_chunk', tool_index: 3, name: 'bash' })
+    // A long write keeps refreshing well inside the TUI's 10 s staleness cutoff.
+    expect(toolCallWriting(calls, delta(1), 10 + WRITING_REFRESH_MS)).toEqual({ sessionUpdate: 'tool_call_delta_chunk', tool_index: 1 })
+    expect(WRITING_REFRESH_MS).toBeLessThan(10_000)
+    expect(toolCallWriting(calls, { type: 'text-delta', index: 0, text: 'x' }, 50)).toBeUndefined()
+    expect(isXaiNotice({ sessionUpdate: 'tool_call_delta_chunk' })).toBe(true)
   })
 
   it('routes only xAI session updates to the xAI notification', () => {

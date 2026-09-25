@@ -152,6 +152,14 @@ already exist; nothing here adds a TUI code path.
   `Unauthorized, HTTP 401`, because the TUI takes the other spellings for
   xAI's credit-limit upsell or `/login`. Missing or unusable keys send no
   state; they still settle as the `/provider` refusal.
+- While the model streams a tool call's arguments, the live
+  `agent/assistant-stream` delta sends `tool_call_delta_chunk`
+  `{tool_index, name?}` (the content-block position, and the name once it
+  arrives): the TUI's "Writing file…"/"Preparing <tool>…" status. Arguments
+  are never forwarded; the durable `tool/call` still opens the card. A call is
+  sent when it starts, when its name arrives and then at most every 2 s while
+  it keeps streaming, inside the TUI's 10 s dead-stream cutoff. Replay sends
+  none.
 
 ## Invariants
 
