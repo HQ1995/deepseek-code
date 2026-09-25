@@ -531,6 +531,25 @@ pub(super) fn dispatch_send_prompt_inner(
         return vec![];
     }
 
+    // DIVERGENCE(dscode): a host command whose descriptor admits no
+    // attachments refuses the draft's images before dispatch; the draft, text
+    // and images, stays for the user to fix.
+    if !literal
+        && consume_input
+        && !agent.prompt.images.is_empty()
+        && let Some(invocation) = crate::slash::parse_invocation(trimmed)
+        && let Some(command) = agent
+            .prompt
+            .slash_controller
+            .registry()
+            .get_for_dispatch(invocation.token)
+        && command.refuses_attachments()
+    {
+        let message = format!("/{} does not accept image attachments", command.name());
+        agent.show_toast(&message);
+        return vec![];
+    }
+
     // Native controls remain available while the parent model turn is running.
     if !literal && let Some(invocation) = crate::slash::parse_invocation(trimmed) {
         if invocation.token.eq_ignore_ascii_case("auto") {

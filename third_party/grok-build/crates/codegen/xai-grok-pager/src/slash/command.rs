@@ -322,6 +322,15 @@ pub trait SlashCommand: Send + Sync {
         false
     }
 
+    /// DIVERGENCE(dscode): whether a composer submission of this command must
+    /// not carry the draft's image attachments. Host commands declare
+    /// attachment support in their descriptor; the composer refuses the rest
+    /// before dispatch and keeps the draft. Pager builtins and unknown names
+    /// keep their images.
+    fn refuses_attachments(&self) -> bool {
+        false
+    }
+
     /// Tool names the agent must have registered for this command to work.
     ///
     /// Default is empty (no tool dependency). Override for commands that

@@ -10,8 +10,15 @@ import type { SessionOutput } from './session-output.ts'
 import type { ParsedPrompt } from './prompt-content.ts'
 import type { PromptSettleResult } from './prompt-queue.ts'
 
+/** DSH's handler-free command descriptor (`CommandDescriptor`). */
+export interface NativeCommandDescriptor {
+  definitionId?: string
+  name: string
+  description: string
+  input?: { hint: string; attachments?: boolean }
+}
 export interface NativeCommands {
-  list(agent: Agent): ReadonlyArray<{ name: string; description: string; input?: { hint: string } }>
+  list(agent: Agent): ReadonlyArray<NativeCommandDescriptor>
   execute(agent: Agent, line: string, images: readonly EncodedImageAttachment[], signal: AbortSignal): Promise<{ result: { kind: string; text?: string } } | undefined>
 }
 interface NativeSkillSummary {
@@ -49,11 +56,20 @@ interface CommandHost<S extends CommandSession> {
   on(name: 'commands/change' | 'skills/change' | 'tools/change', listener: () => void): () => void
   logger: { warn(message: string): void }
 }
+/** The rest of a host command's descriptor, which ACP's name, description and
+ * hint cannot carry: its plugin-owned identity and whether composer
+ * attachments may accompany it (absent: the client refuses them). */
+interface CommandMeta { definitionId?: string; attachments?: true }
 interface AdvertisedCommand {
   name: string
   description: string
   input?: { hint: string }
-  _meta?: { scope: string; path: string; pluginName: string }
+  _meta?: { scope: string; path: string; pluginName: string } | CommandMeta
+}
+const commandMeta = (command: NativeCommandDescriptor): CommandMeta | undefined => {
+  const meta: CommandMeta = { ...command.definitionId === undefined ? {} : { definitionId: command.definitionId },
+    ...command.input?.attachments === true ? { attachments: true } : {} }
+  return Object.keys(meta).length === 0 ? undefined : meta
 }
 const skillScope = (skill: NativeSkillSummary) => skill.source?.startsWith('project-') ? 'repo'
   : skill.source?.startsWith('user-') ? 'user' : skill.source === 'bundled' ? 'bundled' : 'plugin'
@@ -118,8 +134,10 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
     for (const command of fromPlugins) {
       if (claimed.has(command.name.toLowerCase())) continue
       claimed.add(command.name.toLowerCase())
+      const meta = commandMeta(command)
       commands.push({ name: command.name, description: command.description,
-        ...command.input === undefined ? {} : { input: { hint: command.input.hint } } })
+        ...command.input === undefined ? {} : { input: { hint: command.input.hint } },
+        ...meta === undefined ? {} : { _meta: meta } })
     }
     const skills = host.skills(record)
     check()

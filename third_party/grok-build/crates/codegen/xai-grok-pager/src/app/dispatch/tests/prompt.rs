@@ -3063,6 +3063,62 @@ fn palette_dispatch_preserves_prompt_draft() {
     );
 }
 
+/// DIVERGENCE(dscode): a host command whose descriptor admits no attachments
+/// refuses the draft's images before dispatch and keeps the draft whole; one
+/// that declares `attachments` sends them.
+#[test]
+fn host_command_attachment_refusal_keeps_the_draft() {
+    let image = || crate::prompt_images::PastedImage {
+        element_id: xai_ratatui_textarea::ElementId::from_raw(0),
+        display_number: 0,
+        mime_type: "image/png".into(),
+        dimensions: Some((8, 8)),
+        byte_len: 3,
+        encoded_bytes: Some(vec![1, 2, 3].into()),
+        source_path: None,
+        staged_temp_path: None,
+        session_image_path: None,
+        preview: crate::prompt_images::PromptImagePreview::default(),
+    };
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let models = app.agents[&id].session.models.clone();
+    let agent = app.agents.get_mut(&id).unwrap();
+    let attachments = serde_json::json!({ "attachments": true });
+    agent.prompt.sync_acp_commands(
+        &[
+            acp::AvailableCommand::new("dsh", "Manage dsh plugins"),
+            acp::AvailableCommand::new("describe", "Describe an image")
+                .meta(attachments.as_object().cloned().unwrap()),
+        ],
+        None,
+        &models,
+    );
+    agent.prompt.set_text("/dsh plugins");
+    agent.prompt.insert_image(image()).unwrap();
+    let draft = agent.prompt.text().to_owned();
+    let effects = dispatch(Action::SendPrompt("/dsh plugins".into()), &mut app);
+    assert!(effects.is_empty(), "{effects:?}");
+    let agent = &app.agents[&id];
+    assert_eq!(agent.prompt.text(), draft);
+    assert_eq!(agent.prompt.images.len(), 1);
+    assert!(agent.session.pending_prompts.is_empty());
+    assert_eq!(
+        agent.toast.as_ref().map(|(text, _)| text.as_str()),
+        Some("/dsh does not accept image attachments")
+    );
+
+    // A command that declares attachments takes the draft's images along.
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.toast = None;
+    agent.prompt.set_text("/describe sketch");
+    let effects = dispatch(Action::SendPrompt("/describe sketch".into()), &mut app);
+    let agent = &app.agents[&id];
+    assert!(agent.toast.is_none());
+    assert!(agent.prompt.images.is_empty(), "{effects:?}");
+    assert!(agent.prompt.text().is_empty());
+}
+
 #[test]
 fn slash_compact_with_context_enqueues_command() {
     let mut app = test_app_with_agent();

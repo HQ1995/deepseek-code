@@ -365,6 +365,23 @@ impl CommandRegistry {
         }
     }
 
+    /// DIVERGENCE(dscode): the host's own (ACP, non-skill) commands the menu
+    /// offers, as `(name, description)` in advertised order. Feeds the command
+    /// palette's generic Commands section; skills stay in their own surfaces.
+    pub fn host_commands(&self) -> Vec<(&str, &str)> {
+        self.triggers
+            .iter()
+            .filter(|trigger| {
+                trigger.source == CommandSource::Acp
+                    && trigger.alias.is_none()
+                    && trigger.provenance == CommandProvenance::Shell
+                    && trigger.match_text == trigger.canonical
+                    && self.get(&trigger.canonical).is_some()
+            })
+            .map(|trigger| (trigger.canonical.as_str(), trigger.description.as_str()))
+            .collect()
+    }
+
     /// Returns true if the command (by canonical name or alias) is a builtin.
     pub fn is_builtin(&self, key: &str) -> bool {
         self.key_to_index

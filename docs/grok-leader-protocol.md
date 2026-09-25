@@ -412,6 +412,11 @@ For validation commands, see [Upgrade and release](upgrade-strategy.md#validatio
 `x.ai/skills/list` requires an owned `sessionId`; discovery uses that agent scope
 and cwd. `x.ai/commands/list` and ambient `available_commands_update` merge
 user-invocable skills after native commands, preserving collision precedence.
+A native command carries the rest of its DSH descriptor in `_meta`:
+`definitionId`, its stable plugin-owned identity, and `attachments: true` when
+composer attachments may accompany it. The TUI refuses the draft's images for
+every other non-skill command before dispatch, keeping the draft, and lists the
+non-skill commands in its Ctrl+P palette's Commands section.
 The ambient update is re-sent on `commands/change`, `skills/change`, and on
 `tools/change` when a session's capabilities change. A tool-registry change
 inside a conversation reaches the TUI as an `image_dropped` system note

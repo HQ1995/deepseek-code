@@ -90,6 +90,25 @@ describe('owned session commands', () => {
     expect(f.skills).toHaveBeenCalledWith({ cwd: '/work', scope: f.record.agent })
   })
 
+  it('advertises native descriptors whole: identity and attachment admission ride _meta', async () => {
+    const f = fixture()
+    f.list.mockReturnValue([
+      { definitionId: '@deepseek-ai/dsh-command-goal', name: 'goal', description: 'Set or view the goal', input: { hint: '[<objective>]', attachments: true } },
+      { definitionId: '@deepseek-ai/dsh-command-compact', name: 'compact', description: 'Compact older conversation history' },
+      { name: 'plain', description: 'no identity', input: { hint: 'text', attachments: false } },
+    ])
+    const { commands } = await f.commands.catalog(1, { sessionId: 'one' })
+    expect(commands.map(command => command.name)).toEqual(['dsh', 'browser', 'subagents', 'preset', 'goal', 'compact', 'plain'])
+    expect(commands.slice(4)).toEqual([
+      { name: 'goal', description: 'Set or view the goal', input: { hint: '[<objective>]' },
+        _meta: { definitionId: '@deepseek-ai/dsh-command-goal', attachments: true } },
+      { name: 'compact', description: 'Compact older conversation history', _meta: { definitionId: '@deepseek-ai/dsh-command-compact' } },
+      { name: 'plain', description: 'no identity', input: { hint: 'text' } },
+    ])
+    // Bridge-owned commands take no attachments, so they carry no descriptor _meta.
+    for (const command of commands.slice(0, 4)) expect(command).not.toHaveProperty('_meta')
+  })
+
   it('keeps the full skill view independent of slash visibility and owns session validation', async () => {
     const f = fixture()
     f.skills.mockResolvedValue([{ name: 'hidden', description: 'native description', whenToUse: 'work', invocation: { userInvocable: false }, source: 'user-local', path: '/user/skill' }])

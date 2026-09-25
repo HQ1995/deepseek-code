@@ -951,3 +951,15 @@ host may title a card by what it does ("Update todo list") without the card
 reappearing. Title-shaped checks (`Goal:`, `Await:`, `Validating workflow`)
 still read the title. A `tool_call_update`'s `_meta` keys now override the
 start's key by key, streamed or final, instead of being dropped (class: feature).
+
+### Host command descriptors and the palette's Commands section
+
+`slash/acp_command.rs` reads the rest of a host command's DSH descriptor from
+its `_meta`: `definitionId` and `attachments`. A non-skill host command without
+`attachments: true` refuses the composer's images before dispatch
+(`SlashCommand::refuses_attachments`): the draft keeps its text and images and a
+toast names the command. Builtins, skills and unknown names keep their images.
+The Ctrl+P palette lists the host's non-skill commands in one generic Commands
+section before Other, in advertised order, in place of the per-plugin Goal and
+Compact History rows; builtins that shadow an advertised name (such as
+`/preset`, now a Model & Input row) keep their own rows (class: feature).
