@@ -27,6 +27,11 @@ the bridge uses:
   reminder due while its session was closed or busy is delivered once it can be
   (see [patches](../patches/README.md)). `sourcePatchSha256` becomes
   `27385698…`.
+- 2026-09-25: the backport also fixes the local provider's foreground-signal
+  race (the stdin-wait scan no longer sits between reading the foreground
+  group and killing it, and a group that exited in the gap is re-read, within
+  a bound), so the bridge's `terminal-signal` wrapper is gone.
+  `sourcePatchSha256` becomes `a421672e…`.
 - The native DeepSeek row is now `@deepseek-ai/dsh-llm-deepseek-api-key`
   (API key only); the new `llm-deepseek-account` row is on in the base layer and
   disabled by dscode's patch. `/dsh add` treats it, `deepseek-account` and

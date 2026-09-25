@@ -28,7 +28,6 @@ import { createSessionRegistry } from './session-registry.ts'
 import { PACKAGE_VERSION } from './package-location.ts'
 import { createProfilePlugins, inspectPluginRuntime } from './profile-plugins.ts'
 export { analyzeBundlePatch } from './profile-plugins.ts'
-import { protectTerminalSignals } from './terminal-signal.ts'
 import { internalError, paramRecord, sessionIdParam } from './acp.ts'
 import { errorMessage } from './guards.ts'
 import { createModelCatalog } from './model-catalog.ts'
@@ -130,7 +129,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   ctx.sessionProjections.register(presetHistoryProjection)
   ctx.sessionProjections.register(workflowProjection)
   ctx.sessionProjections.register(legacyRemindersProjection)
-  protectTerminalSignals(ctx)
   const jobOutput = jobOutputSnapshot
   const projectImages = createImageOutputProjector(ctx)
   // Every optional host service is read at call time through this one seam.

@@ -133,7 +133,7 @@
     "testedVersion": "0.1.7-rc.2",
     "supportedRange": "0.1.7-rc.2",
     "sourceCommit": "477b4f420553e8a52c2fbccc464d7561b239c443",
-    "sourcePatchSha256": "2738569822017d3c901496fc99771a9fc632ad6fcce13bfcc7b502d13b8a24fc"
+    "sourcePatchSha256": "a421672e09e42c055dbd576a22a2e7e772c2e027cf3841f33e79ddb9665ce782"
   },
   "dependencies": {
     "@deepseek-ai/dsh-tool-session-query": "0.1.7-rc.2",
