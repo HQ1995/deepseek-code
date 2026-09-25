@@ -623,7 +623,7 @@ describe('leader commands, skills and runtime rails', () => {
     })._meta
     expect(meta.cancelRewind).toBe(false)
     const advertised = [
-      { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | enable|disable <bundle>[#row] | add [--trust] <package> | remove <name> | inspect <name>' }, _meta: { options: true } },
+      { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | enable|disable <bundle>[#row] | add [--trust] <package> | remove <name> | inspect <name> | config [<namespace>] | config set|reset <namespace> <field> [<json>]' }, _meta: { options: true } },
       { name: 'browser', description: 'Turn the isolated browser on or off', input: { hint: 'status | on [--executable <path>] [--origin <origin>]... [--any-origin] | off | origins add|remove <origin>' }, _meta: { options: true } },
       { name: 'subagents', description: 'Inspect and control child conversations', input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' }, _meta: { immediate: true, options: true } },
       { name: 'preset', description: 'Switch the active agent preset', input: { hint: '<preset id>' }, _meta: { options: true } },

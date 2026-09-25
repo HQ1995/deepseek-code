@@ -69,6 +69,7 @@ unless `--force` is explicit. Headless formats are `plain`, `json`,
 | `/team` | Show the roster and task board of a `teams` session's Agent Team |
 | `/browser` | Turn the isolated headless browser on or off and edit its allowed origins |
 | `/dsh plugins` | List, switch, add and remove dsh plugins; see [Plugins](#plugins) |
+| `/dsh config` | Read and change the settings loaded plugins serve; see [Plugin settings](#plugin-settings) |
 | `/doctor` | Check terminal, installation, and optional LSP/PTY dependencies |
 | `Ctrl+P` | Open commands while keeping the current draft; its Commands section lists the session's plugin commands |
 | `Ctrl+S`, `Alt+S` | Stash or restore one prompt draft |
@@ -77,7 +78,8 @@ unless `--force` is explicit. Headless formats are `plain`, `json`,
 
 `/dsh`, `/browser`, `/subagents`, `/goal` and `/preset` entered bare, or picked
 in `Ctrl+P`, open a picker of what they can do now instead of running: the
-plugin verbs and then the bundles each applies to, browser on or off, each child
+plugin verbs and then the bundles each applies to (or a settings namespace and
+resets of its overridden fields), browser on or off, each child
 and its controls, pausing, resuming or clearing the goal, and the presets with
 the current one marked. The pick runs as the full command (`/dsh enable <bundle>`).
 A preset can change in place only before a session has history; after that,
@@ -157,8 +159,32 @@ TUI ends its error with `If a plugin broke startup, run dscode doctor
 selects only dscode's shipped bundles and keeps installed packages; it prints
 what changed and the `mv` command that restores the patch. Row switches (the
 native DeepSeek route `llm-deepseek` from `/provider`, `/browser on`), provider
-and model settings, MCP servers and a remote workspace live in that patch and
-are off until you restore it; API keys are kept.
+and model settings, `/dsh config` changes, MCP servers and a remote workspace
+live in that patch and are off until you restore it; API keys are kept.
+
+### Plugin settings
+
+`/dsh config` reads and changes plugin settings through DSH's settings service,
+the one DSH's own Settings pages use. It serves each loaded row's live fields
+(a namespace per row: `bash-sandbox`, `web-search-deepseek`, `subagent`, …).
+
+| Command | Action |
+|---|---|
+| `/dsh config` | Each namespace, the plugin it belongs to, its fields and how many you override |
+| `/dsh config <namespace>` | Each field: its value, its default, and `overridden` when your profile sets it |
+| `/dsh config set <namespace> <field> <value>` | Set a field (`limits.maxUses`, or `["a.b","c"]` for keys with dots) |
+| `/dsh config reset <namespace> <field>` | Return an overridden field to its default |
+
+A value is JSON (`30000`, `true`, `"text"`, `{"A":"1"}`); text that is not JSON
+is taken as a string. Objects and arrays show as compact JSON, clipped when wide.
+The service validates each change against the plugin's schema, writes the
+profile's `cordis.patch.yml` and applies it to the running leader at once; the
+reply says so, or that a restart applies it. A rejected value is shown with the
+service's error and changes nothing, and a change made elsewhere since the
+namespace was read is refused: run `/dsh config <namespace>` again. Secret fields
+show only as `set` or `unset` and are never set here, since the value would stay
+in the transcript: name a credential in the field beside it (such as
+`apiKeyEnv`) or use the plugin's own flow, such as `/provider`.
 
 ## Remote workspace over SSH (experimental)
 

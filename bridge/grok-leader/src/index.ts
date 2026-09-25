@@ -348,7 +348,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     inspectRuntime: name => inspectPluginRuntime(ctx, name),
     installAnchor: () => host.profileContext()?.installAnchor,
     pluginManager: host.pluginManager,
-    switches: pluginRows, skipped: pluginStatus.skipped,
+    switches: pluginRows, skipped: pluginStatus.skipped, settings: host.settings,
   })
   const sessionCommands = createSessionCommands<SessionRecord>({
     sessions, owned: ownedRecord, client: id => connections.get(id),

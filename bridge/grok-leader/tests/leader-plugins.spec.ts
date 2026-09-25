@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { register, sendRequest, useLeaderHarness, waitFor, waitForId } from './support/leader-harness.ts'
+import { fakeSettingsService } from './support/settings-fake.ts'
 
 describe('leader plugin inspection, /dsh command and bundle management', () => {
   const start = useLeaderHarness()
@@ -249,4 +250,36 @@ describe('leader plugin inspection, /dsh command and bundle management', () => {
       rmSync(root, { recursive: true, force: true })
     }
   }, 30_000)
+  it('serves /dsh config over the host settings service, through the socket and never the model', async () => {
+    const settings = fakeSettingsService()
+    const { registry, client: c } = await start({ settings: settings.service, pluginManager: { listBundles: async () => settings.bundles, listPlugins: async () => [] } })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const replies = () => c.all.filter(message => message.method === 'session/update')
+      .map(message => String((message.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? ''))
+    const dsh = async (id: number, text: string) => {
+      const before = replies().length
+      sendRequest(c, id, 'session/prompt', { sessionId, prompt: [{ type: 'text', text }] })
+      expect((await waitForId(c, id)).result).toMatchObject({ stopReason: 'end_turn' })
+      await waitFor(() => replies().length > before)
+      return replies().slice(before).join('')
+    }
+
+    const options = await c.request(2, 'x.ai/commands/options', { sessionId, name: 'dsh', query: 'config' })
+    expect((options.result as { options: Array<{ id: string; detail?: string }> }).options).toEqual([
+      expect.objectContaining({ id: 'config bash-sandbox', detail: 'Base · 5 fields · 1 overridden' }),
+      expect.objectContaining({ id: 'config web-search', detail: 'Base · 4 fields · 0 overridden' }),
+    ])
+    expect(await dsh(3, '/dsh config set bash-sandbox env {"PATH": "/opt/bin"}'))
+      .toBe('Set `env` of `bash-sandbox` to `{"PATH":"/opt/bin"}`; applied to the running leader.')
+    expect(settings.mutate).toHaveBeenCalledExactlyOnceWith('bash-sandbox', [{ op: 'set', path: ['env'], value: { PATH: '/opt/bin' } }], 3)
+    const view = await dsh(4, '/dsh config web-search')
+    expect(view).toContain('| `apiKey` | set · secret | - |')
+    expect(view).not.toContain('sk-live-secret')
+    expect(await dsh(5, '/dsh config set web-search apiKey sk-typed')).toContain('never writes one')
+    expect(settings.mutate).toHaveBeenCalledTimes(1)
+    expect(registry.byId.get(sessionId)!.internals.followups).toEqual([])
+  })
 })

@@ -49,13 +49,36 @@ export interface CredentialsLike {
   unset?(ref: string): Promise<void>
 }
 
+/** One namespace as the settings service describes it (`SettingsDescriptor`):
+ * a loaded plugin entry's live-editable fields. Only `ns` and `user` are
+ * always read; the rest serve `/dsh config` and are checked where used. */
+export interface SettingsNamespaceLike {
+  ns: string
+  /** The raw user section; a field present here is user-overridden. */
+  user?: unknown
+  /** The serialized form schema (`schema.toJSON()`). */
+  schema?: unknown
+  /** Resolved values: schema defaults, composition base, then the user layer. */
+  value?: unknown
+  /** The composition base with defaults resolved. */
+  base?: unknown
+  /** Send back as the expected revision so a stale edit is refused. */
+  revision?: number
+  /** When the owner applies changes (`live` in DSH 0.1.7-rc.2). */
+  applies?: string
+  /** Every `role('secret')` slot and whether it holds a value (redacted reads). */
+  secrets?: ReadonlyArray<{ readonly path: readonly string[]; readonly set: boolean }>
+}
+
 /** Structural write path of the official settings seam (ctx.settings.mutate). */
 export interface SettingsLike {
   /** Source-runtime startup/import completion; absent on older test adapters. */
   readonly ready?: Promise<void>
+  /** Whether the profile accepts form edits; absent on test adapters. */
+  readonly writable?: boolean
   mutate(ns: string, ops: unknown, expectedRevision?: number): Promise<void>
-  /** Read the raw user sections (ctx.settings.describe); optional for harnesses without it. */
-  describe?(): Array<{ ns: string; user?: unknown }>
+  /** Describe the namespaces (ctx.settings.describe); optional for harnesses without it. */
+  describe?(options?: { redactSecrets?: boolean }): SettingsNamespaceLike[]
 }
 
 /** Structural read of the default-model service. */

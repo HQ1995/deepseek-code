@@ -146,7 +146,16 @@ The bridge also implements the `x.ai/*` surfaces required by this TUI:
   `/subagents` (list, then each continuable child and its pending, stop and
   clear controls), `/browser` (status, on, off, the current state active) and
   `/dsh` (its verbs, then the bundles `enable`, `disable`, `inspect` or
-  `remove` applies to).
+  `remove` applies to, and with a settings service `config`: the namespaces,
+  then a namespace's full view and one confirmed reset per overridden field).
+- `/dsh config` runs in the bridge over DSH's settings service
+  (`settings.describe({redactSecrets: true})`, then `settings.mutate` with one
+  `set` or `unset` path op at the revision just described). It lists the
+  namespaces, one namespace's fields (value, default, override) and sets or
+  resets one field; secret fields show only as set or unset and are refused
+  for writes, a `SETTINGS_CONFLICT` answers "changed elsewhere", and the
+  service's validation error is shown as is. The line after `set <namespace>
+  <field>` is the value as typed: JSON, else a string.
 - native goal, permission, and task state/control from the owning dsh services
 - `x.ai/subagent/inbox` returns structured child/queue rows and applies the same
   native controls, with exact descendant/message IDs and stale-text checks.
