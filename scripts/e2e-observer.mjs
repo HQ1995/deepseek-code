@@ -39,7 +39,7 @@ export function apply(ctx) {
                 path: ctx.get('attachments')?.imageHostPath(block.attachment),
               }))),
           projections: ctx.sessionProjections.snapshot(agent.session,
-            ['contextPressure', 'tokenUsage', 'contextBreakdown', 'goal', 'permissions', 'subagentCatalog']),
+            ['contextPressure', 'tokenUsage', 'contextBreakdown', 'goal', 'permissions', 'subagentCatalog', 'plan']),
           jobs: ctx.jobs.list(agent.session.id),
           terminals: ctx.get('terminals')?.list(agent) ?? [],
           descendants: descendants.map(child => ({ ...child,

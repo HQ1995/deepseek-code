@@ -378,8 +378,35 @@ http.createServer((request, response) => {
       const titleRequest = body.includes('Create a concise title')
       const parsed = JSON.parse(body)
       const fixture = titleRequest ? undefined : contractReply(parsed)
+      if (fixture?.status) {
+        // A provider error response: DSH's retry policy and failure typing see it.
+        response.writeHead(fixture.status, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ error: { message: fixture.error ?? 'fixture failure', type: 'fixture_error' } }))
+        return
+      }
       if (fixture) {
         response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+        if (fixture.holdToolCall) {
+          // A tool call streamed partway, held until the test releases the rest.
+          const { name, argumentsPrefix, argumentsRest } = fixture.holdToolCall
+          const call = JSON.parse(toolCallChunk(name, argumentsPrefix))
+          call.choices[0].delta.tool_calls[0].id = 'held-tool-call'
+          response.write('data: ' + JSON.stringify(call) + '\n\n')
+          const deadline = setTimeout(() => response.destroy(), 90000)
+          response.on('close', () => clearTimeout(deadline))
+          const key = fixture.releaseKey ?? 'preset'
+          const finish = () => {
+            const rest = JSON.parse(toolCallChunk(name, argumentsRest))
+            const delta = rest.choices[0].delta.tool_calls[0]
+            delete delta.id; delete delta.type; delete delta.function.name
+            response.write('data: ' + JSON.stringify(rest) + '\n\n')
+            response.write('data: ' + chunk('', 'tool_calls') + '\n\n')
+            response.end('data: [DONE]\n\n')
+          }
+          heldStreams.set(key, finish)
+          response.on('close', () => { if (heldStreams.get(key) === finish) heldStreams.delete(key) })
+          return
+        }
         if (fixture.hold) {
           if (fixture.text) response.write('data: ' + chunk(fixture.text) + '\n\n')
           response.write(': controlled model wait\n\n')

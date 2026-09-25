@@ -5,6 +5,7 @@ import { goalReply } from './e2e-goals.mjs'
 import { historyReply } from './e2e-history.mjs'
 import { nativeTuiReply } from './e2e-native-tui.mjs'
 import { nativeControlsReply } from './e2e-native-controls.mjs'
+import { bridgeFeedsReply } from './e2e-bridge-feeds.mjs'
 
 export function contractReply(body) {
   // DSH appends live policy and skill reminders as user-role messages.
@@ -12,6 +13,8 @@ export function contractReply(body) {
     message.role !== 'user' || typeof message.content !== 'string' ||
     !(message.content.startsWith('Current runtime context. This snapshot supersedes earlier runtime-context snapshots.') ||
       message.content.startsWith('<system-reminder>\nA skill is a reusable set of task-specific instructions.'))) }
+  const feeds = bridgeFeedsReply(body)
+  if (feeds) return feeds
   const extra = archiveTerminalReply(body)
   if (extra) return extra
   const six = nextSixReply(body)
