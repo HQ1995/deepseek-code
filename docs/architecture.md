@@ -79,7 +79,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `session-commands` | Command advertisement and routing over dsh's command registry |
 | `execution-world` | Where tools run: local, or the SSH workspace a profile configures |
 | `mcp` | ACP MCP declarations to agent-scoped DSH MCP clients, loaded lazily |
-| `native-children` | Workflow membership, child views, bounded history, `/subagents` controls |
+| `native-children` | Workflow membership, child views and `/subagents` controls over native services |
 | `child-controls` | Child overview, `/subagents` grammar and verbs, inbox views; native calls through ports |
 | `child-history` | Append-only child tool/turn metadata index and its serialized, bounded log reads; no transcript copy |
 | `workflows` | Read-only projection of tool-workflow durable records (`dscodeWorkflows`) |
@@ -118,16 +118,24 @@ and `session-export`; a runtime dependency only in `native-tasks`,
 `session-migration`, `terminal-signal` and `preset-catalog`; absent elsewhere. The entry builds no maps, sets, abort controllers or timers
 and imports no `node:net`. `dsh-session-projection` and `zod` stay host peers.
 Each `.ts`/`.mjs` file in `src/`, `bin/` and `tests/` is capped at 800 lines;
-on 2026-09-24 none exceeds it (largest: `tests/leader-queue.spec.ts`, 763).
+on 2026-09-24 none exceeds it (largest: `tests/leader-queue.spec.ts`, 763;
+largest module: `src/model-catalog.ts`, 596).
 `browser/`, `ssh/` and `shared/` are not scanned; their files are under 100.
 
 ## Remaining candidates
 
-Long functions: `prompt-queue.ts` `control` (180 lines), `profile-plugins.ts`
-`executeCommand` (164), `leader-transport.ts` `accept` (155),
-`preset-catalog.ts` `nativeCatalog` (148), `index.ts` `dispatchRequest` (111).
-They own delicate ordering (queue settlement, socket admission, plugin trust):
-each needs its own interface-first change with differential evidence.
+Since the 2026-09-24 split no module in `src/` exceeds 600 lines and no
+function other than a module's factory exceeds 100; the longest are
+`session-lifecycle.ts` `forkSession` (88), `projection.ts`
+`sessionEventToUpdates` and `prompt-queue.ts` `runPrompt` (87 each). The
+factories remain long because they own their module's state:
+`createModelCatalog` (536), `createNativeChildren` (490), `index.ts` `apply`
+(463), `attachPromptQueue` (449).
+
+`leader-routes` is a registry so feature rows can later register their own
+`x.ai/*` methods and become separately mountable, as DSH composes features
+from rows; today only `index.ts` registers, and a duplicate registration
+throws at mount.
 
 ## Harness and launcher invariants
 
