@@ -130,6 +130,29 @@ The bridge also implements the `x.ai/*` surfaces required by this TUI:
 Extension notifications use the `_x.ai/*` wire spelling expected by the ACP
 decoder. `session/update` remains the normal unprefixed ACP notification.
 
+## Turn activity notices
+
+These ride `_x.ai/session_notification`, as `image_dropped` notes do, with the
+session output's `eventSeq` and `promptId` stamps. They feed TUI renderers that
+already exist; nothing here adds a TUI code path.
+
+- A DSH `llm/retry` (a scheduled model-request retry) sends `retry_state`
+  `{type: 'retrying', attempt, max_retries, reason}`, live only; `max_retries`
+  is 0 for an unbounded policy. `is_rate_limited` is never sent: that flag is
+  xAI's upsell. The TUI clears the state at the retried attempt's first
+  streamed update, a later failure or the turn's end.
+- A `turn/end` whose reason is an error sends `retry_state`
+  `{type: 'failed', error_type, message}` live and on replay, before the prompt
+  RPC rejects. `error_type` follows the native code (`CONTEXT_WINDOW_EXCEEDED`
+  → `context_length`, `RATE_LIMIT` → `rate_limited`, `TIMEOUT` →
+  `idle_timeout`, `TRANSPORT` → `http`, `EMPTY_RESPONSE` → `empty_response`),
+  else `api` when the provider sent an HTTP status, else `other`. The message
+  and the rejection (`turn failed: …`) name the status, code and provider
+  request id. A 402 reads `HTTP 402` and `Unauthorized (401)` reads
+  `Unauthorized, HTTP 401`, because the TUI takes the other spellings for
+  xAI's credit-limit upsell or `/login`. Missing or unusable keys send no
+  state; they still settle as the `/provider` refusal.
+
 ## Invariants
 
 - `session/new` and `session/load` require an absolute cwd. ACP `mcpServers`

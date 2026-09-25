@@ -158,6 +158,22 @@ describe('session output ownership', () => {
     expect(f.notes.at(-1)!.params._meta.cumulativeTokens).toBe(22)
   })
 
+  it('sends a scheduled retry live and a failed turn\'s typed failure live and on replay', async () => {
+    const f = fixture()
+    const scheduled = event(0, 'llm/retry', { retryId: 'r', turn: 1, step: 1, provider: 'p', mode: 'normal', policyKey: 'k',
+      retry: 1, maxRetries: 3, delayMs: 10, failure: { message: 'busy', code: 'SERVER', status: 503 } })
+    const failed = event(1, 'turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'busy', code: 'SERVER', status: 503, requestId: 'q' } } })
+    f.output.live(scheduled); f.output.live(failed)
+    expect(f.notes.map(note => [note.method, note.params.update, note.params._meta.promptId])).toEqual([
+      ['x.ai/session_notification', { sessionUpdate: 'retry_state', type: 'retrying', attempt: 1, max_retries: 3, reason: 'busy (status 503, SERVER)' }, 'prompt'],
+      ['x.ai/session_notification', { sessionUpdate: 'retry_state', type: 'failed', error_type: 'api', message: 'busy (status 503, SERVER, request q)' }, 'prompt'],
+    ])
+    const restored = fixture()
+    await restored.output.restore([scheduled, failed])
+    expect(restored.notes.map(note => [note.params.update, note.params._meta.isReplay]))
+      .toEqual([[f.notes[1]!.params.update, true]])
+  })
+
   it('keeps occupancy separate from cumulative spend and owns feature envelope identity', () => {
     const f = fixture()
     f.setContext({ contextPressure: { projectedTokens: 120, contextWindow: 1000 } })

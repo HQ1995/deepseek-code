@@ -2,6 +2,7 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { errorChain, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { hasToolImages } from './image-output.ts'
+import { isXaiNotice, turnNotices, type XaiNotice } from './turn-notices.ts'
 import { assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, parseJsonObject, sessionEventToUpdates, systemNotes, contextInfoFromProjection, type ContextProjectionValues, type DecodeSpeed, type ProjectedUpdate } from './projection.ts'
 
 export interface SessionOutputHost {
@@ -38,12 +39,14 @@ interface OutputState {
   /** Pending tool-call facts keyed by callId, used to attach rawInput/rawOutput. */
   pendingToolCalls: Map<string, { name: string; arguments: unknown }>
 }
-/** The pager renders `image_dropped` notes as one plain system block, so every neutral notice rides it. */
-type SystemNoticeUpdate = { sessionUpdate: 'image_dropped'; notes: string[]; totalTokens?: never; cacheHitPercent?: never; tokensPerSecond?: never }
-type OutputUpdate = ProjectedUpdate | SystemNoticeUpdate
-const noticeUpdate = (event: SessionEvent): SystemNoticeUpdate | undefined => {
+/** xAI-only updates: system notes (the pager renders `image_dropped` notes as
+ * one plain system block, so every neutral notice rides it) and retry/failure
+ * states. They carry no meters. */
+type NoticeUpdate = XaiNotice & { totalTokens?: never; cacheHitPercent?: never; tokensPerSecond?: never }
+type OutputUpdate = ProjectedUpdate | NoticeUpdate
+const notices = (event: SessionEvent, replay: boolean): NoticeUpdate[] => {
   const notes = systemNotes(event)
-  return notes === undefined ? undefined : { sessionUpdate: 'image_dropped', notes }
+  return [...notes === undefined ? [] : [{ sessionUpdate: 'image_dropped' as const, notes }], ...turnNotices(event, replay)]
 }
 
 /** Per-attached-agent output ownership: revision/replay dedup, meter folding,
@@ -134,7 +137,7 @@ export function createSessionOutput(host: SessionOutputHost) {
     const send = (item: OutputUpdate): Promise<void> | undefined => {
       const eventSeq = state.eventSeq++
       const { totalTokens, cacheHitPercent, tokensPerSecond, ...update } = item
-      host.notify(item.sessionUpdate === 'image_dropped' ? 'x.ai/session_notification' : 'session/update', {
+      host.notify(isXaiNotice(item) ? 'x.ai/session_notification' : 'session/update', {
         sessionId: host.sessionId,
         update,
         _meta: {
@@ -309,8 +312,7 @@ export function createSessionOutput(host: SessionOutputHost) {
       return
     }
     const updates = mapEvent(event, false)
-    const notice = noticeUpdate(event)
-    if (notice !== undefined) update(notice, false, event.time)
+    for (const notice of notices(event, false)) update(notice, false, event.time)
     const projected = hasToolImages(event) ? host.projectImages(event, updates) : undefined
     updates.forEach((item, index) => update(
       projected === undefined ? item : projected.then(items => items[index]!), false, event.time))
@@ -339,8 +341,7 @@ export function createSessionOutput(host: SessionOutputHost) {
         if (event.type === 'turn/start') state.turnStartMs = event.time
         const items = mapEvent(event, true)
         if (!send) continue
-        const notice = noticeUpdate(event)
-        if (notice !== undefined) update(notice, true, event.time)
+        for (const notice of notices(event, true)) update(notice, true, event.time)
         if (items.length === 0) continue
         // Reserve the complete replay prefix and its wire positions before
         // yielding. Otherwise a live successor raises lastSeq while an image

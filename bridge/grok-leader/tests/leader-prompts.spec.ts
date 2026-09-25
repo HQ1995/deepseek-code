@@ -416,8 +416,36 @@ describe('leader prompt turns, content and usage', () => {
     pluginCtx.emit('agent/error', { agent, turn: 1, step: 0, error: Object.assign(new Error('llm-deepseek: no API key'), {
       failure: { code: 'MISSING_CREDENTIAL', message: 'llm-deepseek: no API key for provider route "deepseek-official"; store it' },
     }) })
+    // The turn's durable end records the same failure; it adds no failure banner.
+    pluginCtx.emit('session/event', agent.session, agent.session.append('turn/end', { turn: 1, reason: { kind: 'error', error: {
+      code: 'MISSING_CREDENTIAL', message: 'llm-deepseek: no API key for provider route "deepseek-official"; store it' } } } as never))
     const refusal = 'No API key is stored for provider "deepseek-official". Add one in /provider (highlight it and press e), then send again.'
     expect((await waitForId(c, 2)).error).toEqual({ code: -32602, message: refusal, data: { message: refusal } })
+    expect(c.all.some(message => JSON.stringify(message).includes('retry_state'))).toBe(false)
+  })
+
+  it('shows a failed turn\'s typed failure before rejecting it with its status, code and request id', async () => {
+    const { registry, pluginCtx, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'overloaded' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    pluginCtx.emit('agent/inbox/claimed', { agent, message: agent.internals.messages[0] as UserMessage, turn: 1 })
+    const failure = { message: 'upstream busy', code: 'SERVER', status: 503, requestId: 'req-9' }
+    pluginCtx.emit('session/event', agent.session, agent.session.append('llm/retry', { retryId: 'r', turn: 1, step: 1, provider: 'deepseek',
+      mode: 'normal', policyKey: 'k', retry: 1, maxRetries: 2, delayMs: 5, failure } as never))
+    pluginCtx.emit('session/event', agent.session, agent.session.append('turn/end', { turn: 1, reason: { kind: 'error', error: failure } } as never))
+    const response = await waitForId(c, 2)
+    expect(response.error).toEqual({ code: -32603, message: 'turn failed: upstream busy (status 503, SERVER, request req-9)' })
+    const states = c.all.filter(message => (message.params as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate === 'retry_state')
+    expect(states.map(message => [message.method, (message.params as { update: unknown }).update])).toEqual([
+      ['x.ai/session_notification', { sessionUpdate: 'retry_state', type: 'retrying', attempt: 1, max_retries: 2, reason: 'upstream busy (status 503, SERVER, request req-9)' }],
+      ['x.ai/session_notification', { sessionUpdate: 'retry_state', type: 'failed', error_type: 'api', message: 'upstream busy (status 503, SERVER, request req-9)' }],
+    ])
+    expect(c.all.indexOf(states[1]!)).toBeLessThan(c.all.indexOf(response))
   })
 
   it('rejects a prompt only when agent/error names its in-flight turn', async () => {
