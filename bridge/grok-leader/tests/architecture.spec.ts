@@ -126,7 +126,6 @@ const declaredDependencies = [
     ['session-list', []],
     ['session-export', []],
     ['session-migration', []],
-    ['terminal-signal', []],
     ['preset-catalog', ['native-seams', 'session-presets', 'team-presets', 'guards']],
     ['package-location', ['bin/update.mjs']],
 ] as const
@@ -136,7 +135,7 @@ const declaredDependencies = [
 const cordisUse = {
   'session-models': 'type', 'session-presets': 'type', 'profile-plugins': 'type',
   'image-output': 'type', mcp: 'type', 'session-export': 'type',
-  'native-tasks': 'runtime', 'session-migration': 'runtime', 'terminal-signal': 'runtime', 'preset-catalog': 'runtime',
+  'native-tasks': 'runtime', 'session-migration': 'runtime', 'preset-catalog': 'runtime',
 } as const
 
 describe('architecture ownership and dependency gate', () => {

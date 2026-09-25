@@ -40,6 +40,23 @@ The results are identical: removing a config key an entry's patches do not
 carry leaves the patch list unchanged. A settings test pins the composition
 count; the existing inheritance, reset, group and secret tests cover values.
 
+The terminal signalling change is dscode's own as well. The local provider's
+`signalForeground` resolved the foreground process group, then ran the exact
+stdin-wait scan of the whole process table, then killed the group: on a
+loaded host that scan takes tens of milliseconds, longer than one command of
+a shell loop such as `while :; do …; sleep 0.1; done` lives, so the kill hit
+a group that had already exited (`kill ESRCH`) on every attempt, retried or
+not. The backport reads the group immediately before the kill with nothing
+in between, re-reads it up to five times when it exited in that gap, keeps
+the SIGKILL shell guard on each read, and surfaces every other failure at
+once; the stdin-wait scan belongs to `inspectForeground` alone. Three
+terminal tests pin the re-read, its bound and the guard, and the README pair
+records the contract. `scripts/e2e-foreground-signal.mjs` reproduces the race
+against a runtime's `node_modules` (the unpatched runtime fails 9 to 14 of 30
+interrupts on a loaded host; the patched one stops every loop). The bridge's
+`terminal-signal` wrapper, which retried the provider's single inspect-and-kill
+from outside, is removed with it.
+
 The Schedule change is dscode's own. rc.2's Schedule service delivers through
 `sessionController.resolveAgent`; the bridge provides one that resolves only
 Sessions a TUI has open and ready, so a reminder due while its Session is
@@ -59,7 +76,8 @@ translation records to per-section hashes, so the four records the patch
 touches were regenerated with upstream's `verify-translation-pairing --write`;
 source and test hunks are unchanged, and the patched packages' suites pass on
 rc.2. Settings readiness, the macOS kernel process table, the JSONL helper
-extraction and the shared config-editor composition are still not upstream.
+extraction, the shared config-editor composition, Schedule's `requestDelivery`
+and the foreground-signal fix are still not upstream.
 Linux acceptance is re-run for every payload that bumps the runtime.
 
 When upgrading the upstream source, review whether the change is already

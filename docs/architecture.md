@@ -40,7 +40,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 72 modules; `index.ts` is the composition root.
+`src/` has 71 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
@@ -97,7 +97,6 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `native-interactions` | Permission modes and approvals (rendered from the asking tool's call view), user questions and plan reviews, reverse-request admission |
 | `native-execution` | Runtime doctor and persistent-terminal controls |
 | `client-activity` | The quit guard's facts (`x.ai/client/activity`): DSH's session-activity families and the queue, merged by kind for a client's sessions |
-| `terminal-signal` | Retries a foreground-group signal that races an exiting group, a bounded number of times, through the provider |
 | `native-asides` | One-shot `/btw` asides, including late handles |
 | `native-capabilities` | Read-only views of the current preset's native tools |
 | `native-team` | `/team`: read-only roster and task board of the Agent Team |
@@ -125,7 +124,7 @@ must exist. `src/` and `bin/` have no runtime import cycle, nothing imports
 `index.ts`, and computed imports are enumerated. Cordis is type-only in
 `session-models`, `session-presets`, `profile-plugins`, `image-output`, `mcp`
 and `session-export`; a runtime dependency only in `native-tasks`,
-`session-migration`, `terminal-signal` and `preset-catalog`; absent elsewhere. The entry builds no maps, sets, abort controllers or timers,
+`session-migration` and `preset-catalog`; absent elsewhere. The entry builds no maps, sets, abort controllers or timers,
 imports no `node:net`, and reads no host service by name: `ctx.get` is
 refused in `index.ts`, so `host-services` is the one list of what the bridge
 consumes from DSH, to be reread at every runtime bump. `dsh-session-projection` and `zod` stay host peers.
