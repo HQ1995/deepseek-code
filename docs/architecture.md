@@ -40,7 +40,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 63 modules; `index.ts` is the composition root.
+`src/` has 64 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
