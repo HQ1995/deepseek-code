@@ -1007,13 +1007,13 @@ pub async fn run(
                     lines[start..].join("\n")
                 })
                 .unwrap_or_else(|_| "<no leader log written>".to_string());
-            f.error = f.error.context(format!(
-                "The dsh leader failed to start or accept the connection; \
-                 dscode has no embedded fallback agent.\n\
-                 Leader log tail ({}):\n{}",
-                log_path.display(),
-                tail
-            ));
+            f.error = if f.outcome == crate::acp::StartupOutcome::Error {
+                crate::dsh_leader::leader_start_failure(&f.error, &log_path, &tail)
+            } else {
+                // A timeout or cancellation renders its own report.
+                f.error
+                    .context(crate::dsh_leader::leader_failure_context(&log_path, &tail))
+            };
             (Err(f), false, timer, primary_target)
         }
         other => (other, false, timer, primary_target),

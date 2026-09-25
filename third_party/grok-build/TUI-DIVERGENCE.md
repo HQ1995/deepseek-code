@@ -596,7 +596,11 @@ leader's pid while waiting for the socket and fails immediately with
 "exited before its socket became connectable" when the process dies,
 instead of blank-polling the 30s timeout. Verified: a broken profile now
 errors in ~1s with the resolve error on screen (was: 30s black screen,
-then the xAI login).
+then the xAI login). A start that failed outright (`dsh_leader.rs`
+`leader_start_failure`) prints that context, then the cause on its own line,
+then one generic line naming the launcher's safe mode, "If a plugin broke
+startup, run `dscode doctor --reset-plugins`."; it names no plugin, and a unit
+test pins it as the last line. A timeout keeps its own startup report.
 
 ### Leader protocol mismatches fail during registration
 

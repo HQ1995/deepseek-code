@@ -133,7 +133,14 @@ about; `/preset teams` mounts them in one session instead.
 A bundle that cannot load is skipped at startup: dscode starts without it and
 the next session you open says which one and why. `/doctor` and
 `dscode doctor --runtime` report skipped bundles, rows that failed or wait for a
-service, and the leader log.
+service, and the leader log. If a plugin keeps dscode from starting at all, the
+TUI ends its error with `If a plugin broke startup, run dscode doctor
+--reset-plugins.` That safe mode backs up the profile's `cordis.patch.yml`,
+selects only dscode's shipped bundles and keeps installed packages; it prints
+what changed and the `mv` command that restores the patch. Row switches (the
+native DeepSeek route `llm-deepseek` from `/provider`, `/browser on`), provider
+and model settings, MCP servers and a remote workspace live in that patch and
+are off until you restore it; API keys are kept.
 
 ## Remote workspace over SSH (experimental)
 
@@ -183,6 +190,7 @@ dscode update --beta               # beta or stable releases
 dscode update --alpha              # alpha or stable releases
 dscode update --version <version>  # exact version
 dscode doctor --runtime            # diagnose even when normal startup fails
+dscode doctor --reset-plugins      # safe mode: only dscode's shipped plugins
 dscode uninstall
 ```
 

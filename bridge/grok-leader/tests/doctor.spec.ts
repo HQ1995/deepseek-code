@@ -67,7 +67,7 @@ it('checks a remote profile\'s connection only when asked, and says what to fix'
   } finally { rmSync(profile, { recursive: true, force: true }) }
 })
 
-it('reports the bundles boot skips, with their reason', async () => {
+it('reports bundles boot skips and a profile patch that stops boot, with their reason', async () => {
   const { profileBundleFindings } = await import('../bin/doctor.mjs')
   const root = mkdtempSync(join(tmpdir(), 'dscode-doctor-skipped-'))
   try {
@@ -80,11 +80,14 @@ it('reports the bundles boot skips, with their reason', async () => {
     mkdirSync(join(profile, 'node_modules/plain'), { recursive: true })
     writeFileSync(join(profile, 'node_modules/plain/package.json'), JSON.stringify({ name: 'plain', version: '1.0.0' }))
     writeFileSync(join(profile, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'vanished', 'plain'] } } }))
+    writeFileSync(join(profile, 'cordis.patch.yml'), '- 42\n')
     const findings = profileBundleFindings({ anchor, profile })
-    expect(findings.map(f => [f.status, f.name])).toEqual([['ERROR', 'Profile bundle vanished'], ['ERROR', 'Profile bundle plain']])
+    expect(findings.map(f => [f.status, f.name])).toEqual([['ERROR', 'Profile bundle vanished'], ['ERROR', 'Profile bundle plain'], ['ERROR', 'Profile patch']])
     expect(findings[0]!.detail).toMatch(/^Skipped at startup: cannot resolve profile bundle "vanished" from the dsh installation or .*profile\. Inside dscode, \/dsh disable vanished stops loading it and \/dsh remove vanished uninstalls it\.$/)
     expect(findings[0]!.detail).not.toContain('dsh plugin')
     expect(findings[1]!.detail).toContain('Skipped at startup: profile bundle "plain" declares no dsh.bundle')
+    expect(findings[2]!.detail).toContain('cordis.patch.yml')
+    expect(findings[2]!.detail).toContain('The leader cannot start until it loads: fix the file, or run dscode doctor --reset-plugins to move it aside.')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

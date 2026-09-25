@@ -72,6 +72,34 @@ fn resolved_leader_socket() -> PathBuf {
         .unwrap_or_else(default_leader_socket)
 }
 
+/// The recovery hint closing a failed leader start: a plugin bundle or the
+/// profile patch is the usual cause, and the launcher's safe mode resets
+/// both without removing installed packages.
+pub const RESET_PLUGINS_HINT: &str =
+    "If a plugin broke startup, run `dscode doctor --reset-plugins`.";
+
+/// The context the TUI adds when the leader did not start or accept the
+/// connection: the terminal failure and the leader log tail.
+pub fn leader_failure_context(log_path: &Path, tail: &str) -> String {
+    format!(
+        "The dsh leader failed to start or accept the connection; \
+         dscode has no embedded fallback agent.\n\
+         Leader log tail ({}):\n{}",
+        log_path.display(),
+        tail
+    )
+}
+
+/// A leader start that failed outright (a timeout renders its own report):
+/// the context, the cause, then the safe-mode hint as the last line. As an
+/// `anyhow` context the hint would print before the cause.
+pub fn leader_start_failure(error: &anyhow::Error, log_path: &Path, tail: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}\n{error:#}\n{RESET_PLUGINS_HINT}",
+        leader_failure_context(log_path, tail)
+    )
+}
+
 /// Open options for the predictable /tmp leader files: owner-only on create
 /// and no symlink following, so a link planted on a shared host cannot
 /// redirect leader output or the pid record into another file.
@@ -367,6 +395,31 @@ mod tests {
             PathBuf::from("/tmp/explicit-dscode.log"),
             "DSCODE_LOG stays authoritative"
         );
+    }
+
+    /// A failed start names the log, shows its tail and the cause, and ends
+    /// with exactly one generic safe-mode hint line.
+    #[test]
+    fn leader_failure_ends_with_the_reset_plugins_hint() {
+        let cause = anyhow::anyhow!(
+            "Failed to spawn leader: leader process 7 exited before its socket became connectable"
+        );
+        let report = format!(
+            "{:#}",
+            leader_start_failure(
+                &cause,
+                Path::new("/tmp/dscode-1-abc.log"),
+                "dsh: skipping profile bundle \"x\"\nError: boom",
+            )
+        );
+        assert!(report.contains("Leader log tail (/tmp/dscode-1-abc.log):\ndsh: skipping"));
+        assert!(report.contains("Error: boom\nFailed to spawn leader: leader process 7 exited"));
+        assert_eq!(
+            report.lines().last().unwrap(),
+            "If a plugin broke startup, run `dscode doctor --reset-plugins`."
+        );
+        assert_eq!(report.matches("--reset-plugins").count(), 1);
+        assert!(!leader_failure_context(Path::new("/tmp/l.log"), "").contains("--reset-plugins"));
     }
 
     /// A symlink planted at the predictable log path must fail closed:

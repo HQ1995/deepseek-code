@@ -173,6 +173,7 @@ describe('architecture ownership and dependency gate', () => {
     expect(computedImports.sort()).toEqual([
       'bin/bootstrap.mjs: pathToFileURL(candidate).href', // validated active/recovery-stage updater
       "bin/bootstrap.mjs: pathToFileURL(join(profile, plugin, 'dscode.mjs')).href", // recovered installed launcher
+      "bin/plugin-reset.mjs: pathToFileURL(createRequire(anchor).resolve('@deepseek-ai/dsh-app-boot')).href", // the profile runtime's sanitizeProfile
       'bin/update.mjs: pathToFileURL(binding).href', // external pinned native file-lock binding
       "src/package-location.ts: pathToFileURL(join(PACKAGE_DIRECTORY, 'bin/update.mjs')).href",
     ])

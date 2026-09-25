@@ -431,10 +431,17 @@ export const main = async () => {
     process.exitCode = findings.some(finding => finding.status === 'ERROR') ? 1 : 0
     return
   }
+  // Safe mode needs neither a working leader nor a provisioned TUI.
+  if (args[0] === 'doctor' && args.includes('--reset-plugins')) {
+    if (args.length !== 2) throw new Error('Usage: dscode doctor --reset-plugins')
+    const { resetPlugins } = await import('./plugin-reset.mjs')
+    await resetPlugins({ profile: profileDir, packageName: pkg.name, dshBin: process.env.DSH_BIN || dshRuntimeBin })
+    return
+  }
   const updateIndex = updateCommandIndex(args)
   if (updateIndex === -1 && args[0] !== 'remote' && (args.includes('--help') || args.includes('-h'))) {
     if (existsSync(binPath)) spawnAndExit(binPath, args, process.env)
-    else console.log('Usage: dscode [OPTIONS] [PROMPT]\n       dscode update [--stable | --beta | --alpha] [--version VERSION] [--check] [--json] [--force-reinstall]\n       dscode remote init|status|remove\n       dscode uninstall')
+    else console.log('Usage: dscode [OPTIONS] [PROMPT]\n       dscode update [--stable | --beta | --alpha] [--version VERSION] [--check] [--json] [--force-reinstall]\n       dscode doctor --runtime [--json] | --reset-plugins\n       dscode remote init|status|remove\n       dscode uninstall')
     return
   }
   if (updateIndex !== -1) {

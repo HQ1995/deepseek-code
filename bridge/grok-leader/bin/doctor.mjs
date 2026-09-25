@@ -74,7 +74,8 @@ for (const bundle of bundles) {
     }
   } catch (error) { issues.push({ bundle, error: String(error?.message ?? error) }) }
 }
-// What boot itself skips: unresolvable, unreadable or incompatible bundles.
+// What boot itself skips (unresolvable, unreadable or incompatible bundles),
+// and whether the user patch layer loads at all: when it does not, boot fails.
 let skipped = []
 try {
   if (typeof boot.loadProfileDirectory === 'function') {
@@ -82,11 +83,14 @@ try {
       .map(({ packageName, reason }) => ({ packageName, reason: String(reason) }))
   }
 } catch {}
-emit({ runtimeVersion: boot.getDshRuntimeVersion(), checked, issues, warnings: compatibility.warnings, skipped })
+let patchError
+try { if (typeof boot.loadOptionalPatches === 'function') boot.loadOptionalPatches('dscode', profile + '/cordis.patch.yml') }
+catch (error) { patchError = String(error?.message ?? error) }
+emit({ runtimeVersion: boot.getDshRuntimeVersion(), checked, issues, warnings: compatibility.warnings, skipped, patchError })
 `
 
 /** The DSH installation (package.json of `@deepseek-ai/dsh`) behind an executable. */
-const dshInstallAnchor = bin => {
+export const dshInstallAnchor = bin => {
   let dir
   try { dir = dirname(realpathSync(bin)) } catch { return undefined }
   for (;;) {
@@ -109,7 +113,8 @@ const skipReason = reason => reason.replace(/^\w*Error: /, '').replace(/^(?:dsh|
 const bundleRepair = name => `Inside dscode, /dsh disable ${name} stops loading it and /dsh remove ${name} uninstalls it.`
 
 /** Profile bundles the runtime would skip, rows it would disable, and exempted
- * ones. Runtimes without the 0.1.7 compatibility API are not judged. */
+ * ones; a user patch that stops boot. Runtimes without the 0.1.7 compatibility
+ * API are not judged. */
 export const profileBundleFindings = ({ anchor, profile }) => {
   let appBoot
   try { appBoot = createRequire(anchor).resolve('@deepseek-ai/dsh-app-boot') } catch { return [] }
@@ -136,6 +141,9 @@ export const profileBundleFindings = ({ anchor, profile }) => {
   const reported = new Set(result.issues.filter(issue => !issue.component).map(issue => issue.bundle))
   for (const { packageName, reason } of result.skipped ?? []) {
     if (!reported.has(packageName)) findings.push({ status: 'ERROR', name: `Profile bundle ${packageName}`, detail: `Skipped at startup: ${skipReason(reason)}. ${bundleRepair(packageName)}` })
+  }
+  if (result.patchError !== undefined) {
+    findings.push({ status: 'ERROR', name: 'Profile patch', detail: `${result.patchError}. The leader cannot start until it loads: fix the file, or run dscode doctor --reset-plugins to move it aside.` })
   }
   return findings.length > 0 ? findings
     : [{ status: 'OK', name: 'Profile bundles', detail: `${result.checked} bundle(s) satisfy dsh ${result.runtimeVersion} peer requirements` }]
