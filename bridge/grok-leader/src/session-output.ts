@@ -16,6 +16,8 @@ export interface SessionOutputHost {
   projectImages(event: SessionEvent, updates: ProjectedUpdate[]): Promise<ProjectedUpdate[]>
   /** The attached agent's tool presenters: live and restored cards carry the same views. */
   presenter?: ToolPresenter
+  /** Event types a plugin projects onto existing messages (`sessions.registerMessageProjection`). */
+  messageProjection?(type: string): boolean
   logger: { warn(message: string): void }
 }
 interface OutputState {
@@ -323,7 +325,9 @@ export function createSessionOutput(host: SessionOutputHost) {
   /** What one event adds beside its projected updates: system notes, xAI
    * turn notices and mode updates. Folds see every event, sent or not. */
   const notices = (event: SessionEvent, replay: boolean): OutputUpdate[] => {
-    const trigger = triggerNotes(triggers, event), notes = systemNotes(event) ?? trigger, mode = planModeNotice(event)
+    // A turn trigger's note already names its message; the fold sees every event.
+    const trigger = triggerNotes(triggers, event), mode = planModeNotice(event)
+    const notes = trigger ?? systemNotes(event, host.messageProjection)
     const compaction = compactionNotices(compactions, event, replay, occupancy(replay))
     // DSH starts the retried attempt: an empty text chunk (the meters' no-op
     // update) ends the TUI's Retrying state, as that attempt's first chunk would.

@@ -253,7 +253,9 @@ pub struct PermissionViewState {
     /// Planned tool-input lines shown under the title — for MCP tools the
     /// pretty-printed JSON arguments the call would send (built by
     /// `acp_handler::build_permission_display`). Empty for bash/edit
-    /// prompts, which have dedicated displays.
+    /// prompts, which have dedicated displays. DIVERGENCE(dscode): a prompt
+    /// rendered from a host's call view lists the asker's reason, then the
+    /// command's cwd, the diff preview or the salient input.
     pub description: Vec<String>,
 
     /// Whether the planned-args / bash-command display is expanded (Ctrl-F
@@ -804,6 +806,7 @@ pub fn render_permission_view(
             theme,
             content_width as usize,
             args_rows,
+            previews_diff(state),
         ));
         if indicator {
             bash_lines.push(truncation_indicator_line(theme));
@@ -1720,17 +1723,38 @@ fn build_mcp_scope_lines(
 /// (a mid-prompt `/theme` switch recolors), falling back to a flat
 /// secondary style. Highlighting preserves the text, so rows match
 /// [`mcp_args_visible_rows`]; `max_rows` stops the syntect work once the
-/// visible budget is filled.
+/// visible budget is filled. A diff preview (`diff`) renders its `+`/`-`
+/// lines in the diff colours instead.
 fn build_mcp_args_lines(
     description: &[String],
     theme: &Theme,
     content_w: usize,
     max_rows: usize,
+    diff: bool,
 ) -> Vec<Line<'static>> {
     if description.is_empty() || max_rows == 0 {
         return Vec::new();
     }
     let fallback = Style::default().fg(theme.text_secondary);
+    if diff {
+        let mut out: Vec<Line<'static>> = Vec::new();
+        for raw in description {
+            if out.len() >= max_rows {
+                break;
+            }
+            let style = match raw.chars().next() {
+                Some('+') => Style::default().fg(theme.diff_insert_fg),
+                Some('-') => Style::default().fg(theme.diff_delete_fg),
+                _ => fallback,
+            };
+            out.extend(char_wrap_spans(
+                vec![Span::styled(raw.clone(), style)],
+                content_w,
+            ));
+        }
+        out.truncate(max_rows);
+        return out;
+    }
     let syntect = crate::syntax::get_syntect();
     // The highlighter is stateful across lines (pretty JSON nests).
     let mut hl = syntect.highlight_lines_for_token("json");
@@ -1745,6 +1769,14 @@ fn build_mcp_args_lines(
     }
     out.truncate(max_rows);
     out
+}
+
+/// DIVERGENCE(dscode): whether the planned lines preview a file change: the
+/// request carries a host's diff call view (see `acp_handler`'s
+/// `view_permission_display`).
+fn previews_diff(state: &PermissionViewState) -> bool {
+    crate::acp::tracker::tool_view::view_card(state.request.request.tool_call.meta.as_ref())
+        == "diff"
 }
 
 /// The `... Ctrl-F to expand` indicator line for a collapsed args or
@@ -2461,7 +2493,7 @@ mod tests {
         ];
         let theme = Theme::current();
         for width in [10usize, 40, 80] {
-            let lines = build_mcp_args_lines(&description, &theme, width, usize::MAX);
+            let lines = build_mcp_args_lines(&description, &theme, width, usize::MAX, false);
             let plain: Vec<String> = description
                 .iter()
                 .flat_map(|raw| char_wrap(raw, width))

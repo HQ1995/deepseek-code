@@ -5,29 +5,9 @@
  * call's arguments and its durable result.
  */
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { load } from 'js-yaml'
-import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { importRuntime } from '../shared/runtime-modules.mjs'
 import { makeClient, register, useLeaderHarness, waitFor } from './support/leader-harness.ts'
-
-const TOOL_ROWS = ['tool-bash', 'tool-fs', 'tool-fs-search', 'tool-web']
-
-async function mountStandardTools(ctx: Context): Promise<void> {
-  const { default: SystemPrompt } = await importRuntime('@deepseek-ai/dsh-system-prompt')
-  const { default: Tools } = await importRuntime('@deepseek-ai/dsh-tools')
-  await ctx.plugin(SystemPrompt)
-  await ctx.plugin(Tools)
-  for (const service of ['shell', 'shellEnv', 'fs', 'subprocess', 'web']) ctx.provide(service as never, {} as never)
-  const patch = load(readFileSync(new URL('../presets/standard.patch.yml', import.meta.url), 'utf8').replace(/!!js\b/g, '')) as
-    Array<{ insert: Array<{ config: { plugins: Array<{ id: string; name: string; config?: unknown }> } }> }>
-  const rows = patch[0]!.insert[0]!.config.plugins
-  for (const id of TOOL_ROWS) {
-    const row = rows.find(entry => entry.id === id)!
-    await ctx.plugin(await importRuntime(row.name), row.config ?? {})
-  }
-}
+import { mountStandardTools } from './support/standard-tools.ts'
 
 const source = 'const a = 1'
 /** One call and its durable result per tool, as the tools record them. */

@@ -1,8 +1,9 @@
 /**
  * Turn lifecycle facts the TUI already renders from its xAI session updates:
  * model-request retries, typed turn failures, tool calls the model is still
- * writing, automatic compaction, plan mode and why a turn started. Pure mapping
- * of native events and stream chunks; the owning session output keeps their
+ * writing, automatic compaction, plan mode and why a turn started, and the
+ * notes for model-visible context nothing else renders. Pure mapping of
+ * native events and stream chunks; the owning session output keeps their
  * state and decides when to send them.
  *
  * @module dscode/turn-notices
@@ -223,10 +224,18 @@ const TRIGGER_TITLES: Readonly<Record<string, string>> = {
   'subagent-settled': 'Subtask status updated', webhook: 'External event received', schedule: 'Scheduled task',
   'tool-jobs': 'Background task updated', 'cordis-host-runner': 'Plugin status updated',
 }
+/** One display line: control and format characters (bidi overrides
+ * included) and line breaks collapse to spaces; bounded by code points. */
 const line = (text: string, limit: number): string => {
   const chars = [...text.replace(/[\p{Cc}\p{Cf}\s]+/gu, ' ').trim()]
   return chars.length > limit ? chars.slice(0, limit - 1).join('') + '…' : chars.join('')
 }
+/** DSH's bound for a `notice` summary (`CONTEXT_SUMMARY_MAX_CHARS`). */
+const SUMMARY_CHARS = 120
+/** A producer's one-line account of what happened: a message source of DSH's
+ * `notice` context form carries it (`ContextFormed`); other forms have none. */
+const noticeSummary = (source: { form?: unknown; summary?: unknown }): string =>
+  source.form === 'notice' && typeof source.summary === 'string' ? line(source.summary, SUMMARY_CHARS) : ''
 
 /**
  * A display-only note naming why a turn started when no human prompt did: a
@@ -251,7 +260,57 @@ export function triggerNotes(fold: TriggerFold, event: SessionEvent): string[] |
   if (source.kind === 'user' || !fold.claimed.delete(String(event.data.id))) return undefined
   const title = source.kind === 'webhook' && source.provider === 'github' ? 'GitHub event received'
     : (typeof source.kind === 'string' ? TRIGGER_TITLES[source.kind] : undefined) ?? 'Execution requested'
-  const summary = source.form === 'notice' && typeof source.summary === 'string' ? line(source.summary, 120) : ''
+  const summary = noticeSummary(source)
   const sender = typeof source.senderName === 'string' ? line(source.senderName, 60) : ''
   return [title + (summary !== '' ? ': ' + summary : sender !== '' ? ' from ' + sender : '')]
+}
+
+/** Context forms (DSH `ContextFormed.form`) whose content is standing state,
+ * instructions or a catalog the model rereads, not something that happened:
+ * the transcript leaves them out. */
+const UNSHOWN_FORMS: ReadonlySet<string> = new Set(['snapshot', 'instructions', 'catalog'])
+/** Longest line an opaque model-visible record shows. */
+export const OPAQUE_NOTE_CHARS = 200
+
+/** `[label] {compact JSON}` on one bounded line. */
+function opaqueNote(label: string, value: unknown): string {
+  let json: string | undefined
+  try { json = JSON.stringify(value) } catch { json = undefined }
+  return line('[' + label + '] ' + (json ?? ''), OPAQUE_NOTE_CHARS)
+}
+
+/** Message content as one line of text; a non-text block reads as its `[type]`. */
+const contentText = (content: unknown): string => line((Array.isArray(content) ? content : []).map((block: { type?: unknown; text?: unknown } | null) =>
+  block?.type === 'text' && typeof block.text === 'string' ? block.text : '[' + String(block?.type ?? 'block') + ']').join(' '), OPAQUE_NOTE_CHARS)
+
+/**
+ * The note for a model-visible event nothing else renders, keyed on the
+ * producer's declared context form, never on its source kind. A user or
+ * developer message from any producer but the user (appended, not a
+ * replacement copy, which stays model-only): a `notice` shows its summary; a
+ * `snapshot`, `instructions` or `catalog` shows nothing; a `relay`, a
+ * `recall`, no form or an unknown one shows `[kind] {compact JSON}` of its
+ * content and other source fields. An event a plugin projects onto existing
+ * messages (`messageProjection`; `image/offload` has its own notice) shows
+ * `[type] {compact JSON}` of its data. Lines are bounded to
+ * {@link OPAQUE_NOTE_CHARS}. The caller leaves out a message whose turn
+ * trigger note already names it.
+ */
+export function contextNotes(event: SessionEvent, messageProjection?: (type: string) => boolean): string[] | undefined {
+  const type = String(event.type)
+  if (type === 'user/message' || type === 'developer/message') {
+    const surfaceOp = (event as { surfaceOp?: unknown }).surfaceOp
+    if (surfaceOp !== undefined && surfaceOp !== 'append') return undefined
+    const message = (type === 'user/message' ? event.data : (event.data as { message?: unknown } | null)?.message) as
+      { source?: unknown; content?: unknown } | null | undefined
+    const source = typeof message?.source === 'object' && message.source !== null ? message.source as Record<string, unknown> : undefined
+    if (source === undefined || typeof source.kind !== 'string' || source.kind === 'user') return undefined
+    if (typeof source.form === 'string' && UNSHOWN_FORMS.has(source.form)) return undefined
+    const summary = noticeSummary(source)
+    if (summary !== '') return [summary]
+    const fields = Object.fromEntries(Object.entries(source).filter(([key]) => key !== 'kind'))
+    return [opaqueNote(source.kind, { content: contentText(message!.content), ...fields })]
+  }
+  if (type === 'image/offload' || messageProjection?.(type) !== true) return undefined
+  return [opaqueNote(type, event.data)]
 }

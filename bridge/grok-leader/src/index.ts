@@ -48,7 +48,7 @@ import { createHostServices } from './host-services.ts'
  * the contract in docs/grok-leader-protocol.md. Inner dialect:
  * ACP JSON-RPC strings mapped onto the harness services the ACP bridge drives
  * (agents.create/resume, agent.followup / whenIdle / cancel, session/event,
- * approval/request, sessions.flush, llm.listProviders/listModels,
+ * approval/request, sessions.flush/messageProjections, llm.listProviders/listModels,
  * sessionPersistence.list/open, agentDefaultModel.saveSelection). Divergences
  * from upstream grok behavior are marked at the code site with the grok
  * file:line they were verified against.
@@ -278,7 +278,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     client: id => connections.get(id),
     queue: { combineQueued, followUpSteer },
     permissions: interactions,
-    contextValues: record => nativeStatus.contextValues(record), projectImages, logger,
+    contextValues: record => nativeStatus.contextValues(record), projectImages, messageProjection: host.messageProjection, logger,
     unblocked: record => { sessionController.deliverable(record) },
     notice: pluginStatus.notice,
     views: {
@@ -427,7 +427,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       return state
     },
     persistence: host.persistence, flush: host.flush,
-    projectImages,
+    projectImages, messageProjection: host.messageProjection,
     notify: (record, method, params) => connections.get(record.clientId)?.notify(method, params),
     teamMembers,
     on: (name, listener) => ctx.on(name as never, listener as never),

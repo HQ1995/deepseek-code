@@ -106,6 +106,51 @@ describe('native interaction ownership', () => {
     expect(f.request.mock.calls[3]![1]).toMatchObject({ toolCall: { title: 'the browser to open http://127.0.0.1:3000/a' }, _meta: { dscodeAlwaysAsks: true } })
   })
 
+  it('renders an approval from the tool\'s own call view: its card, its kind and its title before the reason', async () => {
+    const f = fixture()
+    // The asking agent's registry, as DSH's bash, edit and a generic tool present their calls.
+    const presenters: Record<string, { presentCall(args: Record<string, string>): unknown }> = {
+      bash: { presentCall: args => ({ card: 'terminal', title: args.command, description: args.description, ...args.workdir === undefined ? {} : { cwd: args.workdir } }) },
+      edit: { presentCall: args => ({ card: 'diff', title: 'Edit ' + args.file_path, diffs: [{ path: args.file_path, oldText: args.old_string, newText: args.new_string }] }) },
+      schedule_create: { presentCall: args => ({ card: 'generic', title: 'Schedule ' + args.name, kind: 'other', rawInput: args.cron }) },
+      broken: { presentCall: () => { throw new Error('presenter failed') } },
+    }
+    Object.assign(f.root.agent, { ctx: { get: (name: string) => name === 'tools' ? { get: (tool: string) => presenters[tool] } : undefined } })
+    Object.assign(f.root.agent.session, { header: { cwd: '/work' } })
+    const ask = async (callId: string, name: string, args: Record<string, string>, extra: object = {}) => {
+      await f.emit('tools/pre-execute', { callId, name, arguments: args }, async () => ({ kind: 'ask' }))
+      await f.emit('approval/request', { agent: f.root.agent, callId, toolName: name, ...extra }, async () => 'fallback')
+      return (f.request.mock.calls.at(-1)![1] as { toolCall: Record<string, unknown> }).toolCall
+    }
+    const reason = { reason: 'escalate sandbox to danger-full-access: fetch deps', displayReason: { en: 'Allow this operation with danger-full-access permissions: fetch deps.' } }
+    // A relative working directory resolves against the session's.
+    expect(await ask('sh', 'bash', { command: 'npm ci', description: 'Install deps', workdir: 'pkg' }, reason)).toEqual({
+      toolCallId: 'sh', displayName: 'bash', kind: 'execute',
+      title: 'npm ci — Allow this operation with danger-full-access permissions: fetch deps',
+      rawInput: { command: 'npm ci', description: 'Install deps', workdir: 'pkg' },
+      _meta: { 'dscode/view': { card: 'terminal', title: 'npm ci', description: 'Install deps', cwd: '/work/pkg' } },
+    })
+    // Without a reason the title is the view's own.
+    expect(await ask('ed', 'edit', { file_path: '/work/a.ts', old_string: 'a', new_string: 'b' })).toMatchObject({
+      kind: 'edit', title: 'Edit /work/a.ts',
+      _meta: { 'dscode/view': { card: 'diff', title: 'Edit /work/a.ts', diffs: [{ path: '/work/a.ts', oldText: 'a', newText: 'b' }] } },
+    })
+    expect(await ask('cron', 'schedule_create', { name: 'nightly', cron: '0 3 * * *' }, reason)).toMatchObject({
+      kind: 'other', title: 'Schedule nightly — Allow this operation with danger-full-access permissions: fetch deps',
+      _meta: { 'dscode/view': { card: 'generic', title: 'Schedule nightly', kind: 'other', rawInput: '0 3 * * *' } },
+    })
+    // A tool that presents nothing, or fails to, keeps the name-titled prompt.
+    for (const name of ['broken', 'unmounted']) {
+      const plain = await ask('p-' + name, name, { x: '1' }, reason)
+      expect(plain).toEqual({ toolCallId: 'p-' + name, displayName: name, rawInput: { x: '1' },
+        title: name + ' — Allow this operation with danger-full-access permissions: fetch deps' })
+    }
+    // Arguments that were never recorded present nothing.
+    await f.emit('approval/request', { agent: f.root.agent, callId: 'unseen', toolName: 'bash' }, async () => 'fallback')
+    expect(f.request.mock.calls.at(-1)![1]).toMatchObject({ toolCall: { toolCallId: 'unseen', displayName: 'bash' } })
+    expect((f.request.mock.calls.at(-1)![1] as { toolCall: object }).toolCall).not.toHaveProperty('_meta')
+  })
+
   it('resolves the reason text defensively', () => {
     const displayReason = { en: 'English', zh: '中文', 'zh-tw': '繁體' }
     expect(approvalReason({ reason: 'audit', displayReason }, 'zh-tw')).toBe('繁體')

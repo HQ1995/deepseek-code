@@ -858,6 +858,22 @@ When DSH gives a reason for asking, the leader appends it to the tool title
 description, so such a title (anything but Grok's "Execute `…`") becomes the
 first line under the command instead of being dropped (class: feature).
 
+### Approvals from a host's call view
+
+A permission request whose tool call carries `_meta['dscode/view']` (the
+tool's own call view, the same one its card reads; `acp/tool_view.rs`
+`approval_view`) renders from the view, keyed on its kind and never on a tool
+name (`acp_handler/permissions.rs`): a `terminal` (or a generic view of the
+`execute` kind) shows the command as the body, its description as the title,
+then the reason and a `cwd:` line; a `diff` reads "Allow <view title>?" (for
+example "Allow Edit /w/a.ts?") over unified `-`/`+` preview lines of the
+change, drawn in the diff colours, each file headed by its path when the title
+does not name it; anything else reads "Allow <view title>?" over its salient
+input (else the planned arguments), capped by the MCP-argument formatter. The
+leader titles such a request "<view title> — <reason>", and the reason leads
+the lines. Grok's `BashToolInput` parsing and the "Execute `" prefix remain
+the fallback for requests without a view (class: feature).
+
 ### Preset change after history opens a new session
 
 The leader refuses to change the preset of a session that has history. Picking

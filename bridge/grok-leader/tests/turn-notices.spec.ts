@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { compactionNotices, describeFailure, emptyTriggers, isXaiNotice, toolCallWriting, triggerNotes, turnFailure, turnNotices, WRITING_REFRESH_MS, type CompactionFold, type WritingCalls } from '../src/turn-notices.ts'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { compactionNotices, contextNotes, describeFailure, emptyTriggers, isXaiNotice, OPAQUE_NOTE_CHARS, toolCallWriting, triggerNotes, turnFailure, turnNotices, WRITING_REFRESH_MS, type CompactionFold, type WritingCalls } from '../src/turn-notices.ts'
 import { event } from './support/session-events.ts'
 
 const retry = (data: Record<string, unknown>) => event('llm/retry', {
@@ -132,6 +133,42 @@ describe('turn notices', () => {
     expect(woke({ kind: 'goal', goalId: 'g', revision: 1, round: 2 })).toEqual(['Continuing goal'])
     expect(woke({ kind: 'webhook', provider: 'github', form: 'notice', summary: 'push to main' })).toEqual(['GitHub event received: push to main'])
     expect(woke({ kind: 'someone-elses-plugin' })).toEqual(['Execution requested'])
+  })
+
+  it('notes model-visible context by its declared form, never by its producer', () => {
+    const user = (source: Record<string, unknown>, content: unknown[] = [{ type: 'text', text: 'body' }], surfaceOp?: unknown) =>
+      contextNotes({ ...event('user/message', { id: 'm', source, content }), ...surfaceOp === undefined ? {} : { surfaceOp } } as SessionEvent)
+    // A notice shows its one-line account, whoever produced it.
+    expect(user({ kind: 'repeat-tool-reminder', form: 'notice', summary: 'bash × 3' })).toEqual(['bash × 3'])
+    expect(user({ kind: 'plan-mode', form: 'notice', summary: 'The user switched\nthis session to plan mode.' })).toEqual(['The user switched this session to plan mode.'])
+    expect(user({ kind: 'hooks-claude-code' }, [{ type: 'text', text: 'line one\n\nline two' }])).toEqual(['[hooks-claude-code] {"content":"line one line two"}'])
+    // Standing state, instructions and catalogs stay off the transcript.
+    for (const form of ['snapshot', 'instructions', 'catalog']) expect(user({ kind: 'time-context', form, sections: [] })).toBeUndefined()
+    // A relay, a recall, no form or an unknown one is an opaque record: its kind, then its content and other fields.
+    expect(user({ kind: 'agent-message', form: 'relay', senderSessionId: 'child' }, [{ type: 'text', text: 'Agent child sent a message: ' }, { type: 'text', text: 'done' }]))
+      .toEqual(['[agent-message] {"content":"Agent child sent a message: done","form":"relay","senderSessionId":"child"}'])
+    expect(user({ kind: 'session-reference', form: 'recall' }, [{ type: 'image' }])).toEqual(['[session-reference] {"content":"[image]","form":"recall"}'])
+    expect(user({ kind: 'user-approval' })).toEqual(['[user-approval] {"content":"body"}'])
+    expect(user({ kind: 'someone-elses-plugin', form: 'hologram' })).toEqual(['[someone-elses-plugin] {"content":"body","form":"hologram"}'])
+    const long = user({ kind: 'ptc-mode' }, [{ type: 'text', text: 'x'.repeat(500) }])![0]!
+    expect([...long]).toHaveLength(OPAQUE_NOTE_CHARS)
+    expect(long.endsWith('…')).toBe(true)
+    // A notice without its summary is opaque too; control characters never reach the line.
+    expect(user({ kind: 'tool-jobs', form: 'notice' }, [{ type: 'text', text: 'a\u202eb' }])).toEqual(['[tool-jobs] {"content":"a b","form":"notice"}'])
+    // The user's own words render as the prompt; a replacement copy stays model-only.
+    expect(user({ kind: 'user' })).toBeUndefined()
+    expect(user({ kind: 'compaction-checkpoint' }, undefined, { op: 'replace', startSeq: 1, endSeq: 4 })).toBeUndefined()
+    expect(user({ kind: 'ptc-mode' }, undefined, 'append')).toEqual(['[ptc-mode] {"content":"body"}'])
+    expect(user({ form: 'notice', summary: 'no kind' })).toBeUndefined()
+    // Developer messages read the same way.
+    expect(contextNotes(event('developer/message', { turn: 1, step: 1, message: { role: 'developer', source: { kind: 'lint' }, content: [{ type: 'text', text: 'fix it' }] } })))
+      .toEqual(['[lint] {"content":"fix it"}'])
+    // A plugin's message projection is an opaque record of its decision; image offload has its own notice.
+    const projected = (type: string) => contextNotes(event(type, { targets: [{ seq: 3 }] }), name => name === type)
+    expect(projected('redact/apply')).toEqual(['[redact/apply] {"targets":[{"seq":3}]}'])
+    expect(projected('image/offload')).toBeUndefined()
+    expect(contextNotes(event('redact/apply', {}))).toBeUndefined()
+    expect(contextNotes(event('turn/start', { turn: 1 }), () => false)).toBeUndefined()
   })
 
   it('routes only xAI session updates to the xAI notification', () => {

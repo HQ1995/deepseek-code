@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { register, sendRequest, useLeaderHarness, waitFor, waitForId } from './support/leader-harness.ts'
+import { mountStandardTools } from './support/standard-tools.ts'
 
 describe('leader questions and permissions', () => {
   const start = useLeaderHarness()
@@ -289,6 +290,33 @@ describe('leader questions and permissions', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('asks with the real tools\' call views: a terminal, a diff, and the reason after the view title', async () => {
+    const { ctx, registry, pluginCtx, client: c } = await start()
+    await mountStandardTools(ctx)
+    register(c); await c.next()
+    const created = await c.request(1, 'session/new', { cwd: '/w', mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId, agent = registry.byId.get(sessionId)!
+    const waterfall = pluginCtx.waterfall as unknown as (name: string, ...args: unknown[]) => Promise<unknown>
+    const reason = { reason: 'escalate sandbox to danger-full-access: fix perms', displayReason: { en: 'Allow this operation with danger-full-access permissions: fix perms' } }
+    const asked = async (callId: string, name: string, args: object, extra: object = {}) => {
+      await waterfall('tools/pre-execute', { callId, name, arguments: args }, async () => ({ kind: 'ask' }))
+      const decision = waterfall('approval/request', { agent, callId, toolName: name, ...extra }, async () => 'rejected')
+      await waitFor(() => c.all.some(m => m.method === 'session/request_permission' && (m.params as { toolCall: { toolCallId: string } }).toolCall.toolCallId === callId))
+      const request = c.all.find(m => m.method === 'session/request_permission' && (m.params as { toolCall: { toolCallId: string } }).toolCall.toolCallId === callId)!
+      c.send({ type: 'acp', payload: JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { outcome: { outcome: 'selected', optionId: 'reject-once' } } }) })
+      await expect(decision).resolves.toBe('rejected')
+      return (request.params as { toolCall: Record<string, unknown> }).toolCall
+    }
+    expect(await asked('sh', 'bash', { command: 'chmod -R u+w build', description: 'Fix build permissions', workdir: 'pkg' }, reason)).toMatchObject({
+      kind: 'execute', title: 'chmod -R u+w build — Allow this operation with danger-full-access permissions: fix perms',
+      _meta: { 'dscode/view': { card: 'terminal', title: 'chmod -R u+w build', description: 'Fix build permissions', cwd: '/w/pkg' } },
+    })
+    expect(await asked('ed', 'edit', { file_path: '/w/a.ts', old_string: 'const a = 1', new_string: 'const a = 2' })).toMatchObject({
+      kind: 'edit', title: 'Edit /w/a.ts',
+      _meta: { 'dscode/view': { card: 'diff', title: 'Edit /w/a.ts', diffs: [{ path: '/w/a.ts', oldText: 'const a = 1', newText: 'const a = 2' }] } },
+    })
   })
 
   it('session/cancel cancels a pending permission roundtrip', async () => {

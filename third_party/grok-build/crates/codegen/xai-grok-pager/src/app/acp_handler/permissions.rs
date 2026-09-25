@@ -261,15 +261,141 @@ fn resolve_subagent_label(agent: &AgentView, session_id: &acp::SessionId) -> Opt
 
 /// Build title, description lines, and optional raw command for a permission request.
 ///
-/// Deserializes `raw_input` into the shared [`BashToolInput`] from
-/// `xai-grok-tools` for typed access to `command` and `description`.
-/// Falls back to ACP-level `title`/`kind` fields when deserialization fails.
+/// DIVERGENCE(dscode): a request whose tool call carries the call's own view
+/// (`_meta['dscode/view']`) renders from it ([`view_permission_display`]).
+/// Otherwise `raw_input` deserializes into the shared [`BashToolInput`] from
+/// `xai-grok-tools` for typed access to `command` and `description`, falling
+/// back to ACP-level `title`/`kind` fields when deserialization fails.
 ///
 /// Returns `(title, description, bash_command_raw)`.
 pub(super) fn build_permission_display(
     req: &acp::RequestPermissionRequest,
     bash_highlights: Option<&BashCommandHighlights>,
     session_local_workspace: bool,
+) -> (String, Vec<String>, Option<String>) {
+    let (title, description, command) =
+        match crate::acp::tracker::tool_view::approval_view(req.tool_call.meta.as_ref()) {
+            Some(view) => view_permission_display(req, view, bash_highlights),
+            None => fallback_permission_display(req, bash_highlights),
+        };
+    let title = qualify_permission_title_for_local_workspace(title, session_local_workspace);
+    (title, description, command)
+}
+
+/// An execute prompt's title: the command's own description, else its binary.
+fn execute_title(
+    description: Option<&str>,
+    bash_highlights: Option<&BashCommandHighlights>,
+) -> String {
+    description
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(
+            || match bash_highlights.and_then(|h| h.highlighted_words.first()) {
+                Some(bin) => format!("Allow `{bin}`?"),
+                None => "Allow Execute?".to_string(),
+            },
+        )
+}
+
+/// DIVERGENCE(dscode): a prompt for a call its tool presented renders from
+/// that call view, as the tool's card does. A command shows its text, its
+/// description as the title and the working directory it names; a file
+/// change reads "Allow <view title>?" over a preview of its diff; anything
+/// else reads "Allow <view title>?" over its salient input (else the planned
+/// arguments). The asker's reason, which the host puts after the view title
+/// in the request title, leads the lines.
+fn view_permission_display(
+    req: &acp::RequestPermissionRequest,
+    view: crate::acp::tracker::tool_view::ApprovalView,
+    bash_highlights: Option<&BashCommandHighlights>,
+) -> (String, Vec<String>, Option<String>) {
+    use crate::acp::tracker::tool_view::ApprovalView;
+    let reason = req
+        .tool_call
+        .fields
+        .title
+        .as_deref()
+        .and_then(|t| t.strip_prefix(view.title()))
+        .and_then(|rest| rest.strip_prefix(" \u{2014} "))
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string);
+    let mut lines: Vec<String> = reason.into_iter().collect();
+    match view {
+        ApprovalView::Command {
+            command,
+            description,
+            cwd,
+            ..
+        } => {
+            lines.extend(cwd.map(|cwd| format!("cwd: {cwd}")));
+            let title = execute_title(description.as_deref(), bash_highlights);
+            (title, lines, Some(command))
+        }
+        ApprovalView::Diff { title, diffs } => {
+            lines.extend(diff_preview_lines(&title, &diffs));
+            (format!("Allow {title}?"), lines, None)
+        }
+        ApprovalView::Generic { title, input } => {
+            let planned = || {
+                let raw = req.tool_call.fields.raw_input.as_ref()?;
+                Some(raw.get("tool_input").unwrap_or(raw).clone())
+            };
+            if let Some(input) = input.or_else(planned) {
+                lines.extend(input_lines(&input));
+            }
+            (format!("Allow {title}?"), lines, None)
+        }
+    }
+}
+
+/// A call-time preview of file changes as unified diff lines (`-`/`+`/` `
+/// prefixes; no line numbers, which only the result knows), each file headed
+/// by its path unless the view's title already names the only one. Capped
+/// like the planned arguments.
+fn diff_preview_lines(title: &str, diffs: &[(String, Option<String>, String)]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (path, old, new) in diffs {
+        if diffs.len() > 1 || !title.contains(path.as_str()) {
+            lines.push(path.clone());
+        }
+        let hunks =
+            xai_grok_pager_diff::diff_hunks_from_strings(old.as_deref().unwrap_or(""), new, 1);
+        for line in hunks.iter().flatten() {
+            let prefix = match line.tag {
+                similar::ChangeTag::Equal => ' ',
+                similar::ChangeTag::Insert => '+',
+                similar::ChangeTag::Delete => '-',
+            };
+            lines.push(format!(
+                "{prefix}{}",
+                line.text.trim_end_matches(['\r', '\n'])
+            ));
+        }
+    }
+    capped_display_lines(lines)
+}
+
+/// A salient input as display lines: a string as its own lines, anything
+/// else pretty-printed. Capped like the planned arguments.
+fn input_lines(input: &serde_json::Value) -> Vec<String> {
+    let text = match input {
+        serde_json::Value::Null => return Vec::new(),
+        serde_json::Value::String(text) => text.clone(),
+        value => match serde_json::to_string_pretty(value) {
+            Ok(pretty) => pretty,
+            Err(_) => return Vec::new(),
+        },
+    };
+    capped_display_lines(text.lines().map(str::to_owned).collect())
+}
+
+/// The prompt's display for a request without a call view (grok's shapes).
+fn fallback_permission_display(
+    req: &acp::RequestPermissionRequest,
+    bash_highlights: Option<&BashCommandHighlights>,
 ) -> (String, Vec<String>, Option<String>) {
     let is_bash = bash_highlights.is_some();
 
@@ -294,17 +420,7 @@ pub(super) fn build_permission_display(
         || raw_command.is_some();
 
     let title = if is_execute {
-        bash_description
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .map(|t| t.to_string())
-            .unwrap_or_else(
-                || match bash_highlights.and_then(|h| h.highlighted_words.first()) {
-                    Some(bin) => format!("Allow `{bin}`?"),
-                    None => "Allow Execute?".to_string(),
-                },
-            )
+        execute_title(bash_description.as_deref(), bash_highlights)
     } else if is_edit_permission(req) {
         let file_path = req
             .tool_call
@@ -337,7 +453,6 @@ pub(super) fn build_permission_display(
         }
     };
 
-    let title = qualify_permission_title_for_local_workspace(title, session_local_workspace);
     let mut description = permission_description_lines(req);
     // DIVERGENCE(dscode): an execute prompt is titled from the command's own
     // description, so a leader-supplied tool title ("bash — <why DSH asks>")
@@ -434,11 +549,17 @@ pub(super) fn mcp_args_lines(req: &acp::RequestPermissionRequest) -> Vec<String>
         Ok(p) => p,
         Err(_) => return Vec::new(),
     };
-    let mut lines: Vec<String> = pretty
-        .lines()
+    capped_display_lines(pretty.lines().map(str::to_owned).collect())
+}
+
+/// Bound stored prompt lines: each at [`MCP_ARGS_MAX_LINE_CHARS`] characters,
+/// at most [`MCP_ARGS_MAX_LINES`] of them plus a hidden-line count.
+fn capped_display_lines(lines: Vec<String>) -> Vec<String> {
+    let mut lines: Vec<String> = lines
+        .into_iter()
         .map(|l| match l.char_indices().nth(MCP_ARGS_MAX_LINE_CHARS) {
             Some((byte_idx, _)) => format!("{}…", &l[..byte_idx]),
-            None => l.to_owned(),
+            None => l,
         })
         .collect();
     if lines.len() > MCP_ARGS_MAX_LINES {

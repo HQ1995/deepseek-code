@@ -200,11 +200,12 @@ async function permissionAcceptance() {
   const denied = join(scratch, 'permission-denied')
   await send(`DSCODE_PERMISSION_ESCALATED:${Buffer.from(denied).toString('base64url')}`)
   await wait(/No, reject \(type to add feedback\)/, 30000)
-  // DSH 0.1.7-rc.2's approval reason rides the tool title ("bash — <reason>");
-  // the prompt keeps the command's description as its title and shows the
-  // reason under the command.
-  const reasonScreen = await wait(/bash — (?:Allow this operation with|允许本次操作使用) danger-full-access/, 30000)
+  // The prompt renders from bash's own terminal view: the command's
+  // description is its title, and DSH 0.1.7-rc.2's approval reason (which
+  // rides the tool title after the view's) shows as a line under the command.
+  const reasonScreen = await wait(/(?:^|\s)(?:Allow this operation with|允许本次操作使用) danger-full-access/m, 30000)
   assert.match(reasonScreen, /DSCODE permission probe/)
+  assert.match(reasonScreen, /printf approved >/)
   await settle(700)
   await assert.rejects(readFile(denied), { code: 'ENOENT' }, 'Ask must hold the real shell operation pending approval')
   await artifact('permission-pending', { initial, asking, peerBefore, peerAfter, screen: await capture() })
@@ -221,6 +222,23 @@ async function permissionAcceptance() {
   await waitState(value => value.status === 'idle', 'approved-turn-settled', 30000)
   assert.equal((await state()).policy.approval, 'ask', 'One-time approval must not change standing policy')
   assert.equal((await state(peerId)).permission, peerBefore.permission)
+  // An edit prompt renders from the edit tool's own diff view: "Allow Edit
+  // <path>?" over the change's preview lines, above the options.
+  const edited = join(scratch, 'permission-edit.txt')
+  await writeFile(edited, 'DSCODE_EDIT_BEFORE\n')
+  await send(`DSCODE_PERMISSION_EDIT:${Buffer.from(edited).toString('base64url')}`)
+  const editScreen = await wait(/No, reject \(type to add feedback\)/, 30000)
+  const editLines = editScreen.split('\n')
+  const titleRow = editLines.findLastIndex(line => line.includes(`Allow Edit ${edited}`))
+  const optionsRow = editLines.findLastIndex(line => /No, reject \(type to add feedback\)/.test(line))
+  assert.ok(titleRow >= 0 && titleRow < optionsRow, 'Edit approval must be titled by its diff view')
+  const preview = editLines.slice(titleRow + 1, optionsRow).join('\n')
+  assert.match(preview, /-DSCODE_EDIT_BEFORE/, 'Edit approval must preview the removed line')
+  assert.match(preview, /\+DSCODE_EDIT_AFTER/, 'Edit approval must preview the added line')
+  await artifact('permission-edit-pending', { screen: editScreen })
+  await key('2')
+  await waitState(value => value.status === 'idle', 'edit-approval-rejected', 30000)
+  assert.equal(await readFile(edited, 'utf8'), 'DSCODE_EDIT_BEFORE\n', 'A rejected edit must not run')
   await key('C-o')
   await waitState(value => value.policy.approval === 'never', 'restore-always-approve')
   await tmux('kill-window', '-t', `${session}:peer`)

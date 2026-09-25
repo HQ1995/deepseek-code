@@ -18,6 +18,7 @@ import {
   type ToolKindWire, type ToolResultContentBlock,
 } from './tool-output.ts'
 import { callView, resultView, viewKind, type ToolCallViewWire, type ToolPresenter, type ToolResultViewWire } from './tool-views.ts'
+import { contextNotes } from './turn-notices.ts'
 export { parseJsonObject, textBlocks, toolKindForName, type ToolKindWire, type ToolResultContentBlock } from './tool-output.ts'
 export type { ToolPresenter } from './tool-views.ts'
 
@@ -60,8 +61,7 @@ export const imageOffloadNotes = (count: number): string[] => [
 
 /** Tool names one native tool-registry developer message added and removed.
  * DSH appends it when a step's tool list differs from the previous request:
- * a plugin or MCP server enabled or disabled while the session runs. Every
- * other developer message stays off the TUI. */
+ * a plugin or MCP server enabled or disabled while the session runs. */
 export function toolRegistryChange(event: SessionEvent): { added: string[]; removed: string[] } | undefined {
   if (String(event.type) !== 'developer/message') return undefined
   const message = (event.data as { message?: { source?: { kind?: unknown }; content?: unknown } } | null)?.message
@@ -90,13 +90,21 @@ export const toolRegistryNotes = (change: { added: readonly string[]; removed: r
 }
 
 /** The neutral system notice one durable event carries, if any: an image
- * offload or a tool change. Live, replayed and child history show the same
- * lines; the TUI renders them as plain system text, never assistant output. */
-export function systemNotes(event: SessionEvent): string[] | undefined {
+ * offload, a tool change, or model-visible context nothing else renders
+ * (`contextNotes`: a producer's notice, an opaque record). Live, replayed and
+ * child history show the same lines; the TUI renders them as plain system
+ * text, never assistant output. `messageProjection` names the event types a
+ * plugin projects onto existing messages. */
+export function systemNotes(event: SessionEvent, messageProjection?: (type: string) => boolean): string[] | undefined {
   const offloaded = imageOffloadCount(event)
   if (offloaded !== undefined) return imageOffloadNotes(offloaded)
-  const tools = toolRegistryChange(event)
-  return tools === undefined ? undefined : toolRegistryNotes(tools)
+  const registry = String(event.type) === 'developer/message'
+    && (event.data as { message?: { source?: { kind?: unknown } } } | null)?.message?.source?.kind === 'tool-registry'
+  if (registry) {
+    const tools = toolRegistryChange(event)
+    return tools === undefined ? undefined : toolRegistryNotes(tools)
+  }
+  return contextNotes(event, messageProjection)
 }
 
 /** Released token-meter values: usage is cumulative; pressure is next-request occupancy. */
@@ -468,8 +476,9 @@ export function sessionEventToUpdates(event: SessionEvent, options: ProjectionOp
     }
     default:
       // Other durable events belong to native state projections or diagnostics.
-      // Tool-registry developer messages are system notices (toolRegistryChange),
-      // not ACP stream updates: child history pages parse only the latter.
+      // Developer messages and injected context are system notices
+      // (systemNotes), not ACP stream updates: child history pages parse only
+      // the latter.
       return []
   }
 }

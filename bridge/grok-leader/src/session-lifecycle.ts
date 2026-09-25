@@ -62,6 +62,7 @@ interface LifecycleHost {
   permissions: Pick<ReturnType<typeof createNativeInteractions<SessionRecord>>, 'validateMeta' | 'apply' | 'assertReady'>
   contextValues(record: SessionRecord): ContextProjectionValues
   projectImages: SessionOutputHost['projectImages']
+  messageProjection?: SessionOutputHost['messageProjection']
   logger: { warn(message: string): void }
   /** A published session finished initializing and accepts input. */
   unblocked(record: SessionRecord): void
@@ -132,6 +133,7 @@ export function createSessionLifecycle(host: LifecycleHost) {
         promptId: () => record.queue.promptId,
         notify: (method, params) => host.client(clientId)?.notify(method, params),
         contextValues: () => host.contextValues(record), projectImages: host.projectImages, logger: host.logger,
+        ...host.messageProjection === undefined ? {} : { messageProjection: host.messageProjection },
         presenter: registryPresenter(handle.agent),
       }),
       work: createSessionWork({

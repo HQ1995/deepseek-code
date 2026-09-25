@@ -121,7 +121,7 @@ describe('tool-change notices', () => {
     expect(systemNotes(developer({ kind: 'tool-registry' }, [tool('tool-removal', 'a')]))).toEqual(['Tools removed: a'])
   })
 
-  it('keeps a long change compact and drops malformed blocks and other developer messages', () => {
+  it('keeps a long change compact and drops malformed blocks; other messages are context notes', () => {
     const names = Array.from({ length: 13 }, (_, index) => 'tool_' + index)
     expect(systemNotes(developer({ kind: 'tool-registry' }, names.map(name => tool('tool-addition', name)))))
       .toEqual(['Tools added: tool_0, tool_1, tool_2, tool_3, tool_4, tool_5 and 7 more'])
@@ -130,14 +130,28 @@ describe('tool-change notices', () => {
     for (const event of [
       developer({ kind: 'tool-registry' }, []),
       developer({ kind: 'tool-registry' }, [{ type: 'text', text: 'hidden' }]),
-      developer({ kind: 'context-injection' }, [tool('tool-addition', 'a')]),
       developer(undefined, [tool('tool-addition', 'a')]),
       { seq: 1, time: 1, type: 'developer/message', data: null } as unknown as SessionEvent,
-      { seq: 1, time: 1, type: 'user/message', data: { source: { kind: 'tool-registry' }, content: [tool('tool-addition', 'a')] } } as unknown as SessionEvent,
     ]) {
       expect(systemNotes(event)).toBeUndefined()
       expect(GrokLeader.sessionEventToUpdates(event, { replay: true })).toEqual([])
     }
+    // Only a developer tool-registry message is a tool change; any other
+    // producer's message is model-visible context (turn-notices' contextNotes).
+    for (const [event, note] of [
+      [developer({ kind: 'context-injection' }, [tool('tool-addition', 'a')]), '[context-injection] {"content":"[tool-addition]"}'],
+      [{ seq: 1, time: 1, type: 'user/message', data: { source: { kind: 'tool-registry' }, content: [tool('tool-addition', 'a')] } } as unknown as SessionEvent,
+        '[tool-registry] {"content":"[tool-addition]"}'],
+      [{ seq: 1, time: 1, type: 'user/message', data: { source: { kind: 'tool-jobs', form: 'notice', summary: 'bash sleep 1 completed' }, content: [] } } as unknown as SessionEvent,
+        'bash sleep 1 completed'],
+    ] as const) {
+      expect(systemNotes(event)).toEqual([note])
+      expect(GrokLeader.sessionEventToUpdates(event, { replay: true })).toEqual([])
+    }
+    // A plugin's message projection, when the host names its type.
+    const redact = { seq: 1, time: 1, type: 'redact/apply', data: { seqs: [2] } } as unknown as SessionEvent
+    expect(systemNotes(redact)).toBeUndefined()
+    expect(systemNotes(redact, type => type === 'redact/apply')).toEqual(['[redact/apply] {"seqs":[2]}'])
   })
 
   it('keeps the image offload notice on the same path', () => {

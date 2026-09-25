@@ -44,6 +44,8 @@ interface ChildHost<S extends ChildSession> {
   persistence(): Pick<SessionPersistence, 'open' | 'stat'> | undefined
   flush(session: Agent['session']): Promise<unknown>
   projectImages(event: SessionEvent, updates: ProjectedUpdate[]): Promise<ProjectedUpdate[]>
+  /** Event types a plugin projects onto existing messages (`sessions.registerMessageProjection`). */
+  messageProjection?(type: string): boolean
   notify(record: S, method: string, params: unknown): void
   /** Teammates of the session's Agent Team, when its preset has one. */
   teamMembers?(record: S): ReadonlyArray<{ id: string; name: string }> | undefined
@@ -300,7 +302,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
           const updates = hasToolImages(event) ? await host.projectImages(event, mapped) : mapped
           scope.assertActive()
           for (const update of updates) entries.push({ update, meta: { isReplay: true, agentTimestampMs: event.time, turnStartMs, streamStartMs: turnStartMs } })
-          const notes = systemNotes(event)
+          const notes = systemNotes(event, host.messageProjection)
           if (notes !== undefined) entries.push({ imageNotes: notes })
           if (event.type === 'turn/end') entries.push({ turnEnded: true })
         }

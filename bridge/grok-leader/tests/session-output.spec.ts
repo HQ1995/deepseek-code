@@ -12,7 +12,7 @@ const assistantEvent = (seq: number, body: string, usage = { inputTokens: 10, ou
   turn: 0, step: 0, usage, stream: [], message: { role: 'assistant', content: [{ type: 'text', text: body }] },
 })
 const imageEvent = (seq: number) => event(seq, 'tool/ptc-dispatch', { subCallId: 'image-' + seq, name: 'read', content: [{ type: 'image', mimeType: 'image/png', data: 'fixture' }] })
-function fixture() {
+function fixture(options: { messageProjection?: (type: string) => boolean } = {}) {
   let live = true, promptId: string | undefined = 'prompt'
   let values: ContextProjectionValues = {}
   const notes: Note[] = []
@@ -21,7 +21,7 @@ function fixture() {
   const projectImages = vi.fn(async (_event: SessionEvent, updates: ProjectedUpdate[]): Promise<ProjectedUpdate[]> => updates)
   const output = createSessionOutput({ sessionId: 'session', cwd: () => '/workspace', drain,
     isLive: () => live, promptId: () => promptId, contextValues: () => values,
-    notify: (method, params) => { notes.push({ method, params: params as Note['params'] }) }, projectImages, logger: { warn } })
+    notify: (method, params) => { notes.push({ method, params: params as Note['params'] }) }, projectImages, logger: { warn }, ...options })
   const content = () => notes.flatMap(note => {
     const update = note.params.update
     return 'content' in update && !Array.isArray(update.content) && update.content?.type === 'text' ? [update.content.text] : []
@@ -95,11 +95,44 @@ describe('session output ownership', () => {
     await restored.output.restore([change])
     expect(restored.notes.map(note => [note.method, note.params.update, note.params._meta.isReplay]))
       .toEqual([['x.ai/session_notification', f.notes[0]!.params.update, true]])
-    // Other developer messages stay off the TUI.
+    // Another producer's standing state stays off the TUI.
     const other = fixture()
-    other.output.live(event(3, 'developer/message', { turn: 1, step: 1, message: { id: 'n', role: 'developer', source: { kind: 'context' }, content: [{ type: 'text', text: 'hidden' }] } }))
+    other.output.live(event(3, 'developer/message', { turn: 1, step: 1, message: { id: 'n', role: 'developer', source: { kind: 'context', form: 'snapshot', sections: [] }, content: [{ type: 'text', text: 'hidden' }] } }))
     expect(other.notes).toEqual([])
     expect(f.output.stats).toMatchObject({ messageCount: 0 })
+  })
+
+  it('notes model-visible context nothing else renders, live and on replay, once per message', async () => {
+    const log = [
+      // A notice injected mid-turn, standing state, an opaque relay and a projected decision.
+      event(0, 'user/message', { id: 'a', source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'bash × 3' }, content: [{ type: 'text', text: 'You ran bash three times.' }] }),
+      event(1, 'user/message', { id: 'b', source: { kind: 'time-context', form: 'snapshot', sections: [] }, content: [{ type: 'text', text: 'It is noon.' }] }),
+      event(2, 'user/message', { id: 'c', source: { kind: 'agent-message', form: 'relay', senderSessionId: 'kid' }, content: [{ type: 'text', text: 'done' }] }),
+      event(3, 'redact/apply', { seqs: [2] }),
+      // A message that woke a turn is named by its trigger note alone.
+      event(4, 'agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [{ id: 'job' }] }),
+      event(5, 'agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }),
+      event(6, 'user/message', { id: 'job', source: { kind: 'tool-jobs', form: 'notice', summary: 'bash sleep 1 completed' }, content: [{ type: 'text', text: 'framed' }] }),
+      // A replacement copy stays model-only.
+      { ...event(7, 'user/message', { id: 'd', source: { kind: 'compaction-checkpoint' }, content: [{ type: 'text', text: 'summary' }] }), surfaceOp: { op: 'replace', startSeq: 0, endSeq: 3 } } as SessionEvent,
+    ]
+    const notes = (f: ReturnType<typeof fixture>) => f.notes.map(note => note.params.update)
+    const expected = [
+      { sessionUpdate: 'image_dropped', notes: ['bash × 3'] },
+      { sessionUpdate: 'image_dropped', notes: ['[agent-message] {"content":"done","form":"relay","senderSessionId":"kid"}'] },
+      { sessionUpdate: 'image_dropped', notes: ['[redact/apply] {"seqs":[2]}'] },
+      { sessionUpdate: 'image_dropped', notes: ['Background task updated: bash sleep 1 completed'] },
+    ]
+    const f = fixture({ messageProjection: type => type === 'redact/apply' })
+    for (const item of log) f.output.live(item)
+    expect(notes(f)).toEqual(expected)
+    const restored = fixture({ messageProjection: type => type === 'redact/apply' })
+    await restored.output.restore(log)
+    expect(notes(restored)).toEqual(expected)
+    // Without the host's projection registry the decision is not a message change.
+    const bare = fixture()
+    await bare.output.restore(log)
+    expect(notes(bare)).toEqual(expected.filter(update => !update.notes[0]!.startsWith('[redact')))
   })
 
   it('admits each event once while preserving all blocks and live/replay meter dedup', async () => {

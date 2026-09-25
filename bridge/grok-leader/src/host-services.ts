@@ -25,9 +25,11 @@ import type { ScheduleDeliveryLike } from './session-controller.ts'
 import type { SessionProjectionCacheLike, SessionQueryLike } from './session-discovery.ts'
 import type { AgentPresetsLike } from './session-presets.ts'
 
-/** Structural read of the session store: this bridge needs only one flush entry point. */
+/** Structural read of the session store: its flush entry point, and the
+ * message projections plugins registered on it. */
 export interface SessionsLike {
   flush(session: object): Promise<unknown>
+  readonly messageProjections?: ReadonlyArray<{ readonly type: string }>
 }
 /** The permission-presets row: one named preset per session. */
 export interface PermissionPresetsLike {
@@ -71,6 +73,9 @@ export interface HostServices {
   attachments(): AttachmentStore | undefined
   /** The session store's flush; a missing store flushes nothing. */
   flush(session: object): Promise<unknown>
+  /** Whether a plugin registered a message projection for an event type on
+   * the session store: a durable decision that changes model-visible messages. */
+  messageProjection(type: string): boolean
   /** The dsh plugin command registry, when the composition mounts it. */
   commands(): NativeCommands | undefined
   /** The Host Schedule service, once it is up. */
@@ -124,6 +129,7 @@ export function createHostServices(ctx: ServiceReads, dependencies: HostServiceD
     persistence: read<SessionPersistence>('sessionPersistence'),
     attachments: read<AttachmentStore>('attachments'),
     flush: async session => read<SessionsLike>('sessions')()?.flush(session),
+    messageProjection: type => read<SessionsLike>('sessions')()?.messageProjections?.some(projection => projection.type === type) === true,
     commands: read<NativeCommands>('commands'),
     schedule: read<ScheduleServiceLike & ScheduleDeliveryLike>('schedule'),
     profileContext: read<ProfileContext>('profileContext'),

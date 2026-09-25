@@ -92,7 +92,7 @@ the typed `rawOutput` the TUI's cards read (a `run_code` result keeps none).
 | `session/cancel` | cancel the active turn and reconcile queued prompts |
 | `session/load`, `session/list`, `session/close` | resume, enumerate, and dispose durable dsh sessions |
 | `session/set_model`, `session/set_mode` | switch model/effort and plan mode |
-| `session/request_permission` | wait for the owning client's answer; disconnect/cancel cancels the request without inventing a user rejection. The tool call carries the planned arguments as `rawInput` (`{variant: 'MCPTool', tool_name, tool_input}` for MCP tools) and, for browser tools, a `title` phrase; `_meta.dscodeAlwaysAsks` marks prompts the client must neither auto-approve nor offer always-approve on. A reject whose response carries `_meta.followup_message` resolves as a rejection, then steers that text into the running turn like `x.ai/interject` (broadcast as an `x.ai/session/interjection` without an id); with no turn running it queues as the next prompt |
+| `session/request_permission` | wait for the owning client's answer; disconnect/cancel cancels the request without inventing a user rejection. The tool call carries the planned arguments as `rawInput` (`{variant: 'MCPTool', tool_name, tool_input}` for MCP tools). A tool that presents its call adds that view as `_meta['dscode/view']` (normalized as for its card) and the `kind` it implies, and the TUI renders the prompt from it; the `title` is the view's title (else the tool name) followed by ` — <reason>` when DSH gives one (`displayReason` in the user's locale), and browser tools use a `title` phrase naming the action instead; `_meta.dscodeAlwaysAsks` marks prompts the client must neither auto-approve nor offer always-approve on. A reject whose response carries `_meta.followup_message` resolves as a rejection, then steers that text into the running turn like `x.ai/interject` (broadcast as an `x.ai/session/interjection` without an id); with no turn running it queues as the next prompt |
 
 `initialize` `_meta.dscodeExecutionWorld` says where tools run: `{kind: 'local'}`,
 or `{kind: 'ssh', host, workspace}` for a profile whose SSH adapter owns the
@@ -237,6 +237,20 @@ TUI renderers that already exist; nothing here adds a TUI code path.
   `notice` summary or the sender's name when the source carries one. The
   message body (reminder or job framing written for the model) is not shown.
   Context injected into a running turn is not a trigger.
+- Model-visible context nothing else renders gets an `image_dropped` system
+  note, live, on replay and in child history, keyed on the producer's declared
+  context form (DSH `ContextFormed.form`), never on a table of source kinds.
+  A `user/message` or `developer/message` from any producer but the user
+  (appended; a replacement copy such as a compaction checkpoint stays
+  model-only; a tool-registry message keeps its tool-change note): a `notice`
+  shows its one-line `summary`; a `snapshot`, `instructions` or `catalog`
+  (runtime context, AGENTS.md, skill catalogs) shows nothing; a `relay`, a
+  `recall`, no form or an unknown one shows `[kind] {compact JSON}` of its
+  content (as one line of text) and its other source fields. An event type a
+  plugin registered as a message projection (`sessions.messageProjections`;
+  `image/offload` keeps its own note) shows `[type] {compact JSON}` of its
+  data. Each line is at most 200 characters. A message a turn-trigger note
+  already names gets no second note.
 
 ## Plan mode
 

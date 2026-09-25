@@ -1,0 +1,16 @@
+---
+source: crates/codegen/xai-grok-pager/src/app/acp_handler/tests/permissions.rs
+expression: "render(approval_view_request(&format!(\"chmod -R u+w build \\u{2014} {APPROVAL_REASON}\"),\nserde_json::json!({}), terminal))"
+---
+┃
+┃  Fix build permissions
+┃  chmod -R u+w build
+┃  Allow this operation with danger-full-access permissions: fix perms
+┃  cwd: /w/pkg
+┃
+┃  1 (●) Allow once
+┃  2 (○) No, reject (type to add feedback)
+┃
+┃
+┃
+┃

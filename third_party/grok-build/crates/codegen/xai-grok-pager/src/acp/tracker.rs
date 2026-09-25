@@ -3118,4 +3118,4 @@ fn make_relative_path(path: &str) -> String {
 #[path = "tracker_tests.rs"]
 mod tests;
 #[path = "tool_view.rs"]
-mod tool_view;
+pub(crate) mod tool_view;
