@@ -6,13 +6,14 @@ import type { Context } from '@deepseek-ai/cordis'
 import { getDshRuntimeVersion, pluginCompatibilityWarning, readProfileCompatibility, setProfileVersionExemption } from '@deepseek-ai/dsh-app-boot'
 import { withProfileLock } from './package-location.ts'
 import { invalidParams } from './acp.ts'
+import { confirmation, type SelectOption } from './command-options.ts'
 import { errorMessage } from './guards.ts'
 import {
   CORE_PLUGIN_NAMES, bundleRequiresTrust, createPluginBundles, describeAnalysis, readProfileManifest, refusedCompatibility, writeProfileBundles,
   type PluginBundleDependencies, type PluginBundles,
 } from './plugin-bundles.ts'
-import type { PluginManagerLike, PluginRows } from './plugin-rows.ts'
-import { bundleDetail, bundleTitle, managementText, outcomeText, pluginTable, type SkippedBundle } from './plugin-status.ts'
+import type { BundleLike, PluginManagerLike, PluginRows } from './plugin-rows.ts'
+import { bundleDetail, bundleTitle, managementText, outcomeText, pluginTable, shownBundles, type SkippedBundle } from './plugin-status.ts'
 
 export { SENSITIVE_ROW_IDS, analyzeBundlePatch, type BundlePatchAnalysis } from './plugin-bundles.ts'
 
@@ -328,6 +329,35 @@ async function removePlugin({ dir, rest, bundles: pluginBundles }: PluginVerb): 
   return 'Removed ' + name + '.\nRestart dscode to unload it.'
 }
 
+/** `/dsh` choices: the verbs a pick completes, then the bundles `enable`,
+ * `disable`, `inspect` or `remove` applies to, by title with the package as
+ * detail. Adding a package and version trust need typed text. */
+async function pluginOptions(dir: string, query: string, manager: PluginManagerLike | undefined): Promise<SelectOption[]> {
+  if (query === '') {
+    return [{ id: 'plugins', label: 'List plugins', detail: 'Every bundle, its state and problems' },
+      ...manager === undefined ? [] : [{ id: 'enable', label: 'Turn a plugin on', next: true } as const, { id: 'disable', label: 'Turn a plugin off', next: true } as const],
+      { id: 'inspect', label: 'Inspect a plugin', next: true }, { id: 'remove', label: 'Remove a plugin', next: true }]
+  }
+  const bundles = shownBundles(await manager?.listBundles() ?? [], CORE_PLUGIN_NAMES)
+  const row = (bundle: BundleLike): SelectOption => ({ id: query + ' ' + bundle.name, label: bundleTitle(bundle),
+    detail: bundle.name + (bundle.version === undefined ? '' : '@' + bundle.version) })
+  const switchable = (bundle: BundleLike) => bundle.readOnlyReason === undefined && !CORE_PLUGIN_NAMES.has(bundle.name)
+  switch (query) {
+    case 'enable': return bundles.filter(bundle => switchable(bundle) && !bundle.enabled && bundle.error === undefined).map(row)
+    case 'disable': return bundles.filter(bundle => switchable(bundle) && bundle.enabled).map(row)
+    case 'inspect': return bundles.map(row)
+    case 'remove': {
+      const { dependencies } = await readProfileManifest(dir)
+      return Object.keys(dependencies).filter(name => !CORE_PLUGIN_NAMES.has(name)).map(name => {
+        const bundle = bundles.find(candidate => candidate.name === name), title = bundle === undefined ? name : bundleTitle(bundle)
+        return { id: 'remove ' + name, label: title, detail: name + '@' + String(dependencies[name]),
+          confirmation: confirmation('Remove ' + title + '?', 'npm uninstalls it from this profile; restart dscode to unload it.', 'Remove') }
+      })
+    }
+    default: return []
+  }
+}
+
 async function runVerb(command: PluginVerb): Promise<string> {
   switch (command.verb) {
     case undefined:
@@ -397,6 +427,12 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
       const operation = executeCommand(text, notify)
       pending.add(operation)
       try { return await operation } finally { pending.delete(operation) }
+    },
+    /** `x.ai/commands/options` for `/dsh`: reads only, outside the profile lock. */
+    async options(query: string): Promise<SelectOption[]> {
+      if (closed) throw new Error('profile plugin management has been disposed')
+      const dir = dshProfileDir()
+      return dir === undefined ? [] : await pluginOptions(dir, query, dependencies.pluginManager?.())
     },
     /** Let an accepted locked mutation finish its post-install verification;
      * exiting midway could leave a dependency enabled without that check. */

@@ -3,6 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type { SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
+import type { SelectOption } from './command-options.ts'
 import { errorMessage, isRecord } from './guards.ts'
 import type { SettingsLike } from './native-seams.ts'
 import { presetHistory, type PresetHistory } from './preset-history.ts'
@@ -303,6 +304,31 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
       ? 'Preset "' + resolved + '" is active and is now the default for new sessions.'
       : 'Switched to preset "' + resolved + '" and made it the default for new sessions.'
   }
+  /** `/preset` choices: the roster, with the session's preset active and the
+   * display copy the TUI's catalog shows. Nothing while the preset cannot
+   * change in place (a turn or change in progress, history, or an Agent Team
+   * preset on either side), so the bare command runs instead and the TUI
+   * opens its catalog, which can start a new session with the pick. */
+  const options = async (record: S): Promise<SelectOption[]> => {
+    const roster = host.roster()
+    assertLive(record)
+    if (roster === undefined || stateOf(record).changing || busy(record) || host.history(record).locked) return []
+    const presets = await roster.list()
+    assertLive(record)
+    const active = current(roster, record)
+    const inPlace = async (id: string) => await roster.attachesOnOpen?.(id) !== true
+    if (active !== undefined && !await inPlace(active)) return []
+    const rows: SelectOption[] = []
+    for (const preset of presets) {
+      if (preset.id !== active && !await inPlace(preset.id)) continue
+      const shipped = preset.name === undefined ? SHIPPED_PRESET_DISPLAY[preset.id] : undefined
+      const description = shipped?.description ?? preset.description
+      rows.push({ id: preset.id, label: shipped?.name ?? preset.name ?? preset.id, ...description === undefined ? {} : { detail: description },
+        ...preset.trust === 'user' ? { badge: 'custom' } : {}, ...preset.id === active ? { active: true } : {} })
+    }
+    assertLive(record)
+    return rows
+  }
   /** The TUI displays one bundle persona per preset and sends the chosen id
    * back as _meta.agentProfile. Custom presets keep their authored display copy. */
   const status = async () => {
@@ -355,6 +381,7 @@ export function createSessionPresets<S extends PresetSession>(host: PresetHost<S
         ? change(request.live, () => prepare(request)) : run(() => prepare(request))
     },
     command: (record: S, text: string) => change(record, () => command(record, text)),
+    options: (record: S) => run(() => options(record), record),
     assertReady,
     status: () => run(status),
     controls(clientId: number, params: unknown) {

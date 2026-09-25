@@ -296,6 +296,24 @@ describe('leader preset selection and composition', () => {
     expect(registry.byId.get(sessionId)?.internals.followups).toEqual([])
   })
 
+  it('serves the roster as /preset options, its preset active, and takes the pick as a command line', async () => {
+    const { client: c } = await start({ presets: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [], _meta: { agentProfile: 'ptc' } })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const listed = (await c.request(2, 'x.ai/commands/list', { sessionId })).result as { commands: Array<{ name: string }> }
+    expect(listed.commands.find(command => command.name === 'preset')).toMatchObject({ input: { hint: '<preset id>' }, _meta: { options: true } })
+    const options = async (id: number) => ((await c.request(id, 'x.ai/commands/options', { sessionId, name: 'preset' })).result as { options: Array<{ id: string; label: string; active?: boolean }> }).options
+    const offered = await options(3)
+    expect(offered.map(option => [option.id, option.label, option.active === true])).toEqual([
+      ['standard', 'Standard mode', false], ['ptc', 'PTC mode', true], ['minimal', 'Minimal mode', false], ['cordis', 'Creator mode', false]])
+    expect((await c.request(4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/preset minimal' }] })).error).toBeUndefined()
+    expect((await options(5)).filter(option => option.active === true).map(option => option.id)).toEqual(['minimal'])
+    expect((await c.request(6, 'x.ai/commands/options', { sessionId, name: 'compact' })).error).toMatchObject({ code: -32602 })
+    expect((await c.request(7, 'x.ai/commands/options', { name: 'preset' })).error).toMatchObject({ code: -32602 })
+  })
+
   it('blocks new prompts and interjections while a preset recompose is pending', async () => {
     const setPermission = vi.fn()
     const { registry, pluginCtx, client: c } = await start({ presets: true, permissionPresets: { set: setPermission } })

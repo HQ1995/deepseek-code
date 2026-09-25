@@ -138,8 +138,15 @@ export async function goalAcceptance(ui) {
     await ui.send('/goal clear');
     await visible(/Goal cleared\./, 'Clear command must report success');
     await observed(`cleared-${++clears}`, state => !state.goal && state.status === 'idle');
+    // Without a goal the host offers no options, so bare /goal runs as typed.
     await ui.send('/goal');
     await visible(/No goal is currently set\./, 'Empty /goal must report no current goal');
+  }
+  // With a goal, bare /goal offers its controls; the first row shows it.
+  async function showGoal() {
+    await ui.send('/goal');
+    await visible(/Show the goal[\s\S]*Clear the goal/, 'Bare /goal must offer the goal controls');
+    await ui.key('Enter');
   }
 
   await ui.send(`/goal ${PREFIX}LIFECYCLE`);
@@ -178,7 +185,7 @@ export async function goalAcceptance(ui) {
   const restored = await observed('restored-paused-disarmed', state => state.status === 'idle' && state.goal?.id === cancelled.goal.id && state.goal.phase === 'paused' && state.goal.activation === 'disarmed');
   assert.deepEqual(restored.goal, cancelled.goal, 'Fresh leader must replay the same native goal identity, revision, counters, and objective');
   await quiet('restore-no-continuation', restored.goal);
-  await ui.send('/goal');
+  await showGoal();
   await visible(/Activation: disarmed/, 'Restored status must show disarmed activation');
   await ui.key('C-c');
   await quiet('disarmed-idle-cancel-is-noop', restored.goal);
@@ -204,7 +211,7 @@ export async function goalAcceptance(ui) {
   assert.deepEqual(hydrated.goal, completed.goal, 'Completed hydration must preserve the exact native goal');
   await quiet('completed-hydration-no-continuation', hydrated.goal);
   assert.doesNotMatch(await ui.capture(), /Goal complete\./, 'Fresh completed hydration must not repeat the one-shot celebration');
-  await ui.send('/goal');
+  await showGoal();
   await visible(/Status: complete/, 'Completed goal remains inspectable after fresh hydration');
   await clear();
 }

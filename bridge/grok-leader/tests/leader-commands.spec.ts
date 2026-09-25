@@ -622,12 +622,13 @@ describe('leader commands, skills and runtime rails', () => {
       _meta: { cancelRewind: boolean; availableCommands: Array<{ name: string; description: string; input?: { hint: string } }> }
     })._meta
     expect(meta.cancelRewind).toBe(false)
-    expect(meta.availableCommands).toEqual([
-      { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | enable|disable <bundle>[#row] | add [--trust] <package> | remove <name> | inspect <name>' } },
-      { name: 'browser', description: 'Turn the isolated browser on or off', input: { hint: 'status | on [--executable <path>] [--origin <origin>]... [--any-origin] | off | origins add|remove <origin>' } },
-      { name: 'subagents', description: 'Inspect and control child conversations', input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' }, _meta: { immediate: true } },
-      { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | ptc | minimal | cordis' } },
-    ])
+    const advertised = [
+      { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | enable|disable <bundle>[#row] | add [--trust] <package> | remove <name> | inspect <name>' }, _meta: { options: true } },
+      { name: 'browser', description: 'Turn the isolated browser on or off', input: { hint: 'status | on [--executable <path>] [--origin <origin>]... [--any-origin] | off | origins add|remove <origin>' }, _meta: { options: true } },
+      { name: 'subagents', description: 'Inspect and control child conversations', input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' }, _meta: { immediate: true, options: true } },
+      { name: 'preset', description: 'Switch the active agent preset', input: { hint: '<preset id>' }, _meta: { options: true } },
+    ]
+    expect(meta.availableCommands).toEqual(advertised)
 
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
@@ -635,14 +636,7 @@ describe('leader commands, skills and runtime rails', () => {
     await c.next() // consume the echoed user_message_chunk before the next request
 
     const commands = await c.request(3, 'x.ai/commands/list', { sessionId })
-    expect(commands.result).toEqual({
-      commands: [
-        { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | enable|disable <bundle>[#row] | add [--trust] <package> | remove <name> | inspect <name>' } },
-        { name: 'browser', description: 'Turn the isolated browser on or off', input: { hint: 'status | on [--executable <path>] [--origin <origin>]... [--any-origin] | off | origins add|remove <origin>' } },
-        { name: 'subagents', description: 'Inspect and control child conversations', input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' }, _meta: { immediate: true } },
-        { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | ptc | minimal | cordis' } },
-      ],
-    })
+    expect(commands.result).toEqual({ commands: advertised })
 
     const history = await c.request(4, 'x.ai/prompt_history', { cwd: process.cwd(), filter_session_id: sessionId })
     expect(history.result).toEqual({ prompts: ['hello'] })

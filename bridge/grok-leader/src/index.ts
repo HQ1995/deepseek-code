@@ -352,17 +352,16 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   })
   const sessionCommands = createSessionCommands<SessionRecord>({
     sessions, owned: ownedRecord, client: id => connections.get(id),
-    registry: host.commands, roster: agentPresets,
+    registry: host.commands, roster: agentPresets, preset: sessionPresets.command, presetOptions: sessionPresets.options,
     skills: record => host.presetService(record.agent, 'skills'),
-    capabilities: nativeCapabilities.capabilities, profile: profilePlugins, preset: sessionPresets.command,
-    team: nativeTeam,
+    capabilities: nativeCapabilities.capabilities, profile: profilePlugins, team: nativeTeam,
     browser: createBrowserControl({
       rows: pluginRows, settings: host.settings,
       status: () => host.browser()?.status(),
       startOpen: async () => { await host.browser()?.startOpen?.() },
     }),
-    children: { command: (clientId, params) => children.command(clientId, params) },
-    goals: { goal: (clientId, params) => nativeStatus.goal(clientId, params) },
+    children: { command: (clientId, params) => children.command(clientId, params), options: (record, query) => children.options(record, query) },
+    goals: { goal: (clientId, params) => nativeStatus.goal(clientId, params), options: record => nativeStatus.goalOptions(record) },
     on: (name, listener) => ctx.on(name as never, listener as never), logger,
   })
 
@@ -503,6 +502,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   requests({ // Commands, skills, presets and MCP servers.
     'x.ai/commands/list': (clientId, params) => sessionCommands.catalog(clientId, params),
     'x.ai/commands/run': (clientId, params) => sessionCommands.run(clientId, params),
+    'x.ai/commands/options': (clientId, params) => sessionCommands.options(clientId, params),
     'x.ai/skills/list': (clientId, params) => sessionCommands.skills(clientId, params),
     'x.ai/presets': (clientId, params) => sessionPresets.controls(clientId, params),
     'x.ai/bundle/status': () => sessionPresets.status(),

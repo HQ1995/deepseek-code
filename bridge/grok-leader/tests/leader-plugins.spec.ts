@@ -164,6 +164,9 @@ describe('leader plugin inspection, /dsh command and bundle management', () => {
       await c.next()
       const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
       const sessionId = (created.result as { sessionId: string }).sessionId
+      // The /dsh picker's `enable` step offers the bundle this enable names.
+      expect((await c.request(10, 'x.ai/commands/options', { sessionId, name: 'dsh', query: 'enable' })).result).toEqual({ options: [{
+        id: 'enable @deepseek-ai/dsh-experimental-auto-review', label: 'Auto Authorization Review', detail: '@deepseek-ai/dsh-experimental-auto-review@0.1.7-rc.2' }] })
       sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh enable @deepseek-ai/dsh-experimental-auto-review' }] })
       expect((await waitForId(c, 2)).error).toBeUndefined()
       await waitFor(() => c.all.some(m => m.method === 'session/update'

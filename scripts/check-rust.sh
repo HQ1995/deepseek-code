@@ -22,7 +22,7 @@ cargo test -p xai-grok-pager -p xai-grok-pager-render --lib -- \
   to_meta_ native_controls native_question dsh_patch dsh_mcp_patch dsh_leader model_switch switch_model slash:: slash_ default_model question_view doctor tasks shortcuts_help subagent mode_switch prompt_stash overlay_post_flush mcps_modal startup_failure \
   presenter_ send_now_awaiting_current background_tasks queue_and_adoption turn_completion \
   settings_modal theme open_settings_focus open_settings_enter_picker prompt_ack headless \
-  scrollback_paste_focus_forward tool_identity_ tool_view_ host_command_ palette_commands_ \
+  scrollback_paste_focus_forward tool_identity_ tool_view_ host_command_ palette_commands_ command_options_ \
   loop_gating_ unadvertised_goal_ auto_waits_for_the_host always_approve_stays_offered \
   native_session_controls native_goal_ literal_goal_ native_session_effect \
   sessions_cmd plan_aware_toast non_shell_execute other_tool_expanded structured_question_answers \

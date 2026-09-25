@@ -4,6 +4,7 @@
  * session's browser keeps the origins, executable and sandbox it started with;
  * removing an origin also stops navigation there at once. Replies are Markdown. */
 import { invalidParams, internalError } from './acp.ts'
+import { confirmation, type SelectOption } from './command-options.ts'
 import { errorMessage } from './guards.ts'
 import type { SettingsLike } from './native-seams.ts'
 import type { PluginRows } from './plugin-rows.ts'
@@ -149,6 +150,19 @@ export function createBrowserControl(dependencies: BrowserControlDependencies) {
       : 'Removed ' + origin + '. No session can navigate to it any more.') + '\n\n' + describeBrowser(dependencies.status())
   }
   return {
+    /** `/browser` choices: status, on and off, the current state active. */
+    async options(): Promise<SelectOption[]> {
+      const on = await dependencies.rows.enabled(BROWSER_ROW)
+      const status = on ? dependencies.status() : undefined
+      const facts = status === undefined ? '' : ' · ' + String(status.sessions) + ' open · allowed: '
+        + (status.anyOrigin ? 'any origin' : status.origins.join(', ') || 'none')
+      return [
+        { id: 'status', label: 'Status', detail: (on ? 'On' : 'Off') + facts },
+        { id: 'on', label: 'On', ...on ? { active: true } : {},
+          confirmation: confirmation('Turn the browser on?', 'A private headless browser per session; not a network sandbox, and every action asks for approval.', 'Turn on') },
+        { id: 'off', label: 'Off', detail: 'Closes open browsers', ...on ? {} : { active: true } },
+      ]
+    },
     async execute(text: string): Promise<string> {
       let words: string[]
       try { words = parseCommandLine(text).slice(1) } catch (error) {

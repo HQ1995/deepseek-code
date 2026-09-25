@@ -550,6 +550,32 @@ pub(super) fn dispatch_send_prompt_inner(
         return vec![];
     }
 
+    // DIVERGENCE(dscode): a bare command whose host serves its options
+    // (`_meta.options`) opens the option picker instead of running. A pick,
+    // or an empty list, comes back as a draft-preserving send, which runs.
+    if !literal
+        && consume_input
+        && let Some(invocation) = crate::slash::parse_invocation(trimmed)
+        && invocation.args.trim().is_empty()
+        && let Some(name) = agent
+            .prompt
+            .slash_controller
+            .registry()
+            .options_command(invocation.token)
+            .map(str::to_owned)
+    {
+        if agent.session.session_id.is_none() {
+            agent.show_toast("No active session");
+            return vec![];
+        }
+        agent
+            .prompt
+            .slash_controller
+            .record_command_use(invocation.token, invocation.token);
+        agent.prompt.set_text("");
+        return super::command_options::load(agent, &name, "");
+    }
+
     // DIVERGENCE(dscode): a host command whose descriptor says `immediate`
     // (`/goal`, `/subagents`) runs at once over `x.ai/commands/run`, beside a
     // running turn and its queue, instead of queueing as a prompt.
