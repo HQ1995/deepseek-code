@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
 import { unsupportedPlatformMessage } from '../bin/update.mjs'
@@ -64,4 +65,53 @@ it('checks a remote profile\'s connection only when asked, and says what to fix'
     const healthy = () => ({ status: 0, stderr: '', stdout: JSON.stringify({ node: 'v24.0.0', workspace: true, digests: ['a'.repeat(64), 'b'.repeat(64)] }) })
     expect(remote(installationReport({ profile, dshBin: '/nonexistent/dsh', optional: false, remote: true, probe: healthy }))).toMatchObject({ status: 'OK', detail: expect.stringContaining('Node v24.0.0') })
   } finally { rmSync(profile, { recursive: true, force: true }) }
+})
+
+it('reports bundles boot skips and a profile patch that stops boot, with their reason', async () => {
+  const { profileBundleFindings } = await import('../bin/doctor.mjs')
+  const root = mkdtempSync(join(tmpdir(), 'dscode-doctor-skipped-'))
+  try {
+    const require = createRequire(import.meta.url)
+    const install = join(root, 'runtime/node_modules/@deepseek-ai'), profile = join(root, 'profile'), anchor = join(install, 'dsh/package.json')
+    mkdirSync(join(install, 'dsh'), { recursive: true })
+    writeFileSync(anchor, JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.7-rc.2' }))
+    symlinkSync(dirname(require.resolve('@deepseek-ai/dsh-app-boot/package.json')), join(install, 'dsh-app-boot'))
+    symlinkSync(dirname(require.resolve('@deepseek-ai/dsh-base/cordis.patch.yml')), join(install, 'dsh-base'))
+    mkdirSync(join(profile, 'node_modules/plain'), { recursive: true })
+    writeFileSync(join(profile, 'node_modules/plain/package.json'), JSON.stringify({ name: 'plain', version: '1.0.0' }))
+    writeFileSync(join(profile, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'vanished', 'plain'] } } }))
+    writeFileSync(join(profile, 'cordis.patch.yml'), '- 42\n')
+    const findings = profileBundleFindings({ anchor, profile })
+    expect(findings.map(f => [f.status, f.name])).toEqual([['ERROR', 'Profile bundle vanished'], ['ERROR', 'Profile bundle plain'], ['ERROR', 'Profile patch']])
+    expect(findings[0]!.detail).toMatch(/^Skipped at startup: cannot resolve profile bundle "vanished" from the dsh installation or .*profile\. Inside dscode, \/dsh disable vanished stops loading it and \/dsh remove vanished uninstalls it\.$/)
+    expect(findings[0]!.detail).not.toContain('dsh plugin')
+    expect(findings[1]!.detail).toContain('Skipped at startup: profile bundle "plain" declares no dsh.bundle')
+    expect(findings[2]!.detail).toContain('cordis.patch.yml')
+    expect(findings[2]!.detail).toContain('The leader cannot start until it loads: fix the file, or run dscode doctor --reset-plugins to move it aside.')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+it('names the leader log and warns about a pnpm lockfile in the npm-managed profile', async () => {
+  const { installationReport, leaderLog } = await import('../bin/doctor.mjs')
+  const root = mkdtempSync(join(tmpdir(), 'dscode-doctor-log-'))
+  try {
+    const uid = process.getuid?.() ?? 0
+    for (const [name, seconds] of [[`dscode-${uid}-old.log`, 1000], [`dscode-${uid}-new.log`, 2000], ['dscode-999999-other.log', 3000], [`dscode-${uid}-x.sock`, 4000]] as const) {
+      writeFileSync(join(root, name), '')
+      utimesSync(join(root, name), seconds, seconds)
+    }
+    expect(leaderLog({}, root)).toEqual({ path: join(root, `dscode-${uid}-new.log`), exact: false })
+    expect(leaderLog({ DSCODE_SOCKET: '/tmp/dscode-1-abc.sock' }, root)).toEqual({ path: '/tmp/dscode-1-abc.log', exact: true })
+    expect(leaderLog({ DSCODE_LOG: '/var/d.log', DSCODE_SOCKET: '/tmp/x.sock' }, root)).toEqual({ path: '/var/d.log', exact: true })
+    expect(leaderLog({}, join(root, 'missing'))).toBeUndefined()
+    const profile = join(root, 'profile')
+    mkdirSync(profile)
+    const report = () => installationReport({ profile, dshBin: '/nonexistent/dsh', optional: false, env: { DSCODE_SOCKET: '/tmp/dscode-1-abc.sock' } })
+    expect(report().find(f => f.name === 'Leader log')).toEqual({ status: 'INFO', name: 'Leader log', detail: '/tmp/dscode-1-abc.log' })
+    expect(report().find(f => f.name === 'Profile package manager')).toBeUndefined()
+    writeFileSync(join(profile, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
+    expect(report().find(f => f.name === 'Profile package manager')).toEqual({ status: 'WARN', name: 'Profile package manager',
+      detail: `${join(profile, 'pnpm-lock.yaml')} exists: pnpm installed into this dscode profile (dsh plugin --profile dscode, or DSH's plugin manager), `
+        + 'which diverges from the package-lock.json npm keeps for dscode. Manage dscode plugins with /dsh add and /dsh remove only.' })
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })

@@ -1,7 +1,7 @@
 // Read-only installation checks, shared by /doctor and the pre-startup CLI.
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { accessSync, constants, existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { homedir, release } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -74,11 +74,23 @@ for (const bundle of bundles) {
     }
   } catch (error) { issues.push({ bundle, error: String(error?.message ?? error) }) }
 }
-emit({ runtimeVersion: boot.getDshRuntimeVersion(), checked, issues, warnings: compatibility.warnings })
+// What boot itself skips (unresolvable, unreadable or incompatible bundles),
+// and whether the user patch layer loads at all: when it does not, boot fails.
+let skipped = []
+try {
+  if (typeof boot.loadProfileDirectory === 'function') {
+    skipped = boot.loadProfileDirectory('dscode', profile, anchor, { userLayer: false }).skippedBundles
+      .map(({ packageName, reason }) => ({ packageName, reason: String(reason) }))
+  }
+} catch {}
+let patchError
+try { if (typeof boot.loadOptionalPatches === 'function') boot.loadOptionalPatches('dscode', profile + '/cordis.patch.yml') }
+catch (error) { patchError = String(error?.message ?? error) }
+emit({ runtimeVersion: boot.getDshRuntimeVersion(), checked, issues, warnings: compatibility.warnings, skipped, patchError })
 `
 
 /** The DSH installation (package.json of `@deepseek-ai/dsh`) behind an executable. */
-const dshInstallAnchor = bin => {
+export const dshInstallAnchor = bin => {
   let dir
   try { dir = dirname(realpathSync(bin)) } catch { return undefined }
   for (;;) {
@@ -95,8 +107,14 @@ const failureReason = text => {
   return lines.find(line => /^[A-Za-z]*Error\b/.test(line)) ?? lines[0] ?? 'no diagnostics'
 }
 
+/** A boot skip reason without the error class, the CLI prefix, or DSH's pnpm
+ * repair hint (dscode manages this profile with npm through /dsh). */
+const skipReason = reason => reason.replace(/^\w*Error: /, '').replace(/^(?:dsh|dscode): /, '').replace(/; run 'dsh plugin [^']*'.*$/, '')
+const bundleRepair = name => `Inside dscode, /dsh disable ${name} stops loading it and /dsh remove ${name} uninstalls it.`
+
 /** Profile bundles the runtime would skip, rows it would disable, and exempted
- * ones. Runtimes without the 0.1.7 compatibility API are not judged. */
+ * ones; a user patch that stops boot. Runtimes without the 0.1.7 compatibility
+ * API are not judged. */
 export const profileBundleFindings = ({ anchor, profile }) => {
   let appBoot
   try { appBoot = createRequire(anchor).resolve('@deepseek-ai/dsh-app-boot') } catch { return [] }
@@ -119,8 +137,38 @@ export const profileBundleFindings = ({ anchor, profile }) => {
     return { status: 'ERROR', name, detail: `${issue.warning} ${effect} Update or remove it, or run /dsh allow-version ${issue.name}@${issue.version} --accept-risk inside dscode.` }
   })
   findings.push(...result.warnings.map(detail => ({ status: 'WARN', name: 'Profile compatibility file', detail })))
+  // An incompatible bundle is already reported above with its exemption command.
+  const reported = new Set(result.issues.filter(issue => !issue.component).map(issue => issue.bundle))
+  for (const { packageName, reason } of result.skipped ?? []) {
+    if (!reported.has(packageName)) findings.push({ status: 'ERROR', name: `Profile bundle ${packageName}`, detail: `Skipped at startup: ${skipReason(reason)}. ${bundleRepair(packageName)}` })
+  }
+  if (result.patchError !== undefined) {
+    findings.push({ status: 'ERROR', name: 'Profile patch', detail: `${result.patchError}. The leader cannot start until it loads: fix the file, or run dscode doctor --reset-plugins to move it aside.` })
+  }
   return findings.length > 0 ? findings
     : [{ status: 'OK', name: 'Profile bundles', detail: `${result.checked} bundle(s) satisfy dsh ${result.runtimeVersion} peer requirements` }]
+}
+
+/** The leader log the TUI writes (xai-grok-pager dsh_leader.rs): DSCODE_LOG, or
+ * the leader socket's `.log` sibling, exact inside a leader. A shell has only
+ * this user's newest `/tmp/dscode-<uid>-*.log`, named by profile and build. */
+export const leaderLog = (env = process.env, directory = '/tmp') => {
+  if (env.DSCODE_LOG) return { path: env.DSCODE_LOG, exact: true }
+  const socket = env.DSCODE_SOCKET
+  if (socket) {
+    const slash = socket.lastIndexOf('/'), dot = socket.lastIndexOf('.')
+    return { path: (dot > slash + 1 ? socket.slice(0, dot) : socket) + '.log', exact: true }
+  }
+  const prefix = `dscode-${process.getuid?.() ?? 0}-`
+  let newest
+  try {
+    for (const name of readdirSync(directory)) {
+      if (!name.startsWith(prefix) || !name.endsWith('.log')) continue
+      const path = join(directory, name), mtime = statSync(path).mtimeMs
+      if (newest === undefined || mtime > newest.mtime) newest = { path, mtime }
+    }
+  } catch {}
+  return newest === undefined ? undefined : { path: newest.path, exact: false }
 }
 
 export const installationReport = ({
@@ -133,6 +181,7 @@ export const installationReport = ({
   // a session's /doctor already reports its live connection.
   remote = false,
   probe,
+  env = process.env,
 } = {}) => {
   const findings = []
   const add = (status, name, detail) => findings.push({ status, name, detail })
@@ -181,6 +230,16 @@ export const installationReport = ({
     if (anchor) findings.push(...profileBundleFindings({ anchor, profile }))
     else add('INFO', 'Profile bundles', 'Not evaluated: the DSH executable is not inside an @deepseek-ai/dsh installation.')
   }
+  // dscode keeps this profile with npm (the launcher and /dsh add); a pnpm run
+  // (dsh plugin --profile dscode, DSH's plugin manager) builds a second lockfile
+  // and layout that the next npm run does not reconcile.
+  const pnpmLock = join(profile, 'pnpm-lock.yaml')
+  if (existsSync(pnpmLock)) {
+    add('WARN', 'Profile package manager', `${pnpmLock} exists: pnpm installed into this dscode profile (dsh plugin --profile dscode, or DSH's plugin manager), `
+      + 'which diverges from the package-lock.json npm keeps for dscode. Manage dscode plugins with /dsh add and /dsh remove only.')
+  }
+  const log = leaderLog(env)
+  if (log !== undefined) add('INFO', 'Leader log', log.exact ? log.path : `${log.path} (this user's most recent; the TUI prints the exact path when the leader fails to start)`)
   const settings = remote ? remoteSettings(existsSync(join(profile, 'cordis.patch.yml')) ? readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') : '') : undefined
   if (settings !== undefined) {
     const where = `ssh ${settings.host}:${settings.workspace}`

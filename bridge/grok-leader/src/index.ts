@@ -34,6 +34,7 @@ import { errorMessage } from './guards.ts'
 import { createModelCatalog } from './model-catalog.ts'
 import { createNativeProviders } from './native-provider.ts'
 import { createPluginRows, type PluginManagerLike } from './plugin-rows.ts'
+import { createPluginStatus, type LoaderEntryLike } from './plugin-status.ts'
 import { createBrowserControl, type BrowserStatus } from './browser-control.ts'
 import { createNativeTeam, type TeamServiceLike } from './native-team.ts'
 import { TEAM_TOOLS_MODULE } from './team-presets.ts'
@@ -217,6 +218,14 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       await reconcileProfilePatches(ctx.root, readProfilePatches('dsh', profile), 'dsh', requiredIds)
     },
   })
+  // Plugin health: bundles this start skipped (told once to the next opened
+  // session), and rows that did not activate (for /doctor).
+  const pluginStatus = createPluginStatus({
+    manager: () => ctx.get('pluginManager') as PluginManagerLike | undefined,
+    loader: () => ctx.get('loader') as unknown as { entries(): Iterable<LoaderEntryLike> } | undefined,
+    profile: () => ctx.get('profileContext') as ProfileContext | undefined,
+    logger,
+  })
   const models = createModelCatalog({
     config,
     llm: () => ctx.get('llm') as LlmLike | undefined,
@@ -294,6 +303,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     permissions: interactions,
     contextValues: record => nativeStatus.contextValues(record), projectImages, logger,
     unblocked: record => { sessionController.deliverable(record) },
+    notice: pluginStatus.notice,
     views: {
       status: (record, replay) => nativeStatus.snapshot(record, replay),
       children: (record, replay) => children.snapshot(record, replay),
@@ -407,6 +417,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const profilePlugins = createProfilePlugins({
     inspectRuntime: name => inspectPluginRuntime(ctx, name),
     installAnchor: () => (ctx.get('profileContext') as { installAnchor?: string } | undefined)?.installAnchor,
+    pluginManager: () => ctx.get('pluginManager') as PluginManagerLike | undefined,
+    switches: pluginRows, skipped: pluginStatus.skipped,
   })
   const sessionCommands = createSessionCommands<SessionRecord>({
     sessions, owned: ownedRecord, client: id => connections.get(id),
@@ -441,6 +453,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     remote: () => { const configured = remote(); return configured === undefined ? undefined : { ...configured, connected: sshState().state === 'connected' } },
     hostTeamRows: async () => (await (ctx.get('pluginManager') as PluginManagerLike | undefined)?.listPlugins() ?? [])
       .filter(row => row.enabled && row.moduleName === TEAM_TOOLS_MODULE).map(row => row.patchId ?? row.entryId),
+    plugins: () => pluginStatus.findings(),
     terminals: record => presetServiceFor(record, 'terminals') as NativeTerminals | undefined,
     subprocess: record => presetServiceFor(record, 'subprocess') as NativeExecutionHost | undefined,
     toolNames: nativeCapabilities.toolNames,

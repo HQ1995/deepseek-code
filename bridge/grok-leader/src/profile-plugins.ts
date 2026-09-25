@@ -11,6 +11,8 @@ import {
   CORE_PLUGIN_NAMES, bundleRequiresTrust, createPluginBundles, describeAnalysis, readProfileManifest, refusedCompatibility, writeProfileBundles,
   type PluginBundleDependencies, type PluginBundles,
 } from './plugin-bundles.ts'
+import type { PluginManagerLike, PluginRows } from './plugin-rows.ts'
+import { bundleDetail, bundleTitle, managementText, outcomeText, pluginTable, type SkippedBundle } from './plugin-status.ts'
 
 export { SENSITIVE_ROW_IDS, analyzeBundlePatch, type BundlePatchAnalysis } from './plugin-bundles.ts'
 
@@ -146,13 +148,27 @@ export function inspectPluginRuntime(ctx: Context, packageName: string): string 
 export interface ProfilePluginDependencies extends PluginBundleDependencies {
   inspectRuntime(name: string): string | undefined
   directory?: () => string | undefined
+  /** The running leader's DSH plugin manager; absent outside a leader. */
+  pluginManager?: () => PluginManagerLike | undefined
+  /** Switches bundles and rows through that manager and applies them live. */
+  switches?: Pick<PluginRows, 'switchBundle' | 'switchRow'>
+  /** Bundles this leader's start skipped, with why. */
+  skipped?: () => readonly SkippedBundle[]
 }
 
-const USAGE = 'Usage: /dsh plugins | /dsh add [--trust] <package|git-url|file:path> | /dsh remove <name> | /dsh inspect <name>'
-  + ' | /dsh allow-version <package@version> --accept-risk | /dsh revoke-version <package@version>'
+// Inline code: the TUI renders replies as Markdown, where a bare `<name>` is HTML.
+const USAGE = 'Usage: `/dsh plugins` | `/dsh enable <bundle>[#row]` | `/dsh disable <bundle>[#row]` | `/dsh add [--trust] <package|git-url|file:path>`'
+  + ' | `/dsh remove <name>` | `/dsh inspect <name>` | `/dsh allow-version <package@version> --accept-risk` | `/dsh revoke-version <package@version>`'
 
 /** Verbs that mutate the profile, and so run under its lock. */
-const LOCKED_VERBS: ReadonlySet<string | undefined> = new Set(['add', 'remove', 'allow-version', 'revoke-version'])
+const LOCKED_VERBS: ReadonlySet<string | undefined> = new Set(['add', 'remove', 'enable', 'disable', 'allow-version', 'revoke-version'])
+
+/** The live plugin manager a leader offers /dsh, with what its start skipped. */
+interface PluginCatalog {
+  readonly manager: PluginManagerLike
+  readonly switches: Pick<PluginRows, 'switchBundle' | 'switchRow'> | undefined
+  skipped(): readonly SkippedBundle[]
+}
 
 /** One parsed /dsh command against an installed profile directory. */
 interface PluginVerb {
@@ -162,16 +178,59 @@ interface PluginVerb {
   notify(message: string): void
   readonly bundles: PluginBundles
   inspectRuntime(name: string): string | undefined
+  readonly catalog: PluginCatalog | undefined
 }
 
-async function listPlugins({ dir }: PluginVerb): Promise<string> {
+async function listPlugins({ dir, catalog }: PluginVerb): Promise<string> {
   const { dependencies, bundles } = await readProfileManifest(dir)
+  let note = ''
+  if (catalog !== undefined) {
+    try {
+      const [listed, plugins] = await Promise.all([catalog.manager.listBundles(), catalog.manager.listPlugins()])
+      return pluginTable({ dir, bundles: listed, plugins, order: bundles, core: CORE_PLUGIN_NAMES, skipped: catalog.skipped() }) + '\n\n' + USAGE
+    } catch (error) {
+      note = '\n\nThe DSH plugin manager could not list the bundles (' + errorMessage(error) + '); this is the profile manifest.'
+    }
+  }
   const lines = bundles.map(name => {
     const core = CORE_PLUGIN_NAMES.has(name) ? ' (core)' : ''
     const version = dependencies[name] === undefined ? '' : ' ' + dependencies[name]
     return '- ' + name + version + core
   })
-  return 'Plugins in ' + dir + ':\n' + lines.join('\n') + '\n\n' + USAGE
+  return 'Plugins in ' + dir + ':\n' + lines.join('\n') + note + '\n\n' + USAGE
+}
+
+/** `/dsh enable|disable <bundle>[#row]` through the DSH plugin manager, as its
+ * Plugins page switches them; dscode's own bundles and their rows stay on. */
+async function switchPlugin({ verb, rest, catalog }: PluginVerb): Promise<string> {
+  const enabled = verb === 'enable'
+  if (rest.length !== 1) return 'Usage: `/dsh ' + String(verb) + ' <bundle>[#row]`'
+  if (catalog?.switches === undefined) return 'Switching plugins needs the DSH plugin manager, which this leader does not run. Restart dscode and retry.'
+  const target = rest[0]!
+  const hash = target.indexOf('#')
+  const name = hash === -1 ? target : target.slice(0, hash)
+  const rowId = hash === -1 ? undefined : target.slice(hash + 1)
+  const bundle = (await catalog.manager.listBundles()).find(candidate => candidate.name === name)
+  if (bundle === undefined) return name + ' is not a bundle of this profile. /dsh plugins lists them; /dsh add installs one.'
+  const title = bundleTitle(bundle)
+  const core = CORE_PLUGIN_NAMES.has(name)
+  if (rowId === undefined) {
+    if (!enabled && core) return name + ' is part of dscode itself; turning it off would stop dscode from starting.'
+    if (bundle.readOnlyReason !== undefined) return title + ': ' + managementText({ code: bundle.readOnlyReason })
+    if (bundle.enabled === enabled) return title + ' is already ' + (enabled ? 'on' : 'off') + '.'
+    // A bundle DSH cannot read cannot be switched on; a selected one can be deselected.
+    if (enabled && bundle.error !== undefined) return 'Could not enable: ' + managementText(bundle.error)
+    return outcomeText(await catalog.switches.switchBundle(name, enabled, bundle.rows.map(row => row.rowId)), enabled, title + ' (' + name + ')', false)
+  }
+  const row = bundle.rows.find(candidate => candidate.rowId === rowId)
+  if (row === undefined) return title + ' has no component "' + rowId + '". Components: ' + (bundle.rows.map(candidate => candidate.rowId).join(', ') || 'none') + '.'
+  if (!enabled && core) return rowId + ' is part of dscode itself; use the command that owns it (/browser, /provider) or edit cordis.patch.yml.'
+  if (!bundle.enabled) return title + ' is off; turn it on first with /dsh enable ' + name + '.'
+  const entry = row.entryId === undefined ? undefined : (await catalog.manager.listPlugins()).find(candidate => candidate.entryId === row.entryId)
+  if (entry === undefined) return rowId + ' has no live entry in this leader, so it cannot be switched. Restart dscode and retry.'
+  if (entry.readOnlyReason !== undefined || entry.patchId === undefined) return rowId + ': ' + managementText({ code: entry.readOnlyReason ?? 'unaddressable' })
+  if (entry.enabled === enabled) return 'The component ' + rowId + ' is already ' + (enabled ? 'on' : 'off') + '.'
+  return outcomeText(await catalog.switches.switchRow({ entryId: entry.entryId, patchId: entry.patchId }, enabled), enabled, rowId + ' of ' + title, true)
 }
 
 /** Audit in an isolated stage, refuse core, broken or incompatible packages and
@@ -214,10 +273,15 @@ async function addPlugins({ dir, rest, notify, bundles: pluginBundles }: PluginV
   return await pluginBundles.installAudited(dir, specs, staged, trusted)
 }
 
-async function inspectPlugin({ dir, rest, inspectRuntime }: PluginVerb): Promise<string> {
+async function inspectPlugin({ dir, rest, inspectRuntime, catalog }: PluginVerb): Promise<string> {
   const name = rest[0]
   if (name === undefined) return 'Missing plugin name. ' + USAGE
   const runtime = inspectRuntime(name)
+  const bundle = (await catalog?.manager.listBundles().catch(() => undefined))?.find(candidate => candidate.name === name)
+  if (bundle !== undefined) {
+    const detail = bundleDetail(bundle, await catalog!.manager.listPlugins(), CORE_PLUGIN_NAMES)
+    return runtime === undefined ? detail : runtime + '\n\n' + detail
+  }
   if (runtime !== undefined) return runtime
   const manifest = await readProfileManifest(dir)
   if (manifest.dependencies[name] !== undefined) {
@@ -231,7 +295,7 @@ async function versionExemption({ dir, verb, rest }: PluginVerb): Promise<string
   const allow = verb === 'allow-version'
   const acceptRisk = rest.includes('--accept-risk')
   const keys = rest.filter(part => part !== '--accept-risk')
-  if (keys.length !== 1 || (!allow && acceptRisk)) return 'Usage: /dsh allow-version <package@version> --accept-risk | /dsh revoke-version <package@version>'
+  if (keys.length !== 1 || (!allow && acceptRisk)) return 'Usage: `/dsh allow-version <package@version> --accept-risk` | `/dsh revoke-version <package@version>`'
   if (allow && !acceptRisk) {
     return 'Running a plugin whose dsh peers this runtime does not satisfy can crash dscode or corrupt data. '
       + 'The exemption covers only ' + keys[0] + ' on this exact DSH version. Rerun with --accept-risk to grant it.'
@@ -244,7 +308,7 @@ async function versionExemption({ dir, verb, rest }: PluginVerb): Promise<string
 async function removePlugin({ dir, rest, bundles: pluginBundles }: PluginVerb): Promise<string> {
   const name = rest[0]
   if (name === undefined) return 'Missing plugin name. ' + USAGE
-  if (rest.length !== 1) return 'Usage: /dsh remove <name>'
+  if (rest.length !== 1) return 'Usage: `/dsh remove <name>`'
   if (CORE_PLUGIN_NAMES.has(name)) {
     return name + ' is a core component of this leader; refusing to remove it.'
   }
@@ -271,6 +335,8 @@ async function runVerb(command: PluginVerb): Promise<string> {
     case 'list': return await listPlugins(command)
     case 'add': return await addPlugins(command)
     case 'inspect': return await inspectPlugin(command)
+    case 'enable':
+    case 'disable': return await switchPlugin(command)
     case 'allow-version':
     case 'revoke-version': return await versionExemption(command)
     case 'remove': return await removePlugin(command)
@@ -313,7 +379,10 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
     if (dir === undefined) {
       return 'dsh plugin management is unavailable: no installed leader profile was found (running from a source checkout?). Use: dsh plugin --profile dscode add <package>'
     }
-    const execute = (): Promise<string> => runVerb({ dir, verb, rest, notify, bundles, inspectRuntime: name => dependencies.inspectRuntime(name) })
+    const manager = dependencies.pluginManager?.()
+    const catalog = manager === undefined ? undefined
+      : { manager, switches: dependencies.switches, skipped: () => dependencies.skipped?.() ?? [] }
+    const execute = (): Promise<string> => runVerb({ dir, verb, rest, notify, bundles, inspectRuntime: name => dependencies.inspectRuntime(name), catalog })
     try {
       return LOCKED_VERBS.has(verb) ? await withProfileLock(dir, execute) : await execute()
     } catch (error: unknown) {

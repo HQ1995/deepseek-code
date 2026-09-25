@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { register, sendRequest, useLeaderHarness, waitFor, waitForId } from './support/leader-harness.ts'
@@ -103,8 +104,73 @@ describe('leader plugin inspection, /dsh command and bundle management', () => {
       sendRequest(c, 5, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh frobnicate' }] })
       await waitForId(c, 5)
       await waitFor(() => c.all.some(m => m.method === 'session/update'
-        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('Usage: /dsh')))
+        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('Usage: `/dsh')))
       expect(agent.internals.followups).toEqual([])
+    } finally {
+      delete process.env.DSH_PROFILE_DIR
+      rmSync(profileDir, { recursive: true, force: true })
+    }
+  })
+
+  it('tells the first opened session once which bundles this start skipped', async () => {
+    const { mkdirSync, writeFileSync, rmSync } = await import('node:fs')
+    const profileDir = resolve(tmpdir(), 'dsh-profile-skipped-' + randomUUID())
+    mkdirSync(profileDir, { recursive: true })
+    writeFileSync(resolve(profileDir, 'package.json'), JSON.stringify({ private: true, dependencies: {},
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-plugin-vanished'] } } }))
+    const installAnchor = fileURLToPath(new URL('../node_modules/@deepseek-ai/dsh/package.json', import.meta.url))
+    process.env.DSH_PROFILE_DIR = profileDir
+    try {
+      const { client: c } = await start({ profileContext: { name: 'dscode', dir: profileDir, patchPath: resolve(profileDir, 'cordis.patch.yml'), installAnchor,
+        cwd: process.cwd(), home: profileDir, startedBundles: ['@deepseek-ai/dsh-base'], overlays: [], telemetryDisabledEnv: '1' } })
+      register(c)
+      await c.next()
+      const notes = () => c.all.filter(m => m.method === 'x.ai/session_notification')
+        .flatMap(m => (m.params as { update: { sessionUpdate: string; notes?: string[] } }).update.notes ?? [])
+        .filter(note => note.includes('dscode started without'))
+      const first = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      await waitFor(() => notes().length === 1)
+      expect(notes()[0]).toMatch(/^dscode started without a plugin bundle: dsh-plugin-vanished \(cannot resolve profile bundle "dsh-plugin-vanished".*\)\. Run \/doctor for details, or \/dsh disable dsh-plugin-vanished to stop loading it\./)
+      expect(notes()[0]).not.toContain("run 'dsh plugin")
+      const noteSession = c.all.find(m => m.method === 'x.ai/session_notification' && JSON.stringify(m).includes('dscode started without'))
+      expect((noteSession!.params as { sessionId: string }).sessionId).toBe((first.result as { sessionId: string }).sessionId)
+      await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      await new Promise(resolve => setTimeout(resolve, 150))
+      expect(notes()).toHaveLength(1)
+    } finally {
+      delete process.env.DSH_PROFILE_DIR
+      rmSync(profileDir, { recursive: true, force: true })
+    }
+  })
+
+  it('switches a bundle through the plugin manager and turns it off again when the leader cannot apply it', async () => {
+    const { mkdirSync, writeFileSync, rmSync } = await import('node:fs')
+    const profileDir = resolve(tmpdir(), 'dsh-profile-switch-' + randomUUID())
+    mkdirSync(profileDir, { recursive: true })
+    writeFileSync(resolve(profileDir, 'package.json'), JSON.stringify({ private: true, dependencies: {}, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }))
+    const selected: boolean[] = []
+    const manager = {
+      listPlugins: async () => [],
+      listBundles: async () => [{ name: '@deepseek-ai/dsh-experimental-auto-review', version: '0.1.7-rc.2', meta: { title: { en: 'Auto Authorization Review' } },
+        enabled: selected.at(-1) ?? false, installed: false, optional: true, removable: false, rows: [{ rowId: 'auto-review', moduleName: '@deepseek-ai/dsh-experimental-auto-review' }], overrides: [] }],
+      setBundleEnabled: async (_name: string, enabled: boolean) => { selected.push(enabled); return { changed: true, application: 'restart-required' } },
+      setPluginEnabled: async () => ({ application: 'failed' }),
+    }
+    process.env.DSH_PROFILE_DIR = profileDir
+    try {
+      // No launcher profile context: the leader cannot reconcile, so the enable is undone.
+      const { client: c } = await start({ pluginManager: manager })
+      register(c)
+      await c.next()
+      const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      const sessionId = (created.result as { sessionId: string }).sessionId
+      sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh enable @deepseek-ai/dsh-experimental-auto-review' }] })
+      expect((await waitForId(c, 2)).error).toBeUndefined()
+      await waitFor(() => c.all.some(m => m.method === 'session/update'
+        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '')
+          .startsWith('Could not enable: no profile context: restart dscode to apply the change; restart dscode to unload what did start')))
+      expect(JSON.stringify(c.all)).toContain('It was switched off again, so the next start is unaffected.')
+      expect(selected).toEqual([true, false])
     } finally {
       delete process.env.DSH_PROFILE_DIR
       rmSync(profileDir, { recursive: true, force: true })

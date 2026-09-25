@@ -132,7 +132,11 @@ earlier:
   inserted rows with the runtime's own app-boot. They report skipped bundles and
   disabled rows as errors, and exempted ones as warnings. An unreadable
   `compatibility.json`, or a DSH executable outside an `@deepseek-ai/dsh`
-  installation, is reported rather than silently passed.
+  installation, is reported rather than silently passed. They also run boot's
+  own profile loader, so a bundle skipped for any other reason (not installed,
+  no `dsh.bundle`, an unreadable patch) is an error with that reason, and a
+  profile `cordis.patch.yml` that does not load, which stops boot, points at
+  `dscode doctor --reset-plugins`.
 
 Exemptions are exact package and DSH versions, stored in the profile's
 `compatibility.json`; a dscode update to a new DSH version does not carry them
@@ -173,6 +177,7 @@ be on PATH; dscode's `/dsh add` uses npm.
 | HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY | Native runtime proxy support; environment is inherited by the managed runtime |
 | Streaming tool-call continuation | Native DeepSeek fix preserves call identifiers and names |
 | MCP tool pagination | Native repeated-cursor rejection; `/mcps` and bridge initialization keep diagnostic behavior |
+| Plugin manager, shipped optional bundles and safe mode | `/dsh plugins` and `/dsh enable|disable <bundle>[#row]` over the native manager, applied live; `dscode doctor --reset-plugins` runs app-boot's `sanitizeProfile`; see [plugin management](#plugin-management) |
 | Skills and commands | `/skills`, skill insertion and native command discovery; TUI search uses its existing picker |
 | Declarative preset registry and ordered bundle patches | `/preset manage`, `/dsh`; local editable declaration bundles, read-only legacy import and shared host service identities |
 | `present` file delivery | Clickable transcript links from `deliverables/presented`, live and after resume; child/fork paths use the viewed workspace |
@@ -232,6 +237,57 @@ Account"), switched on in its base layer. dscode's patch disables it: `/provider
 cannot manage that route, and it would otherwise sit in the roster with no
 models. `/dsh add` flags a bundle that touches it, as it does the other
 credential rows.
+
+### Plugin management
+
+The leader mounts DSH's plugin manager (`plugin-manager`, a base row that needs
+a launcher profile), and `/dsh` reads it as DSH's Plugins page does:
+`listBundles` for each bundle's locale title and description, version,
+selection, `installed`, `optional`, `removable` and `readOnlyReason`, and
+`listPlugins` for each row's live Loader phase. The table leaves out the app
+bundles every installation carries (web, headless, SDK, ACP) unless one is
+selected. rc.2 ships `OPTIONAL_BUNDLES` = Agent Teams, Voice input and Auto
+Authorization Review, off until switched on and never removable.
+
+`/dsh enable|disable <bundle>` calls `setBundleEnabled` and `<bundle>#<row>`
+calls `setPluginEnabled`, under the same profile lock as `/dsh add`. dscode runs
+without `hmr`, so the manager saves the change and answers `restart-required`;
+the bridge then reconciles the running Loader with the saved patches, as
+`/browser` and the native provider do, requiring the bundle's rows (or the row)
+to activate. Verified on an installed leader: all three optional bundles and a
+row switch on and off live. An enable whose rows do not activate is switched off
+again; a disable the live Loader rejects stays saved for the next start. A row
+still off after the reconcile is reported as overridden by a higher layer. The
+manager's `readOnlyReason` locks a bundle or row, and dscode refuses to switch
+off `@deepseek-ai/dsh-base`, `@hqzhao95/dscode` or their rows, which would stop
+the leader from starting. The Agent Teams bundle inserts host-level Team tools
+that dscode confines to its `teams` preset; `/doctor` warns while it is on.
+
+Boot skips a bundle it cannot load and says so only in the leader log. The
+bridge compares the profile's selection with `profileContext.startedBundles`,
+reads the reasons with app-boot's `loadProfileDirectory`, and the first session
+opened in that leader gets one `image_dropped` system note naming them.
+`/doctor` adds the Loader rows that failed or wait for a service, with their
+bundle and the leader log.
+
+`dscode doctor --reset-plugins` is the Desktop's "disable third-party plugins":
+under the profile lock it calls the runtime's `sanitizeProfile` (a byte-for-byte
+mirror when app-boot cannot load), which renames `cordis.patch.yml` to
+`cordis.patch.yml.bak-<ms>` and selects `@deepseek-ai/dsh-base` and
+`@hqzhao95/dscode` only. Installed packages and `compatibility.json` stay. The
+report names the row switches and settings the patch held and the `mv` that
+restores it. When the leader does not start or accept the connection, the
+TUI's error ends with that command.
+
+dscode keeps the profile with npm (`package-lock.json`); DSH's `dsh plugin` and
+its manager's `installBundle` use pnpm (`pnpm-lock.yaml`), and the two layouts
+diverge. `/doctor` warns when the profile holds a `pnpm-lock.yaml`. Test homes
+that install the plugin with `dsh plugin --profile dscode add` show that warning.
+
+`scripts/e2e-plugins-installed.mjs <runtime> <home>` checks an installed leader
+over ACP: the table, enabling and disabling an optional bundle and one of its
+rows, the core refusals, an override by a DSH-home patch, `/doctor`, the note
+for a skipped bundle, and `--reset-plugins` with a restart.
 
 ### Approval reasons
 

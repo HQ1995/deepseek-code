@@ -62,6 +62,7 @@ const declaredDependencies = [
     ['provider-roster', ['model-endpoint', 'native-provider', 'native-seams', 'provider-profile', 'wire-catalog', 'guards']],
     ['native-provider', ['acp', 'native-seams', 'plugin-rows', 'provider-profile']],
     ['plugin-rows', ['acp', 'guards']],
+    ['plugin-status', ['plugin-rows', 'guards']],
     ['browser-control', ['acp', 'native-seams', 'plugin-rows', 'profile-plugins', 'guards']],
     ['browser-actions', ['guards']],
     ['model-endpoint', ['guards']],
@@ -96,7 +97,7 @@ const declaredDependencies = [
     ['native-team', ['acp']],
     ['team-presets', []],
     ['execution-world', ['acp']],
-    ['profile-plugins', ['package-location', 'plugin-bundles', 'acp', 'guards']],
+    ['profile-plugins', ['package-location', 'plugin-bundles', 'plugin-rows', 'plugin-status', 'acp', 'guards']],
     ['plugin-bundles', []],
     ['acp', ['protocol', 'guards']],
     ['protocol', ['codec']],
@@ -172,6 +173,7 @@ describe('architecture ownership and dependency gate', () => {
     expect(computedImports.sort()).toEqual([
       'bin/bootstrap.mjs: pathToFileURL(candidate).href', // validated active/recovery-stage updater
       "bin/bootstrap.mjs: pathToFileURL(join(profile, plugin, 'dscode.mjs')).href", // recovered installed launcher
+      "bin/plugin-reset.mjs: pathToFileURL(createRequire(anchor).resolve('@deepseek-ai/dsh-app-boot')).href", // the profile runtime's sanitizeProfile
       'bin/update.mjs: pathToFileURL(binding).href', // external pinned native file-lock binding
       "src/package-location.ts: pathToFileURL(join(PACKAGE_DIRECTORY, 'bin/update.mjs')).href",
     ])

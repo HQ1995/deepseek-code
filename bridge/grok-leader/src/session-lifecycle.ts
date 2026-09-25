@@ -64,6 +64,8 @@ interface LifecycleHost {
   logger: { warn(message: string): void }
   /** A published session finished initializing and accepts input. */
   unblocked(record: SessionRecord): void
+  /** A leader-wide system note the next opened session shows once. */
+  notice?: { pending(): boolean; take(): string | undefined }
   views: {
     status(record: SessionRecord, replay?: boolean): void
     children(record: SessionRecord, replay: boolean): Promise<void>
@@ -185,15 +187,18 @@ export function createSessionLifecycle(host: LifecycleHost) {
     initializing.delete(record)
     host.unblocked(record)
     const notice = record.model.notice
-    if (creation.kind === 'load' && notice === undefined) return
+    if (creation.kind === 'load' && notice === undefined && host.notice?.pending() !== true) return
     // After the response: a new session's id is unknown to the client until then.
     const conn = host.client(record.clientId)!
     record.mcpInitTimer = setTimeout(() => {
       record.mcpInitTimer = undefined
       if (ownedRecord(record.clientId, record.agent.session.id) !== record || host.client(record.clientId) !== conn) return
       if (creation.kind !== 'load') conn.notify('_x.ai/mcp_initialized', { sessionId: record.agent.session.id })
-      // The TUI's display-only system note, once per opened session.
-      if (notice !== undefined) record.output.notify('x.ai/session_notification', { update: { sessionUpdate: 'image_dropped', notes: [notice] } })
+      // The TUI's display-only system notes: this session's own, and a
+      // leader-wide one only the first session to get here takes.
+      const leader = host.notice?.take()
+      const notes = [notice, leader].filter((note): note is string => note !== undefined)
+      if (notes.length > 0) record.output.notify('x.ai/session_notification', { update: { sessionUpdate: 'image_dropped', notes } })
     }, 50)
   }
   const activate = async (clientId: number, meta: Meta, events: readonly SessionEvent[], preset: Preset, creation: Creation, mcpConfigs?: McpClientConfig[]): Promise<SessionRecord> => {
