@@ -4,7 +4,6 @@
 //! command structs and provides `builtin_commands()` for registry
 //! construction.
 pub mod always_approve;
-pub mod auto;
 pub mod btw;
 pub mod cd;
 pub mod compact;
@@ -86,7 +85,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(provider::ProviderCommand),
         Arc::new(effort::EffortCommand),
         Arc::new(always_approve::AlwaysApproveCommand),
-        Arc::new(auto::AutoCommand),
         Arc::new(multiline::MultilineCommand),
         Arc::new(compact_mode::CompactModeCommand),
         Arc::new(vim_mode::VimModeCommand),
@@ -191,9 +189,6 @@ mod tests {
         assert!(reg.get("provider").is_some());
         assert!(reg.get("home").is_some());
         assert!(reg.get("view-plan").is_some());
-        reg.set_available_tools(std::collections::HashSet::from([
-            "schedule_create".to_string()
-        ]));
         assert!(reg.get("loop").is_some(), "/loop should be registered");
         assert!(
             reg.get("vim-mode").is_some(),
@@ -201,22 +196,17 @@ mod tests {
         );
         assert!(reg.get("find").is_some(), "/find should be registered");
     }
+    /// DIVERGENCE(dscode): `/loop` is gated on the `schedule` capability (its
+    /// `visible`), not on a toolset the leader never advertises.
     #[test]
-    fn loop_command_requires_native_schedule_tool() {
-        let loop_cmd = loop_cmd::LoopCommand;
-        assert_eq!(loop_cmd.required_tools(), &["schedule_create"]);
-    }
-    #[test]
-    fn loop_command_hidden_without_scheduler_tools() {
+    fn loop_command_is_not_tool_gated() {
+        assert!(loop_cmd::LoopCommand.required_tools().is_empty());
         let mut reg = CommandRegistry::new(builtin_commands());
         reg.set_available_tools(std::collections::HashSet::from([
             "read_file".to_string(),
             "grep".to_string(),
         ]));
-        assert!(
-            reg.get("loop").is_none(),
-            "/loop needs the native scheduling tool"
-        );
+        assert!(reg.get("loop").is_some());
         assert!(reg.get("quit").is_some());
         assert!(reg.get("copy").is_some());
     }

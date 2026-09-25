@@ -23,7 +23,7 @@ fn native_goal_response_requires_native_kind_and_text() {
 async fn native_session_effect_uses_control_wire_and_dedicated_result() {
     use std::sync::Arc;
     use xai_acp_lib::AcpAgentMessage;
-    for (method, command) in [("x.ai/goal", "/goal pause"), ("x.ai/subagents", "/subagents stop child")] {
+    for (method, command) in [("x.ai/commands/run", "/goal pause"), ("x.ai/commands/run", "/subagents stop child")] {
     for (raw, expected) in [
         (r#"{"result":{"kind":"success","text":"Goal paused."}}"#, Ok("Goal paused.".to_string())),
         (r#"{"result":{"kind":"error","text":"native refusal"}}"#, Err("native refusal".to_string())),

@@ -8,8 +8,8 @@
 //! the shell to expand, but marked `InjectSkill` for rendering.
 //!
 //! DIVERGENCE(dscode): a host command's `_meta` also carries the rest of its
-//! DSH descriptor ([`CommandMeta`]): its plugin-owned `definitionId` and
-//! whether composer attachments may accompany it.
+//! DSH descriptor ([`CommandMeta`]): its plugin-owned `definitionId`, whether
+//! composer attachments may accompany it, and whether it runs immediately.
 
 use agent_client_protocol as acp;
 use xai_grok_tools::implementations::skills::types::SkillScope;
@@ -90,6 +90,9 @@ pub struct CommandMeta {
     /// Composer attachments may accompany an invocation. Absent means the
     /// host rejects them, so the composer refuses them before dispatch.
     pub attachments: bool,
+    /// The host runs it at once over `x.ai/commands/run`, beside a running
+    /// turn and its queue, instead of receiving it as a queued prompt.
+    pub immediate: bool,
 }
 
 impl CommandMeta {
@@ -100,6 +103,7 @@ impl CommandMeta {
         Self {
             definition_id: trimmed_string_field(m, "definitionId"),
             attachments: m.get("attachments").and_then(|v| v.as_bool()) == Some(true),
+            immediate: m.get("immediate").and_then(|v| v.as_bool()) == Some(true),
         }
     }
 }
@@ -165,6 +169,10 @@ impl SlashCommand for AcpSlashCommand {
     /// says so; skills are prompts and keep theirs.
     fn refuses_attachments(&self) -> bool {
         matches!(self.skill, SkillMeta::Absent) && !self.command.attachments
+    }
+
+    fn runs_immediately(&self) -> bool {
+        matches!(self.skill, SkillMeta::Absent) && self.command.immediate
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -362,6 +370,7 @@ mod tests {
         ));
         assert_eq!(goal.definition_id(), Some("@deepseek-ai/dsh-command-goal"));
         assert!(!goal.refuses_attachments());
+        assert!(!goal.runs_immediately());
         assert_eq!(goal.provenance(), CommandProvenance::Shell);
 
         let compact = AcpSlashCommand::from(&make_cmd(
@@ -383,6 +392,20 @@ mod tests {
             assert_eq!(bare.definition_id(), None, "{meta:?}");
             assert!(bare.refuses_attachments(), "{meta:?}");
         }
+
+        let subagents = AcpSlashCommand::from(&make_cmd(
+            "subagents",
+            Some(serde_json::json!({ "immediate": true })),
+        ));
+        assert!(subagents.runs_immediately());
+        assert!(subagents.refuses_attachments());
+        assert!(
+            !AcpSlashCommand::from(&make_cmd(
+                "subagents",
+                Some(serde_json::json!({ "immediate": "yes" })),
+            ))
+            .runs_immediately()
+        );
 
         // Skills are prompts: their attachments ride along.
         let skill = AcpSlashCommand::from(&make_cmd(

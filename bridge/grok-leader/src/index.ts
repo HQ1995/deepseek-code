@@ -559,7 +559,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     [WIRE.sessionSetMode]: (clientId, params) => interactions.mode(clientId, params),
   })
   requests({ // Native features: goals, tasks and reminders, children, asides, execution.
-    'x.ai/goal': (clientId, params) => nativeStatus.goal(clientId, params),
     'x.ai/task/output': (clientId, params) => tasks.output(clientId, params),
     'x.ai/task/kill': (clientId, params) => tasks.kill(clientId, params),
     'x.ai/scheduler/list': (clientId, params, method) => tasks.reminders(clientId, method, params),
@@ -568,13 +567,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     'x.ai/subagent/history': (clientId, params) => children.history(clientId, params),
     'x.ai/subagent/cancel': (clientId, params) => children.cancel(clientId, params),
     'x.ai/subagent/inbox': (clientId, params) => children.inbox(clientId, params),
-    'x.ai/subagents': (clientId, params) => children.command(clientId, params),
     'x.ai/btw': (clientId, params) => asides.btw(clientId, params),
     'x.ai/doctor': (clientId, params) => execution.doctor(clientId, params),
     'x.ai/terminals': (clientId, params) => execution.terminals(clientId, params),
   })
   requests({ // Commands, skills, presets and MCP servers.
     'x.ai/commands/list': (clientId, params) => sessionCommands.catalog(clientId, params),
+    'x.ai/commands/run': (clientId, params) => sessionCommands.run(clientId, params),
     'x.ai/skills/list': (clientId, params) => sessionCommands.skills(clientId, params),
     'x.ai/presets': (clientId, params) => sessionPresets.controls(clientId, params),
     'x.ai/bundle/status': () => sessionPresets.status(),

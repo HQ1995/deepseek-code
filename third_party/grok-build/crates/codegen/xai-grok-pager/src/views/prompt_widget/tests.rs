@@ -1515,16 +1515,70 @@
         );
     }
 
+    /// DIVERGENCE(dscode): the leader advertises runtime capabilities
+    /// (`_meta.capabilities`), never a toolset (`_meta.tools`). `/loop`
+    /// follows the `schedule` capability alone; requiring `schedule_create` in
+    /// a toolset nothing sends hid it from every session. The update is decoded
+    /// from the bridge's own wire JSON: a bare `meta` key (what the bridge once
+    /// sent) is not ACP's extension field and carries nothing.
     #[test]
-    fn sync_acp_commands_passes_tools_to_registry() {
-        // End-to-end: tracker advertises a toolset, sync forwards it,
-        // and tool-gated commands disappear when their tool isn't registered.
-        // DIVERGENCE(dscode): /loop is gated on DSH's native schedule_create
-        // tool, which only scheduling presets register.
+    fn loop_gating_follows_the_schedule_capability_the_leader_advertises() {
+        use agent_client_protocol as acp;
+        let models = crate::acp::model_state::ModelState::default();
+        let decode = |meta_key: &str, capabilities: &[&str]| -> acp::SessionUpdate {
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": [],
+                meta_key: { "capabilities": capabilities },
+            }))
+            .expect("available_commands_update")
+        };
+        for (meta_key, capabilities, expected) in [
+            ("_meta", &["schedule", "skills"][..], 1),
+            ("_meta", &["skills"][..], 0),
+            ("meta", &["schedule", "skills"][..], 0),
+        ] {
+            let mut pw = PromptWidget::new();
+            let mut tracker = crate::acp::tracker::AcpUpdateTracker::new();
+            let mut scrollback = crate::scrollback::ScrollbackState::new();
+            tracker.handle_update(
+                decode(meta_key, capabilities),
+                &crate::acp::meta::NotificationMeta::default(),
+                &mut scrollback,
+            );
+            // Drained as `acp_handler` drains them into the session.
+            let tools: Option<std::collections::HashSet<String>> = tracker
+                .take_pending_acp_tools()
+                .map(|tools| tools.into_iter().collect());
+            assert!(tools.is_none(), "the leader sends no toolset");
+            pw.slash_controller
+                .set_capabilities(tracker.take_pending_acp_capabilities());
+            pw.sync_acp_commands(&[], tools.as_ref(), &models);
+            pw.textarea.set_text("/loop");
+            pw.refresh_slash(&models);
+            let rows = pw
+                .slash_snapshot()
+                .matches
+                .iter()
+                .filter(|row| row.display == "/loop")
+                .count();
+            assert_eq!(rows, expected, "{meta_key} {capabilities:?}");
+            assert!(
+                pw.slash_controller
+                    .registry()
+                    .get_for_dispatch("loop")
+                    .is_some(),
+                "a typed /loop reaches its handler"
+            );
+        }
+    }
+
+    /// DIVERGENCE(dscode): a forwarded toolset does not gate `/loop`; the
+    /// `schedule` capability alone does.
+    #[test]
+    fn loop_gating_ignores_a_forwarded_toolset() {
         let mut pw = PromptWidget::new();
         let models = crate::acp::model_state::ModelState::default();
-        pw.slash_controller
-            .set_capabilities(Some(["schedule".to_string()].into_iter().collect()));
         let loop_rows = |pw: &mut PromptWidget| {
             pw.textarea.set_text("/loop");
             pw.refresh_slash(&models);
@@ -1536,17 +1590,20 @@
                 .count()
         };
 
+        pw.slash_controller
+            .set_capabilities(Some(["schedule".to_string()].into_iter().collect()));
         let without: std::collections::HashSet<String> =
             ["read_file".to_string()].into_iter().collect();
         pw.sync_acp_commands(&[], Some(&without), &models);
-        assert_eq!(loop_rows(&mut pw), 0, "/loop must hide without schedule_create");
+        assert_eq!(loop_rows(&mut pw), 1, "/loop ignores the toolset");
 
-        let with: std::collections::HashSet<String> =
-            ["read_file".to_string(), "schedule_create".to_string()]
-                .into_iter()
-                .collect();
-        pw.sync_acp_commands(&[], Some(&with), &models);
-        assert_eq!(loop_rows(&mut pw), 1, "/loop must return with schedule_create");
+        pw.slash_controller
+            .set_capabilities(Some(["skills".to_string()].into_iter().collect()));
+        assert_eq!(
+            loop_rows(&mut pw),
+            0,
+            "/loop hides without the schedule capability"
+        );
     }
 
     // ── Slash completion acceptance tests ──────────────────────────

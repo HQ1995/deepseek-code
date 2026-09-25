@@ -7,7 +7,7 @@ import { errorMessage } from './guards.ts'
 import type { AgentPresetsLike } from './session-presets.ts'
 import type { SessionWork, SessionOperation } from './session-work.ts'
 import type { SessionOutput } from './session-output.ts'
-import type { ParsedPrompt } from './prompt-content.ts'
+import { parsePrompt, type ParsedPrompt } from './prompt-content.ts'
 import type { PromptSettleResult } from './prompt-queue.ts'
 
 /** DSH's handler-free command descriptor (`CommandDescriptor`). */
@@ -57,18 +57,24 @@ interface CommandHost<S extends CommandSession> {
   logger: { warn(message: string): void }
 }
 /** The rest of a host command's descriptor, which ACP's name, description and
- * hint cannot carry: its plugin-owned identity and whether composer
- * attachments may accompany it (absent: the client refuses them). */
-interface CommandMeta { definitionId?: string; attachments?: true }
+ * hint cannot carry: its plugin-owned identity, whether composer attachments
+ * may accompany it (absent: the client refuses them), and whether the client
+ * runs it at once over `x.ai/commands/run` instead of queueing it behind the
+ * running turn. */
+interface CommandMeta { definitionId?: string; attachments?: true; immediate?: true }
 interface AdvertisedCommand {
   name: string
   description: string
   input?: { hint: string }
   _meta?: { scope: string; path: string; pluginName: string } | CommandMeta
 }
+/** Commands that control a session beside its running turn rather than
+ * inside it: the client sends them over `x.ai/commands/run`, never queued. */
+const IMMEDIATE = new Set(['goal', 'subagents'])
 const commandMeta = (command: NativeCommandDescriptor): CommandMeta | undefined => {
   const meta: CommandMeta = { ...command.definitionId === undefined ? {} : { definitionId: command.definitionId },
-    ...command.input?.attachments === true ? { attachments: true } : {} }
+    ...command.input?.attachments === true ? { attachments: true } : {},
+    ...IMMEDIATE.has(command.name.toLowerCase()) ? { immediate: true } : {} }
   return Object.keys(meta).length === 0 ? undefined : meta
 }
 const skillScope = (skill: NativeSkillSummary) => skill.source?.startsWith('project-') ? 'repo'
@@ -122,7 +128,8 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
     { name: 'browser', description: 'Turn the isolated browser on or off',
       input: { hint: 'status | on [--executable <path>] [--origin <origin>]... [--any-origin] | off | origins add|remove <origin>' } },
     { name: 'subagents', description: 'Inspect and control child conversations',
-      input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' } }]
+      input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' },
+      _meta: { immediate: true } }]
     if (presets.length > 0) commands.push({ name: 'preset', description: 'Switch the active agent preset', input: { hint: presets.map(preset => preset.id).join(' | ') } })
     if (record === undefined) return commands
     if (host.capabilities(record).includes('team')) commands.push({ name: 'team', description: 'Show the Agent Team roster and task board' })
@@ -176,8 +183,9 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
             const client = host.client(record.clientId)
             active(record, scope)
             if (client === undefined || client.closed) return
+            // ACP's extension field is `_meta`; a bare `meta` never reached the TUI.
             client.notify('session/update', { sessionId: record.agent.session.id,
-              update: { sessionUpdate: 'available_commands_update', availableCommands, meta: { capabilities } } })
+              update: { sessionUpdate: 'available_commands_update', availableCommands, _meta: { capabilities } } })
             advertised.set(record, capabilityKey(capabilities))
           } while (state.dirty)
         } finally { if (refreshes.get(record) === state) refreshes.delete(record) }
@@ -294,7 +302,25 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
     if (failures.length > 1) throw new AggregateError(failures, 'command subscription construction failed')
     throw error
   }
+  /** Each immediate command's owner; both take the `x.ai/commands/run` params. */
+  const immediate: Record<string, (clientId: number, params: unknown) => Promise<CommandResult>> = {
+    goal: (clientId, params) => host.goals.goal(clientId, params),
+    subagents: (clientId, params) => host.children.command(clientId, params),
+  }
   return {
+    /** `x.ai/commands/run`: an immediate command (`_meta.immediate`) runs at once
+     * beside the session's turn and queue, and answers with its result instead
+     * of settling a prompt. Its owner checks the session and the invocation. */
+    run(clientId: number, params: unknown): Promise<CommandResult> {
+      return accepted(async () => {
+        const p = paramRecord(params, 'x.ai/commands/run')
+        const text = parsePrompt(p.prompt).text.trim()
+        const name = /^\/([^\s]+)/.exec(text)?.[1]?.toLowerCase()
+        const owner = name === undefined || !IMMEDIATE.has(name) ? undefined : immediate[name]
+        if (owner === undefined) throw invalidParams(`x.ai/commands/run requires an immediate command (${[...IMMEDIATE].map(name => '/' + name).join(', ')})`)
+        return owner(clientId, params)
+      })
+    },
     catalog(clientId?: number, params?: unknown): Promise<{ commands: AdvertisedCommand[] }> {
       return accepted(async () => {
         const p = clientId === undefined && params === undefined ? {} : paramRecord(params, 'x.ai/commands/list')

@@ -331,6 +331,14 @@ pub trait SlashCommand: Send + Sync {
         false
     }
 
+    /// DIVERGENCE(dscode): whether the host runs this command at once over
+    /// `x.ai/commands/run`, beside a running turn and its queue, and answers
+    /// with its result. Declared by the host command's descriptor
+    /// (`_meta.immediate`); pager builtins never are.
+    fn runs_immediately(&self) -> bool {
+        false
+    }
+
     /// Tool names the agent must have registered for this command to work.
     ///
     /// Default is empty (no tool dependency). Override for commands that

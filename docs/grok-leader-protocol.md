@@ -92,11 +92,16 @@ The bridge also implements the `x.ai/*` surfaces required by this TUI:
 - multiline dsh question headers/details and free-form answers
 - preset-scoped manual `/compact` dispatch through dsh's command registry;
   presets without a compaction command fail closed
-- `x.ai/goal` executes the preset-scoped native `/goal` command outside ordinary
-  prompt admission, without fabricating model calls or prompt-complete events
+- `x.ai/commands/run` `{sessionId, prompt}` runs an immediate command, one
+  whose advertisement carries `_meta.immediate: true`, beside the session's
+  running turn and prompt queue, and answers `{result: {kind, text}}` without
+  fabricating model calls or prompt-complete events. Today these are the
+  preset-scoped native `/goal` and the bridge's `/subagents` controls (list,
+  pending, queue, steer, edit, remove, steer-queued (one/all), clear, stop);
+  any other line fails with `-32602`. The same lines sent as `session/prompt`
+  still run turnless. (This replaces the dedicated `x.ai/goal` and
+  `x.ai/subagents` routes.)
 - native goal, permission, and task state/control from the owning dsh services
-- `x.ai/subagents` runs `/subagents` controls outside the parent's prompt queue:
-  list, pending, queue, steer, edit, remove, steer-queued (one/all), clear, stop
 - `x.ai/subagent/inbox` returns structured child/queue rows and applies the same
   native controls, with exact descendant/message IDs and stale-text checks.
 - `x.ai/task/output` returns an owned job's non-consuming retained output;
@@ -243,7 +248,8 @@ TUI renderers that already exist; nothing here adds a TUI code path.
 - Activity updates carry `_meta.sessionRunning` from native agent status,
   independently of foreground prompt IDs; native goal rounds need no synthetic
   foreground prompt. `/auto` remains unsupported and cannot change permissions
-  or invoke the model.
+  or invoke the model; the bridge's refusal is the only answer, since the TUI
+  has no `/auto` of its own.
 - A fresh profile may advertise no providers or models. Provider mutations
   broadcast the refreshed catalog, and model/effort selections persist both as
   the default for new sessions and as session-local durable events. Like DSH's
@@ -417,7 +423,11 @@ A native command carries the rest of its DSH descriptor in `_meta`:
 composer attachments may accompany it. The TUI refuses the draft's images for
 every other non-skill command before dispatch, keeping the draft, and lists the
 non-skill commands in its Ctrl+P palette's Commands section.
-The ambient update is re-sent on `commands/change`, `skills/change`, and on
+The ambient update carries the session's runtime capabilities (`subagents`,
+`skills`, `plan`, `goal`, `jobs`, `workflow`, `todo`, `schedule`, `team`) in
+ACP's `_meta.capabilities` and never a toolset; the TUI's capability-gated
+commands (`/btw`, `/plan`, `/inbox`, `/reminders`, `/loop`) read it. It is
+re-sent on `commands/change`, `skills/change`, and on
 `tools/change` when a session's capabilities change. A tool-registry change
 inside a conversation reaches the TUI as an `image_dropped` system note
 (`Tools added: …` / `Tools removed: …`), live and on replay.

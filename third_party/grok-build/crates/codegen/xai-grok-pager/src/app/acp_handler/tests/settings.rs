@@ -151,17 +151,8 @@
     fn loop_instruction(app: &mut AppView, args: &str) -> String {
         use crate::app::actions::Action;
 
-        // `/loop` is `required_tools()`-gated and the registry fails closed
-        // until the toolset is advertised, so a bare test agent never reaches
-        // the command.
-        if let Some(agent) = app.agents.get_mut(&AgentId(0)) {
-            agent
-                .prompt
-                .slash_controller
-                .registry_mut()
-                // DIVERGENCE(dscode): `/loop` needs DSH's native scheduler tool.
-                .set_available_tools(["schedule_create".to_string()].into_iter().collect());
-        }
+        // DIVERGENCE(dscode): `/loop` is not tool-gated; its `schedule`
+        // capability gate only hides it from completion.
         let effects =
             crate::app::dispatch::dispatch(Action::SendPrompt(format!("/loop {args}")), app);
         let blocks = effects

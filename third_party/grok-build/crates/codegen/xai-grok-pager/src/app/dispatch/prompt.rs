@@ -550,53 +550,42 @@ pub(super) fn dispatch_send_prompt_inner(
         return vec![];
     }
 
-    // Native controls remain available while the parent model turn is running.
-    if !literal && let Some(invocation) = crate::slash::parse_invocation(trimmed) {
-        if invocation.token.eq_ignore_ascii_case("auto") {
-            if consume_input {
-                agent.prompt.set_text("");
-            }
-            push_and_page_flip(
-                &mut agent.scrollback,
-                RenderBlock::system(
-                    "/auto is unsupported: the permission classifier is not available in dscode.",
-                ),
-            );
+    // DIVERGENCE(dscode): a host command whose descriptor says `immediate`
+    // (`/goal`, `/subagents`) runs at once over `x.ai/commands/run`, beside a
+    // running turn and its queue, instead of queueing as a prompt.
+    if !literal
+        && let Some(invocation) = crate::slash::parse_invocation(trimmed)
+        && agent
+            .prompt
+            .slash_controller
+            .registry()
+            .get_for_dispatch(invocation.token)
+            .is_some_and(|command| command.runs_immediately())
+    {
+        let Some(session_id) = agent.session.session_id.clone() else {
+            agent.show_toast("No active session");
             return vec![];
-        }
-        let method = if invocation.token.eq_ignore_ascii_case("goal") {
-            Some("x.ai/goal")
-        } else if invocation.token.eq_ignore_ascii_case("subagents") {
-            Some("x.ai/subagents")
-        } else {
-            None
         };
-        if let Some(method) = method {
-            let Some(session_id) = agent.session.session_id.clone() else {
-                agent.show_toast("No active session");
-                return vec![];
-            };
-            let images = if consume_input {
-                interject::record_interject_prompt_history(agent, &text);
-                agent.prompt.drain_images()
-            } else {
-                Vec::new()
-            };
-            let prompt = crate::prompt_images::build_content_blocks_with_workspace(
-                text,
-                images,
-                Some(std::path::Path::new(&agent.session.cwd)),
-            );
-            if consume_input {
-                agent.prompt.set_text("");
-            }
-            return vec![Effect::RunSessionCommand {
-                agent_id: id,
-                session_id,
-                method,
-                prompt,
-            }];
+        let images = if consume_input {
+            interject::record_interject_prompt_history(agent, &text);
+            agent.prompt.drain_images()
+        } else {
+            Vec::new()
+        };
+        let prompt = crate::prompt_images::build_content_blocks_with_workspace(
+            text,
+            images,
+            Some(std::path::Path::new(&agent.session.cwd)),
+        );
+        if consume_input {
+            agent.prompt.set_text("");
         }
+        return vec![Effect::RunSessionCommand {
+            agent_id: id,
+            session_id,
+            method: "x.ai/commands/run",
+            prompt,
+        }];
     }
 
     // ── Registry-based slash command execution ─────────────────────

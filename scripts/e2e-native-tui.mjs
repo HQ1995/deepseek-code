@@ -62,6 +62,12 @@ export async function nativeTuiAcceptance(ui) {
     await waitFor(capture, screen => !new RegExp(`${label}\\s+/${name}\\b`).test(screen), `palette-command-${name}-closed`)
   }
   await artifact('native-palette-commands', paletteCommands)
+  // /loop follows the `schedule` capability the standard preset advertises;
+  // the leader sends no toolset, which once hid it everywhere.
+  await type('/loo')
+  const loopMenu = await wait(/\/loop[^\n]*Run a prompt on a recurring interval/)
+  await artifact('native-loop-offered', { screen: loopMenu })
+  await key('Escape'); await key('C-u')
 
   const sourceId = randomUUID(), secret = `fact-${randomUUID()}`
   await runHeadless({ cwd, preset: 'standard', sessionId: sourceId, prompt: `DSCODE_NATIVE_REFERENCE_SOURCE:${secret}` })

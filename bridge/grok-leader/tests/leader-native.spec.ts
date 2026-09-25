@@ -179,7 +179,7 @@ describe('leader native jobs, children, workflows and activity', () => {
     const remove = vi.fn(), replace = vi.fn(), clear = vi.fn()
     Object.assign(child.inbox, { nextTurn: [message], nextStep: [], remove, replace, clear })
     let requestId = 2
-    const command = (text: string, receivingSession = sessionId) => c.request(requestId++, 'x.ai/subagents', {
+    const command = (text: string, receivingSession = sessionId) => c.request(requestId++, 'x.ai/commands/run', {
       sessionId: receivingSession, prompt: [{ type: 'text', text: '/subagents ' + text }],
     })
     for (const text of ['queue foreign message', 'queue child message', 'queue one-shot message', 'queue child-one', 'remove child-one missing']) {
@@ -505,7 +505,7 @@ describe('leader native jobs, children, workflows and activity', () => {
     agent.internals.status = 'running'
     pluginCtx.emit('agent/status', { agent, status: 'running' })
     await waitFor(() => activity().length === 2)
-    expect((await c.request(2, 'x.ai/goal', { sessionId, prompt: [{ type: 'text', text: '/goal pause' }] })).error).toBeUndefined()
+    expect((await c.request(2, 'x.ai/commands/run', { sessionId, prompt: [{ type: 'text', text: '/goal pause' }] })).error).toBeUndefined()
     c.notify('session/cancel', { sessionId })
     await c.request(3, 'x.ai/session/info', { sessionId })
     expect(agent.internals.cancelCalls).toBe(1)
