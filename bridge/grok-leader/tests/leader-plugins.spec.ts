@@ -104,7 +104,7 @@ describe('leader plugin inspection, /dsh command and bundle management', () => {
       sendRequest(c, 5, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh frobnicate' }] })
       await waitForId(c, 5)
       await waitFor(() => c.all.some(m => m.method === 'session/update'
-        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('Usage: /dsh')))
+        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('Usage: `/dsh')))
       expect(agent.internals.followups).toEqual([])
     } finally {
       delete process.env.DSH_PROFILE_DIR

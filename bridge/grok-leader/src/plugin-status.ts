@@ -140,7 +140,7 @@ export function bundleDetail(bundle: BundleLike, plugins: readonly PluginEntryLi
     lines.push('- `' + row.rowId + '` ' + row.moduleName + ' · ' + state + locked)
   }
   if (bundle.overrides.length > 0) lines.push('', 'Changes built-in rows: ' + bundle.overrides.join(', '))
-  lines.push('', 'Switch one component with /dsh enable|disable ' + bundle.name + '#<row>.')
+  lines.push('', 'Switch one component with `/dsh enable|disable ' + bundle.name + '#<row>`.')
   return lines.join('\n')
 }
 

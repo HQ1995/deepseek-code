@@ -87,7 +87,7 @@ describe('the plugin table', () => {
     expect(detail).toContain('- `tool-agent-team` @deepseek-ai/dsh-experimental-tool-agent-team · off')
     expect(detail).toContain('- `ui-agent-team` @deepseek-ai/dsh-experimental-client-ui-agent-team · running · locked: The profile patch cannot address this one uniquely.')
     expect(detail).toContain('Changes built-in rows: tool-subagent')
-    expect(detail).toContain('/dsh enable|disable @deepseek-ai/dsh-experimental-agent-team-profile#<row>')
+    expect(detail).toContain('`/dsh enable|disable @deepseek-ai/dsh-experimental-agent-team-profile#<row>`')
   })
 })
 

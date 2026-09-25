@@ -309,7 +309,7 @@ describe('/dsh enable and disable', () => {
     expect(text).toContain('| off | **Auto Authorization Review** | `@deepseek-ai/dsh-experimental-auto-review@0.1.7-rc.2` | official · optional · experimental | 1 row |')
     expect(text).toContain('- `dsh-plugin-broken`: This package declares no bundle, so it cannot be managed as a plugin.')
     expect(text).toContain('- `dsh-plugin-gone`: skipped at startup: cannot resolve it')
-    expect(text).toContain('/dsh enable <bundle>[#row] | /dsh disable <bundle>[#row]')
+    expect(text).toContain('`/dsh enable <bundle>[#row]` | `/dsh disable <bundle>[#row]`')
     expect(await f.plugins.execute('/dsh inspect dsh-plugin-mine')).toContain('- `shared` dsh-plugin-mine/shared · running · locked: The profile patch cannot address this one uniquely.')
   })
 
@@ -342,7 +342,7 @@ describe('/dsh enable and disable', () => {
     ['/dsh enable dsh-plugin-mine#nope', 'plugin-mine has no component "nope". Components: mine, shared.'],
     ['/dsh disable dsh-plugin-mine#shared', 'shared: The profile patch cannot address this one uniquely.'],
     ['/dsh enable @deepseek-ai/dsh-experimental-auto-review#auto-review', 'Auto Authorization Review is off; turn it on first'],
-    ['/dsh enable', 'Usage: /dsh enable <bundle>[#row]'],
+    ['/dsh enable', 'Usage: `/dsh enable <bundle>[#row]`'],
   ])('refuses %s before any write', async (text, reply) => {
     const f = await managed()
     expect(await f.plugins.execute(text)).toContain(reply)

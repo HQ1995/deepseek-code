@@ -156,8 +156,9 @@ export interface ProfilePluginDependencies extends PluginBundleDependencies {
   skipped?: () => readonly SkippedBundle[]
 }
 
-const USAGE = 'Usage: /dsh plugins | /dsh enable <bundle>[#row] | /dsh disable <bundle>[#row] | /dsh add [--trust] <package|git-url|file:path>'
-  + ' | /dsh remove <name> | /dsh inspect <name> | /dsh allow-version <package@version> --accept-risk | /dsh revoke-version <package@version>'
+// Inline code: the TUI renders replies as Markdown, where a bare `<name>` is HTML.
+const USAGE = 'Usage: `/dsh plugins` | `/dsh enable <bundle>[#row]` | `/dsh disable <bundle>[#row]` | `/dsh add [--trust] <package|git-url|file:path>`'
+  + ' | `/dsh remove <name>` | `/dsh inspect <name>` | `/dsh allow-version <package@version> --accept-risk` | `/dsh revoke-version <package@version>`'
 
 /** Verbs that mutate the profile, and so run under its lock. */
 const LOCKED_VERBS: ReadonlySet<string | undefined> = new Set(['add', 'remove', 'enable', 'disable', 'allow-version', 'revoke-version'])
@@ -203,7 +204,7 @@ async function listPlugins({ dir, catalog }: PluginVerb): Promise<string> {
  * Plugins page switches them; dscode's own bundles and their rows stay on. */
 async function switchPlugin({ verb, rest, catalog }: PluginVerb): Promise<string> {
   const enabled = verb === 'enable'
-  if (rest.length !== 1) return 'Usage: /dsh ' + String(verb) + ' <bundle>[#row]'
+  if (rest.length !== 1) return 'Usage: `/dsh ' + String(verb) + ' <bundle>[#row]`'
   if (catalog?.switches === undefined) return 'Switching plugins needs the DSH plugin manager, which this leader does not run. Restart dscode and retry.'
   const target = rest[0]!
   const hash = target.indexOf('#')
@@ -294,7 +295,7 @@ async function versionExemption({ dir, verb, rest }: PluginVerb): Promise<string
   const allow = verb === 'allow-version'
   const acceptRisk = rest.includes('--accept-risk')
   const keys = rest.filter(part => part !== '--accept-risk')
-  if (keys.length !== 1 || (!allow && acceptRisk)) return 'Usage: /dsh allow-version <package@version> --accept-risk | /dsh revoke-version <package@version>'
+  if (keys.length !== 1 || (!allow && acceptRisk)) return 'Usage: `/dsh allow-version <package@version> --accept-risk` | `/dsh revoke-version <package@version>`'
   if (allow && !acceptRisk) {
     return 'Running a plugin whose dsh peers this runtime does not satisfy can crash dscode or corrupt data. '
       + 'The exemption covers only ' + keys[0] + ' on this exact DSH version. Rerun with --accept-risk to grant it.'
@@ -307,7 +308,7 @@ async function versionExemption({ dir, verb, rest }: PluginVerb): Promise<string
 async function removePlugin({ dir, rest, bundles: pluginBundles }: PluginVerb): Promise<string> {
   const name = rest[0]
   if (name === undefined) return 'Missing plugin name. ' + USAGE
-  if (rest.length !== 1) return 'Usage: /dsh remove <name>'
+  if (rest.length !== 1) return 'Usage: `/dsh remove <name>`'
   if (CORE_PLUGIN_NAMES.has(name)) {
     return name + ' is a core component of this leader; refusing to remove it.'
   }
