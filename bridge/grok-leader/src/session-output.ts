@@ -2,6 +2,7 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { errorChain, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { hasToolImages } from './image-output.ts'
+import { compactionNotices, emptyTriggers, isXaiNotice, planModeNotice, toolCallWriting, triggerNotes, turnNotices, type CompactionFold, type ContextTokens, type ModeUpdate, type WritingCalls, type XaiNotice } from './turn-notices.ts'
 import { assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, parseJsonObject, sessionEventToUpdates, systemNotes, contextInfoFromProjection, type ContextProjectionValues, type DecodeSpeed, type ProjectedUpdate } from './projection.ts'
 
 export interface SessionOutputHost {
@@ -38,13 +39,11 @@ interface OutputState {
   /** Pending tool-call facts keyed by callId, used to attach rawInput/rawOutput. */
   pendingToolCalls: Map<string, { name: string; arguments: unknown }>
 }
-/** The pager renders `image_dropped` notes as one plain system block, so every neutral notice rides it. */
-type SystemNoticeUpdate = { sessionUpdate: 'image_dropped'; notes: string[]; totalTokens?: never; cacheHitPercent?: never; tokensPerSecond?: never }
-type OutputUpdate = ProjectedUpdate | SystemNoticeUpdate
-const noticeUpdate = (event: SessionEvent): SystemNoticeUpdate | undefined => {
-  const notes = systemNotes(event)
-  return notes === undefined ? undefined : { sessionUpdate: 'image_dropped', notes }
-}
+/** xAI-only updates: system notes (the pager renders `image_dropped` notes as
+ * one plain system block, so every neutral notice rides it), retry/failure
+ * states, tool calls being written and automatic compaction. No meters. */
+type NoticeUpdate = (XaiNotice | ModeUpdate) & { totalTokens?: never; cacheHitPercent?: never; tokensPerSecond?: never }
+type OutputUpdate = ProjectedUpdate | NoticeUpdate
 
 /** Per-attached-agent output ownership: revision/replay dedup, meter folding,
  * wire sequence stamps and asynchronous image hydration share one lifetime. */
@@ -54,8 +53,15 @@ export function createSessionOutput(host: SessionOutputHost) {
   let outputTail: Promise<void> | undefined
   const outputQueue: Array<(() => void | Promise<void>) | undefined> = []
   let outputHead = 0
-  let streamState: { attemptId: string; revision: number; turn: number; step: number; delivered: Set<number>; closed: boolean; pending: SessionEvent[] } | undefined
+  let streamState: { attemptId: string; revision: number; turn: number; step: number; delivered: Set<number>; closed: boolean; pending: SessionEvent[]; writing: WritingCalls } | undefined
   let lastUsage: { turn: number; step: number; usage: TokenUsage } | undefined
+  /** Last provider-reported prompt size, the occupancy replay can recover. */
+  let promptTokens: number | undefined
+  /** The TUI empties its todo pane at an automatic compaction; DSH keeps the
+   * turn's todos, so the last plan is sent again after the completion. */
+  let lastPlan: ProjectedUpdate | undefined
+  const compactions: CompactionFold = new Map()
+  const triggers = emptyTriggers()
   const state: OutputState = {
     lastSeq: -1,
     turnStartMs: undefined,
@@ -134,7 +140,7 @@ export function createSessionOutput(host: SessionOutputHost) {
     const send = (item: OutputUpdate): Promise<void> | undefined => {
       const eventSeq = state.eventSeq++
       const { totalTokens, cacheHitPercent, tokensPerSecond, ...update } = item
-      host.notify(item.sessionUpdate === 'image_dropped' ? 'x.ai/session_notification' : 'session/update', {
+      host.notify(isXaiNotice(item) ? 'x.ai/session_notification' : 'session/update', {
         sessionId: host.sessionId,
         update,
         _meta: {
@@ -186,6 +192,7 @@ export function createSessionOutput(host: SessionOutputHost) {
         state.cacheReadTokens += (usage.cacheReadTokens ?? 0) - (previous?.cacheReadTokens ?? 0)
         state.cacheWriteTokens += (usage.cacheWriteTokens ?? 0) - (previous?.cacheWriteTokens ?? 0)
         lastUsage = { turn: event.data.turn, step: event.data.step, usage }
+        promptTokens = usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
       }
       if (event.type === 'assistant/message') state.messageCount += 1
     } else if (event.type === 'tool/call') {
@@ -249,6 +256,8 @@ export function createSessionOutput(host: SessionOutputHost) {
         ...meters,
       })
     }
+    const plan = updates.findLast(item => item.sessionUpdate === 'plan')
+    if (plan !== undefined) lastPlan = plan
     if (event.type === 'tool/result') {
       state.pendingToolCalls.delete(String(event.data.message.toolCallId))
     }
@@ -280,7 +289,7 @@ export function createSessionOutput(host: SessionOutputHost) {
       drainAssistantEvents()
       streamState = {
         attemptId: frame.attemptId, revision: frame.revision, turn: frame.turn, step: frame.step,
-        delivered: new Set(), closed: false, pending: [],
+        delivered: new Set(), closed: false, pending: [], writing: new Map(),
       }
       return
     }
@@ -291,11 +300,37 @@ export function createSessionOutput(host: SessionOutputHost) {
       previous.closed = true
       drainAssistantEvents(frame.outcome.kind === 'committed' ? frame.outcome : undefined)
       previous.delivered.clear()
+      previous.writing.clear()
       return
     }
     if (previous.delivered.has(frame.index)) return
     for (const item of assistantChunkToUpdates(frame.chunk)) update(item, false, frame.time)
+    const writing = toolCallWriting(previous.writing, frame.chunk, frame.time)
+    if (writing !== undefined) update(writing, false, frame.time)
     previous.delivered.add(frame.index)
+  }
+
+  /** Occupancy for compaction notices: the native projection live, else the last reported prompt. */
+  const occupancy = (replay: boolean) => (): ContextTokens => {
+    const pressure = replay ? undefined : host.contextValues().contextPressure
+    const native = pressure?.projectedTokens, used = native ?? promptTokens
+    return { ...used === undefined ? {} : { used }, ...native === undefined ? {} : { native: true },
+      ...pressure?.contextWindow === undefined ? {} : { window: pressure.contextWindow } }
+  }
+  /** What one event adds beside its projected updates: system notes, xAI
+   * turn notices and mode updates. Folds see every event, sent or not. */
+  const notices = (event: SessionEvent, replay: boolean): OutputUpdate[] => {
+    const trigger = triggerNotes(triggers, event), notes = systemNotes(event) ?? trigger, mode = planModeNotice(event)
+    const compaction = compactionNotices(compactions, event, replay, occupancy(replay))
+    // DSH starts the retried attempt: an empty text chunk (the meters' no-op
+    // update) ends the TUI's Retrying state, as that attempt's first chunk would.
+    const retried = !replay && event.type === 'llm/retry-started'
+    return [
+      ...notes === undefined ? [] : [{ sessionUpdate: 'image_dropped' as const, notes }], ...mode === undefined ? [] : [mode],
+      ...turnNotices(event, replay), ...compaction,
+      ...retried ? [{ sessionUpdate: 'agent_message_chunk' as const, content: { type: 'text' as const, text: '' } }] : [],
+      ...lastPlan !== undefined && compaction.some(item => item.sessionUpdate === 'auto_compact_completed') ? [lastPlan] : [],
+    ]
   }
 
   const live = (event: SessionEvent): void => {
@@ -309,8 +344,7 @@ export function createSessionOutput(host: SessionOutputHost) {
       return
     }
     const updates = mapEvent(event, false)
-    const notice = noticeUpdate(event)
-    if (notice !== undefined) update(notice, false, event.time)
+    for (const notice of notices(event, false)) update(notice, false, event.time)
     const projected = hasToolImages(event) ? host.projectImages(event, updates) : undefined
     updates.forEach((item, index) => update(
       projected === undefined ? item : projected.then(items => items[index]!), false, event.time))
@@ -338,9 +372,9 @@ export function createSessionOutput(host: SessionOutputHost) {
         if (!admitEvent(event.seq)) continue
         if (event.type === 'turn/start') state.turnStartMs = event.time
         const items = mapEvent(event, true)
+        const extra = notices(event, true)
         if (!send) continue
-        const notice = noticeUpdate(event)
-        if (notice !== undefined) update(notice, true, event.time)
+        for (const notice of extra) update(notice, true, event.time)
         if (items.length === 0) continue
         // Reserve the complete replay prefix and its wire positions before
         // yielding. Otherwise a live successor raises lastSeq while an image

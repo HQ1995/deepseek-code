@@ -32,6 +32,24 @@ describe('leader questions and permissions', () => {
     })).toEqual({ answers: [{ id: 'q1', selected: [], custom: 'my custom answer' }] })
   })
 
+  it('reviews a DSH plan in the TUI plan approval view and answers with the requested changes', async () => {
+    const { pluginCtx, registry, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const answer = pluginCtx.waterfall('user-questions/request', { agent: registry.byId.get(sessionId)!, questions: [{
+      id: 'plan-review', header: 'Plan review', question: 'Approve this plan and leave plan mode?', detail: '# Plan\n\n1. Build',
+      options: [{ label: 'Approve' }, { label: 'Keep planning' }], intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan' } }],
+    }, () => Promise.reject(new Error('no answerer')))
+    await waitFor(() => c.all.some(message => message.method === 'x.ai/exit_plan_mode'))
+    const reverse = c.all.find(message => message.method === 'x.ai/exit_plan_mode')!
+    expect(reverse.params).toEqual({ sessionId, toolCallId: 'call-plan', planContent: '# Plan\n\n1. Build' })
+    expect(c.all.some(message => message.method === 'x.ai/ask_user_question')).toBe(false)
+    c.send({ type: 'acp', payload: JSON.stringify({ jsonrpc: '2.0', id: reverse.id, result: { outcome: 'cancelled', feedback: 'Test first' } }) })
+    expect(await answer).toEqual({ answers: [{ id: 'plan-review', selected: ['Keep planning'], custom: 'Test first' }] })
+  })
+
   it('a real option labelled Other remains selected', async () => {
     expect(await answerQuestion([{ id: 'q1', question: 'Category?', options: [{ label: 'Main' }, { label: 'Other' }] }], {
       outcome: 'accepted', answers: { 'Category?': ['Other'] },

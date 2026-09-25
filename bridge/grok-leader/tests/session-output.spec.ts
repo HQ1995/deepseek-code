@@ -148,6 +148,82 @@ describe('session output ownership', () => {
     expect(f.content()).toEqual(['live', 'other'])
   })
 
+  it('shows a tool call the model is still writing, live only, without its arguments', async () => {
+    const f = fixture()
+    f.frame({ type: 'start', attemptId: 'w', revision: 1, turn: 1, step: 1 })
+    const delta = (index: number, time: number, extra: Record<string, unknown> = {}) => f.frame({ type: 'chunk', attemptId: 'w', revision: 2 + index, index, time,
+      chunk: { type: 'tool-call-delta', index: 1, id: 'call', argumentsDelta: '{"path":"/secret', ...extra } })
+    delta(0, 1000, { name: 'write' }); delta(1, 1100); delta(2, 1200)
+    expect(f.notes.map(note => [note.method, note.params.update, note.params._meta.promptId])).toEqual([
+      ['x.ai/session_notification', { sessionUpdate: 'tool_call_delta_chunk', tool_index: 1, name: 'write' }, 'prompt'],
+    ])
+    delta(3, 4000)
+    expect(f.notes.at(-1)!.params.update).toEqual({ sessionUpdate: 'tool_call_delta_chunk', tool_index: 1 })
+    expect(JSON.stringify(f.notes)).not.toContain('secret')
+    // The durable settlement replays no writing status.
+    const restored = fixture()
+    await restored.output.restore([event(0, 'assistant/message', { turn: 1, step: 1, stream: [], message: { role: 'assistant', content: [] } })])
+    expect(restored.notes).toEqual([])
+  })
+
+  it('shows automatic compaction in the transcript and restores the todo pane the TUI clears', async () => {
+    const f = fixture()
+    const todos = event(0, 'todo/write', { todos: [{ content: 'keep me', status: 'in_progress' }] })
+    const log = [todos,
+      event(1, 'compaction/start', { compactionId: 'c', turn: 1 }, 1000),
+      event(2, 'compaction/summary', { compactionId: 'c', turn: 1, shadowedTokenCount: 50, usage: { inputTokens: 1, outputTokens: 5 }, summary: [{ type: 'text', text: 'short' }] }),
+      event(3, 'compaction/end', { compactionId: 'c', turn: 1 }, 1600)]
+    f.setContext({ contextPressure: { projectedTokens: 90, contextWindow: 100 } })
+    f.output.live(log[0]!); f.output.live(log[1]!); f.output.live(log[2]!)
+    f.setContext({ contextPressure: { projectedTokens: 45, contextWindow: 100 } })
+    f.output.live(log[3]!)
+    expect(f.notes.map(note => [note.method, note.params.update.sessionUpdate])).toEqual([
+      ['session/update', 'plan'], ['x.ai/session_notification', 'auto_compact_started'],
+      ['x.ai/session_notification', 'auto_compact_completed'], ['session/update', 'plan']])
+    expect(f.notes[1]!.params.update).toMatchObject({ tokens_used: 90, context_window: 100, percentage: 90 })
+    expect(f.notes[2]!.params.update).toEqual({ sessionUpdate: 'auto_compact_completed', tokens_before: 90, tokens_after: 45, elapsed_ms: 600, summary_preview: 'short' })
+    expect(f.notes[3]!.params.update).toEqual(f.notes[0]!.params.update)
+    expect(f.output.stats.compactionCount).toBe(1)
+    // Replay: the completion only, from the last reported prompt size.
+    const restored = fixture()
+    await restored.output.restore([assistantEvent(0, 'big', { inputTokens: 80, outputTokens: 2 }), ...log.slice(1).map((item, index) => ({ ...item, seq: index + 1 }))])
+    expect(restored.notes.map(note => note.params.update.sessionUpdate)).toEqual(['agent_message_chunk', 'auto_compact_completed'])
+    expect(restored.notes[1]!.params.update).toMatchObject({ tokens_before: 80, tokens_after: 35 })
+  })
+
+  it('keeps the TUI plan-mode indicator on DSH\'s committed plan mode, live and on replay', async () => {
+    const f = fixture()
+    const on = event(0, 'plan/mode', { active: true }), off = event(1, 'plan/mode', { active: false })
+    f.output.live(on); f.output.live(off)
+    expect(f.notes.map(note => [note.method, note.params.update])).toEqual([
+      ['session/update', { sessionUpdate: 'current_mode_update', currentModeId: 'plan' }],
+      ['session/update', { sessionUpdate: 'current_mode_update', currentModeId: 'default' }]])
+    const restored = fixture()
+    await restored.output.restore([on, off, event(2, 'plan/mode', { active: 'yes' })])
+    expect(restored.notes.map(note => [note.params.update, note.params._meta.isReplay])).toEqual(f.notes.map(note => [note.params.update, true]))
+  })
+
+  it('heads a turn no human started with why it started, live and on replay', async () => {
+    const log = [
+      event(0, 'agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [{ id: 'wake' }] }),
+      event(1, 'turn/start', { turn: 2 }),
+      event(2, 'agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }),
+      event(3, 'user/message', { id: 'wake', source: { kind: 'schedule' }, content: [{ type: 'text', text: '[SCHEDULE REMINDER]' }] }),
+      assistantEvent(4, 'Reminder: stretch'),
+    ]
+    const f = fixture()
+    f.setPrompt(undefined)
+    for (const item of log) f.output.live(item)
+    expect(f.notes.map(note => [note.method, note.params.update.sessionUpdate])).toEqual([
+      ['session/update', 'plan'], ['x.ai/session_notification', 'image_dropped'], ['session/update', 'agent_message_chunk']])
+    expect(f.notes[1]!.params.update).toEqual({ sessionUpdate: 'image_dropped', notes: ['Scheduled task'] })
+    expect(JSON.stringify(f.notes)).not.toContain('SCHEDULE REMINDER')
+    const restored = fixture()
+    await restored.output.restore(log)
+    expect(restored.notes.map(note => note.params.update)).toEqual(f.notes.map(note => note.params.update))
+    expect(restored.output.stats.messageCount).toBe(1)
+  })
+
   it('replaces same-step usage but keeps separately billed retry attempts', () => {
     const f = fixture()
     f.output.live(assistantEvent(0, 'first', { inputTokens: 10, outputTokens: 2 }))
@@ -156,6 +232,28 @@ describe('session output ownership', () => {
     f.output.live(event(2, 'llm/retry-started', { turn: 0, step: 0, retry: 1 }))
     f.output.live(assistantEvent(3, 'retry', { inputTokens: 5, outputTokens: 2 }))
     expect(f.notes.at(-1)!.params._meta.cumulativeTokens).toBe(22)
+  })
+
+  it('sends a scheduled retry live and a failed turn\'s typed failure live and on replay', async () => {
+    const f = fixture()
+    const scheduled = event(0, 'llm/retry', { retryId: 'r', turn: 1, step: 1, provider: 'p', mode: 'normal', policyKey: 'k',
+      retry: 1, maxRetries: 3, delayMs: 10, failure: { message: 'busy', code: 'SERVER', status: 503 } })
+    const failed = event(1, 'turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'busy', code: 'SERVER', status: 503, requestId: 'q' } } })
+    f.output.live(scheduled); f.output.live(failed)
+    expect(f.notes.map(note => [note.method, note.params.update, note.params._meta.promptId])).toEqual([
+      ['x.ai/session_notification', { sessionUpdate: 'retry_state', type: 'retrying', attempt: 1, max_retries: 3, reason: 'busy (status 503, SERVER)' }, 'prompt'],
+      ['x.ai/session_notification', { sessionUpdate: 'retry_state', type: 'failed', error_type: 'api', message: 'busy (status 503, SERVER, request q)' }, 'prompt'],
+    ])
+    const restored = fixture()
+    await restored.output.restore([scheduled, failed])
+    expect(restored.notes.map(note => [note.params.update, note.params._meta.isReplay]))
+      .toEqual([[f.notes[1]!.params.update, true]])
+    // The retried attempt starting ends the Retrying state with the meters' no-op chunk; replay sends none.
+    const started = event(2, 'llm/retry-started', { retryId: 'r', turn: 1, step: 1, retry: 1 })
+    f.output.live(started)
+    expect(f.notes.at(-1)!.params.update).toEqual({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '' } })
+    await restored.output.restore([started])
+    expect(restored.notes).toHaveLength(1)
   })
 
   it('keeps occupancy separate from cumulative spend and owns feature envelope identity', () => {

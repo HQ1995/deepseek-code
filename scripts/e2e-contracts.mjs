@@ -14,6 +14,7 @@ import { historyAcceptance } from './e2e-history.mjs'
 import { nativeTuiAcceptance } from './e2e-native-tui.mjs'
 import { nativeControlsAcceptance } from './e2e-native-controls.mjs'
 import { sessionLifecycleAcceptance } from './e2e-session-lifecycle.mjs'
+import { bridgeFeedsAcceptance } from './e2e-bridge-feeds.mjs'
 
 const execute = promisify(execFile)
 const env = process.env
@@ -601,7 +602,7 @@ try {
       assert.ok(response.ok, `Controlled stream release failed: ${response.status}`)
     },
   }
-  let history, nativeTui, nativeControls
+  let history, nativeTui, nativeControls, bridgeFeeds
   if (env.DSCODE_E2E_NEXT_SIX_ONLY !== '1' && !extraOnly) {
     await goalStreamAcceptance(goalUi)
     await goalAcceptance(goalUi)
@@ -639,12 +640,18 @@ try {
     type: text => tmux('send-keys', '-l', '-t', `${session}:main.0`, text),
   })
   const rewindUi = env.DSCODE_E2E_NEXT_SIX_ONLY !== '1' && !extraOnly ? await rewindUiAcceptance() : undefined
+  if (env.DSCODE_E2E_NEXT_SIX_ONLY !== '1' && !extraOnly) {
+    // Its jobs and plan-mode turns would shift other acceptances' viewports: a session of its own.
+    await stop(); activeId = randomUUID(); await boot(false, 'standard')
+    bridgeFeeds = await bridgeFeedsAcceptance({ ...goalUi, waitFor,
+      tuiLog: () => readFile(join(artifacts, `tui-${generation}.log`), 'utf8') })
+  }
   await stop()
   const kittyImages = env.DSCODE_E2E_KITTY_BIN ? await kittyImageAcceptance({
     kittyBin: env.DSCODE_E2E_KITTY_BIN, tuiBin: env.DSCODE_TUI_BIN, baseEnv, cwd, artifacts, waitFor, artifact, sockets, children,
   }) : { skipped: 'DSCODE_E2E_KITTY_BIN is not configured' }
   if (env.DSCODE_E2E_NEXT_SIX_ONLY !== '1' && !extraOnly) history = await historyAcceptance({ runHeadless, readRequests, scratch, artifactDir: artifacts })
-  await artifact('PASS', { sessionId: id, lifecycle, rewindUi, history, nativeTui, nativeControls, nextSix, archiveTerminal, kittyImages })
+  await artifact('PASS', { sessionId: id, lifecycle, rewindUi, history, nativeTui, nativeControls, bridgeFeeds, nextSix, archiveTerminal, kittyImages })
   console.log(`PASS runtime acceptance: ${artifacts}`)
 } catch (error) {
   await artifact('FAIL', { error: error.stack ?? String(error), state: await state().catch(() => null), screen: await capture().catch(() => '') })

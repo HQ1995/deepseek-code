@@ -6,6 +6,7 @@ import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp
 import { parsePrompt } from './prompt-content.ts'
 import { goalUpdateFromView, type ContextProjectionValues, type NativeGoalView } from './projection.ts'
 import type { SessionOutput } from './session-output.ts'
+import { planModeUpdate } from './turn-notices.ts'
 
 interface StatusSession {
   work: Pick<SessionWork, 'run'>
@@ -108,6 +109,15 @@ export function createNativeSessionStatus<S extends StatusSession>(host: StatusH
     throw new AggregateError(failures, 'native status subscription setup failed')
   }
 
+  /** The committed plan mode for the TUI's indicator. A new or forked session
+   * has no replayed `plan/mode` to carry it, and the TUI learns its id only
+   * from the response, so its lifecycle sends this once more afterwards. */
+  const mode = (record: S, replay = false): void => {
+    if (!isLive(record)) return
+    let plan: { active?: unknown } | undefined
+    try { plan = (host.projections()?.snapshot(record.agent.session, ['plan']).values as { plan?: { active?: unknown } } | undefined)?.plan } catch { return }
+    if (typeof plan?.active === 'boolean') record.output.update(planModeUpdate(plan.active), replay)
+  }
   const goal = async (clientId: number, params: unknown): Promise<{ result: { kind: string; text: string } }> => {
     const p = paramRecord(params, 'x.ai/goal')
     const record = closed ? undefined : host.owned(clientId, sessionIdParam(p.sessionId))
@@ -135,8 +145,10 @@ export function createNativeSessionStatus<S extends StatusSession>(host: StatusH
     snapshot(record: S, replay = false): void {
       if (!isLive(record)) return
       record.output.activity(record.agent.status === 'running')
+      mode(record, replay)
       refresh(record, true, replay)
     },
+    mode,
     refresh(record: S): void { refresh(record) },
     pauseGoal(record: S): void {
       if (!isLive(record)) return

@@ -416,8 +416,102 @@ describe('leader prompt turns, content and usage', () => {
     pluginCtx.emit('agent/error', { agent, turn: 1, step: 0, error: Object.assign(new Error('llm-deepseek: no API key'), {
       failure: { code: 'MISSING_CREDENTIAL', message: 'llm-deepseek: no API key for provider route "deepseek-official"; store it' },
     }) })
+    // The turn's durable end records the same failure; it adds no failure banner.
+    pluginCtx.emit('session/event', agent.session, agent.session.append('turn/end', { turn: 1, reason: { kind: 'error', error: {
+      code: 'MISSING_CREDENTIAL', message: 'llm-deepseek: no API key for provider route "deepseek-official"; store it' } } } as never))
     const refusal = 'No API key is stored for provider "deepseek-official". Add one in /provider (highlight it and press e), then send again.'
     expect((await waitForId(c, 2)).error).toEqual({ code: -32602, message: refusal, data: { message: refusal } })
+    expect(c.all.some(message => JSON.stringify(message).includes('retry_state'))).toBe(false)
+  })
+
+  it('shows a failed turn\'s typed failure before rejecting it with its status, code and request id', async () => {
+    const { registry, pluginCtx, client: c } = await start({ manualIdle: true })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'overloaded' }] })
+    await waitFor(() => agent.internals.idleWaiters.length === 1)
+    pluginCtx.emit('agent/inbox/claimed', { agent, message: agent.internals.messages[0] as UserMessage, turn: 1 })
+    const failure = { message: 'upstream busy', code: 'SERVER', status: 503, requestId: 'req-9' }
+    pluginCtx.emit('session/event', agent.session, agent.session.append('llm/retry', { retryId: 'r', turn: 1, step: 1, provider: 'deepseek',
+      mode: 'normal', policyKey: 'k', retry: 1, maxRetries: 2, delayMs: 5, failure } as never))
+    pluginCtx.emit('session/event', agent.session, agent.session.append('turn/end', { turn: 1, reason: { kind: 'error', error: failure } } as never))
+    const response = await waitForId(c, 2)
+    expect(response.error).toEqual({ code: -32603, message: 'turn failed: upstream busy (status 503, SERVER, request req-9)' })
+    const states = c.all.filter(message => (message.params as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate === 'retry_state')
+    expect(states.map(message => [message.method, (message.params as { update: unknown }).update])).toEqual([
+      ['x.ai/session_notification', { sessionUpdate: 'retry_state', type: 'retrying', attempt: 1, max_retries: 2, reason: 'upstream busy (status 503, SERVER, request req-9)' }],
+      ['x.ai/session_notification', { sessionUpdate: 'retry_state', type: 'failed', error_type: 'api', message: 'upstream busy (status 503, SERVER, request req-9)' }],
+    ])
+    expect(c.all.indexOf(states[1]!)).toBeLessThan(c.all.indexOf(response))
+  })
+
+  it('shows a tool call while the model writes it, then its durable card', async () => {
+    const { registry, pluginCtx, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const frame = (value: unknown) => pluginCtx.emit('agent/assistant-stream', { agent, frame: value } as never)
+    frame({ type: 'start', attemptId: 'a', revision: 1, turn: 1, step: 1 })
+    frame({ type: 'chunk', attemptId: 'a', revision: 2, index: 0, time: 10, chunk: { type: 'tool-call-delta', index: 0, id: 'call-w', name: 'write', argumentsDelta: '{"path":"a.txt","content":"' } })
+    frame({ type: 'chunk', attemptId: 'a', revision: 3, index: 1, time: 20, chunk: { type: 'tool-call-delta', index: 0, id: 'call-w', argumentsDelta: 'long body' } })
+    pluginCtx.emit('session/event', agent.session, agent.session.append('tool/call', { turn: 1, step: 1, callId: 'call-w', name: 'write', arguments: '{"path":"a.txt","content":"long body"}' } as never))
+    await waitFor(() => c.all.some(message => (message.params as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate === 'tool_call'))
+    const updates = c.all.filter(message => ['tool_call_delta_chunk', 'tool_call'].includes((message.params as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate ?? ''))
+      .map(message => [message.method, (message.params as { update: { sessionUpdate: string } }).update])
+    expect(updates.map(([method, update]) => [method, (update as { sessionUpdate: string }).sessionUpdate])).toEqual([
+      ['x.ai/session_notification', 'tool_call_delta_chunk'], ['session/update', 'tool_call'],
+    ])
+    expect(updates[0]![1]).toEqual({ sessionUpdate: 'tool_call_delta_chunk', tool_index: 0, name: 'write' })
+  })
+
+  it('shows an automatic compaction, not a /compact command, with its before and after context', async () => {
+    const { registry, pluginCtx, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const emit = (type: string, data: unknown) => pluginCtx.emit('session/event', agent.session, agent.session.append(type, data as never))
+    emit('assistant/message', { turn: 1, step: 1, stream: [], usage: { inputTokens: 1000, outputTokens: 10 },
+      message: createAssistantMessage({ content: [{ type: 'text', text: 'long' }], source: { provider: 'deepseek', model: 'chat' } }) })
+    for (const [id, command] of [['manual', 'command-1'], ['auto', undefined]] as const) {
+      const owner = { compactionId: id, turn: 1, ...command === undefined ? {} : { sourceCommandId: command } }
+      emit('compaction/start', owner)
+      emit('compaction/summary', { ...owner, shadowedTokenCount: 700, usage: { inputTokens: 900, outputTokens: 40 }, summary: [{ type: 'text', text: 'The gist' }] })
+      emit('compaction/end', owner)
+    }
+    await waitFor(() => c.all.some(message => JSON.stringify(message).includes('auto_compact_completed')))
+    const compactions = c.all.filter(message => /auto_compact/.test(JSON.stringify(message)))
+    expect(compactions.map(message => [message.method, (message.params as { update: unknown }).update])).toEqual([
+      ['x.ai/session_notification', { sessionUpdate: 'auto_compact_completed', tokens_before: 1000, tokens_after: 340, elapsed_ms: expect.any(Number) as number, summary_preview: 'The gist' }],
+    ])
+    const info = await c.request(2, 'x.ai/session/info', { sessionId })
+    expect(JSON.stringify(info.result)).toContain('"compactionCount":2')
+  })
+
+  it('heads a turn a finished background job woke with a system note, not the job\'s framing', async () => {
+    const { registry, pluginCtx, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const emit = (type: string, data: unknown) => pluginCtx.emit('session/event', agent.session, agent.session.append(type, data as never))
+    emit('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [{ id: 'job-done' }] })
+    emit('turn/start', { turn: 3 })
+    emit('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+    emit('user/message', { id: 'job-done', source: { kind: 'tool-jobs', form: 'notice', summary: 'bash build ok (exit 0)' },
+      content: [{ type: 'text', text: 'background job j1 finished. Read its output with job_output.' }] })
+    await waitFor(() => c.all.some(message => JSON.stringify(message).includes('image_dropped')))
+    const note = c.all.find(message => JSON.stringify(message).includes('image_dropped'))!
+    expect(note).toMatchObject({ method: 'x.ai/session_notification', params: { sessionId,
+      update: { sessionUpdate: 'image_dropped', notes: ['Background task updated: bash build ok (exit 0)'] } } })
+    expect(JSON.stringify(c.all)).not.toContain('job_output')
   })
 
   it('rejects a prompt only when agent/error names its in-flight turn', async () => {

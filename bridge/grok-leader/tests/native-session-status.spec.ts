@@ -233,6 +233,20 @@ describe('native session status ownership', () => {
     expect(f.stops.every(stop => stop.mock.calls.length === 1)).toBe(true)
   })
 
+  it('snapshots the committed plan mode for the TUI indicator when the preset has one', () => {
+    const f = fixture()
+    f.status.snapshot(f.root, true)
+    expect(f.root.output.update).not.toHaveBeenCalled()
+    vi.mocked(f.projection.snapshot).mockImplementation((_session, keys) => keys.includes('plan')
+      ? { values: { plan: { active: true, pending: false } } as never } : { values: {} })
+    f.status.snapshot(f.root, true)
+    expect(f.root.output.update).toHaveBeenCalledExactlyOnceWith({ sessionUpdate: 'current_mode_update', currentModeId: 'plan' }, true)
+    f.status.mode(f.root)
+    expect(f.root.output.update).toHaveBeenLastCalledWith({ sessionUpdate: 'current_mode_update', currentModeId: 'plan' }, false)
+    f.host.projections = () => { throw new Error('projection unavailable') }
+    expect(() => f.status.mode(f.root)).not.toThrow()
+  })
+
   it('rolls back partial construction when a native subscription cannot be registered', async () => {
     const f = fixture()
     await f.status.dispose()

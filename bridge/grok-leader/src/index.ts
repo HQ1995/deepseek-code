@@ -305,7 +305,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     unblocked: record => { sessionController.deliverable(record) },
     notice: pluginStatus.notice,
     views: {
-      status: (record, replay) => nativeStatus.snapshot(record, replay),
+      status: (record, replay) => nativeStatus.snapshot(record, replay), mode: record => nativeStatus.mode(record),
       children: (record, replay) => children.snapshot(record, replay),
       tasks: record => tasks.snapshot(record),
       commands: record => { void sessionCommands.refresh(record) },
@@ -322,9 +322,9 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     if (status === 'idle') ownedAgentRecord(agent)?.queue.agentIdle()
   })
 
-  // Translate the session firehose into grok streaming deltas. Committed text,
-  // reasoning deltas, tool calls, tool results, and Todo plans stream; titles
-  // and retry markers are presentation or trace data and stay off this path.
+  // Translate the session firehose into grok streaming deltas: committed text,
+  // reasoning, tool calls and results, Todo plans, and retry/failure states. The
+  // output runs first, so a failed turn's typed failure precedes its rejection.
   ctx.on('session/event', (session, event: SessionEvent) => {
     const record = sessions.get(session.header.id)
     if (record === undefined || record.agent.session !== session) return

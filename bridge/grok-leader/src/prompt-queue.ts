@@ -8,20 +8,9 @@ import { internalError, invalidParams } from './acp.ts'
 import { errorMessage } from './guards.ts'
 import { turnEndToStopReason, type StopReasonWire } from './projection.ts'
 import { controlQueue, type PromptSettleResult, type PromptState, type QueueControlContext } from './queue-controls.ts'
+import { credentialFix, describeFailure, type FailureFacts } from './turn-notices.ts'
+export { credentialFix } from './turn-notices.ts'
 export type { PromptSettleResult } from './queue-controls.ts'
-
-/** A model call DSH refused for want of a usable key fails the same way on
- * every retry, and DSH's wording points at its web Models page. It settles as
- * a refusal naming dscode's fix; the TUI shows a refusal without "Try sending
- * again". */
-export function credentialFix(failure: { message: string; code?: string }): string | undefined {
-  const provider = /provider route "([^"]+)"/.exec(failure.message)?.[1]
-  const which = provider === undefined ? 'this provider' : 'provider "' + provider + '"'
-  const edit = ' in /provider (highlight it and press e), then send again.'
-  if (failure.code === 'MISSING_CREDENTIAL') return 'No API key is stored for ' + which + '. Add one' + edit
-  if (failure.code === 'INVALID_CREDENTIAL') return 'The API key stored for ' + which + ' is not usable. Replace it' + edit
-  return undefined
-}
 
 /** Already-submitted steering/settling input cannot be retracted independently. */
 export type PromptCancelResult = 'cancelled' | 'not_found' | 'already_submitted'
@@ -487,7 +476,8 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
         if (event.data.reason.kind === 'error') {
           state.inflight = undefined
           const failure = event.data.reason.error, fix = credentialFix(failure)
-          inflight.reject(fix === undefined ? internalError('turn failed: ' + failure.message) : invalidParams(fix))
+          // The session output already sent this failure's typed retry_state.
+          inflight.reject(fix === undefined ? internalError('turn failed: ' + describeFailure(failure)) : invalidParams(fix))
         } else {
           // The grok PromptResponse settles at turn end, not whole-agent idle.
           settlePrompt(turnEndToStopReason(event.data.reason))
@@ -502,9 +492,10 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
       const inflight = state.inflight
       if (inflight === undefined || inflight.turn !== turn) return
       state.inflight = undefined
-      const failure = (error as { failure?: { message: string; code?: string } } | null | undefined)?.failure
+      const failure = (error as { failure?: FailureFacts } | null | undefined)?.failure
       const fix = failure === undefined ? undefined : credentialFix(failure)
-      inflight.reject(fix === undefined ? internalError('turn failed: ' + errorChain(error)) : invalidParams(fix))
+      if (fix !== undefined) inflight.reject(invalidParams(fix))
+      else inflight.reject(internalError('turn failed: ' + (typeof failure?.message === 'string' ? describeFailure(failure) : errorChain(error))))
     },
     cancel,
     agentIdle() {

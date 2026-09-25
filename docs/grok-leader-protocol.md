@@ -130,6 +130,82 @@ The bridge also implements the `x.ai/*` surfaces required by this TUI:
 Extension notifications use the `_x.ai/*` wire spelling expected by the ACP
 decoder. `session/update` remains the normal unprefixed ACP notification.
 
+## Turn activity notices
+
+Unless noted, these ride `_x.ai/session_notification`, as `image_dropped`
+notes do, with the session output's `eventSeq` and `promptId` stamps. They feed
+TUI renderers that already exist; nothing here adds a TUI code path.
+
+- A DSH `llm/retry` (a scheduled model-request retry) sends `retry_state`
+  `{type: 'retrying', attempt, max_retries, reason}`, live only; `max_retries`
+  is 0 for an unbounded policy. `is_rate_limited` is never sent: that flag is
+  xAI's upsell. When DSH starts the retried attempt (`llm/retry-started`) the
+  bridge sends an empty text chunk (ACP `session/update`, the meters' no-op
+  update), which ends the TUI's Retrying state; a later failure or the turn's
+  end also clears it.
+- A `turn/end` whose reason is an error sends `retry_state`
+  `{type: 'failed', error_type, message}` live and on replay, before the prompt
+  RPC rejects. `error_type` follows the native code (`CONTEXT_WINDOW_EXCEEDED`
+  → `context_length`, `RATE_LIMIT` → `rate_limited`, `TIMEOUT` →
+  `idle_timeout`, `TRANSPORT` → `http`, `EMPTY_RESPONSE` → `empty_response`),
+  else `api` when the provider sent an HTTP status, else `other`. The message
+  and the rejection (`turn failed: …`) name the status, code and provider
+  request id. A 402 reads `HTTP 402` and `Unauthorized (401)` reads
+  `Unauthorized, HTTP 401`, because the TUI takes the other spellings for
+  xAI's credit-limit upsell or `/login`. Missing or unusable keys send no
+  state; they still settle as the `/provider` refusal.
+- While the model streams a tool call's arguments, the live
+  `agent/assistant-stream` delta sends `tool_call_delta_chunk`
+  `{tool_index, name?}` (the content-block position, and the name once it
+  arrives): the TUI's "Writing file…"/"Preparing <tool>…" status. Arguments
+  are never forwarded; the durable `tool/call` still opens the card. A call is
+  sent when it starts, when its name arrives and then at most every 2 s while
+  it keeps streaming, inside the TUI's 10 s dead-stream cutoff. Replay sends
+  none.
+- An automatic compaction (`compaction/*` markers without a
+  `sourceCommandId`; a `/compact` command keeps the TUI's command flow) sends
+  `auto_compact_started` `{tokens_used, context_window, percentage}` at its
+  start, live only and only when native occupancy and capacity are known: the
+  TUI's "Context N% full. Compacting…" line and spinner. Its end sends
+  `auto_compact_failed` `{error}` or `auto_compact_completed`
+  `{tokens_before, tokens_after, elapsed_ms, summary_preview}`, live and on
+  replay. Live, `tokens_after` is the native next-request projection, which
+  reprices the shadowed span at once; on replay, and live without that
+  projection, it is the last reported prompt size minus the summary's shadowed
+  tokens plus its output. The TUI shows the completion at the turn's end and
+  empties its todo pane, so the bridge sends the turn's last plan again.
+- A turn no human prompt started gets an `image_dropped` system note naming
+  why, live and on replay, as DSH's own client heads it: a non-user
+  `user/message` that the latest next-turn inbox claim (`agent/inbox/spliced`)
+  took is the turn's trigger. The line is DSH's title for the source kind
+  (`Scheduled task`, `Background task updated`, `Task message received`,
+  `Team message received`, `Subtask status updated`, `Continuing goal`,
+  `External event received`/`GitHub event received`, `Plugin status updated`;
+  any other kind reads `Execution requested`), then the producer's one-line
+  `notice` summary or the sender's name when the source carries one. The
+  message body (reminder or job framing written for the model) is not shown.
+  Context injected into a running turn is not a trigger.
+
+## Plan mode
+
+- A DSH question whose single item carries `intent.kind: 'plan-review'` (the
+  `exit_plan_mode` review) is sent as the TUI's `_x.ai/exit_plan_mode` reverse
+  request `{sessionId, toolCallId: intent.callId, planContent: detail}`
+  instead of `_x.ai/ask_user_question`, so the TUI opens its full plan
+  approval view. Its answer maps back onto the question: `approved` selects
+  `intent.approve`; `cancelled` ("request changes") selects the other option,
+  with the typed feedback as the custom answer; `abandoned` turns plan mode off
+  and dismisses the review (`ASK_CANCELLED`), which DSH tells the model means
+  stop and wait. Any other reply dismisses it. The tool card of a call whose
+  only argument is a markdown `plan` reads `Plan: Submit for approval`, so the
+  view quotes the commented plan lines in its feedback.
+- Each durable `plan/mode` event sends ACP `current_mode_update`
+  (`plan` or `default`), live and on replay: `/plan`, `session/set_mode`, an
+  approved plan and an abandoned review's exit all reach the TUI indicator once
+  DSH commits them. Session snapshots send the committed mode from the native
+  `plan` projection; a new or forked session gets it once more after its
+  response, when the TUI knows its id.
+
 ## Invariants
 
 - `session/new` and `session/load` require an absolute cwd. ACP `mcpServers`
