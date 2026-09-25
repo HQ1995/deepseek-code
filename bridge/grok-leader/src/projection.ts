@@ -14,10 +14,12 @@ import { pathToFileURL } from 'node:url'
 import { browserCardTitle } from './browser-actions.ts'
 import { argumentTitle } from './tool-titles.ts'
 import {
-  diffBlocksFromCall, diffBlocksFromMeta, parseJsonObject, rawInputForTool, toolKindForName, typedRawOutput,
+  diffBlocksFromCall, diffBlocksFromMeta, parseJsonObject, rawInputForTool, textBlocks, toolKindForName, typedRawOutput,
   type ToolKindWire, type ToolResultContentBlock,
 } from './tool-output.ts'
-export { parseJsonObject, toolKindForName, type ToolKindWire, type ToolResultContentBlock } from './tool-output.ts'
+import { callView, resultView, viewKind, type ToolCallViewWire, type ToolPresenter, type ToolResultViewWire } from './tool-views.ts'
+export { parseJsonObject, textBlocks, toolKindForName, type ToolKindWire, type ToolResultContentBlock } from './tool-output.ts'
+export type { ToolPresenter } from './tool-views.ts'
 
 /** The grok StopReason vocabulary (agent.rs StopReason). */
 export type StopReasonWire = 'end_turn' | 'max_tokens' | 'cancelled'
@@ -27,8 +29,8 @@ export type GrokSessionUpdate =
     | { sessionUpdate: 'user_message_chunk'; content: { type: 'text'; text: string } }
     | { sessionUpdate: 'agent_message_chunk'; content: { type: 'text'; text: string } }
     | { sessionUpdate: 'agent_thought_chunk'; content: { type: 'text'; text: string } }
-    | { sessionUpdate: 'tool_call'; toolCallId: string; title: string; kind: ToolKindWire; status: 'in_progress'; rawInput?: unknown; _meta?: { 'x.ai/tool': { name: string } } }
-    | { sessionUpdate: 'tool_call_update'; toolCallId: string; status: 'completed' | 'failed'; content?: Array<ToolResultContentBlock>; rawOutput?: unknown; error?: { name: string; code: string } }
+    | { sessionUpdate: 'tool_call'; toolCallId: string; title: string; kind: ToolKindWire; status: 'in_progress'; rawInput?: unknown; _meta: { 'x.ai/tool': { name: string }; 'dscode/view'?: ToolCallViewWire } }
+    | { sessionUpdate: 'tool_call_update'; toolCallId: string; status: 'completed' | 'failed'; content?: Array<ToolResultContentBlock>; rawOutput?: unknown; error?: { name: string; code: string }; _meta?: { 'dscode/view': ToolResultViewWire } }
     | { sessionUpdate: 'plan'; entries: Array<{ content: string; priority: string; status: string }> }
 /** Non-rendering usage facts carried beside one session update. */
 export type ProjectedUpdate = GrokSessionUpdate & {
@@ -323,20 +325,32 @@ function deliveredFiles(files: ReadonlyArray<{ path: string; description?: strin
   return [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `\n\n**Delivered files**\n${lines.join('\n')}\n\n` } }]
 }
 
-/** One tool card opening; native calls and PTC sub-calls share it. A card titled by what
- * it does keeps its tool name in `_meta['x.ai/tool']`, which headless output reads first. */
-function toolCallStarted(toolCallId: string, name: string, args: unknown): GrokSessionUpdate {
+/** One tool card opening; native calls and PTC sub-calls share it. The card always
+ * carries its tool name in `_meta['x.ai/tool']`, which the TUI and headless output
+ * read before the title. A tool that presents its call sends that view, and the view
+ * gives the card its kind and title; the name tables are the fallback for tools
+ * without one. An argument-shape title stays ahead of the view's: the TUI keys its
+ * inline plan review on the plan title, and the card renders from the view anyway. */
+function toolCallStarted(toolCallId: string, name: string, args: unknown, options: ProjectionOptions): GrokSessionUpdate {
+  const view = callView(options.presenter, name, args, options.cwd)
+  if (view !== undefined) {
+    const kind = viewKind(view)
+    return { sessionUpdate: 'tool_call', toolCallId, title: argumentTitle(kind, args) ?? view.title, kind, status: 'in_progress', rawInput: args,
+      _meta: { 'x.ai/tool': { name }, 'dscode/view': view } }
+  }
   const title = browserCardTitle(name, args) ?? argumentTitle(toolKindForName(name, args), args) ?? name
   return { sessionUpdate: 'tool_call', toolCallId, title, kind: toolKindForName(name, args), status: 'in_progress', rawInput: rawInputForTool(name, args),
-    ...title === name ? {} : { _meta: { 'x.ai/tool': { name } } } }
+    _meta: { 'x.ai/tool': { name } } }
 }
 
-/** One tool card settlement: rendered content, typed raw output and the native error identity. */
+/** One tool card settlement: rendered content, typed raw output, the native error
+ * identity and the tool's own result view when it presents one. */
 function toolCallSettled(
   toolCallId: string,
   failed: boolean,
   contents: Array<ToolResultContentBlock>,
   rawOutput: Record<string, unknown> | undefined,
+  view: ToolResultViewWire | undefined,
   error?: { name: string; code: string },
 ): GrokSessionUpdate {
   return {
@@ -346,7 +360,44 @@ function toolCallSettled(
     ...contents.length > 0 ? { content: contents } : {},
     ...rawOutput === undefined ? {} : { rawOutput },
     ...error === undefined ? {} : { error },
+    ...view === undefined ? {} : { _meta: { 'dscode/view': view } },
   }
+}
+
+/** One settled call, native or PTC. A tool that presents its call or result renders
+ * from its views: its diffs ride as ACP `diff` content and no typed `rawOutput` is
+ * rebuilt. Otherwise the name tables reconstruct the shapes the TUI's cards read. */
+function toolResultSettled(
+  callId: string,
+  result: { content: unknown; isError: boolean; meta?: unknown },
+  options: ProjectionOptions,
+  error?: { name: string; code: string },
+): GrokSessionUpdate {
+  const prior = options.toolCall?.(callId)
+  const view = prior === undefined ? undefined : resultView(options.presenter, prior.name, prior.arguments, result)
+  const viewed = view !== undefined || (prior !== undefined && callView(options.presenter, prior.name, prior.arguments, options.cwd) !== undefined)
+  const diffs: ToolResultContentBlock[] = view?.card === 'diff'
+    ? view.diffs.map(diff => ({ type: 'diff', path: diff.path, ...diff.oldText === null ? {} : { oldText: diff.oldText }, newText: diff.newText }))
+    : diffBlocksFromMeta(result.meta)
+  const contents: ToolResultContentBlock[] = [
+    ...textBlocks(result.content).map(block => ({ type: 'content' as const, content: block })),
+    ...diffs,
+    ...(diffs.length === 0 && !result.isError && !viewed ? diffBlocksFromCall(prior) : []),
+  ]
+  const rawOutput = viewed ? undefined : typedRawOutput(prior, result.meta, contents, result.isError)
+  return toolCallSettled(callId, result.isError, contents, rawOutput, view, error)
+}
+
+/** What projecting one event may consult beyond the event itself. */
+export interface ProjectionOptions {
+  replay: boolean
+  /** The viewed session's cwd: delivered-file links and relative terminal cwds resolve against it. */
+  cwd?: string
+  streamedChunks?: ReadonlySet<number>
+  /** A pending call's name and arguments by call id, for its settlement. */
+  toolCall?: (callId: string) => { name: string; arguments: unknown } | undefined
+  /** The viewed agent's tool presenters; without one no view is sent. */
+  presenter?: ToolPresenter
 }
 
 /**
@@ -355,15 +406,7 @@ function toolCallSettled(
  * are skipped. Tool calls/results remain owned by their durable execution events.
  * Empty streams are native seeded messages and use their assembled content.
  */
-export function sessionEventToUpdates(
-  event: SessionEvent,
-  options: {
-    replay: boolean
-    cwd?: string
-    streamedChunks?: ReadonlySet<number>
-    toolCall?: (callId: string) => { name: string; arguments: unknown } | undefined
-  },
-): Array<GrokSessionUpdate> {
+export function sessionEventToUpdates(event: SessionEvent, options: ProjectionOptions): Array<GrokSessionUpdate> {
   if (!options.replay && event.type === 'user/message') return []
   // The native todos projection resets at turn/start and retains turn/end.
   // All consumers (live, resume and child history) must see the same state.
@@ -397,22 +440,15 @@ export function sessionEventToUpdates(
       if (typeof event.data.callId !== 'string' || event.data.callId === '') return []
       const prior = options.toolCall?.(event.data.callId)
       const args = prior === undefined ? parseJsonObject(event.data.arguments) : prior.arguments
-      return [toolCallStarted(event.data.callId, event.data.name, args)]
+      return [toolCallStarted(event.data.callId, event.data.name, args, options)]
     }
     case 'tool/result': {
       const message = event.data.message
       const callId = message.toolCallId
-      const failed = message.isError === true || event.data.error !== undefined
       if (typeof callId !== 'string' || callId === '') return []
-      const prior = options.toolCall?.(callId)
-      const metaDiffs = diffBlocksFromMeta(event.data.meta)
-      const contents: ToolResultContentBlock[] = [
-        ...textBlocks(message.content).map(block => ({ type: 'content' as const, content: block })),
-        ...metaDiffs,
-        ...(metaDiffs.length === 0 && !failed ? diffBlocksFromCall(prior) : []),
-      ]
+      const isError = message.isError === true || event.data.error !== undefined
       const error = event.data.error === undefined ? undefined : { name: event.data.error.name, code: event.data.error.code }
-      return [toolCallSettled(callId, failed, contents, typedRawOutput(prior, event.data.meta, contents, failed), error)]
+      return [toolResultSettled(callId, { content: message.content, isError, meta: event.data.meta }, options, error)]
     }
     // PTC mode runs tools inside a `run_code` program. These two durable events
     // are the only carrier of those nested calls (log-only: `deriveMessages()`
@@ -421,19 +457,14 @@ export function sessionEventToUpdates(
     // the native call/result path keeps one card vocabulary for both planes.
     case 'tool/ptc-dispatch-start': {
       if (typeof event.data.subCallId !== 'string' || event.data.subCallId === '') return []
-      return [toolCallStarted(event.data.subCallId, event.data.name, event.data.arguments)]
+      return [toolCallStarted(event.data.subCallId, event.data.name, event.data.arguments, options)]
     }
     case 'tool/ptc-dispatch': {
       const callId = event.data.subCallId
       if (typeof callId !== 'string' || callId === '') return []
-      const prior = options.toolCall?.(callId)
-      const contents: ToolResultContentBlock[] = [
-        ...textBlocks(event.data.content).map(block => ({ type: 'content' as const, content: block })),
-        ...(event.data.isError ? [] : diffBlocksFromCall(prior)),
-      ]
-      // Sub-calls carry no tool-private presentation meta, so only the
-      // argument-derived raw shapes (execute/edit) can be reconstructed.
-      return [toolCallSettled(callId, event.data.isError, contents, typedRawOutput(prior, undefined, contents, event.data.isError))]
+      // Sub-calls carry no tool-private presentation meta: their result views
+      // and raw shapes come from the arguments and the text alone.
+      return [toolResultSettled(callId, { content: event.data.content, isError: event.data.isError }, options)]
     }
     default:
       // Other durable events belong to native state projections or diagnostics.
@@ -441,21 +472,6 @@ export function sessionEventToUpdates(
       // not ACP stream updates: child history pages parse only the latter.
       return []
   }
-}
-
-/** Turn dsh image/text blocks into display text blocks. */
-export function textBlocks(content: unknown): Array<{ type: 'text'; text: string }> {
-  if (!Array.isArray(content)) return []
-  const blocks: Array<{ type: 'text'; text: string }> = []
-  for (const raw of content) {
-    const block = raw as { type?: string; text?: string; attachment?: { attachmentId?: string } }
-    if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
-      blocks.push({ type: 'text', text: block.text })
-    } else if (block.type === 'image') {
-      blocks.push({ type: 'text', text: '[image attachment ' + String(block.attachment?.attachmentId) + ']' })
-    }
-  }
-  return blocks
 }
 
 /**

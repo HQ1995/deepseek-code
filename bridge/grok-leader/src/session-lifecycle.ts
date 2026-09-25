@@ -16,6 +16,7 @@ import type { createNativeInteractions } from './native-interactions.ts'
 import { createSessionWork, type SessionWork } from './session-work.ts'
 import type { SessionDiscovery } from './session-discovery.ts'
 import { textBlocks, type ContextProjectionValues } from './projection.ts'
+import { registryPresenter } from './tool-views.ts'
 
 /** Per-session protocol state. */
 export interface SessionRecord {
@@ -131,6 +132,7 @@ export function createSessionLifecycle(host: LifecycleHost) {
         promptId: () => record.queue.promptId,
         notify: (method, params) => host.client(clientId)?.notify(method, params),
         contextValues: () => host.contextValues(record), projectImages: host.projectImages, logger: host.logger,
+        presenter: registryPresenter(handle.agent),
       }),
       work: createSessionWork({
         isLive: () => registry.acceptsInput(record) && agents.get(record.agent.id) === record.agent && host.client(clientId)?.closed === false,

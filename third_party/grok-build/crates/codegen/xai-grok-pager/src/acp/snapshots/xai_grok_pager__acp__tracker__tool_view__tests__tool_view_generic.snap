@@ -1,0 +1,9 @@
+---
+source: crates/codegen/xai-grok-pager/src/acp/tool_view_tests.rs
+expression: both(&plan)
+---
+◆ Plan review
+---
+◆ Plan review
+
+Plan approved.

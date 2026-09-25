@@ -1,0 +1,11 @@
+---
+source: crates/codegen/xai-grok-pager/src/acp/tool_view_tests.rs
+expression: both(&window)
+---
+◆ Read a.ts (10-12 of 40)
+---
+◆ Read /w/a.ts (10-12 of 40)
+
+10  line 10
+11  line 11
+12  line 12

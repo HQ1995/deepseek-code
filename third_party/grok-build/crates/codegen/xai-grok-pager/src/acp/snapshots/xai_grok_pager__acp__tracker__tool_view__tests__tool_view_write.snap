@@ -1,0 +1,10 @@
+---
+source: crates/codegen/xai-grok-pager/src/acp/tool_view_tests.rs
+expression: both(&created)
+---
+◆ Creating new.txt
+---
+◆ Creating /w/new.txt
+
+  1  one
+  2  two

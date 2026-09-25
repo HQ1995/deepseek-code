@@ -15,6 +15,7 @@ import { nativeTuiAcceptance } from './e2e-native-tui.mjs'
 import { nativeControlsAcceptance } from './e2e-native-controls.mjs'
 import { sessionLifecycleAcceptance } from './e2e-session-lifecycle.mjs'
 import { bridgeFeedsAcceptance } from './e2e-bridge-feeds.mjs'
+import { toolViewsAcceptance } from './e2e-tool-views.mjs'
 
 const execute = promisify(execFile)
 const env = process.env
@@ -592,7 +593,8 @@ try {
     send, key, wait, capture, state, waitState, settle, artifact,
     receivedToolFailure: async name => {
       const receipt = await waitFor(() => readFile(join(artifacts, `tui-${generation}.log`), 'utf8'), log => {
-        const call = [...log.matchAll(/\[acp\] tool_call id=(\S+)[^\n]* title="([^"]+)"/g)].findLast(match => match[2] === name)
+        // The tool's identity, not its title: a presenter titles a card by what it does.
+        const call = [...log.matchAll(/\[acp\] tool_call id=(\S+)[^\n]* tool="([^"]+)"/g)].findLast(match => match[2] === name)
         return call && log.includes(`tool_call_update id=${call[1]} status=Some(Failed)`)
       }, 'tui-tool-failure-received')
       await artifact('tui-tool-failure-received', { name, receipt })
@@ -604,7 +606,7 @@ try {
       assert.ok(response.ok, `Controlled stream release failed: ${response.status}`)
     },
   }
-  let history, nativeTui, nativeControls, bridgeFeeds
+  let history, nativeTui, nativeControls, bridgeFeeds, toolViews
   if (env.DSCODE_E2E_NEXT_SIX_ONLY !== '1' && !extraOnly) {
     await goalStreamAcceptance(goalUi)
     await goalAcceptance(goalUi)
@@ -647,13 +649,17 @@ try {
     await stop(); activeId = randomUUID(); await boot(false, 'standard')
     bridgeFeeds = await bridgeFeedsAcceptance({ ...goalUi, waitFor,
       tuiLog: () => readFile(join(artifacts, `tui-${generation}.log`), 'utf8') })
+    // Tool cards from the tools' own views, live and resumed, in a session of their own.
+    await stop(); activeId = randomUUID(); await boot(false, 'standard')
+    toolViews = await toolViewsAcceptance({ ...goalUi,
+      tuiLog: () => readFile(join(artifacts, `tui-${generation}.log`), 'utf8') })
   }
   await stop()
   const kittyImages = env.DSCODE_E2E_KITTY_BIN ? await kittyImageAcceptance({
     kittyBin: env.DSCODE_E2E_KITTY_BIN, tuiBin: env.DSCODE_TUI_BIN, baseEnv, cwd, artifacts, waitFor, artifact, sockets, children,
   }) : { skipped: 'DSCODE_E2E_KITTY_BIN is not configured' }
   if (env.DSCODE_E2E_NEXT_SIX_ONLY !== '1' && !extraOnly) history = await historyAcceptance({ runHeadless, readRequests, scratch, artifactDir: artifacts })
-  await artifact('PASS', { sessionId: id, lifecycle, rewindUi, history, nativeTui, nativeControls, bridgeFeeds, nextSix, archiveTerminal, kittyImages })
+  await artifact('PASS', { sessionId: id, lifecycle, rewindUi, history, nativeTui, nativeControls, bridgeFeeds, toolViews, nextSix, archiveTerminal, kittyImages })
   console.log(`PASS runtime acceptance: ${artifacts}`)
 } catch (error) {
   await artifact('FAIL', { error: error.stack ?? String(error), state: await state().catch(() => null), screen: await capture().catch(() => '') })

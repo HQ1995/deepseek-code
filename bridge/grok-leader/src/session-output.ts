@@ -3,7 +3,7 @@ import { errorChain, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { hasToolImages } from './image-output.ts'
 import { compactionNotices, emptyTriggers, isXaiNotice, planModeNotice, toolCallWriting, triggerNotes, turnNotices, type CompactionFold, type ContextTokens, type ModeUpdate, type WritingCalls, type XaiNotice } from './turn-notices.ts'
-import { assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, parseJsonObject, sessionEventToUpdates, systemNotes, contextInfoFromProjection, type ContextProjectionValues, type DecodeSpeed, type ProjectedUpdate } from './projection.ts'
+import { assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, parseJsonObject, sessionEventToUpdates, systemNotes, contextInfoFromProjection, type ContextProjectionValues, type DecodeSpeed, type ProjectedUpdate, type ToolPresenter } from './projection.ts'
 
 export interface SessionOutputHost {
   sessionId: string
@@ -14,6 +14,8 @@ export interface SessionOutputHost {
   drain?(): Promise<void> | undefined
   contextValues(): ContextProjectionValues
   projectImages(event: SessionEvent, updates: ProjectedUpdate[]): Promise<ProjectedUpdate[]>
+  /** The attached agent's tool presenters: live and restored cards carry the same views. */
+  presenter?: ToolPresenter
   logger: { warn(message: string): void }
 }
 interface OutputState {
@@ -238,6 +240,7 @@ export function createSessionOutput(host: SessionOutputHost) {
       streamedChunks,
       cwd: host.cwd(),
       toolCall: (callId) => state.pendingToolCalls.get(callId),
+      presenter: host.presenter,
     })) {
       if (item.sessionUpdate === 'agent_message_chunk') {
         updates.push({ ...item, ...meters })

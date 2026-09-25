@@ -87,6 +87,9 @@ pub struct SearchToolCallBlock {
     pub error: Option<String>,
     /// Extra metadata from the search input (path, glob, mode, etc.).
     pub meta: SearchInputMeta,
+    /// DIVERGENCE(dscode): how many of `match_count` the tool kept when it
+    /// capped its result; the summary then reads "N of total".
+    pub shown: Option<usize>,
     /// When the tool started running (Phase 2: time tracking).
     pub started_at: Option<std::time::Instant>,
     /// Elapsed time in ms after completion (Phase 2: time tracking).
@@ -107,6 +110,7 @@ impl SearchToolCallBlock {
             file_paths: Vec::new(),
             error: None,
             meta: SearchInputMeta::default(),
+            shown: None,
             started_at: None,
             elapsed_ms: None,
         }
@@ -175,6 +179,10 @@ impl SearchToolCallBlock {
     /// - `FilesWithMatches`:   `(3 files)` / `(1 file)` / `(no matches)`
     /// - `Count`:              `(42 matches across 5 files)` / `(no matches)`
     fn match_summary(&self) -> String {
+        let count = match self.shown.filter(|shown| *shown < self.match_count) {
+            Some(shown) => format!("{shown} of {}", self.match_count),
+            None => self.match_count.to_string(),
+        };
         if self.match_count == 0 {
             return match self.meta.output_mode {
                 SearchOutputMode::FilesWithMatches => "(no files)".to_string(),
@@ -185,11 +193,11 @@ impl SearchToolCallBlock {
             SearchOutputMode::Content => {
                 let file_count = self.file_matches.len();
                 if file_count > 1 {
-                    format!("({} matches in {} files)", self.match_count, file_count)
+                    format!("({count} matches in {file_count} files)")
                 } else if self.match_count == 1 {
                     "(1 match)".to_string()
                 } else {
-                    format!("({} matches)", self.match_count)
+                    format!("({count} matches)")
                 }
             }
             SearchOutputMode::FilesWithMatches => {
@@ -197,7 +205,7 @@ impl SearchToolCallBlock {
                 if n == 1 {
                     "(1 file)".to_string()
                 } else {
-                    format!("({n} files)")
+                    format!("({count} files)")
                 }
             }
             SearchOutputMode::Count => {

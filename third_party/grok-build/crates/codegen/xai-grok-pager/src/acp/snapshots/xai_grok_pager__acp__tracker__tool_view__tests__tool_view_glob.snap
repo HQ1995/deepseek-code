@@ -1,0 +1,12 @@
+---
+source: crates/codegen/xai-grok-pager/src/acp/tool_view_tests.rs
+expression: "both(&paths(false, 2))"
+---
+◆ Search "**/*.ts" (2 matches)
+---
+◆ Search "**/*.ts" (2 matches)
+
+  mode: pattern
+
+  a.ts
+  b.ts

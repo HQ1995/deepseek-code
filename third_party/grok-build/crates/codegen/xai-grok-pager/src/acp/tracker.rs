@@ -1722,7 +1722,7 @@ fn extract_cron_prompt_body(text: &str) -> Option<String> {
 /// Merge ToolCallUpdate fields with the base ToolCall.
 /// Update fields take precedence when present.
 fn merge_tool_call_update(base: acp::ToolCall, update: acp::ToolCallUpdate) -> acp::ToolCall {
-    let meta = merge_tool_meta(base.meta, update.meta);
+    let meta = merge_tool_meta(base.meta, tool_view::settled_meta(update.meta));
     acp::ToolCall::new(
         update.tool_call_id,
         update.fields.title.unwrap_or(base.title),
@@ -1849,6 +1849,10 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
             block.error = Some("Tool failed".into());
         }
         return RenderBlock::ToolCall(ToolCallBlock::Other(block));
+    }
+    // DIVERGENCE(dscode): a host's tool view picks the card; see `tool_view`.
+    if let Some(block) = tool_view::view_block(tc, session_cwd) {
+        return block;
     }
     match tc.kind {
         acp::ToolKind::Execute => {
@@ -2338,6 +2342,10 @@ const RAW_INPUT_INLINE_MAX_CHARS: usize = 80;
 /// string), and other values as JSON (pretty-printed when long). Fields in
 /// `skip` are already on the card. `None` when nothing is left to show.
 fn raw_input_display(tc: &acp::ToolCall, skip: &[&str]) -> Option<String> {
+    value_display(tc.raw_input.as_ref()?, skip)
+}
+/// [`raw_input_display`] of one input value.
+fn value_display(value: &serde_json::Value, skip: &[&str]) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut total = 0usize;
     let mut push = |line: String| {
@@ -2346,7 +2354,7 @@ fn raw_input_display(tc: &acp::ToolCall, skip: &[&str]) -> Option<String> {
             lines.push(line);
         }
     };
-    match tc.raw_input.as_ref()? {
+    match value {
         serde_json::Value::Null => return None,
         serde_json::Value::Object(fields) => {
             for (key, value) in fields {
@@ -2893,21 +2901,23 @@ fn update_summary(update: &acp::SessionUpdate) -> String {
         }
         acp::SessionUpdate::ToolCall(tc) => {
             format!(
-                "tool_call id={} kind={:?} status={:?} title={:?} content={} raw_input={}",
+                "tool_call id={} kind={:?} status={:?} title={:?} tool={:?} content={} raw_input={} view={}",
                 tc.tool_call_id.0,
                 tc.kind,
                 tc.status,
                 tc.title,
+                tool_name(tc),
                 tc.content.len(),
                 tc.raw_input
                     .as_ref()
                     .map_or_else(|| "none".to_string(), json_size_hint),
+                tool_view::view_card(tc.meta.as_ref()),
             )
         }
         acp::SessionUpdate::ToolCallUpdate(tcu) => {
             let f = &tcu.fields;
             format!(
-                "tool_call_update id={} status={:?} title={:?} content={} raw_output={}",
+                "tool_call_update id={} status={:?} title={:?} content={} raw_output={} view={}",
                 tcu.tool_call_id.0,
                 f.status,
                 f.title,
@@ -2917,6 +2927,7 @@ fn update_summary(update: &acp::SessionUpdate) -> String {
                 f.raw_output
                     .as_ref()
                     .map_or_else(|| "none".to_string(), json_size_hint),
+                tool_view::view_card(tcu.meta.as_ref()),
             )
         }
         acp::SessionUpdate::Plan(plan) => format!("plan entries={}", plan.entries.len()),
@@ -3106,3 +3117,5 @@ fn make_relative_path(path: &str) -> String {
 #[cfg(test)]
 #[path = "tracker_tests.rs"]
 mod tests;
+#[path = "tool_view.rs"]
+mod tool_view;
