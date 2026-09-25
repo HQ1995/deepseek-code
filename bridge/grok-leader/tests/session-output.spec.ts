@@ -12,22 +12,22 @@ const assistantEvent = (seq: number, body: string, usage = { inputTokens: 10, ou
   turn: 0, step: 0, usage, stream: [], message: { role: 'assistant', content: [{ type: 'text', text: body }] },
 })
 const imageEvent = (seq: number) => event(seq, 'tool/ptc-dispatch', { subCallId: 'image-' + seq, name: 'read', content: [{ type: 'image', mimeType: 'image/png', data: 'fixture' }] })
-function fixture(options: { messageProjection?: (type: string) => boolean } = {}) {
+function fixture(options: { messageProjection?: (type: string) => boolean; contextRevision?: () => number } = {}) {
   let live = true, promptId: string | undefined = 'prompt'
-  let values: ContextProjectionValues = {}
+  let values: ContextProjectionValues = {}, reads = 0
   const notes: Note[] = []
   const warn = vi.fn()
   const drain = vi.fn<() => Promise<void> | undefined>(() => undefined)
   const projectImages = vi.fn(async (_event: SessionEvent, updates: ProjectedUpdate[]): Promise<ProjectedUpdate[]> => updates)
   const output = createSessionOutput({ sessionId: 'session', cwd: () => '/workspace', drain,
-    isLive: () => live, promptId: () => promptId, contextValues: () => values,
+    isLive: () => live, promptId: () => promptId, contextValues: () => { reads++; return values },
     notify: (method, params) => { notes.push({ method, params: params as Note['params'] }) }, projectImages, logger: { warn }, ...options })
   const content = () => notes.flatMap(note => {
     const update = note.params.update
     return 'content' in update && !Array.isArray(update.content) && update.content?.type === 'text' ? [update.content.text] : []
   })
   const frame = (value: unknown) => output.assistant(value as AssistantStreamFrame)
-  return { output, notes, warn, projectImages, content, frame, drain,
+  return { output, notes, warn, projectImages, content, frame, drain, reads: () => reads,
     unpublish: () => { live = false }, setPrompt: (id: string | undefined) => { promptId = id }, setContext: (next: ContextProjectionValues) => { values = next } }
 }
 
@@ -181,6 +181,50 @@ describe('session output ownership', () => {
     f.output.live(log[1]!); expect(f.notes).toEqual([])
     f.output.update(text('new'))
     expect(f.notes[0]!.params._meta).toMatchObject({ eventSeq: 1, streamStartMs: 1000, promptId: 'prompt' })
+  })
+
+  it('reads the context once per log position while a reply streams, and again when the log or a carried counter moves', () => {
+    let revision = 7
+    const f = fixture({ contextRevision: () => revision })
+    f.setContext({ contextPressure: { projectedTokens: 120, contextWindow: 1000 } })
+    f.frame({ type: 'start', attemptId: 'a', revision: 1, turn: 0, step: 0 })
+    const chunk = (index: number) => f.frame({ type: 'chunk', attemptId: 'a', revision: 2 + index, index, time: 1000 + index,
+      chunk: { type: 'text-delta', index: 0, text: 't' + index } })
+    for (let index = 0; index < 50; index++) chunk(index)
+    expect(f.notes).toHaveLength(50)
+    expect(f.reads()).toBe(1)
+    expect(f.notes.at(-1)!.params._meta.contextInfo).toMatchObject({ used: 120, total: 1000, turnCount: 0 })
+    // A committed event moves the log: its projections may have changed.
+    revision = 8
+    f.setContext({ contextPressure: { projectedTokens: 300, contextWindow: 1000 } })
+    chunk(50)
+    expect(f.reads()).toBe(2)
+    expect(f.notes.at(-1)!.params._meta.contextInfo).toMatchObject({ used: 300, turnCount: 0 })
+    // A counter the stamp carries moves with the event the bridge folds.
+    f.output.live(event(9, 'turn/end', { turn: 0, reason: { kind: 'completed' } }))
+    chunk(51)
+    expect(f.notes.at(-1)!.params._meta.contextInfo).toMatchObject({ used: 300, turnCount: 1 })
+    // An announced change is read afresh even where the log position did not move.
+    f.setContext({ contextPressure: { projectedTokens: 450, contextWindow: 1000 } })
+    const reads = f.reads()
+    f.output.contextChanged()
+    expect(f.reads()).toBe(reads + 1)
+    expect(f.notes.at(-1)!.params.update).toEqual({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '' } })
+    expect(f.notes.at(-1)!.params._meta.contextInfo).toMatchObject({ used: 450 })
+    chunk(52)
+    expect(f.reads()).toBe(reads + 1)
+    expect(f.notes.at(-1)!.params._meta.contextInfo).toMatchObject({ used: 450 })
+  })
+
+  it('reads the context for every update when the host names no log position', () => {
+    const f = fixture()
+    f.frame({ type: 'start', attemptId: 'a', revision: 1, turn: 0, step: 0 })
+    for (let index = 0; index < 5; index++) {
+      f.setContext({ contextPressure: { projectedTokens: index, contextWindow: 10 } })
+      f.frame({ type: 'chunk', attemptId: 'a', revision: 2 + index, index, time: 1000 + index, chunk: { type: 'text-delta', index: 0, text: 't' } })
+    }
+    expect(f.reads()).toBe(5)
+    expect(f.notes.map(note => (note.params._meta.contextInfo as { used: number }).used)).toEqual([0, 1, 2, 3, 4])
   })
 
   it('correlates live stream settlement by exact event and ignores duplicate/late frames', () => {

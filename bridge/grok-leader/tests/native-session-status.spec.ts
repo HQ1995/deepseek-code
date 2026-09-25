@@ -16,7 +16,7 @@ function fixture() {
   const emit = (name: string, ...args: unknown[]) => listeners.get(name)?.(...args as never[])
   const record = (id: string, clientId: number) => { const value = { clientId,
     agent: { status: 'idle', session: { id: SessionId(id) } } as Agent,
-    output: { notify: vi.fn(), update: vi.fn(), activity: vi.fn() },
+    output: { notify: vi.fn(), update: vi.fn(), activity: vi.fn(), contextChanged: vi.fn() },
     work: createSessionWork({ isLive: () => sessions.get(SessionId(id)) === value, assertReady: () => {} }),
   }; return value }
   const root = record('root', 1), other = record('other', 2)
@@ -88,6 +88,7 @@ describe('native session status ownership', () => {
     expect(f.root.output.notify).not.toHaveBeenCalled()
     expect(f.root.output.activity).not.toHaveBeenCalled()
     expect(f.root.output.update).not.toHaveBeenCalled()
+    expect(f.root.output.contextChanged).not.toHaveBeenCalled()
     f.emit('agent/status', { agent: f.root.agent })
     expect(f.root.output.activity).toHaveBeenCalledWith(false)
     expect(f.root.output.notify).not.toHaveBeenCalled()
@@ -105,8 +106,8 @@ describe('native session status ownership', () => {
     const f = fixture()
     for (const key of ['tokenUsage', 'contextPressure', 'contextBreakdown']) f.changed(f.root.agent.session, key)
     f.changed(f.root.agent.session, 'unrelated')
-    expect(f.root.output.update).toHaveBeenCalledTimes(3)
-    expect(f.root.output.update).toHaveBeenLastCalledWith({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '' } }, false)
+    expect(f.root.output.contextChanged).toHaveBeenCalledTimes(3)
+    expect(f.root.output.update).not.toHaveBeenCalled()
     expect(f.status.contextValues(f.root)).toEqual({ contextPressure: { projectedTokens: 12, contextWindow: 100 } })
     const lateProjection = { ...f.projection, snapshot: vi.fn(() => ({ values: {} })) }
     f.host.projections = () => lateProjection
@@ -120,7 +121,7 @@ describe('native session status ownership', () => {
     await f.status.dispose()
     f.changed(f.root.agent.session, 'contextPressure')
     expect(f.root.output.notify).not.toHaveBeenCalled()
-    expect(f.root.output.update).toHaveBeenCalledTimes(3)
+    expect(f.root.output.contextChanged).toHaveBeenCalledTimes(3)
     expect(f.stops.every(stop => stop.mock.calls.length === 1)).toBe(true)
     expect(f.stopProjection).toHaveBeenCalledTimes(1)
   })
