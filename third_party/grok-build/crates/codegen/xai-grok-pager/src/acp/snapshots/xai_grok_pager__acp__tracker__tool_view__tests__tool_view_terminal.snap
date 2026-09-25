@@ -1,0 +1,10 @@
+---
+source: crates/codegen/xai-grok-pager/src/acp/tool_view_tests.rs
+expression: both(&ok)
+---
+◆ Run Say hi
+---
+◆ Run Say hi
+$ echo hi
+
+hi

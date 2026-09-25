@@ -4875,8 +4875,13 @@ fn tool_identity_update_meta_keys_override_the_base_call_meta() {
     let merged = merge_tool_call_update(base.clone(), update);
     let meta = merged.meta.as_ref().expect("merged meta");
     assert_eq!(meta["x.ai/tool"], serde_json::json!({ "name": "bash" }));
+    // A settling update's view is kept beside the call's own view.
     assert_eq!(
         meta["dscode/view"],
+        serde_json::json!({ "kind": "terminal" })
+    );
+    assert_eq!(
+        meta["dscode/resultView"],
         serde_json::json!({ "kind": "terminal", "exitCode": 0 })
     );
     assert_eq!(meta["result"], serde_json::json!(true));

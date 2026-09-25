@@ -6,6 +6,7 @@ import { historyReply } from './e2e-history.mjs'
 import { nativeTuiReply } from './e2e-native-tui.mjs'
 import { nativeControlsReply } from './e2e-native-controls.mjs'
 import { bridgeFeedsReply } from './e2e-bridge-feeds.mjs'
+import { toolViewsReply } from './e2e-tool-views.mjs'
 
 export function contractReply(body) {
   // DSH appends live policy and skill reminders as user-role messages.
@@ -15,6 +16,8 @@ export function contractReply(body) {
       message.content.startsWith('<system-reminder>\nA skill is a reusable set of task-specific instructions.'))) }
   const feeds = bridgeFeedsReply(body)
   if (feeds) return feeds
+  const views = toolViewsReply(body)
+  if (views) return views
   const extra = archiveTerminalReply(body)
   if (extra) return extra
   const six = nextSixReply(body)

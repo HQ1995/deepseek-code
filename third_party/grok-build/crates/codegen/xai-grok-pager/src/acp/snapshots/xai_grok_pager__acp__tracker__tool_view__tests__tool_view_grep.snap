@@ -1,0 +1,15 @@
+---
+source: crates/codegen/xai-grok-pager/src/acp/tool_view_tests.rs
+expression: both(&grep)
+---
+◆ Search "const" in src (2 matches in 2 files)
+---
+◆ Search "const" in src (2 matches in 2 files)
+
+  mode: pattern
+
+  a.ts
+       1  const a = 2
+
+  b.ts
+       4  const b = 3

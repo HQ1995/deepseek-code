@@ -1,0 +1,12 @@
+---
+source: crates/codegen/xai-grok-pager/src/acp/tool_view_tests.rs
+expression: both(&fetch)
+---
+◆ Fetch https://example.test/
+---
+◆ Fetch https://example.test/
+
+  status: 200, size: 9 B
+
+
+  # Example

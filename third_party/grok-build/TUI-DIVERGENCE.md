@@ -985,3 +985,28 @@ not ACP's `_meta`, so the TUI never received capabilities: `/btw`, `/plan`,
 `/loop` never was. It now sends `_meta.capabilities`, and `/loop` drops its
 `schedule_create` toolset requirement (the leader sends no `_meta.tools`)
 for the `schedule` capability alone.
+
+### Tool cards from a host's tool views
+
+A tool call carrying `_meta['dscode/view']` (the dscode bridge's normalized
+DSH `presentCall` view, and on its final update the `presentResult` view)
+renders from the view, keyed on the view's kind and never on a tool name
+(`acp/tool_view.rs`): `terminal` is the Execute card (the call view's command,
+description and, expanded, a cwd other than the session's; the result text;
+the result view's non-zero exit or signal as the error), `diff` the Edit card
+(the ACP diff content, else the view's diffs; "Creating " when every result
+diff is a new file), `read` the Read card (the window's lines, its range when
+it is not the whole file), `search` the Search card (grouped matches or a path
+list, "N of total" when the tool capped them), `web` the WebSearch or WebFetch
+card, and `generic` the Other card (the view's title, its kind as the summary,
+its salient input expanded and capped, the result text; a skill keeps the
+Skill card without the kind), except that a generic view of the `execute` kind
+(a background run, code, terminal and job controls) is the Execute card any
+execute call has, read off the call's own input, whose description the Tasks
+row takes. A generic call keeps its card family while it runs (a file read on
+a location stays Read, a search or fetch of one salient input stays Search or
+WebFetch) so verb groups do not jump, and a failed file read without a result
+view stays a Read card with its error. A final update's view is kept under
+`dscode/resultView` beside the call's own, and the ACP debug log names each
+notification's view card. A call without a view renders as before (class:
+feature).

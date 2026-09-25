@@ -1,0 +1,10 @@
+---
+source: crates/codegen/xai-grok-pager/src/acp/tool_view_tests.rs
+expression: both(&edit)
+---
+◆ Edit a.ts
+---
+◆ Edit /w/a.ts
+
+  1  const a = 1
+  1  const a = 2
