@@ -1,6 +1,7 @@
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { errorChain, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { commandResults, type CommandFold } from './command-results.ts'
 import { hasToolImages } from './image-output.ts'
 import { compactionNotices, emptyTriggers, isXaiNotice, planModeNotice, toolCallWriting, triggerNotes, turnNotices, type CompactionFold, type ContextTokens, type ModeUpdate, type WritingCalls, type XaiNotice } from './turn-notices.ts'
 import { assistantChunkToUpdates, assistantEventUsage, cacheHitPercent, decodeTokensPerSecond, emptyDecodeSpeed, noteDecodeSpeed, parseJsonObject, sessionEventToUpdates, systemNotes, contextInfoFromProjection, type ContextProjectionValues, type DecodeSpeed, type ProjectedUpdate, type ToolPresenter } from './projection.ts'
@@ -45,7 +46,8 @@ interface OutputState {
 }
 /** xAI-only updates: system notes (the pager renders `image_dropped` notes as
  * one plain system block, so every neutral notice rides it), retry/failure
- * states, tool calls being written and automatic compaction. No meters. */
+ * states, tool calls being written, automatic compaction and command results.
+ * No meters. */
 type NoticeUpdate = (XaiNotice | ModeUpdate) & { totalTokens?: never; cacheHitPercent?: never; tokensPerSecond?: never }
 type OutputUpdate = ProjectedUpdate | NoticeUpdate
 
@@ -65,6 +67,7 @@ export function createSessionOutput(host: SessionOutputHost) {
    * turn's todos, so the last plan is sent again after the completion. */
   let lastPlan: ProjectedUpdate | undefined
   const compactions: CompactionFold = new Map()
+  const commands: CommandFold = new Map()
   const triggers = emptyTriggers()
   const state: OutputState = {
     lastSeq: -1,
@@ -323,7 +326,8 @@ export function createSessionOutput(host: SessionOutputHost) {
       ...pressure?.contextWindow === undefined ? {} : { window: pressure.contextWindow } }
   }
   /** What one event adds beside its projected updates: system notes, xAI
-   * turn notices and mode updates. Folds see every event, sent or not. */
+   * turn notices, mode updates and command results. Folds see every event,
+   * sent or not. */
   const notices = (event: SessionEvent, replay: boolean): OutputUpdate[] => {
     // A turn trigger's note already names its message; the fold sees every event.
     const trigger = triggerNotes(triggers, event), mode = planModeNotice(event)
@@ -334,7 +338,7 @@ export function createSessionOutput(host: SessionOutputHost) {
     const retried = !replay && event.type === 'llm/retry-started'
     return [
       ...notes === undefined ? [] : [{ sessionUpdate: 'image_dropped' as const, notes }], ...mode === undefined ? [] : [mode],
-      ...turnNotices(event, replay), ...compaction,
+      ...turnNotices(event, replay), ...compaction, ...commandResults(commands, event),
       ...retried ? [{ sessionUpdate: 'agent_message_chunk' as const, content: { type: 'text' as const, text: '' } }] : [],
       ...lastPlan !== undefined && compaction.some(item => item.sessionUpdate === 'auto_compact_completed') ? [lastPlan] : [],
     ]
@@ -403,6 +407,7 @@ export function createSessionOutput(host: SessionOutputHost) {
       await flush()
       if (streamState !== undefined) streamState.pending.length = 0
       state.pendingToolCalls.clear()
+      commands.clear()
     },
   }
 }

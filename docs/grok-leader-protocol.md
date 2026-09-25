@@ -128,7 +128,9 @@ The bridge also implements the `x.ai/*` surfaces required by this TUI:
   pending, queue, steer, edit, remove, steer-queued (one/all), clear, stop);
   any other line fails with `-32602`. The same lines sent as `session/prompt`
   still run turnless. (This replaces the dedicated `x.ai/goal` and
-  `x.ai/subagents` routes.)
+  `x.ai/subagents` routes.) The result itself arrives as the command's
+  `command_result` block (see Command results), so the TUI shows the reply
+  only when the request fails.
 - `x.ai/commands/options` `{sessionId, name, query?}` serves the choices of a
   command's bare invocation, for a command whose advertisement carries
   `_meta.options: true`, and answers `{options: SelectOption[]}` in DSH's shape
@@ -327,6 +329,42 @@ TUI renderers that already exist; nothing here adds a TUI code path.
   `image/offload` keeps its own note) shows `[type] {compact JSON}` of its
   data. Each line is at most 200 characters. A message a turn-trigger note
   already names gets no second note.
+
+## Command results
+
+A command's result (either kind) is its own `_x.ai/session_notification`
+update `{sessionUpdate: 'command_result', name, args?, kind: 'success' |
+'error', text?, markdown?: true}`, never assistant text: `name` has no slash,
+`args` is the input after the name, trimmed and left out when empty or
+unrecorded (a DSH command with `recordInput: false`, such as `/feedback`), and
+`text` is the command's own text. DSH's command text is plain UI text (DSH's
+own client shows it preformatted), so it is sent without `markdown`; the
+bridge's own commands write Markdown and set it. The TUI renders a "/name args"
+block over the text, Markdown as an agent message renders it and plain text
+verbatim, line by line (an error in the error tone).
+
+- A DSH registry command (`/goal`, `/compact`, `/feedback`, `/plan`, a
+  plugin's commands) leaves its log-only `command/run` and `command/done`
+  records. The session output pairs them by `commandId` and sends the update
+  live, on replay (`isReplay`) and in child history pages (a
+  `commandResult` entry beside `update` and `imageNotes`; a page pairs a
+  settlement with a run an earlier page read), so the result survives a
+  resume. A text-less success that names an earlier event (`sourceEventSeq`)
+  sends nothing: that event already renders it. The bridge sends no text of
+  its own for these, over `session/prompt` or `x.ai/commands/run`, so the
+  block appears once. An error result settles the prompt `end_turn`; a
+  refusal before the registry (an unavailable `/goal`, a malformed reply)
+  still fails the request, and so does a handler that throws, beside the
+  error DSH records for it.
+- The bridge's own commands (`/dsh`, `/browser`, `/preset`, `/team`,
+  `/subagents`) are not DSH commands and leave no records. The bridge sends
+  their result live only, once, when they settle; a resume does not show it.
+  Writing DSH's `command/run`/`command/done` pair for them would claim the
+  registry's provenance and write session history for work that is not the
+  session's (`/dsh` and `/browser` change the profile and the leader), so they
+  stay live-only. `/dsh add` progress lines are `image_dropped` system notes.
+  A refusal (`textOnly`, an unknown preset, a busy session) still fails the
+  request as before; a `/subagents` result of kind `error` is a result.
 
 ## Plan mode
 

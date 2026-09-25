@@ -28,8 +28,8 @@ fn remote_session_references_parse_the_result_shape() {
 }
 #[test]
 fn native_goal_response_requires_native_kind_and_text() {
-    assert_eq!(parse_session_command_result(r#"{"result":{"kind":"success","text":"Goal paused."}}"#), Ok("Goal paused.".into()));
-    assert_eq!(parse_session_command_result(r#"{"result":{"kind":"error","text":"Images require an objective."}}"#), Err("Images require an objective.".into()));
+    assert_eq!(parse_session_command_result(r#"{"result":{"kind":"success","text":"Goal paused."}}"#), Ok((false, "Goal paused.".into())));
+    assert_eq!(parse_session_command_result(r#"{"result":{"kind":"error","text":"Images require an objective."}}"#), Ok((true, "Images require an objective.".into())));
     for raw in [
         "not json", "null", "{}", r#"{"result":null}"#,
         r#"{"result":{"kind":"success"}}"#,
@@ -48,10 +48,13 @@ fn native_goal_response_requires_native_kind_and_text() {
 async fn native_session_effect_uses_control_wire_and_dedicated_result() {
     use std::sync::Arc;
     use xai_acp_lib::AcpAgentMessage;
-    for (method, command) in [("x.ai/commands/run", "/goal pause"), ("x.ai/commands/run", "/subagents stop child")] {
+    // An immediate command's result, either kind, is its own `command_result`
+    // block: the reply shows nothing. Any other command's reply shows its text.
+    for (method, command) in [("x.ai/commands/run", "/goal pause"), ("x.ai/commands/run", "/subagents stop child"), ("x.ai/session/export", "/tmp/out.zip")] {
+    let immediate = method == "x.ai/commands/run";
     for (raw, expected) in [
-        (r#"{"result":{"kind":"success","text":"Goal paused."}}"#, Ok("Goal paused.".to_string())),
-        (r#"{"result":{"kind":"error","text":"native refusal"}}"#, Err("native refusal".to_string())),
+        (r#"{"result":{"kind":"success","text":"Goal paused."}}"#, if immediate { Ok(None) } else { Ok(Some("Goal paused.".to_string())) }),
+        (r#"{"result":{"kind":"error","text":"native refusal"}}"#, if immediate { Ok(None) } else { Err("native refusal".to_string()) }),
         (r#"{"result":{"kind":"success"}}"#, Err("invalid session command response".to_string())),
     ] {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

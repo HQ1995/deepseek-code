@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { register, sendRequest, useLeaderHarness, waitFor, waitForId } from './support/leader-harness.ts'
+import { commandResults, recordCommand, register, sendRequest, useLeaderHarness, waitFor, waitForId } from './support/leader-harness.ts'
 import { mountStandardTools } from './support/standard-tools.ts'
 
 describe('leader questions and permissions', () => {
@@ -226,7 +226,9 @@ describe('leader questions and permissions', () => {
         }, () => Promise.reject(new Error('no question answerer')))
         const picked = answer.answers[0]?.selected[0] ?? 'nothing'
         const custom = answer.answers[0]?.custom
-        return { commandId: 'c1', result: { kind: 'success', text: 'confirmed: ' + picked + (custom === undefined ? '' : '\n' + custom) } }
+        const result = { kind: 'success', text: 'confirmed: ' + picked + (custom === undefined ? '' : '\n' + custom) }
+        recordCommand(pluginCtx, agent, line, 'c1', result)
+        return { commandId: 'c1', result }
       },
     }
     const started = await start({ commands: commandsService })
@@ -264,8 +266,7 @@ describe('leader questions and permissions', () => {
 
     const settled = await waitForId(c, 2)
     expect(settled.result).toMatchObject({ stopReason: 'end_turn', _meta: { promptId: 'ask-1' } })
-    await waitFor(() => c.all.some(m => m.method === 'session/update'
-      && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '') === 'confirmed: Yes\nfirst line\nsecond line'))
+    await waitFor(() => commandResults(c.all).some(params => params.update.text === 'confirmed: Yes\nfirst line\nsecond line'))
   })
 
   it('keeps a human approval pending beyond 60s and accepts the eventual answer', async () => {

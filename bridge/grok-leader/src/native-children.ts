@@ -9,6 +9,7 @@ import type { SubagentPromptRequestId } from '@deepseek-ai/dsh-subagent'
 import { invalidParams, internalError, paramRecord, sessionIdParam } from './acp.ts'
 import { errorMessage, nonEmpty } from './guards.ts'
 import { CHILD_HISTORY_PAGE_SIZE, createChildLogs } from './child-history.ts'
+import { commandResult, type CommandResultNotice } from './command-results.ts'
 import { workflowUpdates, type WorkflowHistory, type LiveWorkflow } from './workflows.ts'
 import { parsePrompt } from './prompt-content.ts'
 import { sessionEventToUpdates, systemNotes, textBlocks, type GrokSessionUpdate, type ProjectedUpdate } from './projection.ts'
@@ -290,7 +291,7 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
         if (owned(clientId, sessionId) !== record) throw invalidParams('unknown session')
         if (after > index.nextSeq) throw invalidParams('child history cursor is ahead of the stored transcript')
         const nextSeq = Math.min(after + CHILD_HISTORY_PAGE_SIZE, index.nextSeq)
-        const entries: Array<{ update?: GrokSessionUpdate; meta?: Record<string, unknown>; imageNotes?: string[]; turnEnded?: boolean }> = []
+        const entries: Array<{ update?: GrokSessionUpdate; meta?: Record<string, unknown>; imageNotes?: string[]; commandResult?: CommandResultNotice; turnEnded?: boolean }> = []
         let turnStartMs = index.turnStartAt(after)
         // Views come from the live child's registry, else from the parent's.
         const presenter = registryPresenter(host.agent(childSessionId) ?? record.agent)
@@ -304,6 +305,8 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
           for (const update of updates) entries.push({ update, meta: { isReplay: true, agentTimestampMs: event.time, turnStartMs, streamStartMs: turnStartMs } })
           const notes = systemNotes(event, host.messageProjection)
           if (notes !== undefined) entries.push({ imageNotes: notes })
+          const result = commandResult(event, id => index.commandRun(id))
+          if (result !== undefined) entries.push({ commandResult: result })
           if (event.type === 'turn/end') entries.push({ turnEnded: true })
         }
         if (!isLive(record)) throw invalidParams('unknown session')

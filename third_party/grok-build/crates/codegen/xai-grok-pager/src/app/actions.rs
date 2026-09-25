@@ -2877,11 +2877,13 @@ pub enum TaskResult {
         agent_id: AgentId,
         error: String,
     },
-    /// Native goal control output; never settles a model prompt.
+    /// Native session control output; never settles a model prompt.
+    /// `Ok(None)`: nothing to show (an immediate command's result arrives as
+    /// its own `command_result` block).
     SessionCommandComplete {
         agent_id: AgentId,
         session_id: acp::SessionId,
-        result: Result<String, String>,
+        result: Result<Option<String>, String>,
     },
     ChildHistoryLoaded {
         agent_id: AgentId,

@@ -1398,3 +1398,52 @@
         );
     }
 
+
+    /// DIVERGENCE(dscode): a host command's result is its own block. Live it
+    /// lands behind a streaming reply (an immediate command runs beside the
+    /// turn) and the view follows it; replayed it lands in transcript order.
+    #[test]
+    fn command_result_block_lands_behind_the_live_stream_and_in_order_on_replay() {
+        use crate::scrollback::block::RenderBlock;
+        use xai_grok_shell::extensions::notification::CommandResultKind;
+        let result = |replay: bool, kind: CommandResultKind| {
+            let notif = SessionNotification {
+                session_id: acp::SessionId::new("sess-1"),
+                update: XaiSessionUpdate::CommandResult {
+                    name: "goal".into(),
+                    args: Some("pause".into()),
+                    kind,
+                    text: Some("Goal **paused**".into()),
+                    markdown: true,
+                },
+                meta: Some(serde_json::json!({ "isReplay": replay })),
+            };
+            let raw = serde_json::value::to_raw_value(&notif).unwrap();
+            acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw))
+        };
+        let mut app = make_app_with_agent("sess-1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("held-round".into());
+        let _ = agent.session.tracker.handle_update(
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                acp::ContentBlock::Text(acp::TextContent::new("live assistant")),
+            )),
+            &crate::acp::meta::NotificationMeta::default(),
+            &mut agent.scrollback,
+        );
+        let live = agent.scrollback.len() - 1;
+        assert!(handle_session_notification(&result(false, CommandResultKind::Success), &mut app));
+        let sb = &app.agents[&AgentId(0)].scrollback;
+        assert!(matches!(&sb.entry(live).unwrap().block,
+            RenderBlock::CommandResult(block) if block.invocation == "/goal pause" && !block.error));
+        assert!(matches!(&sb.entry(live + 1).unwrap().block, RenderBlock::AgentMessage(_)));
+
+        let mut app = make_app_with_agent("sess-1");
+        app.agents.get_mut(&AgentId(0)).unwrap().session.loading_replay = true;
+        assert!(handle_session_notification(&result(true, CommandResultKind::Error), &mut app));
+        let sb = &app.agents[&AgentId(0)].scrollback;
+        assert!(matches!(&sb.entry(sb.len() - 1).unwrap().block,
+            RenderBlock::CommandResult(block) if block.error
+                && block.copy_text(false).contains("Goal paused") && !block.copy_text(false).contains("**")));
+    }

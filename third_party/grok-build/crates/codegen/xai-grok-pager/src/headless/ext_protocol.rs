@@ -77,6 +77,9 @@ pub(crate) enum ExtEvent {
     MonitorEvent,
     Lifecycle(Lifecycle),
     Stream(Box<StreamEvent>),
+    /// DIVERGENCE(dscode): a host command's result text, printed as reply
+    /// text is (the TUI shows it as its own block).
+    CommandText(String),
 }
 
 pub(crate) fn handle_ext_notification(
@@ -223,6 +226,10 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         ImageCompressed {
             message: String,
         },
+        CommandResult {
+            #[serde(default)]
+            text: Option<String>,
+        },
         SubagentSpawned {
             subagent_id: String,
         },
@@ -296,6 +303,7 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         XaiUpdate::ImageCompressed { message } => {
             ExtEvent::Lifecycle(Lifecycle::ImageCompressed { message })
         }
+        XaiUpdate::CommandResult { text } => text.map_or(ExtEvent::None, ExtEvent::CommandText),
         XaiUpdate::SubagentSpawned { subagent_id } => ExtEvent::SubagentSpawned { subagent_id },
         XaiUpdate::SubagentFinished { subagent_id, .. } => {
             ExtEvent::SubagentFinished { subagent_id }

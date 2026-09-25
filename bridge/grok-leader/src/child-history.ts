@@ -2,6 +2,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionInspection, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { internalError, invalidParams } from './acp.ts'
+import { commandRun, type CommandRun } from './command-results.ts'
 import { parseJsonObject } from './projection.ts'
 import type { SessionOperation } from './session-work.ts'
 
@@ -19,11 +20,13 @@ const atOrBefore = <T extends { seq: number }>(values: readonly T[], seq: number
 }
 
 /** Append-only projections shared by lifecycle snapshots and history pages.
- * Retains tool/turn metadata, never copies the full transcript into the bridge. */
+ * Retains tool/turn/command metadata, never copies the full transcript into the bridge. */
 export class ChildHistoryIndex {
   nextSeq = 0
   durableSeq = -1
   private readonly calls = new Map<string, Array<{ seq: number; name: string; arguments: unknown }>>()
+  /** Command runs by commandId, so a page pairs a settlement with a run an earlier page read. */
+  private readonly commands = new Map<string, CommandRun>()
   private readonly turns: Array<{ seq: number; time: number }> = []
   private start?: SessionEvent
   private end?: SessionEvent
@@ -51,6 +54,9 @@ export class ChildHistoryIndex {
           const calls = this.calls.get(id) ?? []
           calls.push({ seq: event.seq, name: event.data.name, arguments: event.type === 'tool/call' ? parseJsonObject(event.data.arguments) : event.data.arguments })
           this.calls.set(id, calls)
+        } else {
+          const started = commandRun(event)
+          if (started !== undefined) this.commands.set(started.commandId, started.run)
         }
         this.nextSeq++
       }
@@ -69,6 +75,11 @@ export class ChildHistoryIndex {
   toolCallAt(id: string, seq: number): { name: string; arguments: unknown } | undefined {
     const call = atOrBefore(this.calls.get(id) ?? [], seq)
     return call === undefined ? undefined : { name: call.name, arguments: call.arguments }
+  }
+
+  /** The run a command's settlement pairs with; commandIds are unique per log. */
+  commandRun(id: string): CommandRun | undefined {
+    return this.commands.get(id)
   }
 }
 

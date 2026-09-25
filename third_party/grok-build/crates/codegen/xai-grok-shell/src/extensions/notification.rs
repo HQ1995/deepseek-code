@@ -902,6 +902,26 @@ pub enum SessionUpdate {
     /// Prompt images dropped before send (integrity / upscale-cap). The
     /// model is told via a system-reminder; this surfaces them to the UI.
     ImageDropped { notes: Vec<String> },
+    /// DIVERGENCE(dscode): one settled host command's result, its own
+    /// scrollback block rather than assistant text. The dscode bridge pairs
+    /// DSH's durable `command/run` and `command/done` records by command id,
+    /// so the block arrives live, on replay and in child history; its own
+    /// commands' results arrive live only.
+    CommandResult {
+        /// Command name, without the slash.
+        name: String,
+        /// The invocation's input after the name, when recorded and non-empty.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args: Option<String>,
+        kind: CommandResultKind,
+        /// The command's own text; absent for a bare success.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        /// The text is Markdown (the bridge's own commands); otherwise plain
+        /// text, as DSH's command output is.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        markdown: bool,
+    },
     /// Memory file listing for the pager's /memory modal.
     MemoryFiles { files: Vec<MemoryFileInfo> },
     WorkflowUpdated {
@@ -1164,6 +1184,14 @@ pub struct MemoryFileInfo {
     pub size_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified_epoch_secs: Option<u64>,
+}
+
+/// How a host command settled (`CommandResult`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandResultKind {
+    Success,
+    Error,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -2380,6 +2408,56 @@ mod tests {
         assert_eq!(json["sessionId"], "sess-abc");
         assert_eq!(json["update"]["sessionUpdate"], "model_changed");
         assert_eq!(json["update"]["model_id"], "grok-4");
+    }
+
+    // ── CommandResult (dscode: a host command's result block) ──
+
+    /// The bridge's `command_result` parses with and without its optional
+    /// input and text, and an unknown kind is refused rather than guessed.
+    #[test]
+    fn command_result_parses_from_the_bridge_wire_shape() {
+        let full: SessionUpdate = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "command_result", "name": "dsh", "args": "plugins",
+            "kind": "success", "text": "| Bundle | On |\n| --- | --- |", "markdown": true,
+        }))
+        .unwrap();
+        assert_eq!(
+            full,
+            SessionUpdate::CommandResult {
+                name: "dsh".into(),
+                args: Some("plugins".into()),
+                kind: CommandResultKind::Success,
+                text: Some("| Bundle | On |\n| --- | --- |".into()),
+                markdown: true,
+            }
+        );
+        let bare: SessionUpdate = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "command_result", "name": "goal", "kind": "error",
+        }))
+        .unwrap();
+        assert_eq!(
+            bare,
+            SessionUpdate::CommandResult {
+                name: "goal".into(),
+                args: None,
+                kind: CommandResultKind::Error,
+                text: None,
+                markdown: false,
+            }
+        );
+        let json = serde_json::to_value(&bare).unwrap();
+        assert_eq!(json["sessionUpdate"], "command_result");
+        assert!(
+            json.get("args").is_none()
+                && json.get("text").is_none()
+                && json.get("markdown").is_none()
+        );
+        assert!(
+            serde_json::from_value::<SessionUpdate>(serde_json::json!({
+                "sessionUpdate": "command_result", "name": "goal", "kind": "cancelled",
+            }))
+            .is_err()
+        );
     }
 
     // ── TurnCompleted (durable, replayable turn-end signal) ──

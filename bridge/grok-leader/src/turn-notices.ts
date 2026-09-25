@@ -11,6 +11,7 @@
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-llm-retry/types'
+import type { CommandResultNotice } from './command-results.ts'
 
 /** A model failure as native events record it (`LlmFailure`). */
 export interface FailureFacts {
@@ -29,10 +30,10 @@ export type RetryStateUpdate =
 export type ToolCallWriting = { sessionUpdate: 'tool_call_delta_chunk'; tool_index: number; name?: string }
 
 /** Updates that ride `x.ai/session_notification` rather than ACP `session/update`. */
-export type XaiNotice = { sessionUpdate: 'image_dropped'; notes: string[] } | RetryStateUpdate | ToolCallWriting | CompactionNotice
+export type XaiNotice = { sessionUpdate: 'image_dropped'; notes: string[] } | RetryStateUpdate | ToolCallWriting | CompactionNotice | CommandResultNotice
 
 const XAI_NOTICES: ReadonlySet<string> = new Set<XaiNotice['sessionUpdate']>(['image_dropped', 'retry_state', 'tool_call_delta_chunk',
-  'auto_compact_started', 'auto_compact_completed', 'auto_compact_failed'])
+  'auto_compact_started', 'auto_compact_completed', 'auto_compact_failed', 'command_result'])
 export const isXaiNotice = (update: { sessionUpdate: string }): update is XaiNotice => XAI_NOTICES.has(update.sessionUpdate)
 
 /** A model call DSH refused for want of a usable key fails the same way on

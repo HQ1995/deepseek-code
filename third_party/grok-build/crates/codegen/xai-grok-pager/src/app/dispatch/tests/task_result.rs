@@ -14,7 +14,7 @@ fn native_goal_result_is_separate_from_live_assistant_and_never_settles_turn() {
         crate::app::ScreenMode::Fullscreen,
     ] {
         for result in [
-            Ok("Goal paused.".to_string()),
+            Ok(Some("Goal paused.".to_string())),
             Err("native refusal".to_string()),
         ] {
             let mut app = test_app_with_agent();
@@ -42,7 +42,7 @@ fn native_goal_result_is_separate_from_live_assistant_and_never_settles_turn() {
                 .id;
             let before = agent.scrollback.len();
             let expected = match &result {
-                Ok(text) => text.clone(),
+                Ok(text) => text.clone().unwrap(),
                 Err(error) => format!("Command failed: {error}"),
             };
             let effects = dispatch(
@@ -100,6 +100,26 @@ fn native_goal_result_is_separate_from_live_assistant_and_never_settles_turn() {
     }
 }
 
+/// DIVERGENCE(dscode): an immediate command's reply adds nothing; its
+/// result arrives as the command's own `command_result` block.
+#[test]
+fn native_goal_result_shown_by_its_command_block_adds_nothing() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id = app.agents[&id].session.session_id.clone().unwrap();
+    let before = app.agents[&id].scrollback.len();
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionCommandComplete {
+            agent_id: id,
+            session_id,
+            result: Ok(None),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert_eq!(app.agents[&id].scrollback.len(), before);
+}
+
 #[test]
 fn native_goal_result_keeps_live_output_visible_in_both_arrival_orders() {
     for result_first in [true, false] {
@@ -122,7 +142,7 @@ fn native_goal_result_keeps_live_output_visible_in_both_arrival_orders() {
                     Action::TaskComplete(TaskResult::SessionCommandComplete {
                         agent_id: id,
                         session_id: session_id.clone(),
-                        result: Ok("Goal created\n".repeat(12)),
+                        result: Ok(Some("Goal created\n".repeat(12))),
                     }),
                     &mut app,
                 );
@@ -170,7 +190,7 @@ fn native_goal_result_ignores_missing_agent_and_stale_or_unbound_session() {
         }
         let before = agent.scrollback.len();
         for result in [
-            Ok("stale success".to_string()),
+            Ok(Some("stale success".to_string())),
             Err("stale error".to_string()),
         ] {
             assert!(

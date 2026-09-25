@@ -1,4 +1,5 @@
 use super::*;
+use xai_grok_shell::extensions::notification::CommandResultKind;
 use xai_grok_shell::sampling::error::format_rate_limited_user_message;
 use xai_grok_shell::session::storage::ReplayLookupFallback;
 
@@ -375,6 +376,34 @@ pub(super) fn handle_session_notification_with_origin(
             ref images,
             ref message,
         } => apply_image_compressed(agent, images, message),
+        // DIVERGENCE(dscode): a host command's result is its own block, the
+        // same live and replayed. Live, it lands behind a streaming reply (an
+        // immediate command runs beside the turn), and the view follows it.
+        XaiSessionUpdate::CommandResult {
+            name,
+            args,
+            kind,
+            text,
+            markdown,
+        } => {
+            let block = RenderBlock::command_result(
+                &name,
+                args.as_deref(),
+                kind == CommandResultKind::Error,
+                text,
+                markdown,
+            );
+            if meta.is_replay || agent.session.loading_replay {
+                agent.scrollback.push_block(block);
+            } else {
+                crate::app::mode_switch::push_block_behind_live_stream(
+                    &mut agent.scrollback,
+                    block,
+                );
+                agent.scrollback.enable_follow_mode();
+            }
+            true
+        }
         XaiSessionUpdate::ToolCallDeltaChunk {
             ref name,
             tool_index,

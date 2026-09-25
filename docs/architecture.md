@@ -40,7 +40,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 71 modules; `index.ts` is the composition root.
+`src/` has 72 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
@@ -66,7 +66,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `prompt-queue` | Prompt admission, active turn, FIFO, edits and steering settlement |
 | `queue-controls` | `x.ai/queue/*` row controls (interject, steer, remove, edit, holds, reorder, clear) over the queue's state |
 | `prompt-content` | ACP prompt validation; commits images to durable storage in block order |
-| `session-output` | Stream state: seq-based replay/live dedup, usage, decode speed, pending tool facts |
+| `session-output` | Stream state: seq-based replay/live dedup, usage, decode speed, pending tool and command facts |
 | `turn-notices` | Pure: xAI turn notices from native events and stream chunks (retry and typed failure states, tool calls being written, automatic compaction, plan mode, turn triggers) and notes for model-visible context keyed on its context form |
 | `session-models` | Runtime model references, durable choice/effort memory, catalog fan-out |
 | `session-presets` | Preset preparation, `/preset` switching, English copy for shipped presets |
@@ -79,13 +79,14 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `session-artifacts` | Title, info and archive RPCs: session admission, cancellation, drains |
 | `session-export` | Atomic logical-log archive save; no partial ZIP, no overwrite |
 | `remote-channel` | `x.ai/remote/invoke`: the default-deny allowlist of DSH Remote methods, identity binding checked against the generated definition, caps, cancellation and the result shape, over the in-process Typert gateway |
-| `session-commands` | Command advertisement and routing over dsh's command registry; serves each command's options from its owner |
+| `session-commands` | Command advertisement and routing over dsh's command registry; serves each command's options from its owner; sends bridge-owned commands' results live |
+| `command-results` | Pure: a command's `command_result` block, paired from DSH's durable `command/run`/`command/done` records (live, replay, child history) or built for a bridge-owned command |
 | `command-options` | Pure: DSH `SelectOption` rows for host-served option pickers, their bounds, and the `/goal` rows |
 | `execution-world` | Where tools run: local, or the SSH workspace a profile configures |
 | `mcp` | ACP MCP declarations to agent-scoped DSH MCP clients, loaded lazily |
 | `native-children` | Workflow membership, child views and `/subagents` controls over native services |
 | `child-controls` | Child overview, `/subagents` grammar and verbs, inbox views; native calls through ports |
-| `child-history` | Append-only child tool/turn metadata index and its serialized, bounded log reads; no transcript copy |
+| `child-history` | Append-only child tool/turn/command metadata index and its serialized, bounded log reads; no transcript copy |
 | `workflows` | Read-only projection of tool-workflow durable records (`dscodeWorkflows`) |
 | `native-tasks` | Task controls, reminder views from `ctx.schedule`, passive job-output snapshots; no own timer |
 | `job-output` | Job-output snapshots and patches from the non-consuming native ring |

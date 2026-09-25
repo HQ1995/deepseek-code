@@ -2,7 +2,9 @@
 // presenters (`_meta['dscode/view']`): the mock model issues one call of each
 // standard shell, file and todo tool, the installed runtime runs them, and the
 // transcript must show the same cards live and after a resume. The mock model
-// alone is scripted; the runtime produces every event.
+// alone is scripted; the runtime produces every event. Command results then
+// follow the same rule: a DSH command's result is its own block, shown once
+// live and again after a resume; a bridge-owned command's is live only.
 import assert from 'node:assert/strict'
 
 const PROMPT = 'DSCODE_TOOL_VIEWS'
@@ -86,5 +88,44 @@ export async function toolViewsAcceptance(ui) {
   check(resumed, 'resumed')
   await artifact('tool-views-resumed', { dir, cards: resumed })
   assert.deepEqual(resumed, live, 'a resumed transcript must show the same cards')
-  return { dir, cards: live.length }
+  const commands = await commandResultsAcceptance(ui)
+  return { dir, cards: live.length, commands }
+}
+
+/** Occurrences of `text` in a captured transcript. */
+const count = (screen, text) => screen.split(text).length - 1
+const GOAL_REFUSAL = 'No goal is currently set; /goal pause requires one.'
+const FEEDBACK = 'Feedback recorded for session'
+
+/** DSH's `/goal` (immediate, over `x.ai/commands/run`) and `/feedback`
+ * (queued like a prompt) record their results durably: each shows once as its
+ * own "/name args" block, never also as the reply's text, and again after a
+ * resume. `/feedback` records no input (its own event holds it), so its block
+ * reads `/feedback`. DSH's text is plain: `/goal`'s usage line stays one line.
+ * `/browser` is the bridge's own command: its result is live only. */
+async function commandResultsAcceptance({ send, wait, waitState, artifact, restart, captureHistory }) {
+  await send('/goal pause')
+  await wait(new RegExp(GOAL_REFUSAL.replaceAll('/', '\\/').replaceAll('.', '\\.')), 30000)
+  await send('/feedback DSCODE_VIEWS_FEEDBACK')
+  await wait(new RegExp(FEEDBACK), 30000)
+  await send('/browser status')
+  await wait(/Browser: (?:off|on)/, 30000)
+  await waitState(value => value.status === 'idle', 'command-results-idle', 30000)
+  const live = await captureHistory()
+  await artifact('command-results-live', { screen: live })
+  assert.equal(count(live, GOAL_REFUSAL), 1, 'the /goal result must show once, not also as its reply')
+  assert.equal(count(live, FEEDBACK), 1, 'the /feedback result must show once, not also as assistant text')
+  assert.match(live, /\/goal pause/, 'the /goal block names its invocation')
+  assert.match(live, /Usage: \/goal \[<objective>\|clear\|edit <objective>\|pause\|resume\]/, 'plain DSH text renders verbatim, not as Markdown')
+  await restart()
+  await wait(new RegExp(FEEDBACK), 30000)
+  const resumed = await captureHistory()
+  await artifact('command-results-resumed', { screen: resumed })
+  assert.equal(count(resumed, GOAL_REFUSAL), 1, 'a resumed transcript must show the /goal result once')
+  assert.equal(count(resumed, FEEDBACK), 1, 'a resumed transcript must show the /feedback result once')
+  assert.match(resumed, /\/goal pause/, 'the resumed /goal block names its invocation')
+  assert.match(resumed, /^\W*\/feedback\s*$/m, 'the resumed /feedback block names its command')
+  assert.doesNotMatch(resumed, /\/feedback DSCODE_VIEWS_FEEDBACK/, 'a resume has no prompt echo for a command')
+  assert.doesNotMatch(resumed, /Browser: (?:off|on)/, "the bridge's own /browser result is live only")
+  return ['goal-refusal', 'feedback', 'browser-live-only']
 }

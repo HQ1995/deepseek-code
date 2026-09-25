@@ -103,11 +103,12 @@ const open = async (host, preset) => {
   return sessionId
 }
 const prompt = (host, sessionId, label) => { phase = label; step = 0; return host.rpc('session/prompt', { sessionId, prompt: [{ type: 'text', text: label }] }) }
+// A command's reply (either kind) is its own `command_result` block.
 const command = async (host, sessionId, text) => {
   const before = host.notes.length
   await host.rpc('session/prompt', { sessionId, prompt: [{ type: 'text', text }] })
-  return host.notes.slice(before).filter(note => note.params?.sessionId === sessionId)
-    .map(note => note.params?.update?.content?.text ?? '').join('\n')
+  return host.notes.slice(before).filter(note => note.params?.sessionId === sessionId && note.params?.update?.sessionUpdate === 'command_result')
+    .map(note => note.params.update.text ?? '').join('\n')
 }
 const commandsOf = (host, sessionId) => host.notes.filter(note => note.params?.sessionId === sessionId && note.params?.update?.sessionUpdate === 'available_commands_update').at(-1)?.params.update
 const until = async (label, predicate) => {

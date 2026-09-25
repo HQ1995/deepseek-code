@@ -470,6 +470,23 @@ export async function makeClient(socketPath: string): Promise<ClientHandle> {
   }
 }
 
+/** Record one command run on its receiving session the way DSH's command
+ * registry does: `command/run`, then its `command/done`, each appended and
+ * dispatched live like every native session event. */
+export function recordCommand(ctx: Context, agent: Agent, line: string, commandId: string,
+  result: { kind: string; text?: string; sourceEventSeq?: number }): void {
+  const [, name = '', args] = /^\s*\/(\S+)(.*)$/s.exec(line) ?? []
+  const session = agent.session as unknown as { append(type: string, data: unknown): SessionEvent }
+  for (const [type, data] of [['command/run', { commandId, name, args, source: { kind: 'user' } }], ['command/done', { commandId, ...result }]] as const) {
+    ctx.emit('session/event', agent.session, session.append(type, data) as never)
+  }
+}
+
+/** The `command_result` blocks among a client's messages, with their stamps. */
+export const commandResults = (messages: ReadonlyArray<Record<string, unknown>>) => messages.filter(message => message.method === 'x.ai/session_notification'
+  && (message.params as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === 'command_result')
+  .map(message => message.params as { update: Record<string, unknown>; _meta: { isReplay?: boolean } })
+
 /** Poll until the predicate holds, then return; fail after the timeout. */
 export async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
   const deadline = Date.now() + timeoutMs

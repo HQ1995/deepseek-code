@@ -82,6 +82,25 @@ describe('session output ownership', () => {
     expect(f.notes).toHaveLength(1)
   })
 
+  it('shows a command\'s durable result as the same command block live and on replay, once, and pairs across the replay boundary', async () => {
+    const pair = [event(0, 'command/run', { commandId: 'c', name: 'goal', args: ' pause', source: { kind: 'user' } }),
+      event(1, 'command/done', { commandId: 'c', kind: 'success', text: 'Goal paused' })]
+    const block = { sessionUpdate: 'command_result', name: 'goal', args: 'pause', kind: 'success', text: 'Goal paused' }
+    const f = fixture()
+    for (const item of pair) f.output.live(item)
+    await f.output.restore(pair)
+    expect(f.notes.map(note => [note.method, note.params.update, note.params._meta.isReplay])).toEqual([['x.ai/session_notification', block, undefined]])
+    const restored = fixture()
+    await restored.output.restore(pair)
+    expect(restored.notes.map(note => [note.method, note.params.update, note.params._meta.isReplay])).toEqual([['x.ai/session_notification', block, true]])
+    // A run replayed before attach settles live; a silent restore still folds it.
+    const split = fixture()
+    await split.output.restore([pair[0]!], false)
+    split.output.live(pair[1]!)
+    expect(split.notes.map(note => note.params.update)).toEqual([block])
+    expect(split.output.stats).toMatchObject({ messageCount: 0, turnCount: 0 })
+  })
+
   it('renders a DSH tool change as the same system notice live and on replay, once', async () => {
     const change = event(2, 'developer/message', { turn: 1, step: 1, headerSeq: 1, message: { id: 'm', role: 'developer', source: { kind: 'tool-registry' },
       content: [{ type: 'tool-addition', toolName: 'mcp__playwright-mcp__browser_navigate' }] } })

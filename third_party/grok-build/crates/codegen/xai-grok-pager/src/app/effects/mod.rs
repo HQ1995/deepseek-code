@@ -1788,7 +1788,8 @@ pub(crate) fn execute(
                         .into(),
                 );
                 let result = match acp_send(request, &tx).await {
-                    Ok(response) => parse_session_command_result(response.0.get()),
+                    Ok(response) => parse_session_command_result(response.0.get())
+                        .and_then(|reply| session_command_outcome(method, reply)),
                     Err(error) => Err(sanitize_user_error(&error.to_string())),
                 };
                 TaskResult::SessionCommandComplete { agent_id, session_id, result }
@@ -4843,7 +4844,9 @@ fn parse_session_references(raw: &str) -> Result<Vec<crate::slash::command::ArgI
     }
 }
 
-fn parse_session_command_result(raw: &str) -> Result<String, String> {
+/// A session command reply's `{result: {kind, text}}`: whether it settled as
+/// an error, and its text. A malformed reply is the error.
+fn parse_session_command_result(raw: &str) -> Result<(bool, String), String> {
     #[derive(serde::Deserialize)]
     struct CommandResult {
         kind: String,
@@ -4856,9 +4859,22 @@ fn parse_session_command_result(raw: &str) -> Result<String, String> {
     let response: CommandResponse = serde_json::from_str(raw)
         .map_err(|_| "invalid session command response".to_string())?;
     match response.result.kind.as_str() {
-        "error" => Err(response.result.text),
-        "success" => Ok(response.result.text),
+        "error" => Ok((true, response.result.text)),
+        "success" => Ok((false, response.result.text)),
         _ => Err("invalid session command response".to_string()),
+    }
+}
+
+/// DIVERGENCE(dscode): what a session command's reply leaves for the
+/// transcript. An immediate command's result (either kind) arrives as its own
+/// `command_result` block, so its `x.ai/commands/run` reply shows nothing;
+/// any other reply (`x.ai/session/export`) shows its text, an error as a
+/// failure.
+fn session_command_outcome(method: &str, (error, text): (bool, String)) -> Result<Option<String>, String> {
+    match (method == "x.ai/commands/run", error) {
+        (true, _) => Ok(None),
+        (false, true) => Err(text),
+        (false, false) => Ok(Some(text)),
     }
 }
 

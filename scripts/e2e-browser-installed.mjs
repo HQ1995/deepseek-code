@@ -86,10 +86,12 @@ try {
     return sessionId
   }
   const prompt = (sessionId, label, text = label) => { phase = label; step = 0; return rpc('session/prompt', { sessionId, prompt: [{ type: 'text', text }] }) }
+  // A command's reply is its own `command_result` block.
   const command = async (sessionId, text) => {
     const before = notes.length
     await rpc('session/prompt', { sessionId, prompt: [{ type: 'text', text }] })
-    return notes.slice(before).map(note => note.params?.update?.content?.text ?? '').join('\n')
+    return notes.slice(before).filter(note => note.params?.update?.sessionUpdate === 'command_result')
+      .map(note => note.params.update.text ?? '').join('\n')
   }
   // DSH records a tool-list change in the conversation; the bridge shows it as a system notice.
   const toolNotices = id => notes.filter(note => /x\.ai\/session_notification$/.test(note.method) && note.params?.sessionId === id
