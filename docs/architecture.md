@@ -40,15 +40,16 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 65 modules; `index.ts` is the composition root.
+`src/` has 66 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
-| `index` | Composition: module assembly, native event forwarding; routing goes through `leader-routes` |
+| `index` | Composition: module assembly, native event forwarding; host reads go through `host-services`, routing through `leader-routes` |
 | `codec` | Frame codec: 4-byte big-endian length plus JSON payload, 64 MiB cap |
 | `protocol` | Envelope types and wire mapping; ACP JSON-RPC strings inside `acp` frames |
 | `acp` | Shared ACP request validation and JSON-RPC errors |
-| `leader-routes` | ACP method registry: requests and notifications to their owners; unknown requests are METHOD_NOT_FOUND |
+| `leader-routes` | ACP method registry: requests and notifications to their owners; unknown requests are METHOD_NOT_FOUND. Builds the `initialize` reply and the fixed replies no owner implements |
+| `host-services` | The optional DSH host services the bridge reads, each by name at call time; the per-session preset/agent/host service lookup |
 | `leader-transport` | Unix socket, registration, ACP request/reply and reverse-request lifetimes; no DSH |
 | `leader-lifecycle` | Host heartbeat, no-client grace, shutdown that joins every owner's drain |
 | `model-catalog` | Catalog snapshots, accepted native reads, discovery, route writes, disposal; no socket or Cordis |
@@ -118,8 +119,10 @@ must exist. `src/` and `bin/` have no runtime import cycle, nothing imports
 `index.ts`, and computed imports are enumerated. Cordis is type-only in
 `session-models`, `session-presets`, `profile-plugins`, `image-output`, `mcp`
 and `session-export`; a runtime dependency only in `native-tasks`,
-`session-migration`, `terminal-signal` and `preset-catalog`; absent elsewhere. The entry builds no maps, sets, abort controllers or timers
-and imports no `node:net`. `dsh-session-projection` and `zod` stay host peers.
+`session-migration`, `terminal-signal` and `preset-catalog`; absent elsewhere. The entry builds no maps, sets, abort controllers or timers,
+imports no `node:net`, and reads no host service by name: `ctx.get` is
+refused in `index.ts`, so `host-services` is the one list of what the bridge
+consumes from DSH, to be reread at every runtime bump. `dsh-session-projection` and `zod` stay host peers.
 Each `.ts`/`.mjs` file in `src/`, `bin/` and `tests/` is capped at 800 lines;
 on 2026-09-24 none exceeds it (largest: `tests/leader-queue.spec.ts`, 763;
 largest module: `src/model-catalog.ts`, 596).
@@ -132,8 +135,8 @@ function other than a module's factory exceeds 100; the longest are
 `session-lifecycle.ts` `forkSession` (88) and `prompt-queue.ts` `runPrompt`
 (87). The
 factories remain long because they own their module's state:
-`createModelCatalog` (536), `createNativeChildren` (490), `index.ts` `apply`
-(463), `attachPromptQueue` (449).
+`createModelCatalog` (536), `createNativeChildren` (492), `attachPromptQueue`
+(451), `index.ts` `apply` (410).
 
 `leader-routes` is a registry so feature rows can later register their own
 `x.ai/*` methods and become separately mountable, as DSH composes features
