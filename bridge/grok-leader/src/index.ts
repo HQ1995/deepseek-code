@@ -34,6 +34,7 @@ import { errorMessage } from './guards.ts'
 import { createModelCatalog } from './model-catalog.ts'
 import { createNativeProviders } from './native-provider.ts'
 import { createPluginRows, type PluginManagerLike } from './plugin-rows.ts'
+import { createPluginStatus } from './plugin-status.ts'
 import { createBrowserControl, type BrowserStatus } from './browser-control.ts'
 import { createNativeTeam, type TeamServiceLike } from './native-team.ts'
 import { TEAM_TOOLS_MODULE } from './team-presets.ts'
@@ -216,6 +217,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       if (profile === undefined) throw new Error('no profile context: restart dscode to apply the change')
       await reconcileProfilePatches(ctx.root, readProfilePatches('dsh', profile), 'dsh', requiredIds)
     },
+  })
+  // Bundles this start skipped, for /dsh plugins.
+  const pluginStatus = createPluginStatus({
+    profile: () => ctx.get('profileContext') as ProfileContext | undefined,
+    logger,
   })
   const models = createModelCatalog({
     config,
@@ -407,6 +413,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const profilePlugins = createProfilePlugins({
     inspectRuntime: name => inspectPluginRuntime(ctx, name),
     installAnchor: () => (ctx.get('profileContext') as { installAnchor?: string } | undefined)?.installAnchor,
+    pluginManager: () => ctx.get('pluginManager') as PluginManagerLike | undefined,
+    skipped: pluginStatus.skipped,
   })
   const sessionCommands = createSessionCommands<SessionRecord>({
     sessions, owned: ownedRecord, client: id => connections.get(id),

@@ -40,7 +40,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 62 modules; `index.ts` is the composition root.
+`src/` has 63 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
@@ -103,7 +103,8 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `browser-control` | `/browser`: toggles the isolated browser row, edits its settings |
 | `profile-plugins` | `/dsh` plugin commands: verb parsing, the profile lock, list/add/inspect/remove, version trust |
 | `plugin-bundles` | Bundle patch analysis, isolated npm audit, install verification and rollback; no command parsing |
-| `plugin-rows` | Toggles one shipped-disabled profile row through the plugin manager |
+| `plugin-rows` | Toggles one shipped-disabled profile row through the plugin manager; the structural plugin-manager seam |
+| `plugin-status` | Read-only plugin views: the `/dsh plugins` table, refusal wording, and the bundles boot skipped |
 | `package-location` | Package provenance; lazy updater resolution and profile lock |
 | `guards` | Leaf value guards shared across the bridge; no imports |
 

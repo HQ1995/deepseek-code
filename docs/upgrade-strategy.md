@@ -173,6 +173,7 @@ be on PATH; dscode's `/dsh add` uses npm.
 | HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY | Native runtime proxy support; environment is inherited by the managed runtime |
 | Streaming tool-call continuation | Native DeepSeek fix preserves call identifiers and names |
 | MCP tool pagination | Native repeated-cursor rejection; `/mcps` and bridge initialization keep diagnostic behavior |
+| Plugin manager and shipped optional bundles | `/dsh plugins` over the native manager; see [plugin management](#plugin-management) |
 | Skills and commands | `/skills`, skill insertion and native command discovery; TUI search uses its existing picker |
 | Declarative preset registry and ordered bundle patches | `/preset manage`, `/dsh`; local editable declaration bundles, read-only legacy import and shared host service identities |
 | `present` file delivery | Clickable transcript links from `deliverables/presented`, live and after resume; child/fork paths use the viewed workspace |
@@ -232,6 +233,17 @@ Account"), switched on in its base layer. dscode's patch disables it: `/provider
 cannot manage that route, and it would otherwise sit in the roster with no
 models. `/dsh add` flags a bundle that touches it, as it does the other
 credential rows.
+
+### Plugin management
+
+The leader mounts DSH's plugin manager (`plugin-manager`, a base row that needs
+a launcher profile), and `/dsh` reads it as DSH's Plugins page does:
+`listBundles` for each bundle's locale title and description, version,
+selection, `installed`, `optional`, `removable` and `readOnlyReason`, and
+`listPlugins` for each row's live Loader phase. The table leaves out the app
+bundles every installation carries (web, headless, SDK, ACP) unless one is
+selected. rc.2 ships `OPTIONAL_BUNDLES` = Agent Teams, Voice input and Auto
+Authorization Review, off until switched on and never removable.
 
 ### Approval reasons
 

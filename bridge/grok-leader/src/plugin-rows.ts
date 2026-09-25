@@ -5,10 +5,49 @@
 import { internalError } from './acp.ts'
 import { errorMessage } from './guards.ts'
 
-/** Structural read of the plugin manager's row toggle (dsh 0.1.7). */
+/** A refusal or failure as the plugin manager reports it (`ManagementError`). */
+export interface ManagementErrorLike {
+  code?: string
+  diagnostic?: string
+  incompatible?: ReadonlyArray<{ name: string; version: string; runtimeVersion: string; peers: Record<string, string> }>
+}
+/** Literal text, or translations with a required English fallback (`LocalizedText`). */
+export type LocalizedTextLike = string | { readonly en: string; readonly [locale: string]: string }
+/** Local package display metadata (`PluginLocalizedMeta`). */
+export interface PluginMetaLike { readonly title?: LocalizedTextLike; readonly description?: LocalizedTextLike; readonly error?: string }
+/** One Loader entry and its profile-patch address (`PluginInfo`). */
+export interface PluginEntryLike {
+  entryId: string
+  moduleName: string
+  enabled: boolean
+  fiberPhase?: 'pending' | 'loading' | 'active' | 'failed' | 'unloading' | null
+  patchId?: string
+  readOnlyReason?: string
+}
+/** One installed or installation-provided bundle (`BundleInfo`). */
+export interface BundleLike {
+  name: string
+  version?: string
+  meta?: PluginMetaLike
+  description?: string
+  enabled: boolean
+  installed: boolean
+  optional: boolean
+  removable: boolean
+  readOnlyReason?: string
+  error?: ManagementErrorLike
+  rows: ReadonlyArray<{ rowId: string; moduleName: string; entryId?: string; meta?: PluginMetaLike }>
+  overrides: readonly string[]
+}
+/** A saved change and its application outcome (`ChangeResult`). */
+export interface ChangeLike { application: string; error?: ManagementErrorLike; warnings?: string[] }
+
+/** Structural read of the DSH plugin manager (dsh 0.1.7-rc.2). A test
+ * compiles the runtime's own `PluginManager` against it. */
 export interface PluginManagerLike {
-  listPlugins(): Promise<Array<{ entryId: string; moduleName: string; enabled: boolean; patchId?: string; readOnlyReason?: string }>>
-  setPluginEnabled(entryId: string, enabled: boolean): Promise<{ application: string; error?: { code?: string }; warnings?: string[] }>
+  listPlugins(): Promise<PluginEntryLike[]>
+  listBundles(): Promise<BundleLike[]>
+  setPluginEnabled(entryId: string, enabled: boolean): Promise<ChangeLike>
 }
 
 export interface PluginRowDependencies {

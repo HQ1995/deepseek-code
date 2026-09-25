@@ -11,6 +11,8 @@ import {
   CORE_PLUGIN_NAMES, bundleRequiresTrust, createPluginBundles, describeAnalysis, readProfileManifest, refusedCompatibility, writeProfileBundles,
   type PluginBundleDependencies, type PluginBundles,
 } from './plugin-bundles.ts'
+import type { PluginManagerLike } from './plugin-rows.ts'
+import { bundleDetail, pluginTable, type SkippedBundle } from './plugin-status.ts'
 
 export { SENSITIVE_ROW_IDS, analyzeBundlePatch, type BundlePatchAnalysis } from './plugin-bundles.ts'
 
@@ -146,6 +148,10 @@ export function inspectPluginRuntime(ctx: Context, packageName: string): string 
 export interface ProfilePluginDependencies extends PluginBundleDependencies {
   inspectRuntime(name: string): string | undefined
   directory?: () => string | undefined
+  /** The running leader's DSH plugin manager; absent outside a leader. */
+  pluginManager?: () => PluginManagerLike | undefined
+  /** Bundles this leader's start skipped, with why. */
+  skipped?: () => readonly SkippedBundle[]
 }
 
 const USAGE = 'Usage: /dsh plugins | /dsh add [--trust] <package|git-url|file:path> | /dsh remove <name> | /dsh inspect <name>'
@@ -153,6 +159,12 @@ const USAGE = 'Usage: /dsh plugins | /dsh add [--trust] <package|git-url|file:pa
 
 /** Verbs that mutate the profile, and so run under its lock. */
 const LOCKED_VERBS: ReadonlySet<string | undefined> = new Set(['add', 'remove', 'allow-version', 'revoke-version'])
+
+/** The live plugin manager a leader offers /dsh, with what its start skipped. */
+interface PluginCatalog {
+  readonly manager: PluginManagerLike
+  skipped(): readonly SkippedBundle[]
+}
 
 /** One parsed /dsh command against an installed profile directory. */
 interface PluginVerb {
@@ -162,16 +174,26 @@ interface PluginVerb {
   notify(message: string): void
   readonly bundles: PluginBundles
   inspectRuntime(name: string): string | undefined
+  readonly catalog: PluginCatalog | undefined
 }
 
-async function listPlugins({ dir }: PluginVerb): Promise<string> {
+async function listPlugins({ dir, catalog }: PluginVerb): Promise<string> {
   const { dependencies, bundles } = await readProfileManifest(dir)
+  let note = ''
+  if (catalog !== undefined) {
+    try {
+      const [listed, plugins] = await Promise.all([catalog.manager.listBundles(), catalog.manager.listPlugins()])
+      return pluginTable({ dir, bundles: listed, plugins, order: bundles, core: CORE_PLUGIN_NAMES, skipped: catalog.skipped() }) + '\n\n' + USAGE
+    } catch (error) {
+      note = '\n\nThe DSH plugin manager could not list the bundles (' + errorMessage(error) + '); this is the profile manifest.'
+    }
+  }
   const lines = bundles.map(name => {
     const core = CORE_PLUGIN_NAMES.has(name) ? ' (core)' : ''
     const version = dependencies[name] === undefined ? '' : ' ' + dependencies[name]
     return '- ' + name + version + core
   })
-  return 'Plugins in ' + dir + ':\n' + lines.join('\n') + '\n\n' + USAGE
+  return 'Plugins in ' + dir + ':\n' + lines.join('\n') + note + '\n\n' + USAGE
 }
 
 /** Audit in an isolated stage, refuse core, broken or incompatible packages and
@@ -214,10 +236,15 @@ async function addPlugins({ dir, rest, notify, bundles: pluginBundles }: PluginV
   return await pluginBundles.installAudited(dir, specs, staged, trusted)
 }
 
-async function inspectPlugin({ dir, rest, inspectRuntime }: PluginVerb): Promise<string> {
+async function inspectPlugin({ dir, rest, inspectRuntime, catalog }: PluginVerb): Promise<string> {
   const name = rest[0]
   if (name === undefined) return 'Missing plugin name. ' + USAGE
   const runtime = inspectRuntime(name)
+  const bundle = (await catalog?.manager.listBundles().catch(() => undefined))?.find(candidate => candidate.name === name)
+  if (bundle !== undefined) {
+    const detail = bundleDetail(bundle, await catalog!.manager.listPlugins(), CORE_PLUGIN_NAMES)
+    return runtime === undefined ? detail : runtime + '\n\n' + detail
+  }
   if (runtime !== undefined) return runtime
   const manifest = await readProfileManifest(dir)
   if (manifest.dependencies[name] !== undefined) {
@@ -313,7 +340,10 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
     if (dir === undefined) {
       return 'dsh plugin management is unavailable: no installed leader profile was found (running from a source checkout?). Use: dsh plugin --profile dscode add <package>'
     }
-    const execute = (): Promise<string> => runVerb({ dir, verb, rest, notify, bundles, inspectRuntime: name => dependencies.inspectRuntime(name) })
+    const manager = dependencies.pluginManager?.()
+    const catalog = manager === undefined ? undefined
+      : { manager, skipped: () => dependencies.skipped?.() ?? [] }
+    const execute = (): Promise<string> => runVerb({ dir, verb, rest, notify, bundles, inspectRuntime: name => dependencies.inspectRuntime(name), catalog })
     try {
       return LOCKED_VERBS.has(verb) ? await withProfileLock(dir, execute) : await execute()
     } catch (error: unknown) {

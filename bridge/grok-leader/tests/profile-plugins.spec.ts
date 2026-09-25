@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { load } from 'js-yaml'
 import { getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
+import type { BundleInfo, PluginInfo } from '@deepseek-ai/dsh-plugin-manager'
 import { analyzeBundlePatch, createProfilePlugins, SENSITIVE_ROW_IDS } from '../src/profile-plugins.ts'
 
 const roots: string[] = []
@@ -253,5 +254,51 @@ describe('profile plugin operations', () => {
     release(); await expect(operation).resolves.toContain('Installed or updated')
     await disposal
     expect((await f.read()).dsh.profile.bundles).toContain('test-plugin')
+  })
+})
+
+/** A leader profile with the rc.2 plugin manager over it: dscode's core
+ * bundles, one optional bundle shipped off, one third-party bundle. */
+async function managed() {
+  const root = await mkdtemp(join(tmpdir(), 'dscode-profile-switch-'))
+  roots.push(root)
+  await writeFile(join(root, 'package.json'), JSON.stringify({ private: true, dependencies: { '@hqzhao95/dscode': '0.0.0', 'dsh-plugin-mine': '1.0.0' },
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@hqzhao95/dscode', 'dsh-plugin-mine'] } } }))
+  const bundles: BundleInfo[] = [
+    { name: '@deepseek-ai/dsh-base', version: '0.1.7-rc.2', enabled: true, installed: false, optional: false, removable: false, readOnlyReason: 'management-required',
+      rows: [{ rowId: 'llm', moduleName: '@deepseek-ai/dsh-llm', entryId: 'include:llm' }] as BundleInfo['rows'], overrides: [] },
+    { name: '@hqzhao95/dscode', version: '0.0.0', enabled: true, installed: true, optional: false, removable: true,
+      rows: [{ rowId: 'dscode-browser', moduleName: '@hqzhao95/dscode/browser', entryId: 'include:dscode-browser' }] as BundleInfo['rows'], overrides: [] },
+    { name: '@deepseek-ai/dsh-experimental-auto-review', version: '0.1.7-rc.2', meta: { title: { en: 'Auto Authorization Review', zh: '自动授权审查' } },
+      enabled: false, installed: false, optional: true, removable: false, rows: [{ rowId: 'auto-review', moduleName: '@deepseek-ai/dsh-experimental-auto-review' }], overrides: [] },
+    { name: 'dsh-plugin-mine', version: '1.0.0', enabled: true, installed: true, optional: false, removable: true,
+      rows: [{ rowId: 'mine', moduleName: 'dsh-plugin-mine', entryId: 'include:mine' }, { rowId: 'shared', moduleName: 'dsh-plugin-mine/shared', entryId: 'include:shared' }] as BundleInfo['rows'], overrides: [] },
+    { name: 'dsh-plugin-broken', enabled: false, installed: true, optional: false, removable: true, error: { code: 'not-bundle' }, rows: [], overrides: [] },
+  ]
+  const plugins: PluginInfo[] = [
+    { entryId: 'include:llm', moduleName: '@deepseek-ai/dsh-llm', enabled: true, fiberPhase: 'active', patchId: 'llm' },
+    { entryId: 'include:dscode-browser', moduleName: '@hqzhao95/dscode/browser', enabled: false, fiberPhase: null, patchId: 'dscode-browser' },
+    { entryId: 'include:mine', moduleName: 'dsh-plugin-mine', enabled: true, fiberPhase: 'active', patchId: 'mine' },
+    { entryId: 'include:shared', moduleName: 'dsh-plugin-mine/shared', enabled: true, fiberPhase: 'active', readOnlyReason: 'unaddressable' },
+  ] as PluginInfo[]
+  const manager = {
+    listBundles: vi.fn(async () => structuredClone(bundles)),
+    listPlugins: vi.fn(async () => structuredClone(plugins)),
+    setPluginEnabled: vi.fn(async () => ({ application: 'failed' })),
+  }
+  const plugins_ = createProfilePlugins({ directory: () => root, exec: vi.fn(), inspectRuntime: () => undefined, pluginManager: () => manager,
+    skipped: () => [{ packageName: 'dsh-plugin-gone', reason: 'cannot resolve it' }] })
+  return { root, manager, plugins: plugins_ }
+}
+
+describe('/dsh plugins over the plugin manager', () => {
+  it('lists every bundle with its kind, rows and problems', async () => {
+    const f = await managed()
+    const text = await f.plugins.execute('/dsh plugins')
+    expect(text).toContain('| on | **dscode** | `@hqzhao95/dscode@0.0.0` | core | 1 row · 1 off |')
+    expect(text).toContain('| off | **Auto Authorization Review** | `@deepseek-ai/dsh-experimental-auto-review@0.1.7-rc.2` | official · optional · experimental | 1 row |')
+    expect(text).toContain('- `dsh-plugin-broken`: This package declares no bundle, so it cannot be managed as a plugin.')
+    expect(text).toContain('- `dsh-plugin-gone`: skipped at startup: cannot resolve it')
+    expect(await f.plugins.execute('/dsh inspect dsh-plugin-mine')).toContain('- `shared` dsh-plugin-mine/shared · running · locked: The profile patch cannot address this one uniquely.')
   })
 })

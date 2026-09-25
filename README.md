@@ -67,6 +67,7 @@ unless `--force` is explicit. Headless formats are `plain`, `json`,
 | `/export [filename]` | Copy/save Markdown; `.zip` exports logs, descendants, and attachments |
 | `/team` | Show the roster and task board of a `teams` session's Agent Team |
 | `/browser` | Turn the isolated headless browser on or off and edit its allowed origins |
+| `/dsh plugins` | List, add and remove dsh plugins; see [Plugins](#plugins) |
 | `/doctor` | Check terminal, installation, and optional LSP/PTY dependencies |
 | `Ctrl+P` | Open commands while keeping the current draft |
 | `Ctrl+S`, `Alt+S` | Stash or restore one prompt draft |
@@ -99,6 +100,23 @@ Every browser action asks for your approval and shows what it will do, so
 always-approve mode refuses browser actions. It is not an OS network or host
 sandbox; see the [browser notes](docs/upgrade-strategy.md#browser) for browser
 discovery, the Chromium sandbox and origin filtering.
+
+## Plugins
+
+dscode runs as a DSH profile, and its plugins are DSH bundles: npm packages whose
+patch layer adds or changes rows (components) of that profile. `/dsh plugins`
+lists them as DSH's own Plugins page does: title and one-line description,
+package and version, on or off, kind (`core`, `official · optional`,
+`installed`, `removable`, `experimental`) and the rows by state (`18 rows · 17
+running · 1 off`), then the reason for each problem bundle. The pinned runtime
+ships three official bundles switched off: Agent Teams, Voice input and Auto
+Authorization Review.
+
+| Command | Action |
+|---|---|
+| `/dsh plugins` | The table above |
+| `/dsh inspect <bundle>` | Its components, their state and the services they provide |
+| `/dsh add [--trust] <package>`, `/dsh remove <bundle>` | Audit and install with npm, or uninstall |
 
 ## Remote workspace over SSH (experimental)
 
