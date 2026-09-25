@@ -40,7 +40,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 64 modules; `index.ts` is the composition root.
+`src/` has 65 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
@@ -99,6 +99,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `projection` | Pure mapping of session events and tool metadata to TUI wire updates |
 | `tool-titles` | Tool card titles read off argument shapes, never tool names |
 | `tool-output` | Pure tool-card shapes: ToolKind, rawInput variants, fallback diffs, typed `rawOutput` |
+| `tool-views` | A tool's own DSH presenters run at projection time, live and on replay, and their views normalized for the TUI |
 | `image-output` | Resolves tool images through the attachment authority |
 | `browser-actions` | Human wording for browser tool cards and approvals |
 | `browser-control` | `/browser`: toggles the isolated browser row, edits its settings |

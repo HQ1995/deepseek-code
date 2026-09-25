@@ -12,6 +12,7 @@ import { CHILD_HISTORY_PAGE_SIZE, createChildLogs } from './child-history.ts'
 import { workflowUpdates, type WorkflowHistory, type LiveWorkflow } from './workflows.ts'
 import { parsePrompt } from './prompt-content.ts'
 import { sessionEventToUpdates, systemNotes, textBlocks, type GrokSessionUpdate, type ProjectedUpdate } from './projection.ts'
+import { registryPresenter } from './tool-views.ts'
 import type { SessionOutput } from './session-output.ts'
 import {
   childConversations, childOverview, childTerminalStatus, inboxCommand, inboxView, parseSubagentsCommand, runLength, runSubagentVerb,
@@ -289,11 +290,13 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
         const nextSeq = Math.min(after + CHILD_HISTORY_PAGE_SIZE, index.nextSeq)
         const entries: Array<{ update?: GrokSessionUpdate; meta?: Record<string, unknown>; imageNotes?: string[]; turnEnded?: boolean }> = []
         let turnStartMs = index.turnStartAt(after)
+        // Views come from the live child's registry, else from the parent's.
+        const presenter = registryPresenter(host.agent(childSessionId) ?? record.agent)
         for (const event of await read(after, nextSeq - after)) {
           if (!isLive(record)) throw invalidParams('unknown session')
           scope.assertActive()
           if (event.type === 'turn/start') turnStartMs = event.time
-          const mapped = sessionEventToUpdates(event, { replay: true, cwd: meta.cwd, toolCall: id => index.toolCallAt(id, event.seq) })
+          const mapped = sessionEventToUpdates(event, { replay: true, cwd: meta.cwd, toolCall: id => index.toolCallAt(id, event.seq), presenter })
           const updates = hasToolImages(event) ? await host.projectImages(event, mapped) : mapped
           scope.assertActive()
           for (const update of updates) entries.push({ update, meta: { isReplay: true, agentTimestampMs: event.time, turnStartMs, streamStartMs: turnStartMs } })

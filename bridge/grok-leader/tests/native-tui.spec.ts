@@ -56,6 +56,7 @@ it('renders PTC sub-dispatches as their own rows in live and replayed transcript
   for (const replay of [false, true]) {
     expect(sessionEventToUpdates(start, { replay })).toEqual([{
       sessionUpdate: 'tool_call', toolCallId: 'code:ptc:1', title: 'bash', kind: 'execute', status: 'in_progress', rawInput: args,
+      _meta: { 'x.ai/tool': { name: 'bash' } },
     }])
     const updates = sessionEventToUpdates(settled, { replay, toolCall: id => id === 'code:ptc:1' ? { name: 'bash', arguments: args } : undefined })
     expect(updates[0]).toMatchObject({

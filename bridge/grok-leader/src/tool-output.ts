@@ -9,7 +9,7 @@
 import { parseExitStatus } from '@deepseek-ai/dsh-shell'
 
 /** grok ACP ToolKind vocabulary the TUI renders for a tool call. */
-export type ToolKindWire = 'execute' | 'read' | 'edit' | 'search' | 'fetch' | 'other'
+export type ToolKindWire = 'execute' | 'read' | 'edit' | 'delete' | 'move' | 'search' | 'fetch' | 'other'
 
 /** grok ToolCallContent shapes the TUI understands (text or file diff).
  *
@@ -60,7 +60,7 @@ export function parseJsonObject(raw: string): unknown {
  * renderer could spend noticeable time on it, we skip the diff fallback and
  * let the normal text result render instead.
  */
-const MAX_FALLBACK_DIFF_CHARS = 64 * 1024
+export const MAX_FALLBACK_DIFF_CHARS = 64 * 1024
 
 /** True when a fallback diff stays within the display-only performance budget. */
 function withinDiffBudget(oldText: string | undefined, newText: string): boolean {
@@ -147,6 +147,21 @@ export function rawInputForTool(name: string, args: unknown): unknown {
   if (lower === 'web_search') return { ...args, variant: 'WebSearch' }
   if (lower === 'x_search') return { ...args, variant: 'XSearch' }
   return args
+}
+
+/** Turn dsh image/text blocks into display text blocks. */
+export function textBlocks(content: unknown): Array<{ type: 'text'; text: string }> {
+  if (!Array.isArray(content)) return []
+  const blocks: Array<{ type: 'text'; text: string }> = []
+  for (const raw of content) {
+    const block = raw as { type?: string; text?: string; attachment?: { attachmentId?: string } }
+    if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
+      blocks.push({ type: 'text', text: block.text })
+    } else if (block.type === 'image') {
+      blocks.push({ type: 'text', text: '[image attachment ' + String(block.attachment?.attachmentId) + ']' })
+    }
+  }
+  return blocks
 }
 
 /** Join text content blocks into the model-facing result text. */

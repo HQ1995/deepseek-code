@@ -56,6 +56,21 @@ its tool name in `_meta['x.ai/tool'].name`, which the TUI (to hide todo, goal,
 workflow and scheduler cards) and headless output read before the title. A
 `tool_call_update`'s `_meta` keys override the call's own, key by key.
 
+Every `tool_call` names its tool in `_meta['x.ai/tool'].name`. When the tool
+defines DSH presenters, the call also carries `_meta['dscode/view']`, the
+tool's own call view (`presentCall`: a `generic`, `terminal` or `diff` card),
+and its `tool_call_update` carries the result view (`presentResult`:
+`generic`, `terminal`, `diff`, `search`, `read` or `web`) under the same key.
+The bridge runs the presenters when it projects: live, on resume and for child
+history (the live child's registry, else the parent's), and for PTC sub-calls,
+whose results have no `meta`. Nothing is persisted, so a replayed log shows
+what the mounted tool presents today. A tool that is not mounted, a presenter
+that throws, arguments that no longer match the tool's schema or a view of an
+unknown shape give no view. Views are normalized: content becomes text blocks,
+a relative terminal `cwd` resolves against the session cwd, a diff view whose
+texts exceed 64 KiB is dropped and a generic `rawInput` over 8 KiB becomes a
+truncated string.
+
 | Surface | Contract |
 |---|---|
 | `initialize`, `authenticate` | advertise models, commands, capabilities, the execution world, and the bridge-owned auth stub |

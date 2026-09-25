@@ -26,8 +26,8 @@ describe('native assistant settlement projection', () => {
       data: { turn: 1, step: 1, callId: ToolCallId('c-' + name), name, arguments: JSON.stringify(args) } } as SessionEvent, { replay: false })
     expect(call('mcp__playwright-mcp__browser_navigate', { url: 'https://example.com/' })).toEqual([expect.objectContaining({
       sessionUpdate: 'tool_call', title: 'Browser: open https://example.com/', rawInput: { url: 'https://example.com/' } })])
-    expect(call('bash', { command: 'ls' })).toEqual([expect.objectContaining({ title: 'bash' })])
-    expect(call('bash', { command: 'ls' })[0]).not.toHaveProperty('_meta')
+    // Every card names its tool for the TUI and headless output, whatever its title.
+    expect(call('bash', { command: 'ls' })).toEqual([expect.objectContaining({ title: 'bash', _meta: { 'x.ai/tool': { name: 'bash' } } })])
   })
 
   it('titles a code-runner card by its first line of code and keeps its result unshaped', () => {
@@ -65,8 +65,7 @@ describe('native assistant settlement projection', () => {
     expect(call('ask_user_question', { questions: [{ id: 'q', question: 'x'.repeat(200) }] }).title).toBe('Ask: ' + 'x'.repeat(79) + '…')
     // Anything else keeps the tool name.
     for (const args of [{ questions: [] }, { questions: [{ id: 'q' }] }, { questions: 'Proceed?' }, { questions: [{ id: 'q', question: ' ' }] }]) {
-      expect(call('ask_user_question', args)).toMatchObject({ title: 'ask_user_question' })
-      expect(call('ask_user_question', args)).not.toHaveProperty('_meta')
+      expect(call('ask_user_question', args)).toMatchObject({ title: 'ask_user_question', _meta: { 'x.ai/tool': { name: 'ask_user_question' } } })
     }
   })
 
