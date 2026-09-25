@@ -279,6 +279,11 @@ report names the row switches and settings the patch held and the `mv` that
 restores it. When the leader does not start or accept the connection, the
 TUI's error ends with that command.
 
+dscode keeps the profile with npm (`package-lock.json`); DSH's `dsh plugin` and
+its manager's `installBundle` use pnpm (`pnpm-lock.yaml`), and the two layouts
+diverge. `/doctor` warns when the profile holds a `pnpm-lock.yaml`. Test homes
+that install the plugin with `dsh plugin --profile dscode add` show that warning.
+
 ### Approval reasons
 
 rc.2 approval requests carry why they ask: a sandbox or `run_code` escalation,

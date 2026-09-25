@@ -230,6 +230,14 @@ export const installationReport = ({
     if (anchor) findings.push(...profileBundleFindings({ anchor, profile }))
     else add('INFO', 'Profile bundles', 'Not evaluated: the DSH executable is not inside an @deepseek-ai/dsh installation.')
   }
+  // dscode keeps this profile with npm (the launcher and /dsh add); a pnpm run
+  // (dsh plugin --profile dscode, DSH's plugin manager) builds a second lockfile
+  // and layout that the next npm run does not reconcile.
+  const pnpmLock = join(profile, 'pnpm-lock.yaml')
+  if (existsSync(pnpmLock)) {
+    add('WARN', 'Profile package manager', `${pnpmLock} exists: pnpm installed into this dscode profile (dsh plugin --profile dscode, or DSH's plugin manager), `
+      + 'which diverges from the package-lock.json npm keeps for dscode. Manage dscode plugins with /dsh add and /dsh remove only.')
+  }
   const log = leaderLog(env)
   if (log !== undefined) add('INFO', 'Leader log', log.exact ? log.path : `${log.path} (this user's most recent; the TUI prints the exact path when the leader fails to start)`)
   const settings = remote ? remoteSettings(existsSync(join(profile, 'cordis.patch.yml')) ? readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') : '') : undefined

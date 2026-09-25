@@ -130,6 +130,10 @@ their rows follow the commands that own them, such as `/browser` and
 `/provider`. Agent Teams gives every session Team tools, which `/doctor` warns
 about; `/preset teams` mounts them in one session instead.
 
+dscode keeps this profile with npm. Add and remove its plugins with `/dsh add`
+and `/dsh remove` only: `dsh plugin --profile dscode …` and DSH's plugin manager
+install with pnpm, and `/doctor` warns when the profile holds a `pnpm-lock.yaml`.
+
 A bundle that cannot load is skipped at startup: dscode starts without it and
 the next session you open says which one and why. `/doctor` and
 `dscode doctor --runtime` report skipped bundles, rows that failed or wait for a

@@ -91,7 +91,7 @@ it('reports bundles boot skips and a profile patch that stops boot, with their r
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-it('names the leader log the TUI wrote', async () => {
+it('names the leader log and warns about a pnpm lockfile in the npm-managed profile', async () => {
   const { installationReport, leaderLog } = await import('../bin/doctor.mjs')
   const root = mkdtempSync(join(tmpdir(), 'dscode-doctor-log-'))
   try {
@@ -108,5 +108,10 @@ it('names the leader log the TUI wrote', async () => {
     mkdirSync(profile)
     const report = () => installationReport({ profile, dshBin: '/nonexistent/dsh', optional: false, env: { DSCODE_SOCKET: '/tmp/dscode-1-abc.sock' } })
     expect(report().find(f => f.name === 'Leader log')).toEqual({ status: 'INFO', name: 'Leader log', detail: '/tmp/dscode-1-abc.log' })
+    expect(report().find(f => f.name === 'Profile package manager')).toBeUndefined()
+    writeFileSync(join(profile, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
+    expect(report().find(f => f.name === 'Profile package manager')).toEqual({ status: 'WARN', name: 'Profile package manager',
+      detail: `${join(profile, 'pnpm-lock.yaml')} exists: pnpm installed into this dscode profile (dsh plugin --profile dscode, or DSH's plugin manager), `
+        + 'which diverges from the package-lock.json npm keeps for dscode. Manage dscode plugins with /dsh add and /dsh remove only.' })
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
