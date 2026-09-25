@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest'
 import type { SubprocessTerminalHandle } from '@deepseek-ai/dsh-subprocess'
-import { retryForegroundSignal } from '../src/terminal-signal.ts'
+import { FOREGROUND_SIGNAL_ATTEMPTS, retryForegroundSignal } from '../src/terminal-signal.ts'
 import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { load } from 'js-yaml'
@@ -21,11 +21,20 @@ it('reinspects an exited foreground group and preserves the actual successful ta
   expect(signal.mock.calls).toEqual([['SIGINT'], ['SIGINT']])
 })
 
+it('keeps reinspecting a foreground group that exits again, within a bound', async () => {
+  const esrch = () => Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' })
+  const signal = vi.fn().mockRejectedValueOnce(esrch()).mockRejectedValueOnce(esrch()).mockRejectedValueOnce(esrch()).mockResolvedValue(789)
+  const handle = { signalForeground: signal } as unknown as SubprocessTerminalHandle
+  retryForegroundSignal(handle)
+  expect(await handle.signalForeground('SIGINT')).toBe(789)
+  expect(signal).toHaveBeenCalledTimes(4)
+})
+
 it.each(['EPERM', 'EIO', 'ESRCH'])('surfaces %s when signalling cannot succeed', async code => {
   const error = Object.assign(new Error(code), { code })
   const signal = vi.fn().mockRejectedValue(error)
   const handle = { signalForeground: signal } as unknown as SubprocessTerminalHandle
   retryForegroundSignal(handle)
   await expect(handle.signalForeground('SIGINT')).rejects.toBe(error)
-  expect(signal).toHaveBeenCalledTimes(code === 'ESRCH' ? 2 : 1)
+  expect(signal).toHaveBeenCalledTimes(code === 'ESRCH' ? FOREGROUND_SIGNAL_ATTEMPTS : 1)
 })

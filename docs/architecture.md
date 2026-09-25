@@ -93,7 +93,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `native-session-status` | Goal, activity, plan-mode and context observations; reads never arm a goal |
 | `native-interactions` | Permission modes and approvals, user questions and plan reviews, reverse-request admission |
 | `native-execution` | Runtime doctor and persistent-terminal controls |
-| `terminal-signal` | Retries a foreground-group signal once through the provider |
+| `terminal-signal` | Retries a foreground-group signal that races an exiting group, a bounded number of times, through the provider |
 | `native-asides` | One-shot `/btw` asides, including late handles |
 | `native-capabilities` | Read-only views of the current preset's native tools |
 | `native-team` | `/team`: read-only roster and task board of the Agent Team |
