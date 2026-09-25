@@ -70,6 +70,14 @@ describe('tool views from the mounted standard preset', () => {
       'terminal', 'terminal', 'generic', 'read', 'diff', 'diff', 'generic', 'search', 'generic', 'search', 'generic', 'web',
     ])
     expect(live.filter(row => row.update === 'tool_call').map(row => row.name)).toEqual(calls.map(entry => entry.name))
+    // The views title and kind the cards; no typed rawOutput is rebuilt from names.
+    const updates = (c.all as Row[]).filter(row => row.method === 'session/update').map(row => row.params!.update as Record<string, unknown>)
+    expect(updates.filter(update => update.sessionUpdate === 'tool_call').map(update => [update.title, update.kind])).toEqual([
+      ['echo hi', 'execute'], ['Read /w/a.ts', 'read'], ['Edit /w/a.ts', 'edit'], ['Grep const', 'search'], ['Glob **/*.ts', 'search'], ['https://example.test/', 'fetch'],
+    ])
+    expect(updates.filter(update => update.sessionUpdate === 'tool_call_update' && 'rawOutput' in update)).toEqual([])
+    expect(updates.find(update => update.toolCallId === 'call-edit' && update.sessionUpdate === 'tool_call_update')).toMatchObject({
+      content: [{ type: 'content' }, { type: 'diff', path: '/w/a.ts', oldText: source, newText: 'const a = 2' }] })
     const byId = (id: string) => live.filter(row => row.id === id).map(row => row.view)
     expect(byId('call-bash')).toEqual([{ card: 'terminal', title: 'echo hi', description: 'Say hi' }, { card: 'terminal', output: 'hi\n', exitCode: 0 }])
     expect(byId('call-read')).toEqual([

@@ -60,6 +60,8 @@ export async function toolViewsAcceptance(ui) {
   const views = kind => [...log.matchAll(new RegExp(`\\[acp\\] ${kind} id=[^\\n]* view=(\\w+)`, 'g'))].map(match => match[1])
   assert.deepEqual(views('tool_call').sort(), ['diff', 'diff', 'generic', 'generic', 'generic', 'generic', 'terminal'], 'call views')
   assert.deepEqual(views('tool_call_update').sort(), ['diff', 'diff', 'none', 'read', 'search', 'search', 'terminal'], 'result views')
+  // A viewed call carries no typed rawOutput: bash sends no byte array any more.
+  assert.doesNotMatch(log, /\[acp\] tool_call_update id=[^\n]* raw_output=(?!none)/, 'viewed results carry no rawOutput')
   const live = cardsOf(await captureHistory(), prompt)
   const check = (cards, label) => {
     const screen = cards.join('\n')

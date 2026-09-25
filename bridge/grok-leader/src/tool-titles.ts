@@ -1,7 +1,9 @@
 /**
  * Tool card titles read off a call's arguments rather than its tool name, by
- * argument shape only: no tool is named here. Pure, like the projection that
- * uses them.
+ * argument shape only: no tool is named here. The fallback title for replay of
+ * unmounted tools, MCP and presenter-less tools; a call with a view is titled
+ * by the view unless one of these shapes applies, because the TUI keys its
+ * inline plan review on the plan title. Pure, like the projection that uses them.
  *
  * @module dscode/tool-titles
  */

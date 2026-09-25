@@ -101,16 +101,46 @@ describe('tool view projection', () => {
       : { card: 'terminal', output: 'hi', exitCode: 0 },
   }
 
-  it('sends the call view and the result view beside the unchanged legacy fields', () => {
+  it('sends the call view and the result view, and lets the views replace the name tables', () => {
     const presenter = presenting({ bash })
     const [started] = sessionEventToUpdates(call('b1', 'bash', { command: 'echo hi' }), { replay: false, cwd: '/w', presenter })
-    expect(started).toMatchObject({ sessionUpdate: 'tool_call', title: 'bash', kind: 'execute', rawInput: { command: 'echo hi' },
+    expect(started).toEqual({ sessionUpdate: 'tool_call', toolCallId: 'b1', title: 'echo hi', kind: 'execute', status: 'in_progress', rawInput: { command: 'echo hi' },
       _meta: { 'x.ai/tool': { name: 'bash' }, 'dscode/view': { card: 'terminal', title: 'echo hi', cwd: '/w/pkg' } } })
     const prior = () => ({ name: 'bash', arguments: { command: 'echo hi' } })
     const [settled] = sessionEventToUpdates(result('b1', 'hi'), { replay: false, toolCall: prior, presenter })
-    expect(settled).toMatchObject({ sessionUpdate: 'tool_call_update', status: 'completed', _meta: { 'dscode/view': { card: 'terminal', output: 'hi', exitCode: 0 } } })
+    // No Bash-shaped byte array: the terminal view carries the exit status.
+    expect(settled).toEqual({ sessionUpdate: 'tool_call_update', toolCallId: 'b1', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'hi' } }],
+      _meta: { 'dscode/view': { card: 'terminal', output: 'hi', exitCode: 0 } } })
     const [failed] = sessionEventToUpdates(result('b1', 'boom', undefined, 1, true), { replay: false, toolCall: prior, presenter })
     expect(failed).toMatchObject({ status: 'failed', _meta: { 'dscode/view': { card: 'generic', content: [{ type: 'text', text: '```console\nboom\n```' }] } } })
+    expect(failed).not.toHaveProperty('rawOutput')
+    // Without the presenter the name tables rebuild the Bash shape, as before.
+    expect(sessionEventToUpdates(result('b1', 'hi'), { replay: false, toolCall: prior })[0]).toMatchObject({ rawOutput: { type: 'Bash', exit_code: 0 } })
+  })
+
+  it('takes the kind from the view, keeps argument-shape titles and sends the view\'s diffs as ACP content', () => {
+    const presenter = presenting({
+      terminal_close: { presentCall: () => ({ card: 'generic', title: 'Close terminal t1', kind: 'delete' }) },
+      exit_plan_mode: { presentCall: () => ({ card: 'generic', title: 'Ship it', kind: 'other' }) },
+      web_search: { presentCall: () => ({ card: 'generic', title: 'rust', kind: 'search', rawInput: 'rust' }) },
+      write: {
+        presentCall: () => ({ card: 'diff', title: 'Write a', diffs: [{ path: 'a', oldText: null, newText: 'new' }] }),
+        presentResult: (_args, outcome) => outcome.isError ? undefined : ({ card: 'diff', title: 'Write a', diffs: [{ path: 'a', oldText: null, newText: 'new' }] }),
+      },
+    })
+    const start = (name: string, args: unknown) => sessionEventToUpdates(call('c-' + name, name, args), { replay: false, presenter })[0]
+    expect(start('terminal_close', { id: 't1' })).toMatchObject({ title: 'Close terminal t1', kind: 'delete' })
+    // The TUI's inline plan review reads the plan title; the card renders from the view.
+    expect(start('exit_plan_mode', { plan: '# Ship it\n\n1. Step' })).toMatchObject({ title: 'Plan: Submit for approval', _meta: { 'dscode/view': { title: 'Ship it' } } })
+    // No `variant` is added to a viewed call's input.
+    expect(start('web_search', { queries: ['rust'] })).toMatchObject({ kind: 'search', rawInput: { queries: ['rust'] } })
+    const prior = () => ({ name: 'write', arguments: { file_path: 'a', content: 'new' } })
+    const [written] = sessionEventToUpdates(result('c-write', 'Wrote a', { diffs: [{ path: 'a', oldText: 'stale', newText: 'meta' }] }), { replay: false, toolCall: prior, presenter })
+    expect(written).toMatchObject({ content: [{ type: 'content' }, { type: 'diff', path: 'a', newText: 'new' }] })
+    expect((written as { content: unknown[] }).content[1]).not.toHaveProperty('oldText')
+    // A failed write has a call view but no result view: no diff is synthesized from its arguments.
+    const [failed] = sessionEventToUpdates(result('c-write', 'denied', undefined, 1, true), { replay: false, toolCall: prior, presenter })
+    expect(failed).toEqual({ sessionUpdate: 'tool_call_update', toolCallId: 'c-write', status: 'failed', content: [{ type: 'content', content: { type: 'text', text: 'denied' } }] })
   })
 
   it('always names the tool and keeps legacy output byte-identical when no view is presented', () => {

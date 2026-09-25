@@ -1008,5 +1008,7 @@ a location stays Read, a search or fetch of one salient input stays Search or
 WebFetch) so verb groups do not jump, and a failed file read without a result
 view stays a Read card with its error. A final update's view is kept under
 `dscode/resultView` beside the call's own, and the ACP debug log names each
-notification's view card. A call without a view renders as before (class:
-feature).
+notification's view card. The bridge sends no typed `rawOutput` (the Bash byte
+array, `ReadFile`, `GrepSearch`, `WebSearch`, `WebFetch`) for a call with a
+view, so these cards no longer read it for DSH tools. A call without a view
+renders as before, from its typed `rawOutput` (class: feature).

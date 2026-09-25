@@ -97,8 +97,8 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `native-capabilities` | Read-only views of the current preset's native tools |
 | `native-team` | `/team`: read-only roster and task board of the Agent Team |
 | `projection` | Pure mapping of session events and tool metadata to TUI wire updates |
-| `tool-titles` | Tool card titles read off argument shapes, never tool names |
-| `tool-output` | Pure tool-card shapes: ToolKind, rawInput variants, fallback diffs, typed `rawOutput` |
+| `tool-titles` | Fallback tool card titles read off argument shapes, never tool names |
+| `tool-output` | Pure fallback tool-card shapes by tool name: ToolKind, rawInput variants, fallback diffs, typed `rawOutput` |
 | `tool-views` | A tool's own DSH presenters run at projection time, live and on replay, and their views normalized for the TUI |
 | `image-output` | Resolves tool images through the attachment authority |
 | `browser-actions` | Human wording for browser tool cards and approvals |
@@ -129,8 +129,8 @@ largest module: `src/model-catalog.ts`, 596).
 
 Since the 2026-09-24 split no module in `src/` exceeds 600 lines and no
 function other than a module's factory exceeds 100; the longest are
-`session-lifecycle.ts` `forkSession` (88), `projection.ts`
-`sessionEventToUpdates` and `prompt-queue.ts` `runPrompt` (87 each). The
+`session-lifecycle.ts` `forkSession` (88) and `prompt-queue.ts` `runPrompt`
+(87). The
 factories remain long because they own their module's state:
 `createModelCatalog` (536), `createNativeChildren` (490), `index.ts` `apply`
 (463), `attachPromptQueue` (449).

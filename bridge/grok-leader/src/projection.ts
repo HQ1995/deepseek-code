@@ -17,7 +17,7 @@ import {
   diffBlocksFromCall, diffBlocksFromMeta, parseJsonObject, rawInputForTool, textBlocks, toolKindForName, typedRawOutput,
   type ToolKindWire, type ToolResultContentBlock,
 } from './tool-output.ts'
-import { callView, resultView, type ToolCallViewWire, type ToolPresenter, type ToolResultViewWire } from './tool-views.ts'
+import { callView, resultView, viewKind, type ToolCallViewWire, type ToolPresenter, type ToolResultViewWire } from './tool-views.ts'
 export { parseJsonObject, textBlocks, toolKindForName, type ToolKindWire, type ToolResultContentBlock } from './tool-output.ts'
 export type { ToolPresenter } from './tool-views.ts'
 
@@ -327,12 +327,20 @@ function deliveredFiles(files: ReadonlyArray<{ path: string; description?: strin
 
 /** One tool card opening; native calls and PTC sub-calls share it. The card always
  * carries its tool name in `_meta['x.ai/tool']`, which the TUI and headless output
- * read before the title, and the tool's own call view when it presents one. */
+ * read before the title. A tool that presents its call sends that view, and the view
+ * gives the card its kind and title; the name tables are the fallback for tools
+ * without one. An argument-shape title stays ahead of the view's: the TUI keys its
+ * inline plan review on the plan title, and the card renders from the view anyway. */
 function toolCallStarted(toolCallId: string, name: string, args: unknown, options: ProjectionOptions): GrokSessionUpdate {
   const view = callView(options.presenter, name, args, options.cwd)
+  if (view !== undefined) {
+    const kind = viewKind(view)
+    return { sessionUpdate: 'tool_call', toolCallId, title: argumentTitle(kind, args) ?? view.title, kind, status: 'in_progress', rawInput: args,
+      _meta: { 'x.ai/tool': { name }, 'dscode/view': view } }
+  }
   const title = browserCardTitle(name, args) ?? argumentTitle(toolKindForName(name, args), args) ?? name
   return { sessionUpdate: 'tool_call', toolCallId, title, kind: toolKindForName(name, args), status: 'in_progress', rawInput: rawInputForTool(name, args),
-    _meta: { 'x.ai/tool': { name }, ...view === undefined ? {} : { 'dscode/view': view } } }
+    _meta: { 'x.ai/tool': { name } } }
 }
 
 /** One tool card settlement: rendered content, typed raw output, the native error
@@ -356,7 +364,9 @@ function toolCallSettled(
   }
 }
 
-/** One settled call, native or PTC: its content, fallback shapes and result view. */
+/** One settled call, native or PTC. A tool that presents its call or result renders
+ * from its views: its diffs ride as ACP `diff` content and no typed `rawOutput` is
+ * rebuilt. Otherwise the name tables reconstruct the shapes the TUI's cards read. */
 function toolResultSettled(
   callId: string,
   result: { content: unknown; isError: boolean; meta?: unknown },
@@ -364,14 +374,18 @@ function toolResultSettled(
   error?: { name: string; code: string },
 ): GrokSessionUpdate {
   const prior = options.toolCall?.(callId)
-  const metaDiffs = diffBlocksFromMeta(result.meta)
+  const view = prior === undefined ? undefined : resultView(options.presenter, prior.name, prior.arguments, result)
+  const viewed = view !== undefined || (prior !== undefined && callView(options.presenter, prior.name, prior.arguments, options.cwd) !== undefined)
+  const diffs: ToolResultContentBlock[] = view?.card === 'diff'
+    ? view.diffs.map(diff => ({ type: 'diff', path: diff.path, ...diff.oldText === null ? {} : { oldText: diff.oldText }, newText: diff.newText }))
+    : diffBlocksFromMeta(result.meta)
   const contents: ToolResultContentBlock[] = [
     ...textBlocks(result.content).map(block => ({ type: 'content' as const, content: block })),
-    ...metaDiffs,
-    ...(metaDiffs.length === 0 && !result.isError ? diffBlocksFromCall(prior) : []),
+    ...diffs,
+    ...(diffs.length === 0 && !result.isError && !viewed ? diffBlocksFromCall(prior) : []),
   ]
-  const view = prior === undefined ? undefined : resultView(options.presenter, prior.name, prior.arguments, result)
-  return toolCallSettled(callId, result.isError, contents, typedRawOutput(prior, result.meta, contents, result.isError), view, error)
+  const rawOutput = viewed ? undefined : typedRawOutput(prior, result.meta, contents, result.isError)
+  return toolCallSettled(callId, result.isError, contents, rawOutput, view, error)
 }
 
 /** What projecting one event may consult beyond the event itself. */

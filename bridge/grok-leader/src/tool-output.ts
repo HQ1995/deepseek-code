@@ -1,8 +1,10 @@
 /**
- * Tool-card shapes: the grok ToolKind a dsh tool renders as, the rawInput
- * variants the typed TUI blocks route on, display-only fallback diffs and the
- * typed `rawOutput` rebuilt from model-facing text plus tool-private meta.
- * Pure functions only; `projection` assembles them into session updates.
+ * Tool-card shapes by tool name: the grok ToolKind a dsh tool renders as, the
+ * rawInput variants the typed TUI blocks route on, display-only fallback diffs
+ * and the typed `rawOutput` rebuilt from model-facing text plus tool-private
+ * meta. Fallback only: replay of unmounted tools, MCP and presenter-less tools.
+ * A tool that presents its calls renders from its views (`tool-views`), which
+ * `projection` prefers. Pure functions only.
  *
  * @module dscode/tool-output
  */

@@ -46,20 +46,14 @@ PTC calls and replay. `error` is not an accepted tool status: the TUI decoder
 drops the entire frame, not just its status. Error metadata remains a separate
 field on the failed result.
 
-A `tool_call` is titled by its tool name unless its arguments say what it does:
-a browser action reads `Browser: <action>`, a call whose arguments carry
-`questions: [{question}]` reads `Ask: <question>` (`Ask N questions` for
-several), and an execute call that runs `code` rather than a shell `command`
-(PTC's `run_code`) reads `code: <first non-empty line>`, which the TUI shows as
-`Run code: …`. Its result keeps no Bash-shaped `rawOutput`. Such a card keeps
-its tool name in `_meta['x.ai/tool'].name`, which the TUI (to hide todo, goal,
-workflow and scheduler cards) and headless output read before the title. A
-`tool_call_update`'s `_meta` keys override the call's own, key by key.
+Every `tool_call` names its tool in `_meta['x.ai/tool'].name`, which the TUI
+(to hide todo, goal, workflow and scheduler cards) and headless output read
+before the title. A `tool_call_update`'s `_meta` keys override the call's own,
+key by key; the TUI keeps a result view beside the call's view.
 
-Every `tool_call` names its tool in `_meta['x.ai/tool'].name`. When the tool
-defines DSH presenters, the call also carries `_meta['dscode/view']`, the
-tool's own call view (`presentCall`: a `generic`, `terminal` or `diff` card),
-and its `tool_call_update` carries the result view (`presentResult`:
+When the tool defines DSH presenters, the call carries `_meta['dscode/view']`,
+the tool's own call view (`presentCall`: a `generic`, `terminal` or `diff`
+card), and its `tool_call_update` carries the result view (`presentResult`:
 `generic`, `terminal`, `diff`, `search`, `read` or `web`) under the same key.
 The bridge runs the presenters when it projects: live, on resume and for child
 history (the live child's registry, else the parent's), and for PTC sub-calls,
@@ -69,7 +63,26 @@ that throws, arguments that no longer match the tool's schema or a view of an
 unknown shape give no view. Views are normalized: content becomes text blocks,
 a relative terminal `cwd` resolves against the session cwd, a diff view whose
 texts exceed 64 KiB is dropped and a generic `rawInput` over 8 KiB becomes a
-truncated string.
+truncated string. A call with a view takes its ACP `kind` from it (`terminal`
+is `execute`, `diff` is `edit`, a generic view names its own, else `other`)
+and its title, `rawInput` is the call's arguments unchanged, a diff result's
+diffs ride as ACP `diff` content, and no typed `rawOutput` is sent: a bash
+result no longer carries its output as a byte array. The TUI renders such a
+card from the views.
+
+The name tables are the fallback: replay of unmounted tools, MCP and
+presenter-less tools. Such a card is titled by its tool name unless its
+arguments say what it does: a browser action reads `Browser: <action>`, a call
+whose arguments carry `questions: [{question}]` reads `Ask: <question>` (`Ask
+N questions` for several), an execute call that runs `code` rather than a
+shell `command` (PTC's `run_code`) reads `code: <first non-empty line>`, which
+the TUI shows as `Run code: …`, and a lone markdown `plan` reads `Plan: Submit
+for approval`. These argument-shape titles stay ahead of a view's title too:
+the TUI's inline plan review keys on the plan title. A fallback card's kind
+comes from the tool name, `web_search` and `x_search` input gains a `variant`,
+an Edit or Write result without `meta` diffs gets diffs rebuilt from its
+arguments, and bash, read, grep, glob, web search and web fetch results carry
+the typed `rawOutput` the TUI's cards read (a `run_code` result keeps none).
 
 | Surface | Contract |
 |---|---|
