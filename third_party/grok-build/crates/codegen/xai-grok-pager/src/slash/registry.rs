@@ -140,6 +140,10 @@ pub struct CommandRegistry {
     /// setters can never un-hide a restricted command: the deny list always
     /// wins over every other visibility gate.
     restricted: HashSet<String>,
+    /// DIVERGENCE(dscode): advertised host command names (lowercase) whose
+    /// descriptor serves options (`_meta.options`), kept even when a builtin
+    /// holds the name so a builtin fronting that command can use them.
+    host_options: HashSet<String>,
     /// Names of tools the connected agent has advertised.
     ///
     /// Semantics (fail-closed):
@@ -203,6 +207,7 @@ impl CommandRegistry {
             hidden,
             menu_hidden,
             restricted: HashSet::new(),
+            host_options: HashSet::new(),
             available_tools: None,
         };
         reg.rebuild_triggers();
@@ -361,6 +366,25 @@ impl CommandRegistry {
             None => false,
             Some(set) => required.iter().all(|t| set.contains(*t)),
         }
+    }
+
+    /// DIVERGENCE(dscode): the canonical name whose bare invocation opens the
+    /// host-served option picker (`x.ai/commands/options`): a host command
+    /// whose descriptor serves options, or a builtin fronting a host command
+    /// of the same name that does. Resolves like a typed invocation.
+    pub fn options_command(&self, key: &str) -> Option<&str> {
+        let source = *self
+            .key_to_index
+            .get(key)
+            .and_then(|idx| self.sources.get(*idx))?;
+        let command = self.get_for_dispatch(key)?;
+        let serves = match source {
+            CommandSource::Acp => command.serves_options(),
+            CommandSource::Builtin => {
+                command.fronts_host_command() && self.host_options.contains(command.name())
+            }
+        };
+        serves.then(|| command.name())
     }
 
     /// DIVERGENCE(dscode): the host's own (ACP, non-skill) commands the menu
@@ -559,6 +583,17 @@ impl CommandRegistry {
                     .any(|b| b.eq_ignore_ascii_case(name))
         };
 
+        self.host_options = commands
+            .iter()
+            .filter(|cmd| {
+                crate::slash::acp_command::CommandMeta::parse(cmd.meta.as_ref()).options
+                    && matches!(
+                        crate::slash::acp_command::SkillMeta::parse(cmd.meta.as_ref()),
+                        crate::slash::acp_command::SkillMeta::Absent
+                    )
+            })
+            .map(|cmd| cmd.name.to_lowercase())
+            .collect();
         let mut claimed: HashSet<String> = HashSet::new();
         for acp_cmd in commands {
             let name = acp_cmd.name.to_lowercase();
@@ -1356,6 +1391,40 @@ mod tests {
             reg.get_for_dispatch("loop").is_none(),
             "tool-gated stays fail-closed pre-handshake"
         );
+    }
+
+    /// DIVERGENCE(dscode): a bare invocation opens the host's option picker
+    /// for a host command that serves options, and for the builtin `/preset`
+    /// (and its alias) only while the host's same-named command does. Other
+    /// builtins keep their names; skills never serve options.
+    #[test]
+    fn command_options_follow_the_host_advertisement() {
+        use agent_client_protocol::AvailableCommand;
+        let options = serde_json::json!({ "options": true });
+        let options = options.as_object().cloned().unwrap();
+        let mut reg = CommandRegistry::new(crate::slash::commands::builtin_commands());
+        assert_eq!(reg.options_command("preset"), None);
+        reg.set_acp_commands(&[
+            AvailableCommand::new("dsh", "Manage dsh plugins").meta(options.clone()),
+            AvailableCommand::new("preset", "host preset").meta(options.clone()),
+            AvailableCommand::new("model", "shadow").meta(options.clone()),
+            AvailableCommand::new("compact", "no options"),
+            AvailableCommand::new("review", "a skill").meta(
+                serde_json::json!({ "options": true, "scope": "plugin", "path": "/p/SKILL.md" })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            ),
+        ]);
+        assert_eq!(reg.options_command("dsh"), Some("dsh"));
+        assert_eq!(reg.options_command("preset"), Some("preset"));
+        assert_eq!(reg.options_command("presets"), Some("preset"));
+        assert!(reg.is_builtin("preset"), "the builtin keeps the name");
+        for key in ["model", "compact", "review", "nope"] {
+            assert_eq!(reg.options_command(key), None, "{key}");
+        }
+        reg.set_acp_commands(&[AvailableCommand::new("preset", "host preset")]);
+        assert_eq!(reg.options_command("preset"), None);
     }
 
     #[test]

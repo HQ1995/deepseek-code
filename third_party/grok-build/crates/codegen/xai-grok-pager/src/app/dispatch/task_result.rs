@@ -959,6 +959,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         result @ (TaskResult::NativeControlsLoaded { .. }
         | TaskResult::NativeControlsPoll { .. }) => super::native_controls::result(app, result),
+        TaskResult::CommandOptionsLoaded {
+            agent_id,
+            session_id,
+            command,
+            key,
+            result,
+        } => super::command_options::loaded(app, agent_id, &session_id, &command, &key, result),
         TaskResult::SessionReferencesLoaded {
             agent_id,
             session_id,

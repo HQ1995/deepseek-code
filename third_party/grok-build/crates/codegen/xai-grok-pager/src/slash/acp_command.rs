@@ -9,7 +9,8 @@
 //!
 //! DIVERGENCE(dscode): a host command's `_meta` also carries the rest of its
 //! DSH descriptor ([`CommandMeta`]): its plugin-owned `definitionId`, whether
-//! composer attachments may accompany it, and whether it runs immediately.
+//! composer attachments may accompany it, whether it runs immediately, and
+//! whether the host serves options for its bare invocation.
 
 use agent_client_protocol as acp;
 use xai_grok_tools::implementations::skills::types::SkillScope;
@@ -93,6 +94,9 @@ pub struct CommandMeta {
     /// The host runs it at once over `x.ai/commands/run`, beside a running
     /// turn and its queue, instead of receiving it as a queued prompt.
     pub immediate: bool,
+    /// The host serves the choices of its bare invocation over
+    /// `x.ai/commands/options`; the pager shows them in an option picker.
+    pub options: bool,
 }
 
 impl CommandMeta {
@@ -104,6 +108,7 @@ impl CommandMeta {
             definition_id: trimmed_string_field(m, "definitionId"),
             attachments: m.get("attachments").and_then(|v| v.as_bool()) == Some(true),
             immediate: m.get("immediate").and_then(|v| v.as_bool()) == Some(true),
+            options: m.get("options").and_then(|v| v.as_bool()) == Some(true),
         }
     }
 }
@@ -173,6 +178,10 @@ impl SlashCommand for AcpSlashCommand {
 
     fn runs_immediately(&self) -> bool {
         matches!(self.skill, SkillMeta::Absent) && self.command.immediate
+    }
+
+    fn serves_options(&self) -> bool {
+        matches!(self.skill, SkillMeta::Absent) && self.command.options
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -413,6 +422,33 @@ mod tests {
             Some(serde_json::json!({ "scope": "plugin", "path": "/p/SKILL.md" })),
         ));
         assert!(!skill.refuses_attachments());
+    }
+
+    #[test]
+    fn host_descriptor_meta_parses_served_options() {
+        let preset = AcpSlashCommand::from(&make_cmd(
+            "preset",
+            Some(serde_json::json!({ "options": true })),
+        ));
+        assert!(preset.serves_options());
+        assert!(!preset.runs_immediately());
+        let goal = AcpSlashCommand::from(&make_cmd(
+            "goal",
+            Some(serde_json::json!({ "options": true, "immediate": true })),
+        ));
+        assert!(goal.serves_options() && goal.runs_immediately());
+        for meta in [
+            None,
+            Some(serde_json::json!({ "options": "yes" })),
+            Some(serde_json::json!({ "options": false })),
+            // A skill is a prompt; the host serves it no options.
+            Some(serde_json::json!({ "options": true, "scope": "plugin", "path": "/p/SKILL.md" })),
+        ] {
+            assert!(
+                !AcpSlashCommand::from(&make_cmd("dsh", meta.clone())).serves_options(),
+                "{meta:?}"
+            );
+        }
     }
 
     fn make_skill_cmd(name: &str, path: &str, scope: SkillScope) -> AcpSlashCommand {

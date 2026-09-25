@@ -3,6 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { EncodedImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
+import { goalOptions, type SelectOption } from './command-options.ts'
 import { parsePrompt } from './prompt-content.ts'
 import { goalUpdateFromView, type ContextProjectionValues, type NativeGoalView } from './projection.ts'
 import type { SessionOutput } from './session-output.ts'
@@ -150,6 +151,10 @@ export function createNativeSessionStatus<S extends StatusSession>(host: StatusH
     },
     mode,
     refresh(record: S): void { refresh(record) },
+    /** `/goal` options: the controls the session's goal phase accepts. */
+    goalOptions(record: S): SelectOption[] {
+      return isLive(record) ? goalOptions(host.goals(record)?.get(record.agent)) : []
+    },
     pauseGoal(record: S): void {
       if (!isLive(record)) return
       const goals = host.goals(record), goal = goals?.get(record.agent)

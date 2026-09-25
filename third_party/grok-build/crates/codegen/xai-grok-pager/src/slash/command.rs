@@ -339,6 +339,21 @@ pub trait SlashCommand: Send + Sync {
         false
     }
 
+    /// DIVERGENCE(dscode): whether the host serves the choices of this
+    /// command's bare invocation over `x.ai/commands/options`
+    /// (`_meta.options`). A bare Enter or a Ctrl+P pick then opens the option
+    /// picker instead of running it; pager builtins never serve options.
+    fn serves_options(&self) -> bool {
+        false
+    }
+
+    /// DIVERGENCE(dscode): whether this builtin fronts the host command of the
+    /// same name, which the registry then does not list: the host's
+    /// `_meta.options` applies to its bare invocation.
+    fn fronts_host_command(&self) -> bool {
+        false
+    }
+
     /// Tool names the agent must have registered for this command to work.
     ///
     /// Default is empty (no tool dependency). Override for commands that

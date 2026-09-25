@@ -14,6 +14,7 @@
 
 mod auth;
 mod billing;
+pub(crate) mod command_options;
 mod cta;
 mod ctx;
 mod dashboard;

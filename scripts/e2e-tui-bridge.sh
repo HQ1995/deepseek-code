@@ -966,18 +966,21 @@ grep -q 'Dry run' "$WORKTREE_GC_OUT" \
   || fail "worktree gc dry-run did not report its mode"
 
 
-echo "[tui] preset picker"
-send_line "/preset"
-wait_frame "preset picker" 'Presets'
-tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" End
-wait_frame "custom preset in picker" 'Fixture custom preset'
-tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Home Enter
+echo "[tui] preset picker served by the host, from the palette"
+# A blank session can still change preset in place, so /preset's options are
+# the roster, the current preset marked and preselected.
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" C-p
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" -l "preset"
+wait_frame "palette preset row" 'Switch Preset'
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Enter
+wait_frame "preset options" 'Standard mode \(current\)'
+grep -q '/preset' "$FRAME" || fail "the preset options are not titled with their command"
+wait_frame "custom preset in options" 'Fixture custom preset'
+cp "$FRAME" "$OUT/preset-options-$RUN_ID.txt"
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Enter
+wait_frame "preset pick" 'Preset "standard" is active and is now the default' 300
 wait_frame "preset selection" 'preset: standard'
-capture
-if grep -q 'Presets' "$FRAME"; then
-  tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Escape
-fi
-wait_frame_absent "preset picker close" 'Presets'
+wait_frame_absent "preset options close" 'Standard mode \(current\)'
 
 echo "[tui] preset-scoped manual compaction"
 clear_prompt
@@ -998,6 +1001,19 @@ for command in hooks plugins; do
   send_line "/$command"
   wait_frame "unsupported $command" "/$command is unavailable in this session" 100
 done
+
+echo "[tui] /dsh options offer the bundles enable applies to"
+clear_prompt
+send_line "/dsh"
+wait_frame "dsh options" 'Turn a plugin on'
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" -l "enable"
+wait_frame_absent "dsh options filtered" 'List plugins'
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Enter
+wait_frame "dsh enable options" '/dsh enable'
+wait_frame "dsh enable bundles" 'Auto Authorization Review'
+cp "$FRAME" "$OUT/dsh-enable-options-$RUN_ID.txt"
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Escape
+wait_frame_absent "dsh options close" 'Auto Authorization Review'
 
 echo "[tui] bridge-owned plugin lifecycle"
 clear_prompt
@@ -1021,7 +1037,12 @@ fi
 
 echo "[tui] browser row toggles live without a browser in the running session"
 clear_prompt
+# Bare /browser offers status, on and off, the current state marked.
 send_line "/browser"
+wait_frame "browser options" 'Off \(current\)'
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" -l "status"
+wait_frame_absent "browser options filtered" 'Off \(current\)'
+tmux -L "$SESSION" -f /dev/null send-keys -t "$SESSION:0.0" Enter
 wait_frame "browser off" 'Browser: off\. Turn it on'
 clear_prompt
 # A missing executable still enables the row; the report explains it.

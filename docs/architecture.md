@@ -40,7 +40,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 67 modules; `index.ts` is the composition root.
+`src/` has 68 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
@@ -78,7 +78,8 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `session-list` | Session-picker metadata (first prompt, title, activity) and its index |
 | `session-artifacts` | Title, references and archive RPCs: session admission, cancellation, drains |
 | `session-export` | Atomic logical-log archive save; no partial ZIP, no overwrite |
-| `session-commands` | Command advertisement and routing over dsh's command registry |
+| `session-commands` | Command advertisement and routing over dsh's command registry; serves each command's options from its owner |
+| `command-options` | Pure: DSH `SelectOption` rows for host-served option pickers, their bounds, and the `/goal` rows |
 | `execution-world` | Where tools run: local, or the SSH workspace a profile configures |
 | `mcp` | ACP MCP declarations to agent-scoped DSH MCP clients, loaded lazily |
 | `native-children` | Workflow membership, child views and `/subagents` controls over native services |

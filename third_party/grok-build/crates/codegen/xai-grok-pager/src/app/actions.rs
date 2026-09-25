@@ -103,6 +103,13 @@ pub enum Action {
     SearchSessionReferences {
         query: Option<String>,
     },
+    /// DIVERGENCE(dscode): load a host command's options at `query` ('' for
+    /// its bare invocation, or a `next` row's id) into its option picker,
+    /// opening one when none is showing.
+    LoadCommandOptions {
+        command: String,
+        query: String,
+    },
     /// The session picker overlay was dismissed without a pick: invalidate any
     /// in-flight list/search/foreign scan so a late response can't fall
     /// through to the welcome picker fields.
@@ -2026,6 +2033,15 @@ pub enum Effect {
         query: String,
         nonce: String,
     },
+    /// DIVERGENCE(dscode): `x.ai/commands/options` for an option picker.
+    FetchCommandOptions {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        command: String,
+        query: String,
+        /// The picker's loading key, echoed back to reject stale replies.
+        key: String,
+    },
     /// Fetch and display session info via x.ai/session/info.
     /// Auth lines are derived in the effect from SessionFlags + env (not Effect fields).
     ShowSessionInfo {
@@ -2877,6 +2893,13 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         nonce: String,
         result: Result<Vec<crate::slash::command::ArgItem>, String>,
+    },
+    CommandOptionsLoaded {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        command: String,
+        key: String,
+        result: Result<Vec<crate::app::dispatch::command_options::SelectOption>, String>,
     },
     /// Session info fetched successfully.
     SessionInfoComplete {

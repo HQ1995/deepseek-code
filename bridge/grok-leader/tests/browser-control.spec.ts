@@ -32,6 +32,18 @@ function fixture(options: { executable?: string; startOpen?: boolean } = {}) {
 }
 
 describe('/browser', () => {
+  it('offers status, on and off as options, the current state active', async () => {
+    const f = fixture({ executable: '/opt/chrome' })
+    const off = await f.control.options()
+    expect(off.map(option => [option.id, option.label, option.active === true])).toEqual([['status', 'Status', false], ['on', 'On', false], ['off', 'Off', true]])
+    expect(off[0]!.detail).toBe('Off')
+    expect(off[1]!.confirmation).toMatchObject({ title: 'Turn the browser on?', description: expect.stringContaining('not a network sandbox'), confirmLabel: 'Turn on' })
+    await f.control.execute('/browser on --origin https://example.com')
+    const on = await f.control.options()
+    expect(on.filter(option => option.active === true).map(option => option.id)).toEqual(['on'])
+    expect(on[0]!.detail).toBe('On · 0 open · allowed: https://example.com')
+  })
+
   it('reports off, then turns on with origins and states the security boundary', async () => {
     const f = fixture({ executable: '/opt/chrome' })
     expect(await f.control.execute('/browser')).toContain('Browser: off')

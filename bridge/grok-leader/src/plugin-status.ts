@@ -96,11 +96,14 @@ function kinds(bundle: BundleLike, core: ReadonlySet<string>): string[] {
   ]
 }
 
+/** The bundles `/dsh` shows: every one this profile runs, holds or may switch on. */
+export const shownBundles = <B extends BundleLike>(bundles: readonly B[], core: ReadonlySet<string>): B[] => bundles.filter(bundle =>
+  (core.has(bundle.name) && bundle.enabled) || (!BUILTIN_BUNDLES.has(bundle.name) && (bundle.installed || bundle.optional || bundle.error !== undefined)))
+
 /** `/dsh plugins`: every bundle this profile runs, holds or may switch on, as
  * one aligned table, then the reason for each problem bundle. */
 export function pluginTable({ dir, bundles, plugins, order, core, skipped, locale = environmentLocale() }: PluginTable): string {
-  const shown = bundles.filter(bundle => (core.has(bundle.name) && bundle.enabled)
-    || (!BUILTIN_BUNDLES.has(bundle.name) && (bundle.installed || bundle.optional || bundle.error !== undefined)))
+  const shown = shownBundles(bundles, core)
   const position = (bundle: BundleLike) => bundle.enabled && order.includes(bundle.name) ? order.indexOf(bundle.name) : order.length
   const group = (bundle: BundleLike) => bundle.enabled ? 0 : bundle.installed ? 1 : 2
   shown.sort((a, b) => group(a) - group(b) || position(a) - position(b) || shortName(a.name).localeCompare(shortName(b.name)))

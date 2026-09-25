@@ -350,6 +350,28 @@ describe('/dsh enable and disable', () => {
     expect(f.manager.setPluginEnabled).not.toHaveBeenCalled()
   })
 
+  it('offers its verbs, then the bundles each one applies to, as options', async () => {
+    const f = await managed()
+    expect((await f.plugins.options('')).map(option => [option.id, option.next === true]))
+      .toEqual([['plugins', false], ['enable', true], ['disable', true], ['inspect', true], ['remove', true]])
+    expect(await f.plugins.options('enable')).toEqual([{ id: 'enable @deepseek-ai/dsh-experimental-auto-review', label: 'Auto Authorization Review',
+      detail: '@deepseek-ai/dsh-experimental-auto-review@0.1.7-rc.2' }])
+    // dscode's own bundles and managed ones never switch; a broken one cannot be enabled.
+    expect((await f.plugins.options('disable')).map(option => option.id)).toEqual(['disable dsh-plugin-mine'])
+    expect((await f.plugins.options('inspect')).map(option => option.label)).toEqual(['base', 'dscode', 'Auto Authorization Review', 'plugin-mine', 'plugin-broken'])
+    expect(await f.plugins.options('remove')).toEqual([{ id: 'remove dsh-plugin-mine', label: 'plugin-mine', detail: 'dsh-plugin-mine@1.0.0',
+      confirmation: expect.objectContaining({ title: 'Remove plugin-mine?', confirmLabel: 'Remove' }) }])
+    for (const query of ['add', 'plugins', 'enable x']) expect(await f.plugins.options(query)).toEqual([])
+    expect(f.manager.setBundleEnabled).not.toHaveBeenCalled()
+  })
+
+  it('offers only profile reads as options without the plugin manager', async () => {
+    const f = await fixture()
+    expect((await f.plugins.options('')).map(option => option.id)).toEqual(['plugins', 'inspect', 'remove'])
+    expect(await f.plugins.options('enable')).toEqual([])
+    expect(await f.plugins.options('remove')).toEqual([])
+  })
+
   it('honors a bundle the plugin manager keeps for itself', async () => {
     const f = await managed()
     // Enabling the base is refused by its management lock, not the core rule.

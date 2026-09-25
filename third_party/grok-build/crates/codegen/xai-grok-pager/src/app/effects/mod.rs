@@ -1751,6 +1751,23 @@ pub(crate) fn execute(
                 TaskResult::SessionReferencesLoaded { agent_id, session_id, nonce, result }
             });
         }
+        Effect::FetchCommandOptions { agent_id, session_id, command, query, key } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                #[derive(serde::Deserialize)]
+                struct Options { options: Vec<crate::app::dispatch::command_options::SelectOption> }
+                let params = serde_json::json!({ "sessionId": session_id.0, "name": command, "query": query });
+                let request = acp::ExtRequest::new("x.ai/commands/options", serde_json::value::to_raw_value(&params).expect("serialize command options query").into());
+                let result = match tokio::time::timeout(std::time::Duration::from_secs(15), acp_send(request, &tx)).await {
+                    Ok(Ok(response)) => serde_json::from_str::<Options>(response.0.get())
+                        .map(|response| response.options)
+                        .map_err(|error| format!("Invalid command options: {error}")),
+                    Ok(Err(error)) => Err(sanitize_user_error(&error.to_string())),
+                    Err(_) => Err("Request timed out.".into()),
+                };
+                TaskResult::CommandOptionsLoaded { agent_id, session_id, command, key, result }
+            });
+        }
         Effect::RunSessionCommand { agent_id, session_id, method, prompt } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {

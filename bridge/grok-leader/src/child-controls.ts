@@ -10,6 +10,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { invalidParams } from './acp.ts'
+import { confirmation, type SelectOption } from './command-options.ts'
 import { textBlocks } from './projection.ts'
 
 /** One native descendant row. */
@@ -186,3 +187,22 @@ export const inboxView = (row: ChildRow, child: Agent | undefined, member: boole
     editable: !member && message.content.every(block => block.type === 'text'),
   })),
 })
+
+/** `/subagents` choices: the list, then each continuable child (running ones
+ * badged); a child's id as `query` offers the controls a pick completes. A
+ * teammate's queued input is Team mailbox delivery, so it offers no clear. */
+export function subagentOptions(rows: readonly ChildRow[], members: ReadonlyArray<{ id: string; name: string }>,
+  running: (id: string) => boolean, query: string): SelectOption[] {
+  const listed = rows.filter(row => row.kind === 'child'), children = listed.filter(row => row.mode === 'continuable')
+  const name = (row: ChildRow) => members.find(member => member.id === row.id)?.name ?? (row.label || row.id)
+  if (query === '') {
+    return listed.length === 0 ? [] : [{ id: 'list', label: 'List child conversations' }, ...children.map(row => ({
+      id: row.id, label: name(row), detail: row.id, ...running(row.id) ? { badge: 'running' } : {}, next: true } as const))]
+  }
+  const row = children.find(candidate => candidate.id === query)
+  if (row === undefined) return []
+  return [{ id: 'pending ' + row.id, label: 'Show its pending input' },
+    { id: 'stop ' + row.id, label: 'Stop it', confirmation: confirmation('Stop ' + name(row) + '?', 'Its running turn ends; queued input is kept.', 'Stop') },
+    ...members.some(member => member.id === row.id) ? [] : [{ id: 'clear ' + row.id, label: 'Clear its pending input',
+      confirmation: confirmation('Clear the pending input of ' + name(row) + '?', 'Every message queued for it is removed.', 'Clear') }]]
+}

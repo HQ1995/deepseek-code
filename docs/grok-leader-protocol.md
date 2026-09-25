@@ -129,6 +129,24 @@ The bridge also implements the `x.ai/*` surfaces required by this TUI:
   any other line fails with `-32602`. The same lines sent as `session/prompt`
   still run turnless. (This replaces the dedicated `x.ai/goal` and
   `x.ai/subagents` routes.)
+- `x.ai/commands/options` `{sessionId, name, query?}` serves the choices of a
+  command's bare invocation, for a command whose advertisement carries
+  `_meta.options: true`, and answers `{options: SelectOption[]}` in DSH's shape
+  (`id`, `label`, `badge?`, `detail?`, `active?`, `confirmation?` with
+  `title`, `description`, `acknowledgeLabel`, `cancelLabel`, `confirmLabel`)
+  plus dscode's `next?: true`. Picking a row submits `/<name> <id>` (an empty
+  id: the bare command); a `next` row instead asks again with `query` set to its
+  id, one argument further; `active` marks the value in use, where the picker
+  starts. An empty bare list means nothing can be picked now, and the client
+  runs the bare command. Reads only, for an owned session; any other command
+  fails with `-32602`. Rows are one line, bounded, with at most one active row.
+  The bridge serves them itself: `/preset` (the roster with the session's preset
+  active; none while the preset cannot change in place: a turn, history or an
+  Agent Team preset), `/goal` (show, then pause or resume by phase, and clear),
+  `/subagents` (list, then each continuable child and its pending, stop and
+  clear controls), `/browser` (status, on, off, the current state active) and
+  `/dsh` (its verbs, then the bundles `enable`, `disable`, `inspect` or
+  `remove` applies to).
 - native goal, permission, and task state/control from the owning dsh services
 - `x.ai/subagent/inbox` returns structured child/queue rows and applies the same
   native controls, with exact descendant/message IDs and stale-text checks.
@@ -450,7 +468,11 @@ A native command carries the rest of its DSH descriptor in `_meta`:
 `definitionId`, its stable plugin-owned identity, and `attachments: true` when
 composer attachments may accompany it. The TUI refuses the draft's images for
 every other non-skill command before dispatch, keeping the draft, and lists the
-non-skill commands in its Ctrl+P palette's Commands section.
+non-skill commands in its Ctrl+P palette's Commands section. `options: true`
+says `x.ai/commands/options` serves the command's bare choices (above); a
+Ctrl+P pick or a bare Enter then opens them in the TUI's option picker. The
+bridge's `/preset` advertises `<preset id>` as its hint: the roster is its
+options.
 The ambient update carries the session's runtime capabilities (`subagents`,
 `skills`, `plan`, `goal`, `jobs`, `workflow`, `todo`, `schedule`, `team`) in
 ACP's `_meta.capabilities` and never a toolset; the TUI's capability-gated

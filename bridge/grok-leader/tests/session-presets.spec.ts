@@ -124,6 +124,29 @@ describe('session preset ownership', () => {
     await expect(f.presets.command(record, '/preset minimal')).resolves.toContain('Switched')
   })
 
+  it('offers the roster as /preset options while the preset can change in place, and nothing otherwise', async () => {
+    const f = fixture(), roster = { ...f.roster, attachesOnOpen: vi.fn(async (id: string) => id === 'minimal') }
+    f.setRoster(roster)
+    const { record, events } = f.add()
+    // Shipped presets show their English copy; the Team-on-open preset cannot switch in place.
+    expect(await f.presets.options(record)).toEqual([
+      { id: 'standard', label: 'Standard mode', detail: expect.stringContaining('Full coding agent'), active: true },
+      { id: 'custom', label: 'Custom', detail: 'User-authored', badge: 'custom' },
+    ])
+    record.queue.busy = true
+    expect(await f.presets.options(record)).toEqual([])
+    record.queue.busy = false
+    events.push(event('user/message'))
+    expect(await f.presets.options(record)).toEqual([])
+    expect(await f.presets.options(f.add('team', 'minimal').record)).toEqual([])
+    f.setRoster()
+    const bare = f.add('bare').record
+    expect(await f.presets.options(bare)).toEqual([])
+    f.sessions.delete('bare')
+    await expect(f.presets.options(bare)).rejects.toThrow('session closed')
+    expect(f.order).toEqual([])
+  })
+
   it('locks all model-visible history but not log-only events; reselecting a busy live session is also locked', async () => {
     const f = fixture()
     for (const type of ['user/message', 'assistant/message', 'tool/result']) {

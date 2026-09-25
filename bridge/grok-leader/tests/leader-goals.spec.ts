@@ -60,6 +60,21 @@ describe('leader native goals', () => {
     expect(updates.every((item, index) => index === 0 || item._meta.eventSeq > updates[index - 1]!._meta.eventSeq)).toBe(true)
   })
 
+  it('serves the goal controls its phase accepts as /goal options', async () => {
+    let goal: NativeGoalView | undefined
+    const { client: c } = await start({ goals: { get: vi.fn((_agent: Agent) => goal), pause: vi.fn() } })
+    register(c); await c.next()
+    const sessionId = ((await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })).result as { sessionId: string }).sessionId
+    const ids = async (id: number) => ((await c.request(id, 'x.ai/commands/options', { sessionId, name: 'goal' })).result as { options: Array<{ id: string }> }).options.map(option => option.id)
+    expect(await ids(2)).toEqual([])
+    goal = { id: 'g', revision: 1, objective: 'ship it', phase: 'active', activation: 'armed', roundsStarted: 0, maxGoalRounds: 3 }
+    expect(await ids(3)).toEqual(['', 'pause', 'clear'])
+    goal = { ...goal, phase: 'paused' }
+    expect(await ids(4)).toEqual(['', 'resume', 'clear'])
+    goal = { ...goal, phase: 'complete', activation: 'disarmed' }
+    expect(await ids(5)).toEqual(['', 'clear'])
+  })
+
   it('hydrates completed goals on load and fork without presenting a fresh completion', async () => {
     let goal: NativeGoalView | undefined = { id: 'done', revision: 5, objective: 'finished', phase: 'complete', activation: 'disarmed', roundsStarted: 3, maxGoalRounds: 3 }
     const get = vi.fn((_agent: Agent) => goal)

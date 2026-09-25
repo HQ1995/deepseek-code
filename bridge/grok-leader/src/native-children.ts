@@ -15,7 +15,7 @@ import { sessionEventToUpdates, systemNotes, textBlocks, type GrokSessionUpdate,
 import { registryPresenter } from './tool-views.ts'
 import type { SessionOutput } from './session-output.ts'
 import {
-  childConversations, childOverview, childTerminalStatus, inboxCommand, inboxView, parseSubagentsCommand, runLength, runSubagentVerb,
+  childConversations, childOverview, childTerminalStatus, inboxCommand, inboxView, parseSubagentsCommand, runLength, runSubagentVerb, subagentOptions,
   type ChildRow, type ChildState, type SubagentsLike,
 } from './child-controls.ts'
 
@@ -528,6 +528,13 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     cancel: (clientId: number, params: unknown) => request(() => cancelSubagent(clientId, params)),
     inbox: (clientId: number, params: unknown) => request(() => childInbox(clientId, params)),
     command: (clientId: number, params: unknown) => request(() => executeSubagentCommand(clientId, params)),
+    /** `/subagents` options for an owned session: its children, then one child's controls. */
+    options: (record: S, query: string) => request(() => record.work.read(async scope => {
+      const service = subagentsService(record)
+      const rows = service === undefined ? [] : await listChildRows(service, record, scope)
+      scope.assertActive()
+      return subagentOptions(rows, host.teamMembers?.(record) ?? [], id => host.agent(SessionId(id))?.status === 'running', query)
+    })),
     dispose(): Promise<void> {
       if (disposal !== undefined) return disposal
       closed = true

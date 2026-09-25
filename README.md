@@ -54,7 +54,7 @@ unless `--force` is explicit. Headless formats are `plain`, `json`,
 | In the TUI | Action |
 |---|---|
 | `/model`, `/provider` | Choose model, reasoning effort, and provider; selections persist |
-| `/preset`, `Ctrl+Y` | Choose an installed preset |
+| `/preset`, `Ctrl+Y` | Choose an installed preset; `/preset <id>` switches directly |
 | `/preset manage` | Search, copy (`c`), view (`v`), or edit (`e`) presets; restart after editing |
 | `/resume`, `/reference` | Search sessions or insert a reference into the draft |
 | `/compact`, `/goal` | Use the selected preset's native compaction and goal controls |
@@ -74,6 +74,14 @@ unless `--force` is explicit. Headless formats are `plain`, `json`,
 | `Ctrl+S`, `Alt+S` | Stash or restore one prompt draft |
 | `Ctrl+T` | View the native Todo list |
 | `Enter` in a block viewer | Quote the selection into the draft |
+
+`/dsh`, `/browser`, `/subagents`, `/goal` and `/preset` entered bare, or picked
+in `Ctrl+P`, open a picker of what they can do now instead of running: the
+plugin verbs and then the bundles each applies to, browser on or off, each child
+and its controls, pausing, resuming or clearing the goal, and the presets with
+the current one marked. The pick runs as the full command (`/dsh enable <bundle>`).
+A preset can change in place only before a session has history; after that,
+`/preset` opens the preset catalog, which starts a new session with the pick.
 
 Paste or drag PNG, JPEG, WebP, or GIF images when the model supports image input.
 A plugin command that takes no images, such as `/dsh` or `/compact` (`/goal`

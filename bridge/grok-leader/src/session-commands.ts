@@ -3,6 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { EncodedImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
+import { boundOptions, type SelectOption } from './command-options.ts'
 import { errorMessage } from './guards.ts'
 import type { AgentPresetsLike } from './session-presets.ts'
 import type { SessionWork, SessionOperation } from './session-work.ts'
@@ -39,6 +40,7 @@ interface CommandSession {
   output: Pick<SessionOutput, 'update'>
 }
 type CommandResult = { result: { kind: string; text: string } }
+type Options = Promise<readonly SelectOption[]> | readonly SelectOption[]
 interface CommandHost<S extends CommandSession> {
   sessions: ReadonlyMap<SessionId, S>
   owned(clientId: number, id: SessionId | undefined): S | undefined
@@ -47,21 +49,23 @@ interface CommandHost<S extends CommandSession> {
   roster(): Pick<AgentPresetsLike, 'list'> | undefined
   skills(record: S): NativeSkills | undefined
   capabilities(record: S): string[]
-  profile: { execute(text: string, notify: (message: string) => void): Promise<string> }
-  browser: { execute(text: string): Promise<string> }
+  profile: { execute(text: string, notify: (message: string) => void): Promise<string>; options(query: string): Options }
+  browser: { execute(text: string): Promise<string>; options(): Options }
   team: { execute(record: S, text: string): string }
   preset(record: S, text: string): Promise<string>
-  children: { command(clientId: number, params: unknown): Promise<CommandResult> }
-  goals: { goal(clientId: number, params: unknown): Promise<CommandResult> }
+  presetOptions(record: S): Options
+  children: { command(clientId: number, params: unknown): Promise<CommandResult>; options(record: S, query: string): Options }
+  goals: { goal(clientId: number, params: unknown): Promise<CommandResult>; options(record: S): Options }
   on(name: 'commands/change' | 'skills/change' | 'tools/change', listener: () => void): () => void
   logger: { warn(message: string): void }
 }
 /** The rest of a host command's descriptor, which ACP's name, description and
  * hint cannot carry: its plugin-owned identity, whether composer attachments
- * may accompany it (absent: the client refuses them), and whether the client
+ * may accompany it (absent: the client refuses them), whether the client
  * runs it at once over `x.ai/commands/run` instead of queueing it behind the
- * running turn. */
-interface CommandMeta { definitionId?: string; attachments?: true; immediate?: true }
+ * running turn, and whether `x.ai/commands/options` serves the choices of its
+ * bare invocation. */
+interface CommandMeta { definitionId?: string; attachments?: true; immediate?: true; options?: true }
 interface AdvertisedCommand {
   name: string
   description: string
@@ -71,10 +75,14 @@ interface AdvertisedCommand {
 /** Commands that control a session beside its running turn rather than
  * inside it: the client sends them over `x.ai/commands/run`, never queued. */
 const IMMEDIATE = new Set(['goal', 'subagents'])
+/** Commands whose bare invocation offers bridge-served choices; each has its provider below. */
+const OPTION_COMMANDS = ['preset', 'dsh', 'browser', 'subagents', 'goal'] as const
+const OPTIONS: ReadonlySet<string> = new Set(OPTION_COMMANDS)
 const commandMeta = (command: NativeCommandDescriptor): CommandMeta | undefined => {
   const meta: CommandMeta = { ...command.definitionId === undefined ? {} : { definitionId: command.definitionId },
     ...command.input?.attachments === true ? { attachments: true } : {},
-    ...IMMEDIATE.has(command.name.toLowerCase()) ? { immediate: true } : {} }
+    ...IMMEDIATE.has(command.name.toLowerCase()) ? { immediate: true } : {},
+    ...OPTIONS.has(command.name.toLowerCase()) ? { options: true } : {} }
   return Object.keys(meta).length === 0 ? undefined : meta
 }
 const skillScope = (skill: NativeSkillSummary) => skill.source?.startsWith('project-') ? 'repo'
@@ -124,13 +132,14 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
     const presets = roster === undefined ? [] : await roster.list()
     check()
     const commands: AdvertisedCommand[] = [{ name: 'dsh', description: 'Manage dsh plugins',
-      input: { hint: 'plugins | enable|disable <bundle>[#row] | add [--trust] <package> | remove <name> | inspect <name>' } },
+      input: { hint: 'plugins | enable|disable <bundle>[#row] | add [--trust] <package> | remove <name> | inspect <name>' }, _meta: { options: true } },
     { name: 'browser', description: 'Turn the isolated browser on or off',
-      input: { hint: 'status | on [--executable <path>] [--origin <origin>]... [--any-origin] | off | origins add|remove <origin>' } },
+      input: { hint: 'status | on [--executable <path>] [--origin <origin>]... [--any-origin] | off | origins add|remove <origin>' }, _meta: { options: true } },
     { name: 'subagents', description: 'Inspect and control child conversations',
       input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' },
-      _meta: { immediate: true } }]
-    if (presets.length > 0) commands.push({ name: 'preset', description: 'Switch the active agent preset', input: { hint: presets.map(preset => preset.id).join(' | ') } })
+      _meta: { immediate: true, options: true } }]
+    // The installed presets are its options, not a hint: they change with the roster.
+    if (presets.length > 0) commands.push({ name: 'preset', description: 'Switch the active agent preset', input: { hint: '<preset id>' }, _meta: { options: true } })
     if (record === undefined) return commands
     if (host.capabilities(record).includes('team')) commands.push({ name: 'team', description: 'Show the Agent Team roster and task board' })
     const registry = host.registry()
@@ -302,6 +311,14 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
     if (failures.length > 1) throw new AggregateError(failures, 'command subscription construction failed')
     throw error
   }
+  /** Where each command's options come from, for `query` '' or a `next` row's id. */
+  const providers: Record<typeof OPTION_COMMANDS[number], (record: S, query: string) => Options> = {
+    preset: record => host.presetOptions(record),
+    dsh: (_record, query) => host.profile.options(query),
+    browser: () => host.browser.options(),
+    subagents: (record, query) => host.children.options(record, query),
+    goal: record => host.goals.options(record),
+  }
   /** Each immediate command's owner; both take the `x.ai/commands/run` params. */
   const immediate: Record<string, (clientId: number, params: unknown) => Promise<CommandResult>> = {
     goal: (clientId, params) => host.goals.goal(clientId, params),
@@ -319,6 +336,27 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
         const owner = name === undefined || !IMMEDIATE.has(name) ? undefined : immediate[name]
         if (owner === undefined) throw invalidParams(`x.ai/commands/run requires an immediate command (${[...IMMEDIATE].map(name => '/' + name).join(', ')})`)
         return owner(clientId, params)
+      })
+    },
+    /** `x.ai/commands/options`: the choices of a command's bare invocation
+     * (`_meta.options`) in an owned session, at `query` '' or a `next` row's
+     * id. Reads only; the pick comes back as an ordinary command line. */
+    options(clientId: number, params: unknown): Promise<{ options: SelectOption[] }> {
+      return accepted(async () => {
+        const p = paramRecord(params, 'x.ai/commands/options')
+        const record = host.owned(clientId, sessionIdParam(p.sessionId))
+        if (record === undefined) throw invalidParams('x.ai/commands/options requires an owned sessionId')
+        const name = typeof p.name === 'string' ? p.name.replace(/^\//, '').toLowerCase() : undefined
+        const provider = name !== undefined && OPTIONS.has(name) ? providers[name as typeof OPTION_COMMANDS[number]] : undefined
+        if (provider === undefined) throw invalidParams(`x.ai/commands/options requires a command with options (${OPTION_COMMANDS.map(name => '/' + name).join(', ')})`)
+        if (p.query !== undefined && typeof p.query !== 'string') throw invalidParams('x.ai/commands/options query must be a string')
+        const query = (p.query ?? '').trim()
+        return record.work.read(async scope => {
+          active(record, scope)
+          const options = boundOptions(await provider(record, query))
+          active(record, scope)
+          return { options }
+        })
       })
     },
     catalog(clientId?: number, params?: unknown): Promise<{ commands: AdvertisedCommand[] }> {

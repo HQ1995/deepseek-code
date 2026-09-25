@@ -218,6 +218,15 @@ describe('leader native jobs, children, workflows and activity', () => {
     expect(child.internals.steered).toEqual(['original'])
     await command('clear child-one')
     expect(clear).toHaveBeenCalledOnce()
+    // The same rows back the /subagents option picker: its continuable children, then one child's controls.
+    const options = (query?: string, receivingSession = sessionId) => c.request(requestId++, 'x.ai/commands/options', {
+      sessionId: receivingSession, name: 'subagents', ...query === undefined ? {} : { query } })
+    expect((await options()).result).toEqual({ options: [{ id: 'list', label: 'List child conversations' },
+      { id: 'child-one', label: 'child-one', detail: 'child-one', badge: 'running', next: true },
+      { id: 'child-two', label: 'child-two', detail: 'child-two', next: true }] })
+    expect(((await options('child-one')).result as { options: Array<{ id: string }> }).options.map(option => option.id))
+      .toEqual(['pending child-one', 'stop child-one', 'clear child-one'])
+    expect((await options(undefined, 'foreign-owner')).error).toMatchObject({ code: -32602 })
     expect(owner.internals.status).toBe('running')
     expect(owner.internals.followups).toEqual([])
     expect(owner.internals.steered).toEqual([])

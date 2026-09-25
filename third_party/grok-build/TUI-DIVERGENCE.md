@@ -1012,3 +1012,30 @@ notification's view card. The bridge sends no typed `rawOutput` (the Bash byte
 array, `ReadFile`, `GrepSearch`, `WebSearch`, `WebFetch`) for a call with a
 view, so these cards no longer read it for DSH tools. A call without a view
 renders as before, from its typed `rawOutput` (class: feature).
+
+### Host-served option pickers
+
+A host command whose descriptor carries `_meta.options: true`
+(`SlashCommand::serves_options`, `CommandRegistry::options_command`) opens the
+existing ArgPicker when picked in Ctrl+P or entered bare, instead of running.
+The picker opens empty ("Loading…") and asks `x.ai/commands/options`
+`{sessionId, name, query}` (`app/dispatch/command_options.rs`), the way the
+reference picker asks `x.ai/session/references`: only the reply carrying its
+loading key fills it. Each DSH `SelectOption` becomes one row: the label (a
+badge after a `·`, "(current)" on the `active` row, which is preselected) and
+the detail, or the `confirmation`'s description, which is only shown for now.
+Picking a row submits `/name <id>` as a draft-preserving send, which runs the
+command and never reopens the picker; a `next` row asks again one argument
+further (the title shows the line so far, "/dsh enable"). An empty bare list
+runs the bare command; an empty later step says "Nothing to choose"; a failed
+load closes the picker with a toast. Typing filters the rows as it does for
+every ArgPicker. No command is named in Rust (class: feature).
+
+The builtin `/preset` fronts the host's `/preset`
+(`SlashCommand::fronts_host_command`): the registry keeps the host's options
+flag for a name a builtin holds, so a bare `/preset` (or the palette's Switch
+Preset row) opens the host's preset options while the session can still change
+preset in place. There the host offers none (a turn, history or an Agent Team
+preset), so the bare builtin opens the preset catalog as before, which can
+start a new session with the pick. `/preset <id>` now goes to the host instead
+of reopening the catalog; `/preset manage` is unchanged (class: behavior).

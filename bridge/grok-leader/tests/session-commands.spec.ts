@@ -26,12 +26,16 @@ function fixture(disposalError?: string) {
     registry: vi.fn(() => native.value ? { list, execute } : undefined),
     roster: vi.fn(() => rosterAvailable.value ? { list: roster } : undefined),
     skills: vi.fn((_record: TestSession) => ({ list: skills })), capabilities: vi.fn(() => ['skills', 'subagents']),
-    profile: { execute: vi.fn(async (_text: string, _notify: (message: string) => void) => 'profile done') },
-    browser: { execute: vi.fn(async (_text: string) => 'browser done') },
+    profile: { execute: vi.fn(async (_text: string, _notify: (message: string) => void) => 'profile done'),
+      options: vi.fn(async (query: string) => [{ id: query === '' ? 'enable' : query + ' @acme/dsh-plugin', label: 'Enable', next: true as const }]) },
+    browser: { execute: vi.fn(async (_text: string) => 'browser done'), options: vi.fn(() => [{ id: 'on', label: 'On', active: true }]) },
     team: { execute: vi.fn((_record: TestSession, _text: string) => 'team done') },
     preset: vi.fn(async (_record: TestSession, _text: string) => 'preset done'),
-    children: { command: vi.fn(async (_clientId: number, _params: unknown) => ({ result: { kind: 'success', text: 'children done' } })) },
-    goals: { goal: vi.fn(async (_clientId: number, _params: unknown) => ({ result: { kind: 'success', text: 'goal done' } })) },
+    presetOptions: vi.fn(async (_record: TestSession) => [{ id: 'standard', label: 'Standard\nmode', active: true }, { id: 'minimal', label: 'Minimal', active: true }]),
+    children: { command: vi.fn(async (_clientId: number, _params: unknown) => ({ result: { kind: 'success', text: 'children done' } })),
+      options: vi.fn(async (_record: TestSession, query: string) => [{ id: 'stop ' + query, label: 'Stop it' }]) },
+    goals: { goal: vi.fn(async (_clientId: number, _params: unknown) => ({ result: { kind: 'success', text: 'goal done' } })),
+      options: vi.fn((_record: TestSession) => [{ id: '', label: 'Show the goal' }]) },
     on: vi.fn((name: 'commands/change' | 'skills/change' | 'tools/change', listener: () => void) => {
       events.set(name, listener)
       const unsubscribe = vi.fn(() => { events.delete(name) }); unsubscribes.push(unsubscribe); return unsubscribe
@@ -101,12 +105,36 @@ describe('owned session commands', () => {
     expect(commands.map(command => command.name)).toEqual(['dsh', 'browser', 'subagents', 'preset', 'goal', 'compact', 'plain'])
     expect(commands.slice(4)).toEqual([
       { name: 'goal', description: 'Set or view the goal', input: { hint: '[<objective>]' },
-        _meta: { definitionId: '@deepseek-ai/dsh-command-goal', attachments: true, immediate: true } },
+        _meta: { definitionId: '@deepseek-ai/dsh-command-goal', attachments: true, immediate: true, options: true } },
       { name: 'compact', description: 'Compact older conversation history', _meta: { definitionId: '@deepseek-ai/dsh-command-compact' } },
       { name: 'plain', description: 'no identity', input: { hint: 'text' } },
     ])
-    // Bridge-owned commands take no attachments; only /subagents runs immediately.
-    expect(commands.slice(0, 4).map(command => command._meta)).toEqual([undefined, undefined, { immediate: true }, undefined])
+    // Bridge-owned commands take no attachments and serve their options; only
+    // /subagents runs immediately. The roster is /preset's options, not its hint.
+    expect(commands.slice(0, 4).map(command => command._meta)).toEqual([{ options: true }, { options: true }, { immediate: true, options: true }, { options: true }])
+    expect(commands[3]).toMatchObject({ name: 'preset', input: { hint: '<preset id>' } })
+  })
+
+  it('serves each command\'s options from its owner, bounded, for an owned session only', async () => {
+    const f = fixture()
+    await expect(f.commands.options(1, { sessionId: 'one', name: 'preset' })).resolves.toEqual({ options: [
+      { id: 'standard', label: 'Standard mode', active: true }, { id: 'minimal', label: 'Minimal' }] })
+    expect(f.host.presetOptions).toHaveBeenCalledWith(f.record)
+    await expect(f.commands.options(1, { sessionId: 'one', name: '/DSH', query: ' enable ' })).resolves.toEqual({ options: [
+      { id: 'enable @acme/dsh-plugin', label: 'Enable', next: true }] })
+    expect(f.host.profile.options).toHaveBeenCalledWith('enable')
+    await expect(f.commands.options(1, { sessionId: 'one', name: 'browser' })).resolves.toEqual({ options: [{ id: 'on', label: 'On', active: true }] })
+    await expect(f.commands.options(1, { sessionId: 'one', name: 'subagents', query: 'child-1' })).resolves.toEqual({ options: [{ id: 'stop child-1', label: 'Stop it' }] })
+    expect(f.host.children.options).toHaveBeenCalledWith(f.record, 'child-1')
+    await expect(f.commands.options(1, { sessionId: 'one', name: 'goal' })).resolves.toEqual({ options: [{ id: '', label: 'Show the goal' }] })
+    for (const params of [{ sessionId: 'one', name: 'compact' }, { sessionId: 'one', name: 'constructor' }, { sessionId: 'one' },
+      { sessionId: 'one', name: 'preset', query: 7 }, { name: 'preset' }]) {
+      await expect(f.commands.options(1, params)).rejects.toMatchObject({ code: -32602 })
+    }
+    // Another client's session is not an owned one.
+    await expect(f.commands.options(2, { sessionId: 'one', name: 'preset' })).rejects.toMatchObject({ code: -32602 })
+    f.host.browser.options.mockImplementationOnce(() => { throw new Error('rows unavailable') })
+    await expect(f.commands.options(1, { sessionId: 'one', name: 'browser' })).rejects.toThrow('rows unavailable')
   })
 
   it('runs immediate commands at once through their owners and refuses every other line', async () => {

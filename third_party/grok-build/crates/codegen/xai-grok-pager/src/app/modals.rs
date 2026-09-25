@@ -829,6 +829,18 @@ impl AgentView {
                 InputOutcome::Changed
             }
             ArgPickerStep::Selected(item) => {
+                // DIVERGENCE(dscode): an option row marked `next` asks the host
+                // for the options one argument further; any other row submits
+                // `/name <id>` below.
+                if let Some(ActiveModal::ArgPicker { args_query, .. }) = self.active_modal.as_ref()
+                    && crate::app::dispatch::command_options::query_of(args_query).is_some()
+                    && item.insert_text.ends_with(' ')
+                {
+                    return InputOutcome::Action(Action::LoadCommandOptions {
+                        command: command_clone,
+                        query: item.insert_text.trim_end().to_string(),
+                    });
+                }
                 if command_clone == "reference" {
                     self.active_modal = None;
                     self.prompt
@@ -1062,6 +1074,37 @@ impl AgentView {
                                             crate::views::session_picker::SourceFilter::default(),
                                     });
                                     return InputOutcome::Action(Action::FetchSessionList);
+                                }
+
+                                // DIVERGENCE(dscode): a command whose host serves its
+                                // options opens them in the option picker.
+                                if let Some(name) = self
+                                    .prompt
+                                    .slash_controller
+                                    .registry()
+                                    .options_command(&trimmed)
+                                    .map(str::to_owned)
+                                {
+                                    let prev = {
+                                        let ActiveModal::CommandPalette { entries, state, .. } =
+                                            self.active_modal.as_ref().unwrap()
+                                        else {
+                                            unreachable!()
+                                        };
+                                        Some(crate::views::modal::PaletteSnapshot {
+                                            entries: entries.clone(),
+                                            state: state.clone(),
+                                        })
+                                    };
+                                    self.active_modal = Some(
+                                        crate::app::dispatch::command_options::loading_picker(
+                                            &name, prev,
+                                        ),
+                                    );
+                                    return InputOutcome::Action(Action::LoadCommandOptions {
+                                        command: name,
+                                        query: String::new(),
+                                    });
                                 }
 
                                 let is_picker =
@@ -2042,13 +2085,17 @@ impl AgentView {
                 command,
                 args_query,
                 items,
+                original_items,
                 state,
                 window,
                 ..
             } = active_modal
             {
                 // Arg picker: ModalWindow chrome + picker content.
+                let options_title =
+                    crate::app::dispatch::command_options::title(command, args_query);
                 let title = match command.as_str() {
+                    _ if options_title.is_some() => options_title.as_deref().unwrap_or_default(),
                     "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
                     "model" | "m" => "Pick model",
                     "theme" | "t" => "Pick theme",
@@ -2084,6 +2131,17 @@ impl AgentView {
                             "Searching sessions…"
                         } else {
                             "No matching sessions"
+                        },
+                    });
+                }
+                if options_title.is_some() && picker_entries.is_empty() {
+                    picker_entries.push(PickerEntry::Header {
+                        label: if crate::app::dispatch::command_options::is_loading(args_query) {
+                            "Loading…"
+                        } else if original_items.is_empty() {
+                            "Nothing to choose"
+                        } else {
+                            "No matching options"
                         },
                     });
                 }
