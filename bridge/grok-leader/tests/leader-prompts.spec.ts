@@ -514,6 +514,29 @@ describe('leader prompt turns, content and usage', () => {
     expect(JSON.stringify(c.all)).not.toContain('job_output')
   })
 
+  it('notes context injected into a running turn by its form, and a plugin\'s message projection', async () => {
+    const { ctx, registry, pluginCtx, client: c } = await start()
+    // The session store lists the message projections plugins registered.
+    Object.assign(ctx.get('sessions') as object, { messageProjections: [{ type: 'image/offload' }, { type: 'redact/apply' }] })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const emit = (type: string, data: unknown) => pluginCtx.emit('session/event', agent.session, agent.session.append(type, data as never))
+    emit('turn/start', { turn: 1 })
+    emit('user/message', { id: 'r', source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'bash × 3' }, content: [{ type: 'text', text: 'Stop repeating.' }] })
+    emit('user/message', { id: 's', source: { kind: 'time-context', form: 'snapshot', sections: [] }, content: [{ type: 'text', text: 'It is noon.' }] })
+    emit('user/message', { id: 'm', source: { kind: 'agent-message', form: 'relay', senderSessionId: 'kid' }, content: [{ type: 'text', text: 'done' }] })
+    emit('redact/apply', { seqs: [2] })
+    const notes = () => c.all.flatMap(message => message.method === 'x.ai/session_notification'
+      && (message.params as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === 'image_dropped'
+      ? [(message.params as { update: { notes: string[] } }).update.notes] : [])
+    await waitFor(() => notes().length === 3)
+    expect(notes()).toEqual([['bash × 3'], ['[agent-message] {"content":"done","form":"relay","senderSessionId":"kid"}'], ['[redact/apply] {"seqs":[2]}']])
+    expect(JSON.stringify(c.all)).not.toContain('It is noon')
+  })
+
   it('rejects a prompt only when agent/error names its in-flight turn', async () => {
     const { registry, pluginCtx, client: c } = await start({ manualIdle: true })
     register(c)

@@ -107,7 +107,7 @@ const declaredDependencies = [
     ['protocol', ['codec']],
     ['codec', []],
     ['guards', []],
-    ['projection', ['browser-actions', 'tool-titles', 'tool-output', 'tool-views']],
+    ['projection', ['browser-actions', 'tool-titles', 'tool-output', 'tool-views', 'turn-notices']],
     ['tool-titles', []],
     ['tool-output', []],
     ['tool-views', ['tool-output']],

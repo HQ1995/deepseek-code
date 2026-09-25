@@ -237,6 +237,20 @@ TUI renderers that already exist; nothing here adds a TUI code path.
   `notice` summary or the sender's name when the source carries one. The
   message body (reminder or job framing written for the model) is not shown.
   Context injected into a running turn is not a trigger.
+- Model-visible context nothing else renders gets an `image_dropped` system
+  note, live, on replay and in child history, keyed on the producer's declared
+  context form (DSH `ContextFormed.form`), never on a table of source kinds.
+  A `user/message` or `developer/message` from any producer but the user
+  (appended; a replacement copy such as a compaction checkpoint stays
+  model-only; a tool-registry message keeps its tool-change note): a `notice`
+  shows its one-line `summary`; a `snapshot`, `instructions` or `catalog`
+  (runtime context, AGENTS.md, skill catalogs) shows nothing; a `relay`, a
+  `recall`, no form or an unknown one shows `[kind] {compact JSON}` of its
+  content (as one line of text) and its other source fields. An event type a
+  plugin registered as a message projection (`sessions.messageProjections`;
+  `image/offload` keeps its own note) shows `[type] {compact JSON}` of its
+  data. Each line is at most 200 characters. A message a turn-trigger note
+  already names gets no second note.
 
 ## Plan mode
 

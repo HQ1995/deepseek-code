@@ -11,7 +11,7 @@ const fakeAgent = (services: Record<string, unknown>): Agent =>
   ({ ctx: { get: (name: string) => services[name] } } as unknown as Agent)
 
 /** Reader → the host service name it resolves. */
-const serviceNames: Record<Exclude<keyof HostServices, 'flush' | 'agentTools' | 'presetService'>, string> = {
+const serviceNames: Record<Exclude<keyof HostServices, 'flush' | 'messageProjection' | 'agentTools' | 'presetService'>, string> = {
   settings: 'settings', llm: 'llm', credentials: 'credentials', agentDefaultModel: 'agentDefaultModel',
   persistence: 'sessionPersistence', attachments: 'attachments', commands: 'commands', schedule: 'schedule',
   profileContext: 'profileContext', pluginManager: 'pluginManager', loader: 'loader', configEditor: 'configEditor', ssh: 'ssh',
@@ -24,7 +24,7 @@ const serviceNames: Record<Exclude<keyof HostServices, 'flush' | 'agentTools' | 
 describe('host services seam', () => {
   it('names every reader the seam offers', () => {
     const host = createHostServices(fakeContext({}), { roster: () => undefined })
-    expect(Object.keys(host).sort()).toEqual([...Object.keys(serviceNames), 'flush', 'agentTools', 'presetService'].sort())
+    expect(Object.keys(host).sort()).toEqual([...Object.keys(serviceNames), 'flush', 'messageProjection', 'agentTools', 'presetService'].sort())
   })
 
   it('reads each service by its host name at call time and retains nothing', () => {
@@ -56,6 +56,21 @@ describe('host services seam', () => {
     expect(flushed).toEqual([session])
     services.sessions = { flush: async () => { throw new Error('disk full') } }
     await expect(host.flush(session)).rejects.toThrow('disk full')
+  })
+
+  it('names the message projections registered on the session store, at call time', () => {
+    const services: Record<string, unknown> = {}
+    const host = createHostServices(fakeContext(services), { roster: () => undefined })
+    expect(host.messageProjection('image/offload')).toBe(false)
+    services.sessions = { flush: async () => {} }
+    expect(host.messageProjection('image/offload')).toBe(false)
+    const projections = [{ type: 'image/offload' }]
+    services.sessions = { flush: async () => {}, messageProjections: projections }
+    expect(host.messageProjection('image/offload')).toBe(true)
+    expect(host.messageProjection('redact/apply')).toBe(false)
+    // A plugin registering later is seen by the next read.
+    projections.push({ type: 'redact/apply' })
+    expect(host.messageProjection('redact/apply')).toBe(true)
   })
 
   it('resolves a preset service from the roster, then the agent context, then the host', () => {

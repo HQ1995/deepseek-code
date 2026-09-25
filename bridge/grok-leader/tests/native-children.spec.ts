@@ -74,6 +74,7 @@ function fixture() {
   }, agent: (id: SessionId) => agents.get(id), subagents: () => service,
   workflow: (record: typeof root) => logs.get(record.agent.session.id)!.reduce(workflowProjection.apply, { runs: [] }),
   persistence: () => store as unknown as Pick<SessionPersistence, 'open' | 'stat'>, flush, projectImages, notify,
+  messageProjection: (type: string) => type === 'redact/apply',
   teamMembers: vi.fn((_record: typeof root): ReadonlyArray<{ id: string; name: string }> | undefined => undefined),
   logger: { warn } }
   const children = createNativeChildren({ ...host, on: (name, listener) => {
@@ -168,6 +169,19 @@ describe('native child/workflow ownership', () => {
     const result = await f.children.history(1, { sessionId: 'root', childSessionId: 'child' })
     expect(result).toMatchObject({ nextSeq: 1, entries: [{ imageNotes: [expect.stringContaining('2 older image occurrence(s)')] }] })
     await expect(f.children.history(1, { sessionId: 'root', childSessionId: 'child', after: 1 })).resolves.toMatchObject({ entries: [] })
+    await f.children.dispose()
+  })
+
+  it('shows a child\'s model-visible context as system notices in paged child history', async () => {
+    const f = fixture(), child = f.add('child')
+    f.append(child, 'user/message', { id: 'a', source: { kind: 'team-message', form: 'relay', senderName: 'lead' }, content: [{ type: 'text', text: 'rebase first' }] })
+    f.append(child, 'user/message', { id: 'b', source: { kind: 'agent-instructions', form: 'instructions' }, content: [{ type: 'text', text: 'AGENTS.md' }] })
+    f.append(child, 'user/message', { id: 'c', source: { kind: 'tool-jobs', form: 'notice', summary: 'npm test completed' }, content: [{ type: 'text', text: 'framed' }] })
+    f.append(child, 'redact/apply', { seqs: [0] })
+    const result = await f.children.history(1, { sessionId: 'root', childSessionId: 'child' })
+    expect((result as { entries: Array<{ imageNotes?: string[] }> }).entries.map(entry => entry.imageNotes)).toEqual([
+      ['[team-message] {"content":"rebase first","form":"relay","senderName":"lead"}'], ['npm test completed'], ['[redact/apply] {"seqs":[0]}'],
+    ])
     await f.children.dispose()
   })
 
