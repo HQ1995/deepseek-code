@@ -2549,7 +2549,7 @@ pub fn render_picker(
             // Inset by 1 cell so hints don't hug the left border.
             let shortcuts_rect = Rect::new(shortcuts_x + 1, sy, shortcuts_w.saturating_sub(1), 1);
             ShortcutsBar::new(&all_hints)
-                .with_pending(config.pending_hint)
+                .with_pending(config.pending_hint.clone())
                 .render(shortcuts_rect, buf);
         }
     }

@@ -40,6 +40,7 @@ import { createNativeTeam } from './native-team.ts'
 import { TEAM_TOOLS_MODULE } from './team-presets.ts'
 import { configuredRemote, executionWorld, remoteUnavailable, SSH_FAILURE, type RemoteConnection, type RemoteLike } from './execution-world.ts'
 import { createHostServices } from './host-services.ts'
+import { createClientActivity } from './client-activity.ts'
 /**
  * Grok leader-protocol unix-socket server driving harness agents.
  *
@@ -434,6 +435,13 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     logger,
   })
 
+  // The quit guard: what quitting a client stops, per DSH's activity families and the queue.
+  const clientActivity = createClientActivity<SessionRecord>({
+    sessions, owned: ownedRecord, sessionId: record => record.agent.session.id,
+    activity: host.sessionActivity, prompts: record => record.queue.pending,
+    jobs: record => host.presetService(record.agent, 'jobs'), logger,
+  })
+
   const nativeStatus = createNativeSessionStatus({
     sessions,
     owned: (clientId, id) => {
@@ -498,6 +506,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     'x.ai/btw': (clientId, params) => asides.btw(clientId, params),
     'x.ai/doctor': (clientId, params) => execution.doctor(clientId, params),
     'x.ai/terminals': (clientId, params) => execution.terminals(clientId, params),
+    'x.ai/client/activity': (clientId, params) => clientActivity.activity(clientId, params),
   })
   requests({ // Commands, skills, presets and MCP servers.
     'x.ai/commands/list': (clientId, params) => sessionCommands.catalog(clientId, params),

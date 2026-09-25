@@ -511,6 +511,12 @@ pub struct PendingAction {
     pub label: Option<&'static str>,
     /// When this pending action expires.
     pub expires_at: Instant,
+    /// DIVERGENCE(dscode): what the leader says quitting would affect, shown
+    /// after the label ("press again to quit — stops 1 turn").
+    pub detail: Option<String>,
+    /// DIVERGENCE(dscode): the `x.ai/client/activity` request this quit arm
+    /// asked; only its reply may set [`Self::detail`].
+    pub activity_key: Option<u64>,
 }
 impl PendingAction {
     pub const TTL: Duration = Duration::from_millis(1000);
@@ -534,6 +540,8 @@ impl PendingAction {
             shortcut,
             label,
             expires_at: Instant::now() + ttl,
+            detail: None,
+            activity_key: None,
         }
     }
     pub fn expired(&self) -> bool {
@@ -2432,6 +2440,18 @@ impl AppView {
         self.handle_input_at_with_paste_provenance(ev, Instant::now(), PasteProvenance::Terminal)
     }
     pub(crate) fn handle_input_at_with_paste_provenance(
+        &mut self,
+        ev: &Event,
+        arrived_at: Instant,
+        paste_provenance: PasteProvenance,
+    ) -> InputOutcome {
+        let outcome = self.route_input(ev, arrived_at, paste_provenance);
+        // DIVERGENCE(dscode): a quit arm this event installed asks the leader
+        // what quitting would stop (`x.ai/client/activity`).
+        crate::app::dispatch::quit_activity::arm(self);
+        outcome
+    }
+    fn route_input(
         &mut self,
         ev: &Event,
         arrived_at: Instant,
@@ -4473,6 +4493,7 @@ impl AppView {
                     .map(|label| crate::views::shortcuts_bar::PendingHint {
                         shortcut: p.shortcut,
                         label,
+                        detail: p.detail.clone(),
                     })
             });
         let fps_frame_started = fps_overlay.as_ref().map(|_| std::time::Instant::now());

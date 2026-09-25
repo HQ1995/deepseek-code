@@ -966,6 +966,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             key,
             result,
         } => super::command_options::loaded(app, agent_id, &session_id, &command, &key, result),
+        TaskResult::ClientActivityLoaded { key, result } => {
+            super::quit_activity::loaded(app, key, result)
+        }
         TaskResult::SessionReferencesLoaded {
             agent_id,
             session_id,

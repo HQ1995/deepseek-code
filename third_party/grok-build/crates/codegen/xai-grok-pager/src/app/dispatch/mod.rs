@@ -32,6 +32,7 @@ mod prompt_ack;
 pub(crate) use prompt_ack::reconcile_overdue_prompt_acks;
 mod providers;
 mod queue;
+pub(crate) mod quit_activity;
 mod rewind;
 mod router;
 mod session;

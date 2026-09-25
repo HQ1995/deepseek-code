@@ -113,6 +113,15 @@ route and a new account route, lets tools change inside a running
 conversation, and gives approval requests a localized reason. dscode adopts
 each of these below; the account route stays off.
 
+The quit guard asks rc.2's `workspace/session-activity` waterfall, which DSH's
+archive admission and desktop quit inspection read, for each session a client
+owns: the Agent registry reports a running turn, the job registry running jobs,
+the subagent runtime running descendants and the Schedule its armed reminders.
+The bridge adds its own queue, counts a background subagent's job once (as its
+child, as the Tasks pane does), and answers `x.ai/client/activity`. A family a
+plugin adds is reported by its own kind. At a runtime bump, recheck these
+families and their `items`.
+
 rc.1 enforces plugin compatibility: every `@deepseek-ai/dsh` and
 `@deepseek-ai/dsh-*` peer of a profile bundle or preset row must be satisfied by
 the running DSH version, prereleases included. At startup, DSH skips an

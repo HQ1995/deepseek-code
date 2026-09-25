@@ -40,7 +40,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 69 modules; `index.ts` is the composition root.
+`src/` has 70 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
@@ -49,7 +49,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `protocol` | Envelope types and wire mapping; ACP JSON-RPC strings inside `acp` frames |
 | `acp` | Shared ACP request validation and JSON-RPC errors |
 | `leader-routes` | ACP method registry: requests and notifications to their owners; unknown requests are METHOD_NOT_FOUND. Builds the `initialize` reply and the fixed replies no owner implements |
-| `host-services` | The optional DSH host services the bridge reads, each by name at call time; the per-session preset/agent/host service lookup |
+| `host-services` | The optional DSH host services the bridge reads, each by name at call time; the per-session preset/agent/host service lookup; the `workspace/session-activity` waterfall |
 | `leader-transport` | Unix socket, registration, ACP request/reply and reverse-request lifetimes; no DSH |
 | `leader-lifecycle` | Host heartbeat, no-client grace, shutdown that joins every owner's drain |
 | `model-catalog` | Catalog snapshots, accepted native reads, discovery, route writes, disposal; no socket or Cordis |
@@ -94,6 +94,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `native-session-status` | Goal, activity, plan-mode and context observations; reads never arm a goal |
 | `native-interactions` | Permission modes and approvals (rendered from the asking tool's call view), user questions and plan reviews, reverse-request admission |
 | `native-execution` | Runtime doctor and persistent-terminal controls |
+| `client-activity` | The quit guard's facts (`x.ai/client/activity`): DSH's session-activity families and the queue, merged by kind for a client's sessions |
 | `terminal-signal` | Retries a foreground-group signal that races an exiting group, a bounded number of times, through the provider |
 | `native-asides` | One-shot `/btw` asides, including late handles |
 | `native-capabilities` | Read-only views of the current preset's native tools |

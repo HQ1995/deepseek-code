@@ -10,6 +10,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { AgentDefaultModelLike, CredentialsLike, LlmLike, SettingsLike } from './native-seams.ts'
 import type { BrowserStatus } from './browser-control.ts'
+import type { SessionActivityLike } from './client-activity.ts'
 import type { ConfigEntryLike } from './execution-world.ts'
 import type { NativeAsideRuntime } from './native-asides.ts'
 import type { NativeToolSchemas } from './native-capabilities.ts'
@@ -41,9 +42,12 @@ export interface BrowserRowLike {
   /** Start browsers for open sessions that have none, with the settings just written. */
   startOpen?(): Promise<void>
 }
-/** The one lookup this seam needs; a Cordis context satisfies it. */
+/** The lookups this seam needs; a Cordis context satisfies them. */
 export interface ServiceReads {
   get(name: string): unknown
+  /** Cordis's waterfall dispatch, typed where it is called: the events it
+   * serves here are declared by packages the bridge does not depend on. */
+  waterfall?: unknown
 }
 /** Per-session native services the bridge reads by name, as their owners
  * consume them. A name outside this table resolves untyped (capability probes). */
@@ -106,6 +110,10 @@ export interface HostServices {
   inspector(): { url: string; captureFetch: boolean } | undefined
   /** app-boot's process exit, when this leader runs under it. */
   appExit(): ((code: number) => void) | undefined
+  /** DSH's `workspace/session-activity` waterfall for one session: each
+   * family provider (Agent turn, jobs, subagents, Schedule, plugins) adds
+   * what keeps it active. No listener, or no dispatch, answers none. */
+  sessionActivity(sessionId: string): Promise<readonly SessionActivityLike[]>
   /** The tool registry scoped to one agent: its preset's tools. */
   agentTools(agent: Agent): NativeToolSchemas | undefined
   /** A native service for one session: the preset's own scope first, then
@@ -147,6 +155,11 @@ export function createHostServices(ctx: ServiceReads, dependencies: HostServiceD
     browser: read<BrowserRowLike>('dscodeBrowser'),
     inspector: read<{ url: string; captureFetch: boolean }>('dscodeInspector'),
     appExit: read<(code: number) => void>('appExit'),
+    sessionActivity: async sessionId => {
+      type Waterfall = (name: string, request: { sessionId: string }, next: () => Promise<readonly SessionActivityLike[]>) => Promise<readonly SessionActivityLike[]>
+      const waterfall = ctx.waterfall as Waterfall | undefined
+      return typeof waterfall === 'function' ? await waterfall.call(ctx, 'workspace/session-activity', { sessionId }, async () => []) : []
+    },
     agentTools: agent => agent.ctx.get('tools') as NativeToolSchemas | undefined,
     presetService: ((agent: Agent, name: string): unknown =>
       dependencies.roster()?.serviceFor?.(agent, name) ?? agent.ctx.get(name) ?? ctx.get(name)) as HostServices['presetService'],

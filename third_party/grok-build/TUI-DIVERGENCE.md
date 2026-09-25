@@ -1055,3 +1055,22 @@ preset in place. There the host offers none (a turn, history or an Agent Team
 preset), so the bare builtin opens the preset catalog as before, which can
 start a new session with the pick. `/preset <id>` now goes to the host instead
 of reopening the catalog; `/preset manage` is unchanged (class: behavior).
+
+### Quit guard
+
+When the quit double-press arms (the first Ctrl+C or Ctrl+D, or the Quit
+binding), the TUI asks the leader `x.ai/client/activity` what quitting now
+would affect (`app/dispatch/quit_activity.rs`, hooked after every input event
+in `AppView::handle_input_at_with_paste_provenance`). The reply names each
+kind of work with its count, its singular and plural nouns and a few labels,
+sorted into `stops` (what the quit ends) and `waits` (what resumes when its
+session next opens). The shortcuts bar (and the welcome screen's pending hint)
+then reads "press again to quit — stops 1 turn, 2 jobs (build, test); 1
+reminder waits for the next open": at most two one-line labels per kind, "…"
+when there are more. Rust only counts, picks the noun by count, joins and
+agrees "waits"/"wait" with the waiting total; it names no kind. The request
+waits at most 500 ms and only the arm that asked (its key) takes the answer;
+an answer that reports work keeps that arm up for at least 3 s so the text can
+be read. A second press still quits at once and never waits for the answer. A
+timeout, a failure, nothing to report or an old leader (method not found)
+leaves today's "press again to quit" (class: feature).

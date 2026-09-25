@@ -318,6 +318,20 @@ async function tasksAcceptance() {
   await wait(/DSCODE controlled background job/)
   await wait(/DSCODE controlled child/)
   await artifact('tasks-running', { state: running, screen: await capture() })
+  // The quit guard: Ctrl+C on the idle composer arms quit, and the bar says
+  // what quitting would stop, as the leader reads it (x.ai/client/activity):
+  // the job under DSH's label (its command), and the background child
+  // counted once, as a subagent under its description.
+  await key('C-g')
+  await settle(300)
+  await key('C-c')
+  const quitting = await wait(/press again to quit — stops 1 job \(.+\), 1 subagent \(DSCODE controlled child\)/, 5000)
+  await artifact('quit-guard', { screen: quitting })
+  // Any other key cancels the quit and acts as usual: here it reopens Tasks.
+  await key('C-g')
+  await waitFor(capture, value => !value.includes('press again to quit'), 'quit-guard-cancelled')
+  await wait(/DSCODE controlled background job/)
+  assert.equal((await state()).jobs.find(row => row.id === job.id)?.status, 'running', 'A cancelled quit leaves the work running')
   // Navigate the genuine pane selection; group-header x is intentionally a no-op.
   // Two expansions expose root jobs and descendant rows without a test control RPC.
   await key('Home')

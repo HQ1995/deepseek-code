@@ -688,6 +688,7 @@ impl AgentView {
                 Some(crate::views::shortcuts_bar::PendingHint {
                     shortcut: crate::key!('y'),
                     label: "delete provider + unused saved key (y/n)",
+                    detail: None,
                 })
             } else {
                 None

@@ -159,6 +159,18 @@ The bridge also implements the `x.ai/*` surfaces required by this TUI:
 - native goal, permission, and task state/control from the owning dsh services
 - `x.ai/subagent/inbox` returns structured child/queue rows and applies the same
   native controls, with exact descendant/message IDs and stale-text checks.
+- `x.ai/client/activity` (params ignored) answers what quitting this client
+  would affect, for the TUI's quit confirmation: `{stops, waits}`, each a list
+  of `{kind, count, one, other, labels}` (`one`/`other` are the noun by count,
+  `labels` at most three one-line names). It asks DSH's
+  `workspace/session-activity` waterfall for each session the client owns
+  (families `turn`, `job`, `subagent`, `schedule`, and any a plugin adds, by its
+  own kind), adds the bridge's running prompt (one `turn` per session with DSH's)
+  and queued rows (`prompt`), and leaves out `subagent` jobs, whose child is
+  counted. `stops` is work that ends with the client's sessions; `waits` is
+  reminders, delivered when their session next opens. A session whose
+  providers fail or take over 400 ms counts only the bridge queue. Old leaders
+  answer `-32601`; the TUI then keeps its plain confirmation.
 - `x.ai/task/output` returns an owned job's non-consuming retained output;
   live snapshots also feed the existing Tasks log viewer. For native PTY sends,
   the observer reads retained terminal scrollback and freezes it at completion;

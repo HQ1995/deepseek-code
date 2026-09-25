@@ -168,10 +168,23 @@ pub struct CompactConfig {
 }
 
 /// Info needed to render the "press again" hint.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PendingHint {
     pub shortcut: KeyShortcut,
     pub label: &'static str,
+    /// DIVERGENCE(dscode): what the action would affect, after the label
+    /// (the quit guard's "stops 1 turn, 2 jobs").
+    pub detail: Option<String>,
+}
+
+impl PendingHint {
+    /// "press again to {label}", then " — {detail}" when there is one.
+    pub fn text(&self) -> String {
+        match self.detail.as_deref().filter(|detail| !detail.is_empty()) {
+            Some(detail) => format!("press again to {} \u{2014} {detail}", self.label),
+            None => format!("press again to {}", self.label),
+        }
+    }
 }
 
 impl<'a> ShortcutsBar<'a> {
@@ -242,7 +255,7 @@ impl Widget for ShortcutsBar<'_> {
         // If pending confirmation, show only "press again to {label}"
         if let Some(pending) = &self.pending_confirmation {
             let key_text = pending.shortcut.display();
-            let label = format!("press again to {}", pending.label);
+            let label = pending.text();
 
             let mut x = area.x;
 

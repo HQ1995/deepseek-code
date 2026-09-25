@@ -92,7 +92,14 @@ Completion offers `/btw`, `/plan`, `/inbox`, `/reminders` and `/loop` only in
 presets whose agent can run them.
 Completed child transcripts remain readable after restart. A reminder is
 delivered while its session is open; one that falls due while it is closed
-arrives when the session next opens. Session ZIP export refuses existing files.
+arrives when the session next opens.
+
+Quitting takes a second `Ctrl+C` (or `Ctrl+D`) on an empty prompt. When your
+sessions have work, the confirmation says what quitting affects, as the leader
+counts it: `press again to quit — stops 1 turn, 2 jobs (npm test, sleep 60); 1
+reminder (stand-up) waits for the next open`. Running turns, queued prompts,
+background jobs and subagents stop with their sessions; reminders wait. Such a
+confirmation stays up for 3 seconds; with nothing running it reads as before. Session ZIP export refuses existing files.
 Native `present` deliveries appear as file links and survive transcript replay;
 links open the current source file. `/feedback <text>` records native feedback
 without a model turn and may share session context under DSH's telemetry policy.
