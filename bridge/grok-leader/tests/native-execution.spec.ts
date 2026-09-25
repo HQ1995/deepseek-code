@@ -74,7 +74,7 @@ describe('native execution ownership', () => {
     expect((await f.doctor()).text).not.toContain('Remote gateway')
     f.host.remoteGateway.mockReturnValue(false)
     expect((await f.doctor()).text).toContain('[WARN] Remote gateway: DSH\'s Remote gateway is not running (the typert and typert-gateway rows'
-      + ' of the base layer), so the TUI cannot call plugin Remote methods.')
+      + ' of the base layer), so the TUI cannot call plugin Remote methods, and the session reference picker fails.')
   })
   it('reports plugin rows that did not activate right after the installation checks', async () => {
     const f = fixture()

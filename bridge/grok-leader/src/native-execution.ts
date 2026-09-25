@@ -140,7 +140,7 @@ export function createNativeExecution<S extends ExecutionSession>(host: Executio
             ? '. Tools, shells and file edits run there; session paths are never opened on this computer. Losing the SSH connection needs a leader restart.'
             : '. NOT connected: no tool can run. Check the SSH alias, helper and digests, then restart dscode.') })
         if (host.remoteGateway?.() === false) findings.push({ status: 'WARN', name: 'Remote gateway', detail: 'DSH\'s Remote gateway is not running'
-          + ' (the typert and typert-gateway rows of the base layer), so the TUI cannot call plugin Remote methods.'
+          + ' (the typert and typert-gateway rows of the base layer), so the TUI cannot call plugin Remote methods, and the session reference picker fails.'
           + ' Restore those rows in the dscode profile and restart, or run dscode update --force-reinstall.' })
         const hostTeamRows = await host.hostTeamRows?.() ?? []
         active(record, scope)

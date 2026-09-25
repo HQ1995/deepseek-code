@@ -20,7 +20,7 @@ import type { ScheduleServiceLike } from './native-tasks.ts'
 import type { TeamServiceLike } from './native-team.ts'
 import type { PluginManagerLike } from './plugin-rows.ts'
 import type { LoaderEntryLike } from './plugin-status.ts'
-import type { NativeSessionReferences, NativeSessionTitles } from './session-artifacts.ts'
+import type { NativeSessionTitles } from './session-artifacts.ts'
 import type { NativeCommands, NativeSkills } from './session-commands.ts'
 import type { ScheduleDeliveryLike } from './session-controller.ts'
 import type { SessionProjectionCacheLike, SessionQueryLike } from './session-discovery.ts'
@@ -94,7 +94,6 @@ export interface HostServices {
    * never reconnects. A connection that never came up leaves no service. */
   ssh(): { failure?: unknown } | undefined
   sessionTitles(): NativeSessionTitles | undefined
-  sessionReferences(): NativeSessionReferences | undefined
   /** The optional full-text session query engine. */
   sessionQuery(): SessionQueryLike | undefined
   /** The persisted projection cache: zero-I/O listing reads. */
@@ -150,7 +149,6 @@ export function createHostServices(ctx: ServiceReads, dependencies: HostServiceD
     configEditor: read<{ entries(): Iterable<ConfigEntryLike> }>('configEditor'),
     ssh: read<{ failure?: unknown }>('ssh'),
     sessionTitles: read<NativeSessionTitles>('sessionTitle'),
-    sessionReferences: read<NativeSessionReferences>('sessionReferenceResolver'),
     sessionQuery: read<SessionQueryLike>('sessionQuery'),
     sessionProjectionCache: read<SessionProjectionCacheLike>('sessionProjectionCache'),
     sessionProjections: read<NativeStatusProjections>('sessionProjections'),

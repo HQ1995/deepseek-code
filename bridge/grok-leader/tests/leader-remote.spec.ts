@@ -31,6 +31,8 @@ describe('remote channel over the real Typert gateway', () => {
     expect((await invoke(c, 4, sessionId, { query: 7 })).result)
       .toMatchObject({ ok: false, error: { code: 'gateway/input-invalid', details: { field: 'query' } } })
     expect(remote!.calls).toHaveLength(1)
+    // The dedicated relay this channel replaced is gone.
+    expect((await c.request(5, 'x.ai/session/references', { sessionId, query: '' })).error).toMatchObject({ code: -32601 })
   })
 
   it('refuses client B binding client A\'s session, by sessionId or by an injected agentId', async () => {

@@ -172,29 +172,6 @@ describe('leader commands, skills and runtime rails', () => {
     } finally { release() }
   })
 
-  it('drains an accepted reference query before session close releases the native owner', async () => {
-    let release!: () => void, signal: AbortSignal | undefined
-    const gate = new Promise<void>(resolve => { release = resolve }), flush = vi.fn(async () => {})
-    const { ctx, registry, client: c } = await start({ sessionsStore: { flush } })
-    const query = vi.fn(async (_agent: Agent, _query: string, received: AbortSignal) => { signal = received; await gate; return [] })
-    ctx.provide('sessionReferenceResolver', { remoteExportCandidates: query } as never)
-    try {
-      register(c); await c.next()
-      const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
-      const sessionId = (created.result as { sessionId: string }).sessionId, agent = registry.byId.get(sessionId)!
-      sendRequest(c, 2, 'x.ai/session/references', { sessionId, query: 'needle' })
-      await waitFor(() => signal !== undefined)
-      expect(query).toHaveBeenCalledWith(agent, 'needle', signal)
-      sendRequest(c, 3, 'session/close', { sessionId })
-      await waitFor(() => signal?.aborted === true)
-      expect(flush).not.toHaveBeenCalled(); expect(agent.internals.disposed).toBe(false)
-      release()
-      const replies = await collectIds(c, [2, 3])
-      expect(replies.get(2)?.error).toMatchObject({ code: -32602 }); expect(replies.get(3)?.error).toBeUndefined()
-      expect(flush).toHaveBeenCalledOnce(); expect(agent.internals.disposed).toBe(true)
-    } finally { release() }
-  })
-
   it('drives the auxiliary dscode rails end to end for one owned session', async () => {
     const planStates: boolean[] = []
     const renamed: string[] = []

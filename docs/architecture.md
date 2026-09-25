@@ -76,7 +76,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `session-migration` | Normalizes historical model-selection events before native migration |
 | `session-discovery` | Session roster over native full-text query and projection cache |
 | `session-list` | Session-picker metadata (first prompt, title, activity) and its index |
-| `session-artifacts` | Title, references and archive RPCs: session admission, cancellation, drains |
+| `session-artifacts` | Title, info and archive RPCs: session admission, cancellation, drains |
 | `session-export` | Atomic logical-log archive save; no partial ZIP, no overwrite |
 | `remote-channel` | `x.ai/remote/invoke`: the default-deny allowlist of DSH Remote methods, identity binding checked against the generated definition, caps, cancellation and the result shape, over the in-process Typert gateway |
 | `session-commands` | Command advertisement and routing over dsh's command registry; serves each command's options from its owner |

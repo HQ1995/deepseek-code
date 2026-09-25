@@ -398,7 +398,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
 
   const artifacts = createSessionArtifacts<SessionRecord>({
     owned: ownedRecord, client: id => connections.get(id),
-    titles: host.sessionTitles, references: host.sessionReferences,
+    titles: host.sessionTitles,
     // Archives are written on this computer: a remote cwd names no host directory.
     archive: (id, cwd, filename, signal) => exportSessionArchive(ctx, id, world().kind === 'local' ? cwd : homedir(), filename, signal),
   })
@@ -485,7 +485,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   })
   requests({ // Session artifacts.
     'x.ai/session/export': (clientId, params) => artifacts.archive(clientId, params),
-    'x.ai/session/references': (clientId, params) => artifacts.references(clientId, params),
     'x.ai/session/rename': (clientId, params) => artifacts.rename(clientId, params),
     'x.ai/session/info': (clientId, params) => artifacts.info(clientId, params),
   })

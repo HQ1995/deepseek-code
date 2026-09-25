@@ -24,7 +24,7 @@ cargo test -p xai-grok-pager -p xai-grok-pager-render --lib -- \
   settings_modal theme open_settings_focus open_settings_enter_picker prompt_ack headless \
   scrollback_paste_focus_forward tool_identity_ tool_view_ host_command_ palette_commands_ command_options_ quit_activity_ \
   loop_gating_ unadvertised_goal_ auto_waits_for_the_host always_approve_stays_offered approval_view_ \
-  native_session_controls native_goal_ literal_goal_ native_session_effect \
+  native_session_controls native_goal_ literal_goal_ native_session_effect remote_session_references_ \
   sessions_cmd plan_aware_toast non_shell_execute other_tool_expanded structured_question_answers \
   d_is_not_a_delete_key session_picker_footer_offers_no_delete delete_session_complete
 echo 'PASS Rust product contracts'
