@@ -40,7 +40,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 54 modules; `index.ts` is the composition root.
+`src/` has 55 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
@@ -61,6 +61,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `session-work` | One session's accepted async work: admission generations, cancellation, real drains |
 | `session-input` | Composer input validation, routing and cancellation; not a second queue |
 | `prompt-queue` | Prompt admission, active turn, FIFO, edits and steering settlement |
+| `queue-controls` | `x.ai/queue/*` row controls (interject, steer, remove, edit, holds, reorder, clear) over the queue's state |
 | `prompt-content` | ACP prompt validation; commits images to durable storage in block order |
 | `session-output` | Stream state: seq-based replay/live dedup, usage, decode speed, pending tool facts |
 | `session-models` | Runtime model references, durable choice/effort memory, catalog fan-out |
