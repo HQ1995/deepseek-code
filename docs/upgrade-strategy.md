@@ -284,6 +284,11 @@ its manager's `installBundle` use pnpm (`pnpm-lock.yaml`), and the two layouts
 diverge. `/doctor` warns when the profile holds a `pnpm-lock.yaml`. Test homes
 that install the plugin with `dsh plugin --profile dscode add` show that warning.
 
+`scripts/e2e-plugins-installed.mjs <runtime> <home>` checks an installed leader
+over ACP: the table, enabling and disabling an optional bundle and one of its
+rows, the core refusals, an override by a DSH-home patch, `/doctor`, the note
+for a skipped bundle, and `--reset-plugins` with a restart.
+
 ### Approval reasons
 
 rc.2 approval requests carry why they ask: a sandbox or `run_code` escalation,
