@@ -8,7 +8,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ProfileContext } from '@deepseek-ai/dsh-app-boot'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
-import type { AgentDefaultModelLike, CredentialsLike, LlmLike, SettingsLike } from './native-seams.ts'
+import type { AgentDefaultModelLike, CredentialsLike, LlmLike, SettingsLike, TypertGatewayLike, TypertRegistryLike } from './native-seams.ts'
 import type { BrowserStatus } from './browser-control.ts'
 import type { SessionActivityLike } from './client-activity.ts'
 import type { ConfigEntryLike } from './execution-world.ts'
@@ -20,7 +20,7 @@ import type { ScheduleServiceLike } from './native-tasks.ts'
 import type { TeamServiceLike } from './native-team.ts'
 import type { PluginManagerLike } from './plugin-rows.ts'
 import type { LoaderEntryLike } from './plugin-status.ts'
-import type { NativeSessionReferences, NativeSessionTitles } from './session-artifacts.ts'
+import type { NativeSessionTitles } from './session-artifacts.ts'
 import type { NativeCommands, NativeSkills } from './session-commands.ts'
 import type { ScheduleDeliveryLike } from './session-controller.ts'
 import type { SessionProjectionCacheLike, SessionQueryLike } from './session-discovery.ts'
@@ -94,7 +94,6 @@ export interface HostServices {
    * never reconnects. A connection that never came up leaves no service. */
   ssh(): { failure?: unknown } | undefined
   sessionTitles(): NativeSessionTitles | undefined
-  sessionReferences(): NativeSessionReferences | undefined
   /** The optional full-text session query engine. */
   sessionQuery(): SessionQueryLike | undefined
   /** The persisted projection cache: zero-I/O listing reads. */
@@ -114,6 +113,10 @@ export interface HostServices {
    * family provider (Agent turn, jobs, subagents, Schedule, plugins) adds
    * what keeps it active. No listener, or no dispatch, answers none. */
   sessionActivity(sessionId: string): Promise<readonly SessionActivityLike[]>
+  /** DSH's in-process Remote dispatcher, from the base `typert-gateway` row. */
+  typertGateway(): TypertGatewayLike | undefined
+  /** The Typert registry (the base `typert` row): strict Remote definitions by endpoint. */
+  typert(): TypertRegistryLike | undefined
   /** The tool registry scoped to one agent: its preset's tools. */
   agentTools(agent: Agent): NativeToolSchemas | undefined
   /** A native service for one session: the preset's own scope first, then
@@ -146,7 +149,6 @@ export function createHostServices(ctx: ServiceReads, dependencies: HostServiceD
     configEditor: read<{ entries(): Iterable<ConfigEntryLike> }>('configEditor'),
     ssh: read<{ failure?: unknown }>('ssh'),
     sessionTitles: read<NativeSessionTitles>('sessionTitle'),
-    sessionReferences: read<NativeSessionReferences>('sessionReferenceResolver'),
     sessionQuery: read<SessionQueryLike>('sessionQuery'),
     sessionProjectionCache: read<SessionProjectionCacheLike>('sessionProjectionCache'),
     sessionProjections: read<NativeStatusProjections>('sessionProjections'),
@@ -160,6 +162,8 @@ export function createHostServices(ctx: ServiceReads, dependencies: HostServiceD
       const waterfall = ctx.waterfall as Waterfall | undefined
       return typeof waterfall === 'function' ? await waterfall.call(ctx, 'workspace/session-activity', { sessionId }, async () => []) : []
     },
+    typertGateway: read<TypertGatewayLike>('typertGateway'),
+    typert: read<TypertRegistryLike>('typert'),
     agentTools: agent => agent.ctx.get('tools') as NativeToolSchemas | undefined,
     presetService: ((agent: Agent, name: string): unknown =>
       dependencies.roster()?.serviceFor?.(agent, name) ?? agent.ctx.get(name) ?? ctx.get(name)) as HostServices['presetService'],

@@ -3,7 +3,7 @@
 //! A host command whose descriptor says `_meta.options` (or a builtin that
 //! fronts one) opens the ArgPicker when it is picked in Ctrl+P or entered
 //! bare. Its rows come from `x.ai/commands/options`, loaded the way the
-//! reference picker loads `x.ai/session/references`: the picker opens empty
+//! reference picker loads its candidates: the picker opens empty
 //! under a loading key, and only the reply carrying that key fills it.
 //! Picking a row submits `/name <id>`; a `next` row asks again with its id as
 //! the query. No command is named here.

@@ -87,6 +87,44 @@ export interface AgentDefaultModelLike {
   saveSelection(next: { provider: string; model: string; reasoningEffort?: string }): Promise<unknown>
 }
 
+/** One Remote call as DSH's Typert gateway takes it in process: exact named
+ * wire arguments, answered as the operator when the request names no peer. */
+export interface RemoteInvocationLike {
+  readonly namespace: string
+  readonly method: string
+  readonly args: Readonly<Record<string, unknown>>
+  /** Injected only into a cancellation-aware method (one declaring `signal`). */
+  readonly signal?: AbortSignal
+}
+
+/** Structural read of DSH's in-process Remote dispatcher (`ctx.typertGateway`). */
+export interface TypertGatewayLike {
+  /** The business value; rejects with a `RemoteError` (marked `isDSHRemoteError`) or the owner's own error. */
+  invoke(request: RemoteInvocationLike): Promise<unknown>
+}
+
+/** The parts of a generated Remote invocation descriptor the bridge checks
+ * its allowlist bindings against. */
+export interface RemoteDescriptorLike {
+  /** Absent for unary methods. */
+  readonly mode?: 'stream'
+  /** `context`: a `@RemoteScope` receiver resolved from the `wire` identity. */
+  readonly invocation: { readonly kind: 'direct' } | { readonly kind: 'context'; readonly context: string; readonly wire: string }
+  /** The lookup parameter a consuming Context fills with its own identity. */
+  readonly scope?: { readonly context: string; readonly wire: string }
+  readonly parameters: ReadonlyArray<{ readonly wire: string; readonly source: 'json' | 'lookup'; readonly lookup?: string }>
+  readonly cancellation?: { readonly parameter: 'signal' }
+}
+
+/** Structural read of the Typert registry (`ctx.typert`): strict local definitions by endpoint. */
+export interface TypertRegistryLike {
+  readonly local: {
+    get(endpoint: string): RemoteDescriptorLike | undefined
+    /** Defined once and since withdrawn: the gateway refuses it rather than weakening validation. */
+    hasSeen(endpoint: string): boolean
+  }
+}
+
 /** Cordis registers the wrapper-to-instance symbol globally; it is read
  * structurally so modules keep no framework dependency of their own. */
 const TRACEABLE_ORIGINAL = Symbol.for('cordis.original')

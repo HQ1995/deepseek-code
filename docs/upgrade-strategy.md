@@ -314,6 +314,19 @@ a live set, a rejected value, a refused secret and a reset, all through the
 settings service), `/doctor`, the note for a skipped bundle, and
 `--reset-plugins` with a restart.
 
+### Remote channel
+
+`x.ai/remote/invoke` calls allowlisted DSH Remote methods through the base
+layer's in-process Typert gateway ([grok-leader-protocol.md](grok-leader-protocol.md#remote-channel)).
+A runtime bump must keep the `typert`, `typert-loader`, `typert-gateway`,
+`agent` and `session` rows (`tests/runtime-composition.spec.ts`) and the
+allowlisted definitions: a renamed method or argument answers a `gateway/*`
+code in the result rather than failing the leader.
+`scripts/e2e-typert-remote.mjs <runtime> <home>` checks an installed leader over
+ACP: the reference candidates through the real gateway, and the refusal of an
+unlisted endpoint, of a client-supplied identity and of another client's
+session.
+
 ### Approval reasons
 
 rc.2 approval requests carry why they ask: a sandbox or `run_code` escalation,

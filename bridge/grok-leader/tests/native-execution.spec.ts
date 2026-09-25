@@ -35,6 +35,7 @@ function fixture() {
     hostTeamRows: vi.fn(async (): Promise<readonly string[]> => []),
     remote: vi.fn((): { host: string; workspace: string; helperHash?: string; connected: boolean } | undefined => undefined),
     plugins: vi.fn(async (): Promise<ReadonlyArray<{ status: string; name: string; detail: string }>> => []),
+    remoteGateway: vi.fn(() => true),
   }
   const installation = vi.fn(async (_version: string, _directory: string | undefined, _signal: AbortSignal) => JSON.stringify([{ status: 'OK', name: 'Runtime', detail: 'pinned' }]))
   const execution = createNativeExecution(host, installation)
@@ -67,6 +68,13 @@ describe('native execution ownership', () => {
     expect((await f.doctor()).text).not.toContain('Agent Teams')
     f.host.hostTeamRows.mockResolvedValue(['host-tool-agent-team'])
     expect((await f.doctor()).text).toContain('[WARN] Agent Teams: Host-level Team tools (host-tool-agent-team) give every session Team tools')
+  })
+  it('warns only while DSH\'s Remote gateway is missing', async () => {
+    const f = fixture()
+    expect((await f.doctor()).text).not.toContain('Remote gateway')
+    f.host.remoteGateway.mockReturnValue(false)
+    expect((await f.doctor()).text).toContain('[WARN] Remote gateway: DSH\'s Remote gateway is not running (the typert and typert-gateway rows'
+      + ' of the base layer), so the TUI cannot call plugin Remote methods, and the session reference picker fails.')
   })
   it('reports plugin rows that did not activate right after the installation checks', async () => {
     const f = fixture()

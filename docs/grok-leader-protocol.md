@@ -203,6 +203,61 @@ The bridge also implements the `x.ai/*` surfaces required by this TUI:
 Extension notifications use the `_x.ai/*` wire spelling expected by the ACP
 decoder. `session/update` remains the normal unprefixed ACP notification.
 
+## Remote channel
+
+`x.ai/remote/invoke` `{sessionId?, endpoint, args}` calls one DSH plugin
+Remote method (`@Remote`, generated Typert definition) at `endpoint`
+`<namespace>/<method>`, with `args` its exact named wire arguments, through
+DSH's in-process gateway (`ctx.typertGateway.invoke`) as the operator: no HTTP
+server, WebSocket, stream or forwarded event. The endpoint is one field because
+the leader reads a top-level `method` param of an `_x.ai/*` request as the
+wrapped method name. The initialize reply advertises the channel as
+`_meta.dscodeRemote: 1`. The answer is DSH's `RemoteResult`:
+`{ok: true, value?}` (no `value` for a void method) or
+`{ok: false, error: {code, message, details}}`.
+
+Access is default deny. `REMOTE_ALLOWLIST` in `bridge/grok-leader/src/remote-channel.ts`
+is the only grant, and the client cannot widen it. Each entry names the
+endpoint, how it binds a session (`scope`, `host` or
+`{field}`), whether it `mutates`, and a timeout (10 s by default, at most
+60 s). Today it holds one read, `sessionReferenceResolver/candidates`
+(`args: {query}`), which the reference picker uses. Methods whose capability
+the bridge wraps in its own policy stay out: preset selection, commands, plugin
+management, code runners and cross-session schedule reads.
+
+- `scope`: the definition's scoped lookup (or `@RemoteScope`) wire must be its
+  only looked-up object and name an agent or session; the bridge fills it with
+  the owned session's id. `host`: no lookup, no `sessionId`. `{field}`: the
+  owned session id goes to that dotted path inside a JSON argument. The binding
+  is checked against `ctx.typert.local` before every call; a definition that
+  disagrees answers `dscode/binding-mismatch`, a missing one
+  `gateway/invocation-unavailable` (`gateway/definition-unavailable` once
+  withdrawn), and a composition without the gateway `dscode/remote-unavailable`
+  (`/doctor` warns "Remote gateway").
+- JSON-RPC `-32602` refusals, before any Remote call: an unlisted endpoint or a
+  malformed name; `args` that are not an object, exceed 64 KiB or nest deeper
+  than 32 levels; a client-supplied identity (`agentId`, `sessionId`, any
+  looked-up wire of the definition, a `{field}` path); a missing, foreign or
+  not-yet-ready `sessionId`, or one on a `host` entry; a call dropped from a
+  full queue (below); and a session that closed or reloaded while the call ran
+  (`session closed`).
+- At most 8 calls per client run at once (a read that answered at its timeout
+  holds its slot until its native call settles); up to 32 more wait in order.
+  A call past that drops the oldest waiting one: the reference picker asks
+  again on every keystroke, and only its newest query matters.
+- A session-bound call runs in that session's work scope (`run` for mutations),
+  so close and reload abort it and wait for it before releasing the session. Its
+  signal combines the session, the client connection, leader shutdown and the
+  timeout; an abort answers `gateway/cancelled` with the reason. A read may
+  answer at its timeout; a mutation must accept a cancellation signal and is
+  awaited to its real completion.
+- Results must be lossless JSON of at most 1 MiB (UTF-8): binary or other
+  non-JSON values answer `gateway/result-invalid`, larger ones
+  `dscode/result-too-large`; an `undefined` field is dropped, as on DSH's `/api`.
+- A `RemoteError`, recognized by its `isDSHRemoteError` marker, keeps its code,
+  message and JSON details (`gateway/*` validation failures, a plugin's own
+  codes); any other failure becomes `gateway/internal` with its message only.
+
 ## Turn activity notices
 
 Unless noted, these ride `_x.ai/session_notification`, as `image_dropped`

@@ -40,7 +40,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 70 modules; `index.ts` is the composition root.
+`src/` has 71 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
@@ -48,7 +48,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `codec` | Frame codec: 4-byte big-endian length plus JSON payload, 64 MiB cap |
 | `protocol` | Envelope types and wire mapping; ACP JSON-RPC strings inside `acp` frames |
 | `acp` | Shared ACP request validation and JSON-RPC errors |
-| `leader-routes` | ACP method registry: requests and notifications to their owners; unknown requests are METHOD_NOT_FOUND. Builds the `initialize` reply and the fixed replies no owner implements |
+| `leader-routes` | ACP method registry: requests and notifications to their owners; unknown requests are METHOD_NOT_FOUND. Builds the `initialize` reply (advertising `dscodeRemote`) and the fixed replies no owner implements |
 | `host-services` | The optional DSH host services the bridge reads, each by name at call time; the per-session preset/agent/host service lookup; the `workspace/session-activity` waterfall |
 | `leader-transport` | Unix socket, registration, ACP request/reply and reverse-request lifetimes; no DSH |
 | `leader-lifecycle` | Host heartbeat, no-client grace, shutdown that joins every owner's drain |
@@ -58,7 +58,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `provider-profile` | Pure llm-pi-ai rules: settings reads, `/provider` form validation, profile merge |
 | `model-endpoint` | The catalog's only outbound HTTP: bounded `/models` probe, injected `fetch` |
 | `native-provider` | The official DeepSeek Messages adapter as an explicit `/provider` route |
-| `native-seams` | Types only: structural llm, settings, credentials and default-model contracts |
+| `native-seams` | Types only: structural llm, settings, credentials, default-model and Remote gateway contracts |
 | `session-registry` | Sole owner of accepted sessions; a retiring id stays reserved until flush and disposal |
 | `session-lifecycle` | Session records and new/load/fork/rewind/close flows over the registry |
 | `session-work` | One session's accepted async work: admission generations, cancellation, real drains |
@@ -76,8 +76,9 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `session-migration` | Normalizes historical model-selection events before native migration |
 | `session-discovery` | Session roster over native full-text query and projection cache |
 | `session-list` | Session-picker metadata (first prompt, title, activity) and its index |
-| `session-artifacts` | Title, references and archive RPCs: session admission, cancellation, drains |
+| `session-artifacts` | Title, info and archive RPCs: session admission, cancellation, drains |
 | `session-export` | Atomic logical-log archive save; no partial ZIP, no overwrite |
+| `remote-channel` | `x.ai/remote/invoke`: the default-deny allowlist of DSH Remote methods, identity binding checked against the generated definition, caps, cancellation and the result shape, over the in-process Typert gateway |
 | `session-commands` | Command advertisement and routing over dsh's command registry; serves each command's options from its owner |
 | `command-options` | Pure: DSH `SelectOption` rows for host-served option pickers, their bounds, and the `/goal` rows |
 | `execution-world` | Where tools run: local, or the SSH workspace a profile configures |

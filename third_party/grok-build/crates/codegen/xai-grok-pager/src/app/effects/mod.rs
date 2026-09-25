@@ -1732,20 +1732,10 @@ pub(crate) fn execute(
         Effect::FetchSessionReferences { agent_id, session_id, query, nonce } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {
-                #[derive(serde::Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct Candidate { session_id: String, label: String, cwd: Option<String>, mention: String }
-                #[derive(serde::Deserialize)]
-                struct Candidates { candidates: Vec<Candidate> }
-                let params = serde_json::json!({ "sessionId": session_id.0, "query": query });
-                let request = acp::ExtRequest::new("x.ai/session/references", serde_json::value::to_raw_value(&params).expect("serialize reference query").into());
+                let params = session_references_params(&session_id.0, &query);
+                let request = acp::ExtRequest::new("x.ai/remote/invoke", serde_json::value::to_raw_value(&params).expect("serialize reference query").into());
                 let result = match acp_send(request, &tx).await {
-                    Ok(response) => serde_json::from_str::<Candidates>(response.0.get())
-                        .map(|response| response.candidates.into_iter().map(|candidate| crate::slash::command::ArgItem {
-                            display: candidate.label, match_text: candidate.session_id,
-                            insert_text: candidate.mention, description: candidate.cwd.unwrap_or_default(),
-                        }).collect())
-                        .map_err(|error| format!("Invalid session references: {error}")),
+                    Ok(response) => parse_session_references(response.0.get()),
                     Err(error) => Err(sanitize_user_error(&error.to_string())),
                 };
                 TaskResult::SessionReferencesLoaded { agent_id, session_id, nonce, result }
@@ -4818,6 +4808,41 @@ pub(crate) fn execute(
     }
     (false, meta)
 }
+/// DIVERGENCE(dscode): the reference picker's `x.ai/remote/invoke` params: DSH's
+/// `sessionReferenceResolver/candidates` for the viewed session. The leader binds
+/// the session's own identity (`agentId`); the TUI names only the session. One
+/// `endpoint` field: the leader reads a top-level `method` param of an
+/// extension request as the wrapped method name.
+fn session_references_params(session_id: &str, query: &str) -> serde_json::Value {
+    serde_json::json!({
+        "sessionId": session_id,
+        "endpoint": "sessionReferenceResolver/candidates",
+        "args": { "query": query },
+    })
+}
+
+/// Picker rows from DSH's `RemoteResult` for the reference candidates:
+/// `{ok: true, value: [candidate]}` lists them, `{ok: false, error}` fails with
+/// the host's message.
+fn parse_session_references(raw: &str) -> Result<Vec<crate::slash::command::ArgItem>, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Candidate { session_id: String, label: String, cwd: Option<String>, mention: String }
+    #[derive(serde::Deserialize)]
+    struct RemoteError { message: String }
+    #[derive(serde::Deserialize)]
+    struct RemoteResult { ok: bool, value: Option<Vec<Candidate>>, error: Option<RemoteError> }
+    let result: RemoteResult = serde_json::from_str(raw).map_err(|error| format!("Invalid session references: {error}"))?;
+    match (result.ok, result.value, result.error) {
+        (true, Some(candidates), _) => Ok(candidates.into_iter().map(|candidate| crate::slash::command::ArgItem {
+            display: candidate.label, match_text: candidate.session_id,
+            insert_text: candidate.mention, description: candidate.cwd.unwrap_or_default(),
+        }).collect()),
+        (false, _, Some(error)) => Err(sanitize_user_error(&error.message)),
+        _ => Err("Invalid session references: no candidates or error in the result".into()),
+    }
+}
+
 fn parse_session_command_result(raw: &str) -> Result<String, String> {
     #[derive(serde::Deserialize)]
     struct CommandResult {

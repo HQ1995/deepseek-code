@@ -1036,7 +1036,7 @@ A host command whose descriptor carries `_meta.options: true`
 existing ArgPicker when picked in Ctrl+P or entered bare, instead of running.
 The picker opens empty ("Loading…") and asks `x.ai/commands/options`
 `{sessionId, name, query}` (`app/dispatch/command_options.rs`), the way the
-reference picker asks `x.ai/session/references`: only the reply carrying its
+reference picker asks for its candidates: only the reply carrying its
 loading key fills it. Each DSH `SelectOption` becomes one row: the label (a
 badge after a `·`, "(current)" on the `active` row, which is preselected) and
 the detail, or the `confirmation`'s description, which is only shown for now.
@@ -1074,3 +1074,16 @@ an answer that reports work keeps that arm up for at least 3 s so the text can
 be read. A second press still quits at once and never waits for the answer. A
 timeout, a failure, nothing to report or an old leader (method not found)
 leaves today's "press again to quit" (class: feature).
+
+### Session references over the remote channel
+
+The `/reference` picker asks the leader's generic remote channel instead of a
+dedicated route: `x.ai/remote/invoke` `{sessionId, endpoint:
+"sessionReferenceResolver/candidates", args: {query}}` (`app/effects/mod.rs`,
+`session_references_params`). The reply is DSH's
+`RemoteResult`: `{ok: true, value: [candidate]}` fills the picker with the same
+rows as before (label, cwd, the canonical mention); `{ok: false, error}` leaves
+it empty with a toast carrying the host's message (`parse_session_references`).
+The leader binds the viewed session's identity itself; the TUI never sends an
+`agentId`. The `x.ai/session/references` route is gone; TUI and leader versions
+match at registration, so no fallback is kept (class: feature).

@@ -54,6 +54,28 @@ describe('0.1.7 runtime composition', () => {
     expect(native.filter(row => !disabled.has(row.id))).toEqual([])
   })
 
+  it('keeps the base Remote gateway rows and the lookups it resolves sessions through', () => {
+    // x.ai/remote/invoke runs plugin Remote methods through DSH's in-process
+    // Typert gateway; the agent and session rows register its agentId and
+    // sessionId lookups. dscode inherits all five from the base layer.
+    const remoteRows: Record<string, string> = {
+      typert: '@deepseek-ai/dsh-typert-registry', 'typert-loader': '@deepseek-ai/dsh-typert-loader',
+      'typert-gateway': '@deepseek-ai/dsh-api-gateway', agent: '@deepseek-ai/dsh-agent', session: '@deepseek-ai/dsh-session',
+    }
+    const base = baseRows()
+    for (const [id, name] of Object.entries(remoteRows)) {
+      expect(base.filter(row => row.id === id)).toEqual([expect.objectContaining({ name })])
+      expect(base.find(row => row.id === id)).not.toHaveProperty('disabled')
+    }
+    // No dscode bundle patch addresses them: a patch row replaces the whole
+    // row's config, and `disabled` would switch the channel off.
+    const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { dsh: { bundle: { patch: string[] } } }
+    const hostRows = manifest.dsh.bundle.patch.flatMap(path => (load(readFileSync(new URL('../' + path, import.meta.url), 'utf8')
+      .replace(/!!js\b/g, '')) as Row[]).flatMap(row => [row, ...row.insert ?? []]))
+    expect(hostRows.length).toBeGreaterThan(0)
+    expect(hostRows.filter(row => row.id !== undefined && Object.hasOwn(remoteRows, row.id))).toEqual([])
+  })
+
   it.each(['history', 'lsp', 'terminal'])('keeps %s workflows inside their own realm', preset => {
     const delegation = rows(`../presets/${preset}.patch.yml`).find(row => row.id === 'delegation')!
     expect(delegation.isolate).toMatchObject({ workflowEngine: true })

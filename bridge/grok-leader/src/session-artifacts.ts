@@ -1,12 +1,10 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { SessionReferenceResolver } from '@deepseek-ai/dsh-session-reference'
 import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
 import { contextInfoFromProjection } from './projection.ts'
 import type { SessionOutput } from './session-output.ts'
 import type { SessionOperation, SessionWork } from './session-work.ts'
 
-export type NativeSessionReferences = Pick<SessionReferenceResolver, 'remoteExportCandidates'>
 export interface NativeSessionTitles {
   rename(session: Agent['session'], title: string): unknown
   refresh?(session: Agent['session'], signal?: AbortSignal): Promise<unknown>
@@ -21,12 +19,11 @@ interface ArtifactHost<S extends ArtifactSession> {
   owned(clientId: number, sessionId: SessionId | undefined): S | undefined
   client(clientId: number): { readonly signal: AbortSignal } | undefined
   titles(): NativeSessionTitles | undefined
-  references(): NativeSessionReferences | undefined
   archive(sessionId: SessionId, cwd: string, filename: string, signal: AbortSignal): Promise<string>
 }
 
-/** Attached-session metadata and durable artifacts. Native title/reference
- * capabilities and the archive writer retain their policies; this module owns
+/** Attached-session metadata and durable artifacts. The native title
+ * capability and the archive writer retain their policies; this module owns
  * RPC validation, exact-session admission, cancellation and completion drains.
  * A completed archive is not rolled back if its client departs afterward. */
 export function createSessionArtifacts<S extends ArtifactSession>(host: ArtifactHost<S>) {
@@ -71,27 +68,6 @@ export function createSessionArtifacts<S extends ArtifactSession>(host: Artifact
           const path = await host.archive(record.agent.session.id, record.agent.session.header.cwd ?? process.cwd(), filename, signal)
           active(record, scope); signal.throwIfAborted()
           return { result: { kind: 'success', text: 'Session archive exported to ' + path } }
-        })
-      })
-    },
-    references(clientId: number, params: unknown) {
-      return accept(async () => {
-        const p = paramRecord(params, 'x.ai/session/references')
-        if (typeof p.sessionId !== 'string' || p.sessionId.length === 0 || typeof p.query !== 'string' || p.query.length > 1024) {
-          throw invalidParams('session references requires sessionId and a query of at most 1024 characters')
-        }
-        const record = owned(clientId, p.sessionId)
-        if (record === undefined) throw invalidParams('unknown session')
-        const query = p.query
-        return record.work.read(async scope => {
-          active(record, scope)
-          const resolver = host.references()
-          active(record, scope)
-          if (resolver === undefined) throw internalError('session references are unavailable')
-          const candidates = await resolver.remoteExportCandidates(record.agent, query,
-            AbortSignal.any([scope.signal, shutdown.signal, AbortSignal.timeout(10_000)]))
-          active(record, scope)
-          return { candidates }
         })
       })
     },

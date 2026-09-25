@@ -15,10 +15,10 @@ const serviceNames: Record<Exclude<keyof HostServices, 'flush' | 'messageProject
   settings: 'settings', llm: 'llm', credentials: 'credentials', agentDefaultModel: 'agentDefaultModel',
   persistence: 'sessionPersistence', attachments: 'attachments', commands: 'commands', schedule: 'schedule',
   profileContext: 'profileContext', pluginManager: 'pluginManager', loader: 'loader', configEditor: 'configEditor', ssh: 'ssh',
-  sessionTitles: 'sessionTitle', sessionReferences: 'sessionReferenceResolver', sessionQuery: 'sessionQuery',
+  sessionTitles: 'sessionTitle', sessionQuery: 'sessionQuery',
   sessionProjectionCache: 'sessionProjectionCache', sessionProjections: 'sessionProjections',
   permissionPresets: 'permissionPresets', agentTeams: 'agentTeams', browser: 'dscodeBrowser',
-  inspector: 'dscodeInspector', appExit: 'appExit',
+  inspector: 'dscodeInspector', appExit: 'appExit', typertGateway: 'typertGateway', typert: 'typert',
 }
 
 describe('host services seam', () => {

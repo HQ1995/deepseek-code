@@ -14,6 +14,10 @@ import * as McpClient from '@deepseek-ai/dsh-mcp-client'
 import { SessionId, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { SessionPersistenceRevision, type SessionAccess, type SessionHandle, type SessionPersistenceSnapshot } from '@deepseek-ai/dsh-session-persistence'
+import TypertGateway from '@deepseek-ai/dsh-api-gateway'
+import { TYPERT as SESSION_REFERENCE_TYPERT } from '@deepseek-ai/dsh-session-reference/typert'
+import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { encodeJsonFrame, FrameDecoder } from '../../src/codec.ts'
 import * as GrokLeader from '../../src/index.ts'
 import type {} from '@deepseek-ai/dsh-attachment'
@@ -292,6 +296,38 @@ export const mockAttachments = {
     })),
 }
 
+/** The Remote side of `x.ai/remote/invoke`: DSH's real Typert registry and
+ * gateway, the agent lookup over the mock registry, and a fixture service
+ * behind the pinned runtime's own generated `sessionReferenceResolver`
+ * definition. Each call is recorded; `answer` decides its outcome. */
+export interface RemoteFixture {
+  calls: Array<{ agent: Agent; query: string; signal: AbortSignal }>
+  answer(agent: Agent, query: string, signal: AbortSignal): Promise<unknown>
+}
+
+export async function mountRemoteFixture(ctx: Context, registry: MockRegistry): Promise<RemoteFixture> {
+  const fixture: RemoteFixture = { calls: [], answer: async () => [] }
+  class FixtureReferences extends TypertRemoteService {
+    constructor(owner: Context) { super(owner, 'sessionReferenceResolver') }
+    async remoteExportCandidates(agent: Agent, query: string, signal: AbortSignal): Promise<unknown> {
+      fixture.calls.push({ agent, query, signal })
+      return await fixture.answer(agent, query, signal)
+    }
+  }
+  await ctx.plugin(TypertRegistry)
+  await ctx.plugin(TypertGateway, {})
+  const typert = ctx.get('typert') as unknown as {
+    register(contribution: unknown): unknown
+    lookups: { register(key: string, provider: unknown): unknown }
+  }
+  // dsh-agent registers this lookup in a real host; the mock registry stands in.
+  typert.lookups.register('agent', { parameter: 'agent', wire: 'agentId', hostTypeSymbol: '@deepseek-ai/dsh-agent#Agent',
+    wireTypeSymbol: '@deepseek-ai/dsh-session/types#SessionId', resolve: (id: SessionId) => registry.get(id) })
+  typert.register(SESSION_REFERENCE_TYPERT)
+  await ctx.plugin(FixtureReferences)
+  return fixture
+}
+
 export interface LeaderHarness {
   ctx: Context
   pluginCtx: Context
@@ -301,6 +337,8 @@ export interface LeaderHarness {
   presets: ReturnType<typeof makeMockPresets> | undefined
   /** Stubbed `dsh-mcp-client` fibers backing `x.ai/mcp/list`; restored by teardown. */
   mcpFibers: { mockRestore(): void } | undefined
+  /** The real Typert gateway and its fixture Remote service, when `remote` is set. */
+  remote: RemoteFixture | undefined
 }
 
 export interface HarnessOptions {
@@ -330,6 +368,8 @@ export interface HarnessOptions {
   /** Launcher facts of a profile-launched leader, and its DSH plugin manager. */
   profileContext?: unknown
   pluginManager?: unknown
+  /** Mount DSH's real Typert registry and gateway with a fixture Remote service. */
+  remote?: boolean
   combineQueuedPrompts?: boolean
   followUpBehavior?: 'queue' | 'steer'
   idleExitMs?: number
@@ -513,6 +553,7 @@ export async function makeHarness(
       ? { fibers: options.mcpServers!.map(server => ({ ctx, config: { ...server } })) } as never
       : get(plugin))
   })()
+  const remote = options.remote === true ? await mountRemoteFixture(ctx, registry) : undefined
   let pluginCtx: Context | undefined
   await ctx.plugin({
     name: 'grok-leader-test',
@@ -522,7 +563,7 @@ export async function makeHarness(
       GrokLeader.apply(inner, { socketPath, ...options.model === undefined ? {} : { model: options.model }, ...options.combineQueuedPrompts === undefined ? {} : { combineQueuedPrompts: options.combineQueuedPrompts }, ...options.followUpBehavior === undefined ? {} : { followUpBehavior: options.followUpBehavior }, ...options.idleExitMs === undefined ? {} : { idleExitMs: options.idleExitMs } })
     },
   })
-  return { ctx, pluginCtx: pluginCtx!, socketPath, registry, persistence, presets, mcpFibers }
+  return { ctx, pluginCtx: pluginCtx!, socketPath, registry, persistence, presets, mcpFibers, remote }
 }
 
 export const register = (client: ClientHandle): void => {

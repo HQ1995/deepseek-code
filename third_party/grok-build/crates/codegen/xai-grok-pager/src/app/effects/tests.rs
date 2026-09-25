@@ -2,6 +2,31 @@
 use super::*;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
 #[test]
+fn remote_session_references_ask_the_resolver_for_the_viewed_session() {
+    let params = session_references_params("s-1", "api");
+    assert_eq!(params, serde_json::json!({
+        "sessionId": "s-1", "endpoint": "sessionReferenceResolver/candidates", "args": { "query": "api" },
+    }));
+    // The leader would route a top-level `method` param as the method itself.
+    assert!(params.get("method").is_none());
+}
+#[test]
+fn remote_session_references_parse_the_result_shape() {
+    let rows = parse_session_references(r#"{"ok":true,"value":[
+        {"sessionId":"a","label":"Fix login","displayTitle":"Fix login","cwd":"/w","sameWorkspace":true,"createdAt":1,"mention":"@[Fix login](dsh-session:a)"},
+        {"sessionId":"b","label":"b","displayTitle":"b","sameWorkspace":false,"createdAt":2,"mention":"@[b](dsh-session:b)"}]}"#).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!((rows[0].display.as_str(), rows[0].match_text.as_str(), rows[0].insert_text.as_str(), rows[0].description.as_str()),
+        ("Fix login", "a", "@[Fix login](dsh-session:a)", "/w"));
+    assert_eq!(rows[1].description, "");
+    assert_eq!(parse_session_references(r#"{"ok":true,"value":[]}"#).unwrap().len(), 0);
+    assert_eq!(parse_session_references(r#"{"ok":false,"error":{"code":"gateway/cancelled","message":"Remote invocation was aborted: timed out after 10000 ms","details":{}}}"#).err(),
+        Some("Remote invocation was aborted: timed out after 10000 ms".into()));
+    for raw in ["not json", "{}", r#"{"ok":true}"#, r#"{"ok":false}"#, r#"{"candidates":[]}"#, r#"{"ok":true,"value":[{"sessionId":"a"}]}"#] {
+        assert!(parse_session_references(raw).is_err(), "accepted malformed references: {raw}");
+    }
+}
+#[test]
 fn native_goal_response_requires_native_kind_and_text() {
     assert_eq!(parse_session_command_result(r#"{"result":{"kind":"success","text":"Goal paused."}}"#), Ok("Goal paused.".into()));
     assert_eq!(parse_session_command_result(r#"{"result":{"kind":"error","text":"Images require an objective."}}"#), Err("Images require an objective.".into()));
