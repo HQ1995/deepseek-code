@@ -1,14 +1,15 @@
 /** Provider/model catalog ownership: cached snapshots, accepted native reads
  * and discoveries, and provider route writes. No socket, agent registry or
  * Cordis dependency. Pure rules live in wire-catalog (catalog shape and
- * selection) and provider-profile (llm-pi-ai routes); model-endpoint owns the
- * one outbound capability probe. */
+ * selection), provider-roster (roster rows and model lists) and
+ * provider-profile (llm-pi-ai routes); model-endpoint owns the one outbound
+ * capability probe. */
 import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { RpcError } from './protocol.ts'
 import { JSONRPC_INVALID_PARAMS, internalError, paramRecord } from './acp.ts'
 import { errorMessage, nonEmpty } from './guards.ts'
 import { discoverEndpointModelCapabilities, type EndpointCapabilities } from './model-endpoint.ts'
-import { NATIVE_DEEPSEEK_NAME, NATIVE_MODEL_DESCRIPTIONS, nativeProviderForm, type NativeProviders } from './native-provider.ts'
+import { NATIVE_DEEPSEEK_NAME, nativeProviderForm, type NativeProviders } from './native-provider.ts'
 import { nativeInstance, type AgentDefaultModelLike, type CredentialInfo, type CredentialsLike, type LlmLike, type ModelInfo, type SettingsLike } from './native-seams.ts'
 import {
   NO_MODELS_MARKER, PROVIDER_SETTINGS_NS, discoveredModelUpdate, editableProfile, hasUserProviderRoute, isDiscoverableApi,
@@ -16,8 +17,12 @@ import {
   providerUserSection, requireProviderId, routeSignature, sharesCredentialRef, type DiscoveredProviderModel,
 } from './provider-profile.ts'
 import {
-  assembleCatalog, modelEffortKey, providerNote, resolveSelection, type CatalogProvider, type ModelCatalog, type ProviderModels,
+  assembleCatalog, modelEffortKey, providerNote, resolveSelection, type CatalogProvider, type ModelCatalog,
 } from './wire-catalog.ts'
+import {
+  catalogModelName, catalogSignature, discoveredModelRows, discoveryRequest, listedModels, modelsListing, providerRow, rosterOf, rosterRows,
+  type ProviderListing, type ProviderRoster,
+} from './provider-roster.ts'
 
 /** Lazy capabilities reflect DSH's optional asynchronous module registration. */
 export interface ModelCatalogDependencies {
@@ -47,13 +52,6 @@ export type CatalogChange = 'discovery' | 'mutation' | 'external'
 export const SOURCE_REFRESH_DEBOUNCE_MS = 150
 
 type Profile = Record<string, unknown>
-type ProviderRoster = { providers: CatalogProvider[]; currentProviderId: string }
-/** One provider's listing, or why the llm service could not list it. */
-type ProviderListing = ProviderModels & { failure?: string }
-
-/** The client-visible content of one catalog snapshot. */
-const catalogSignature = (current: ModelCatalog): string =>
-  JSON.stringify([current.currentModelId, current.currentProviderId, current.providers, current.availableModels])
 
 /** Own cached catalogs, accepted native reads/discoveries and provider writes.
  * Disposal closes admission/publication immediately and drains real work,
@@ -167,11 +165,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
       logger.warn('grok-leader: could not list models for provider ' + provider + ': ' + errorMessage(error))
       return { provider, models: [], metadata: new Map(), failure: errorMessage(error) }
     }
-    const native = dependencies.native?.owns(provider) === true
-    const staticModels = native ? listed.map(model => model.description !== undefined || NATIVE_MODEL_DESCRIPTIONS[model.id] === undefined
-      ? model : { ...model, description: NATIVE_MODEL_DESCRIPTIONS[model.id] }) : listed
-    const discovered = discoveredModels.get(provider)
-    const models = discovered === undefined ? staticModels : discovered.map(model => ({ id: model.id, name: model.name ?? model.id }))
+    const models = listedModels(listed, dependencies.native?.owns(provider) === true, discoveredModels.get(provider))
     const metadata = new Map<string, ModelInfo>()
     for (const model of models) {
       assertOpen()
@@ -184,8 +178,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     return { provider, models, metadata }
   })
 
-  /** One roster row: the llm service's identity plus the editable profile
-   * fields and non-secret credential facts. */
+  /** One roster row, with its credential described inside the drain. */
   const describeProvider = (
     row: { id: string; name?: string },
     userSection: Profile | undefined,
@@ -195,18 +188,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     const native = dependencies.native?.owns(row.id) === true
     const profile: Record<string, unknown> = native ? dependencies.native!.describe() : providerUserProfile(userSection, row.id)
     const apiKeyEnv = typeof profile.apiKeyEnv === 'string' ? profile.apiKeyEnv : undefined
-    const credential = await describeCredential(apiKeyEnv)
-    const name = native ? NATIVE_DEEPSEEK_NAME : row.name
-    return {
-      id: row.id,
-      ...name === undefined ? {} : { name },
-      ...typeof profile.displayName === 'string' ? { displayName: profile.displayName } : {},
-      ...apiKeyEnv === undefined ? {} : { apiKeyEnv },
-      ...typeof profile.api === 'string' ? { api: profile.api } : {},
-      ...typeof profile.baseURL === 'string' ? { baseURL: profile.baseURL } : {},
-      ...credential === undefined ? {} : { credential },
-      ...note === undefined ? {} : { note },
-    }
+    return providerRow(row, native, profile, apiKeyEnv, await describeCredential(apiKeyEnv), note)
   })
 
   /** Rebuild the flattened wire catalog plus the provider ownership the bare
@@ -218,18 +200,13 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     const llmService = llm()
     const userSection = displaySection()
     const activeProviders = llmService?.listProviders() ?? []
-    const configured = new Map((llmService?.listConfigurableProviders() ?? []).map(row => [row.provider, row]))
-    // A configurable provider whose configuration failed stays visible with its diagnostic.
-    const rosterRows = new Map<string, { id: string; name?: string }>(activeProviders.map(row => [row.id, row]))
-    for (const row of configured.values()) {
-      if (row.error !== undefined && !rosterRows.has(row.provider)) rosterRows.set(row.provider, { id: row.provider, name: row.displayName })
-    }
+    const roster = rosterRows(activeProviders, llmService?.listConfigurableProviders() ?? [])
     const rows = llmService === undefined ? [] : await Promise.all(activeProviders.map(provider => readProviderModels(llmService, provider.id)))
     assertOpen()
     const listings = new Map(rows.map(row => [row.provider, row]))
-    const providers = await Promise.all([...rosterRows.values()].map(row => {
+    const providers = await Promise.all([...roster.rows.values()].map(row => {
       const listing = listings.get(row.id)
-      return describeProvider(row, userSection, providerNote(configured.get(row.id)?.error, listing?.models.length ?? 0, listing?.failure))
+      return describeProvider(row, userSection, providerNote(roster.configured.get(row.id)?.error, listing?.models.length ?? 0, listing?.failure))
     }))
     assertOpen()
     const assembled = assembleCatalog({
@@ -302,24 +279,12 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
     const apiKey = await discoveryApiKey(nonEmpty(draft.apiKeyEnv) ? draft.apiKeyEnv : undefined, knownEndpoint)
     let models
     try {
-      models = await llmService.discoverModels(PROVIDER_SETTINGS_NS, {
-        provider: id,
-        ...nonEmpty(draft.api) ? { api: draft.api } : {},
-        ...baseURL === undefined ? {} : { baseURL },
-        ...nonEmpty(apiKey) ? { apiKey } : {},
-      })
+      models = await llmService.discoverModels(PROVIDER_SETTINGS_NS, discoveryRequest(id, draft, baseURL, apiKey))
     } catch (error: unknown) {
       throw internalError('cannot add provider "' + id + '": model discovery failed: ' + errorMessage(error))
     }
     if (models.length === 0) throw internalError('cannot add provider "' + id + '": its endpoint listed no models')
-    const capabilities = await probeEndpointCapabilities(id, draft, knownEndpoint, apiKey)
-    return models.map(model => ({
-      id: model.id,
-      ...model.name === undefined ? {} : { name: model.name },
-      ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
-      ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
-      ...capabilities.has(model.id) ? { reasoningEfforts: capabilities.get(model.id)! } : {},
-    }))
+    return discoveredModelRows(models, await probeEndpointCapabilities(id, draft, knownEndpoint, apiKey))
   }
 
   /** Persist a background discovery only if the route is still the one probed. */
@@ -445,7 +410,7 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
       assertOpen()
     }
     publish(current, 'mutation')
-    return { providers: current.providers, currentProviderId: current.currentProviderId }
+    return rosterOf(current)
   }
 
   /**
@@ -577,25 +542,13 @@ export function createModelCatalog(dependencies: ModelCatalogDependencies) {
   const modelsList = async (): Promise<unknown> => {
     const current = await refreshCatalog()
     scheduleDynamicCatalogRefresh()
-    return {
-      currentModelId: current.currentModelId,
-      availableModels: current.availableModels,
-      _meta: { currentProviderId: current.currentProviderId, providers: current.providers },
-    }
+    return modelsListing(current)
   }
 
   return {
     peek: () => catalog,
-    /** The name the picker shows for a model id a native service reports (a
-     * teammate's bare `deepseek-flash`): exact with its provider, otherwise
-     * only when every provider names that id alike. */
-    modelName(id: string, provider?: string): string | undefined {
-      const rows = catalog?.availableModels ?? []
-      const wire = provider === undefined ? undefined : catalog?.providerModelToWireId.get(modelEffortKey(provider, id))
-      if (wire !== undefined) return rows.find(row => row.modelId === wire)?.name
-      const names = new Set(rows.filter(row => row.modelId === id || catalog?.routesByModel.get(row.modelId)?.model === id).map(row => row.name))
-      return names.size === 1 ? [...names][0] : undefined
-    },
+    /** The picker's name for a model id a native service reports. */
+    modelName(id: string, provider?: string): string | undefined { return catalogModelName(catalog, id, provider) },
     /** A settings namespace was recomposed (`ns`), or the profile reloaded
      * (no `ns`): the next display read recomposes the provider section, and
      * the catalog is rebuilt and republished if it changed. */

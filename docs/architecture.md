@@ -40,18 +40,20 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 52 modules; `index.ts` is the composition root.
+`src/` has 62 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
-| `index` | Composition: module assembly, ACP routing (`dispatchRequest`), native event forwarding |
+| `index` | Composition: module assembly, native event forwarding; routing goes through `leader-routes` |
 | `codec` | Frame codec: 4-byte big-endian length plus JSON payload, 64 MiB cap |
 | `protocol` | Envelope types and wire mapping; ACP JSON-RPC strings inside `acp` frames |
 | `acp` | Shared ACP request validation and JSON-RPC errors |
+| `leader-routes` | ACP method registry: requests and notifications to their owners; unknown requests are METHOD_NOT_FOUND |
 | `leader-transport` | Unix socket, registration, ACP request/reply and reverse-request lifetimes; no DSH |
 | `leader-lifecycle` | Host heartbeat, no-client grace, shutdown that joins every owner's drain |
 | `model-catalog` | Catalog snapshots, accepted native reads, discovery, route writes, disposal; no socket or Cordis |
 | `wire-catalog` | Pure: wire ids, catalog assembly, selection resolution, effort acceptance, provider notes |
+| `provider-roster` | Pure: roster rows, each provider's model list and display row, discovery request and rows, client replies |
 | `provider-profile` | Pure llm-pi-ai rules: settings reads, `/provider` form validation, profile merge |
 | `model-endpoint` | The catalog's only outbound HTTP: bounded `/models` probe, injected `fetch` |
 | `native-provider` | The official DeepSeek Messages adapter as an explicit `/provider` route |
@@ -61,6 +63,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `session-work` | One session's accepted async work: admission generations, cancellation, real drains |
 | `session-input` | Composer input validation, routing and cancellation; not a second queue |
 | `prompt-queue` | Prompt admission, active turn, FIFO, edits and steering settlement |
+| `queue-controls` | `x.ai/queue/*` row controls (interject, steer, remove, edit, holds, reorder, clear) over the queue's state |
 | `prompt-content` | ACP prompt validation; commits images to durable storage in block order |
 | `session-output` | Stream state: seq-based replay/live dedup, usage, decode speed, pending tool facts |
 | `session-models` | Runtime model references, durable choice/effort memory, catalog fan-out |
@@ -76,8 +79,9 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `session-commands` | Command advertisement and routing over dsh's command registry |
 | `execution-world` | Where tools run: local, or the SSH workspace a profile configures |
 | `mcp` | ACP MCP declarations to agent-scoped DSH MCP clients, loaded lazily |
-| `native-children` | Workflow membership, child views, bounded history, `/subagents` controls |
-| `child-history` | Append-only child tool/turn metadata index; no transcript copy |
+| `native-children` | Workflow membership, child views and `/subagents` controls over native services |
+| `child-controls` | Child overview, `/subagents` grammar and verbs, inbox views; native calls through ports |
+| `child-history` | Append-only child tool/turn metadata index and its serialized, bounded log reads; no transcript copy |
 | `workflows` | Read-only projection of tool-workflow durable records (`dscodeWorkflows`) |
 | `native-tasks` | Task controls, reminder views from `ctx.schedule`, passive job-output snapshots; no own timer |
 | `job-output` | Job-output snapshots and patches from the non-consuming native ring |
@@ -93,10 +97,12 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `native-team` | `/team`: read-only roster and task board of the Agent Team |
 | `projection` | Pure mapping of session events and tool metadata to TUI wire updates |
 | `tool-titles` | Tool card titles read off argument shapes, never tool names |
+| `tool-output` | Pure tool-card shapes: ToolKind, rawInput variants, fallback diffs, typed `rawOutput` |
 | `image-output` | Resolves tool images through the attachment authority |
 | `browser-actions` | Human wording for browser tool cards and approvals |
 | `browser-control` | `/browser`: toggles the isolated browser row, edits its settings |
-| `profile-plugins` | `/dsh` plugin commands: bundle patch audit, install/remove, version trust |
+| `profile-plugins` | `/dsh` plugin commands: verb parsing, the profile lock, list/add/inspect/remove, version trust |
+| `plugin-bundles` | Bundle patch analysis, isolated npm audit, install verification and rollback; no command parsing |
 | `plugin-rows` | Toggles one shipped-disabled profile row through the plugin manager |
 | `package-location` | Package provenance; lazy updater resolution and profile lock |
 | `guards` | Leaf value guards shared across the bridge; no imports |
@@ -112,16 +118,24 @@ and `session-export`; a runtime dependency only in `native-tasks`,
 `session-migration`, `terminal-signal` and `preset-catalog`; absent elsewhere. The entry builds no maps, sets, abort controllers or timers
 and imports no `node:net`. `dsh-session-projection` and `zod` stay host peers.
 Each `.ts`/`.mjs` file in `src/`, `bin/` and `tests/` is capped at 800 lines;
-on 2026-09-24 none exceeds it (largest: `src/projection.ts`, 799).
+on 2026-09-24 none exceeds it (largest: `tests/leader-queue.spec.ts`, 763;
+largest module: `src/model-catalog.ts`, 596).
 `browser/`, `ssh/` and `shared/` are not scanned; their files are under 100.
 
 ## Remaining candidates
 
-Long functions: `prompt-queue.ts` `control` (180 lines), `profile-plugins.ts`
-`executeCommand` (164), `leader-transport.ts` `accept` (155),
-`preset-catalog.ts` `nativeCatalog` (148), `index.ts` `dispatchRequest` (111).
-They own delicate ordering (queue settlement, socket admission, plugin trust):
-each needs its own interface-first change with differential evidence.
+Since the 2026-09-24 split no module in `src/` exceeds 600 lines and no
+function other than a module's factory exceeds 100; the longest are
+`session-lifecycle.ts` `forkSession` (88), `projection.ts`
+`sessionEventToUpdates` and `prompt-queue.ts` `runPrompt` (87 each). The
+factories remain long because they own their module's state:
+`createModelCatalog` (536), `createNativeChildren` (490), `index.ts` `apply`
+(463), `attachPromptQueue` (449).
+
+`leader-routes` is a registry so feature rows can later register their own
+`x.ai/*` methods and become separately mountable, as DSH composes features
+from rows; today only `index.ts` registers, and a duplicate registration
+throws at mount.
 
 ## Harness and launcher invariants
 

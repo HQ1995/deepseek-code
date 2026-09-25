@@ -4,15 +4,19 @@ import { randomUUID } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import type { SessionInspection, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
-import type { SubagentRuntime, SubagentPromptRequestId } from '@deepseek-ai/dsh-subagent'
+import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import type { SubagentPromptRequestId } from '@deepseek-ai/dsh-subagent'
 import { invalidParams, internalError, paramRecord, sessionIdParam } from './acp.ts'
 import { errorMessage, nonEmpty } from './guards.ts'
-import { ChildHistoryIndex, CHILD_HISTORY_PAGE_SIZE, type ChildEventReader } from './child-history.ts'
+import { CHILD_HISTORY_PAGE_SIZE, createChildLogs } from './child-history.ts'
 import { workflowUpdates, type WorkflowHistory, type LiveWorkflow } from './workflows.ts'
 import { parsePrompt } from './prompt-content.ts'
 import { sessionEventToUpdates, systemNotes, textBlocks, type GrokSessionUpdate, type ProjectedUpdate } from './projection.ts'
 import type { SessionOutput } from './session-output.ts'
+import {
+  childConversations, childOverview, childTerminalStatus, inboxCommand, inboxView, parseSubagentsCommand, runLength, runSubagentVerb,
+  type ChildRow, type ChildState, type SubagentsLike,
+} from './child-controls.ts'
 
 interface ChildSession {
   work: Pick<SessionWork, 'run' | 'read'>
@@ -89,7 +93,6 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       throw new AggregateError(failures, 'native child subscription setup failed')
     }
   }
-  type ChildRow = { kind: 'child' | 'diagnostic'; id: string; mode?: 'continuable' | 'one-shot'; label?: string; parentId?: string; activity?: 'running' | 'inactive'; reason?: string }
   const liveWorkflows = new Map<string, LiveWorkflow>()
   const emitWorkflows = (record: S, replay = false, runId?: string): void => {
     if (!isLive(record)) return
@@ -116,16 +119,10 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     }, 0)
     deferredWorkflowEnds.add(timer)
   })
-  type SubagentsLike = {
-    listDescendants(root: SessionId, signal?: AbortSignal): Promise<ChildRow[]>
-    interrupt(id: SessionId, authority: { kind: 'ancestor'; agent: Agent }): void
-    prompt?: SubagentRuntime['prompt']
-  }
   const subagentsService = (record: S): SubagentsLike | undefined => {
     const service = host.subagents(record) as SubagentsLike | undefined
     return typeof service?.listDescendants === 'function' && typeof service.interrupt === 'function' ? service : undefined
   }
-  type ChildState = { agent?: Agent; label: string; status: string; attemptId: string; output?: string; durationMs?: number }
   const childStates = new WeakMap<S, Map<string, ChildState>>()
   // Workflow workers publish membership before their child reaches the native
   // session corpus; scoped child events need not reach this host listener.
@@ -137,21 +134,6 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
   // This is transient control state, not another retained history projection.
   const turnWatches = new Map<Agent['session'], Set<{ latest?: SessionEvent<'turn/start'> }>>()
   const turnStarts = new WeakMap<Agent['session'], SessionEvent<'turn/start'>>()
-  const runLength = (start: SessionEvent, end: SessionEvent): number => Math.max(0, end.time - start.time)
-  const childTerminalStatus = (kind: string): string => kind === 'completed' || kind === 'max-tokens' ? 'completed'
-    : kind === 'aborted' || kind === 'interrupted' ? 'cancelled' : 'failed'
-  const childOverview = (id: string, events: readonly SessionEvent[], status?: Agent['status'], activity?: ChildRow['activity']): Pick<ChildState, 'attemptId' | 'status' | 'durationMs'> => {
-    const start = events.findLast(event => event.type === 'turn/start')
-    const end = events.findLast(event => event.type === 'turn/end')
-    const settled = end?.type === 'turn/end' && (start?.type !== 'turn/start' || end.data.turn === start.data.turn)
-    return {
-      attemptId: id + ':' + String(start?.type === 'turn/start' ? start.data.turn : 'pending'),
-      status: status === 'running' || activity === 'running' ? 'running'
-        : settled ? childTerminalStatus(end.data.reason.kind) : 'cancelled',
-      // The last run's length, so a settled child stops counting up after a restart too.
-      ...settled && start !== undefined ? { durationMs: runLength(start, end) } : {},
-    }
-  }
   /** DSH 0.1.7-rc.2 walks parent catalogs: when the root's own catalog cannot
    * be read the whole listing rejects (a SessionQueryError, where rc.1 listed
    * nothing). Say so plainly instead of passing the raw native error on. */
@@ -164,87 +146,11 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
       throw internalError('could not list the subagents of this session (' + errorMessage(error) + '); reopen the session and try again')
     }
   }
-  const childLogs = new WeakMap<S, Map<string, { source?: object; index: ChildHistoryIndex; tail: Promise<unknown> }>>()
-  const withChildLog = async <T>(record: S, id: string, scope: SessionOperation,
-    action: (index: ChildHistoryIndex, meta: SessionInspection['meta'], read: ChildEventReader, status?: Agent['status']) => Promise<T> | T,
-  ): Promise<T> => {
-    const signal = AbortSignal.any([scope.signal, shutdown.signal])
-    const assertActive = () => {
-      if (!isLive(record) || signal.aborted) throw invalidParams('session closed')
-      scope.assertActive()
-    }
-    assertActive()
-    let cache = childLogs.get(record)
-    if (cache === undefined) { cache = new Map(); childLogs.set(record, cache) }
-    const cached = cache.get(id) ?? { index: new ChildHistoryIndex(), tail: Promise.resolve() }
-    cache.delete(id)
-    cache.set(id, cached)
-    // ponytail: bound metadata to 64 children per root; evicted histories rebuild on demand.
-    if (cache.size > 64) cache.delete(cache.keys().next().value!)
-    const work = cached.tail.then(async () => {
-      assertActive()
-      // Resolve after earlier reads/cleanup settle: a completed child can
-      // leave the native store while this operation is waiting in the queue.
-      // Serialization belongs to the child entry, not its replaceable index.
-      const live = host.agent(SessionId(id)), store = host.persistence()
-      if (store === undefined) throw internalError('session persistence is not configured')
-      const source = live?.session ?? store
-      if (cached.source !== source) { cached.source = source; cached.index = new ChildHistoryIndex() }
-      const index = cached.index
-      assertActive()
-      // Fix the live prefix before flushing; later appends belong to the next
-      // refresh. Cold storage uses its revision/count and the same read owner.
-      let count: number | undefined, revision: string | undefined
-      // Pair activity with the same cut, before any I/O. A child can settle
-      // during flush: combining its new idle status with this older prefix
-      // would invent a cancelled finish before its real turn/end is indexed.
-      const status = live?.status
-      if (live !== undefined) {
-        count = live.session.seq
-        revision = String(count)
-        await host.flush(live.session)
-      } else {
-        const snapshot = await store.stat(SessionId(id), { signal })
-        count = snapshot?.eventCount
-        revision = snapshot?.revision
-      }
-      assertActive()
-      const handle = await store.open(SessionId(id), 'read', { signal })
-      const failures: unknown[] = []
-      let result!: T
-      try {
-        assertActive()
-        const read: ChildEventReader = async (offset, length) => {
-          assertActive()
-          if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 0 || length > CHILD_HISTORY_PAGE_SIZE
-            || (count !== undefined && offset + length > count)) throw internalError('invalid child history page')
-          if (length === 0) return []
-          const { events } = await handle.read(offset, length, { signal })
-          assertActive()
-          if (events.length > length || (count !== undefined && events.length !== length)) throw internalError('child reader did not return the required page')
-          if (events.some((event, position) => event.seq !== offset + position)) throw internalError('child reader returned a noncontiguous page')
-          return events
-        }
-        await index.sync(read, revision, count)
-        // Unknown cold lengths become fixed after the index reaches EOF.
-        count = index.nextSeq
-        result = await action(index, handle.header, read, status)
-        assertActive()
-      } catch (error) { failures.push(error) }
-      // Close is deliberately uncancellable and always awaited, even after a
-      // late open or projection failure. Preserve both errors when it fails.
-      try { await handle.close() } catch (error) {
-        failures.push(error)
-        if (closed) disposalFailures.push(error)
-      }
-      if (failures.length === 1) throw failures[0]
-      if (failures.length > 1) throw new AggregateError(failures, 'child history read and cleanup failed')
-      assertActive()
-      return result
-    })
-    cached.tail = work.catch(() => {})
-    return work
-  }
+  const withChildLog = createChildLogs<S>({
+    signal: shutdown.signal, isLive,
+    agent: id => host.agent(id), persistence: () => host.persistence(), flush: session => host.flush(session),
+    closeFailed: error => { if (closed) disposalFailures.push(error) },
+  })
   const emitChildFinished = (record: S, id: string, status: string, output?: unknown, attemptId?: string, durationMs?: number): void => {
     const state = childStates.get(record)?.get(id)
     if (state === undefined || (attemptId !== undefined && state.attemptId !== attemptId)) return
@@ -517,42 +423,23 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     const p = paramRecord(params, 'x.ai/subagent/inbox')
     const record = owned(clientId, sessionIdParam(p.sessionId))
     if (record === undefined) throw invalidParams('unknown session')
+    const child = (id: string) => host.agent(SessionId(id))
     return record.work.run(async scope => {
       const service = subagentsService(record)
       if (service === undefined) throw invalidParams('Subagents unavailable')
       const rows = (await listChildRows(service, record, scope)).filter(row => row.kind === 'child' && row.mode === 'continuable')
       if (owned(clientId, record.agent.session.id) !== record) throw invalidParams('session closed')
       scope.assertActive()
-      if (p.childId === undefined || p.childId === null) {
-        return { title: 'Child conversations', items: rows.map(row => ({ id: row.id, text: row.label || row.id, detail: host.agent(SessionId(row.id))?.status ?? 'inactive', editable: false })) }
-      }
+      if (p.childId === undefined || p.childId === null) return childConversations(rows, child)
       const row = rows.find(row => row.id === p.childId)
       if (row === undefined) throw invalidParams('Unknown continuable child')
-      const action = p.action ?? 'list'
-      if (typeof action !== 'string' || !['list', 'queue', 'steer', 'edit', 'remove', 'steer-queued', 'clear', 'stop'].includes(action)) throw invalidParams('Unknown inbox action')
-      if (action !== 'list') {
-        let body = ''
-        if (['edit', 'remove', 'steer-queued'].includes(action)) {
-          const child = host.agent(SessionId(row.id))
-          const message = [...child?.inbox.nextTurn ?? [], ...child?.inbox.nextStep ?? []].find(message => message.id === p.messageId)
-          if (message === undefined) throw invalidParams('This message has already left the queue. Refresh and try again.')
-          body = message.id
-        }
-        if (['queue', 'steer', 'edit'].includes(action)) {
-          if (typeof p.text !== 'string' || p.text.trim().length === 0) throw invalidParams('A message is required.')
-          body += (body.length > 0 ? ' ' : '') + p.text
-        }
-        const result = await executeSubagentCommand(clientId, { sessionId: record.agent.session.id, expectedText: p.expectedText, prompt: [{ type: 'text', text: `/subagents ${action} ${row.id}${body.length > 0 ? ' ' + body : ''}` }] })
+      const command = inboxCommand(row, p, child)
+      if (command !== undefined) {
+        const result = await executeSubagentCommand(clientId, { sessionId: record.agent.session.id, expectedText: p.expectedText, prompt: [{ type: 'text', text: command }] })
         if (result.result.kind === 'error') throw invalidParams(result.result.text)
       }
       if (!isLive(record)) throw invalidParams('session closed')
-      const child = host.agent(SessionId(row.id))
-      const member = host.teamMembers?.(record)?.some(item => item.id === row.id) === true
-      return { title: 'Input queue · ' + (row.label || row.id), items: [...child?.inbox.nextTurn ?? [], ...child?.inbox.nextStep ?? []].map(message => ({
-        id: message.id, text: textBlocks(message.content).map(block => block.text).join(''),
-        detail: child?.inbox.nextTurn.includes(message) ? 'queued for next turn' : 'steering at next step',
-        editable: !member && message.content.every(block => block.type === 'text'),
-      })) }
+      return inboxView(row, child(row.id), host.teamMembers?.(record)?.some(item => item.id === row.id) === true)
     })
   }
 
@@ -563,105 +450,35 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
     if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
     const parsed = parsePrompt(p.prompt)
     if (parsed.images.length > 0) throw invalidParams('/subagents accepts text commands only')
-    const match = /^\/subagents(?:\s+(\S+))?(?:\s+(\S+))?(?:\s+([\s\S]*))?$/i.exec(parsed.text.trim())
-    if (match === null) throw invalidParams('x.ai/subagents requires a /subagents invocation')
+    const command = parseSubagentsCommand(parsed.text)
+    if (command === undefined) throw invalidParams('x.ai/subagents requires a /subagents invocation')
     return record.work.run(async scope => {
-      const [, verb = 'list', selector, body = ''] = match
-      const usage = 'Usage: /subagents list\n/subagents pending <child>\n/subagents queue|steer <child> <text>\n/subagents edit <child> <message> <text>\n/subagents remove <child> <message>\n/subagents steer-queued <child> <message|all>\n/subagents clear|stop <child>\nChild and message IDs accept unique prefixes; Agent Team members also accept their names. Stop preserves queued input.'
-      const success = (text: string) => ({ result: { kind: 'success' as const, text } })
       const service = subagentsService(record)
       if (service === undefined) throw new Error('Subagents are unavailable in this preset.')
       const rows = (await listChildRows(service, record, scope)).filter(row => row.kind === 'child')
       if (owned(clientId, record.agent.session.id) !== record) throw new Error('The owning session was closed.')
       scope.assertActive()
-      const members = host.teamMembers?.(record) ?? []
-      if (verb === 'list' && selector === undefined) {
-        return success((rows.length === 0 ? 'No child conversations.' : rows.map(row => {
-          const child = host.agent(SessionId(row.id))
-          const name = members.find(member => member.id === row.id)?.name
-          const label = name === undefined ? row.label ?? '' : name + ' (teammate)' + (row.label ? ' · ' + row.label : '')
-          return `${row.id}  ${child?.status === 'running' ? 'running' : 'idle'}  ${row.mode ?? 'unknown'}  ${label}`
-        }).join('\n')) + '\n\n' + usage)
-      }
-      if (selector === undefined || !['pending', 'queue', 'steer', 'edit', 'remove', 'steer-queued', 'clear', 'stop'].includes(verb)) throw new Error(usage)
-      const resolvePrefix = <T extends { id: string }>(items: readonly T[], id: string, label: string): T => {
-        const exact = items.find(item => item.id === id)
-        if (exact !== undefined) return exact
-        const matches = id.length === 0 ? [] : items.filter(item => item.id.startsWith(id))
-        if (matches.length !== 1) throw new Error(`${matches.length === 0 ? 'Unknown' : 'Ambiguous'} ${label}: ${id}`)
-        return matches[0]!
-      }
-      // /team names teammates, so a teammate's name selects its child conversation.
-      const named = members.find(member => member.name === selector)
-      const row = rows.find(item => item.id === named?.id) ?? resolvePrefix(rows, selector, 'child')
-      if (row.mode !== 'continuable') throw new Error('Only continuable children accept these controls.')
-      // Queued Team messages carry mailbox receipts; changing them here would
-      // desynchronize the Team's delivery bookkeeping.
-      const member = members.find(item => item.id === row.id)
-      if (member !== undefined && ['edit', 'remove', 'clear', 'steer-queued'].includes(verb)) {
-        throw new Error(`${member.name} is an Agent Team member; its queued input is Team mailbox delivery. Message it through the Lead, or stop it.`)
-      }
-      const childId = SessionId(row.id)
-      const child = host.agent(childId)
-      if (verb === 'queue' || verb === 'steer') {
-        if (body.trim().length === 0) throw new Error('A message is required.\n' + usage)
-        if (service.prompt === undefined) throw new Error('Child message admission is unavailable.')
-        const admission = new AbortController()
-        admissions.set(admission, record)
-        try {
-          const receipt = await service.prompt({
-            requestId: randomUUID() as SubagentPromptRequestId,
-            parentSessionId: SessionId(row.parentId ?? record.agent.session.id),
-            childSessionId: childId,
-            mode: 'continuable', delivery: verb,
-            content: [{ type: 'text', text: body }],
-          }, AbortSignal.any([scope.signal, admission.signal]))
-          if (!isLive(record)) throw new Error('The owning session was closed.')
-          return success(`${verb === 'queue' ? 'Queued' : 'Steering'} child ${row.id}: ${receipt.messageId}`)
-        } finally { admissions.delete(admission) }
-      }
-      if (verb === 'stop') {
-        if (body.length > 0) throw new Error(usage)
-        await cancelSubagent(clientId, { sessionId: record.agent.session.id, subagentId: row.id })
-        return success(`Child ${row.id} stopped; queued input is preserved.`)
-      }
-      if (child === undefined) {
-        if (verb === 'pending') return success(`Child ${row.id} is inactive; no live queue is available.`)
-        throw new Error('The child is inactive; queue a new message to continue it before editing pending input.')
-      }
-      const pending = [...child.inbox.nextTurn, ...child.inbox.nextStep]
-      if (verb === 'pending') {
-        if (body.length > 0) throw new Error(usage)
-        return success(`Pending input for ${row.id}:\n` + (pending.length === 0 ? '(empty)' : pending.map(message =>
-          `${message.id}  ${child.inbox.nextTurn.includes(message) ? 'queued' : 'next-step'}  ${textBlocks(message.content).map(block => block.text).join('\n')}`).join('\n')))
-      }
-      if (verb === 'clear') {
-        if (body.length > 0) throw new Error(usage)
-        child.inbox.clear()
-        return success(`Cleared ${pending.length} pending message(s) for ${row.id}.`)
-      }
-      if (verb === 'steer-queued') {
-        if (child.status !== 'running') throw new Error('The child has no running turn to steer.')
-        const selected = body === 'all' ? [...child.inbox.nextTurn] : [resolvePrefix(child.inbox.nextTurn, body, 'queued message')]
-        for (const message of selected) {
-          child.inbox.remove(message.id)
-          child.steer(message)
-        }
-        return success(`Steering ${selected.length} queued message(s) into child ${row.id}.`)
-      }
-      const edit = verb === 'edit' ? /^(\S+)\s+([\s\S]+)$/.exec(body) : undefined
-      if (verb === 'edit' && edit == null) throw new Error(usage)
-      const message = resolvePrefix(pending, edit?.[1] ?? body, 'pending message')
-      if (verb === 'edit') {
-        // Validate after asynchronous descendant lookup, immediately before replacement.
-        if (message.content.some(block => block.type !== 'text') || (p.expectedText !== undefined && p.expectedText !== textBlocks(message.content).map(block => block.text).join(''))) {
-          throw new Error('This message changed or contains attachments; it cannot be replaced by this text edit.')
-        }
-        child.inbox.replace(message.id, { ...message, content: [{ type: 'text', text: edit![2]! }] })
-        return success(`Edited pending message ${message.id} for ${row.id}.`)
-      }
-      child.inbox.remove(message.id)
-      return success(`Removed pending message ${message.id} for ${row.id}.`)
+      const text = await runSubagentVerb(command, {
+        rows, members: host.teamMembers?.(record) ?? [], expectedText: p.expectedText,
+        child: id => host.agent(SessionId(id)),
+        prompt: service.prompt === undefined ? undefined : async (row, delivery, body) => {
+          const admission = new AbortController()
+          admissions.set(admission, record)
+          try {
+            const receipt = await service.prompt!({
+              requestId: randomUUID() as SubagentPromptRequestId,
+              parentSessionId: SessionId(row.parentId ?? record.agent.session.id),
+              childSessionId: SessionId(row.id),
+              mode: 'continuable', delivery,
+              content: [{ type: 'text', text: body }],
+            }, AbortSignal.any([scope.signal, admission.signal]))
+            if (!isLive(record)) throw new Error('The owning session was closed.')
+            return receipt
+          } finally { admissions.delete(admission) }
+        },
+        stop: id => cancelSubagent(clientId, { sessionId: record.agent.session.id, subagentId: id }),
+      })
+      return { result: { kind: 'success' as const, text } }
     }).catch(error => ({ result: { kind: 'error' as const, text: errorChain(error) } }))
   }
 

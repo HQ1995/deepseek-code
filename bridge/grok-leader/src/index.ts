@@ -29,7 +29,7 @@ import { PACKAGE_VERSION } from './package-location.ts'
 import { createProfilePlugins, inspectPluginRuntime } from './profile-plugins.ts'
 export { analyzeBundlePatch } from './profile-plugins.ts'
 import { protectTerminalSignals } from './terminal-signal.ts'
-import { JSONRPC_METHOD_NOT_FOUND, internalError, paramRecord, sessionIdParam } from './acp.ts'
+import { internalError, paramRecord, sessionIdParam } from './acp.ts'
 import { errorMessage } from './guards.ts'
 import { createModelCatalog } from './model-catalog.ts'
 import { createNativeProviders } from './native-provider.ts'
@@ -57,6 +57,7 @@ import type { LlmLike, SettingsLike, CredentialsLike, AgentDefaultModelLike } fr
 import { statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { createLeaderTransport } from './leader-transport.ts'
+import { WIRE, createLeaderRoutes, registerFixedReplies, type RequestRoute } from './leader-routes.ts'
 import { fileURLToPath } from 'node:url'
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -64,9 +65,7 @@ import Schema from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { installLegacySessionMigration } from './session-migration.ts'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
-import {
-  type AttachmentStore,
-} from '@deepseek-ai/dsh-attachment'
+import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm-retry'
 import type {} from '@deepseek-ai/dsh-settings'
@@ -119,24 +118,6 @@ export const Config: Schema<GrokLeaderConfig> = Schema.object({
   followUpBehavior: Schema.union(['queue', 'steer'] as const),
   idleExitMs: Schema.number().default(2000),
 })
-
-/** Wire method names of the embedded ACP dialect (agent-client-protocol 0.10.4). */
-const WIRE = {
-  initialize: 'initialize',
-  authenticate: 'authenticate',
-  sessionNew: 'session/new',
-  sessionPrompt: 'session/prompt',
-  sessionCancel: 'session/cancel',
-  sessionLoad: 'session/load',
-  sessionList: 'session/list',
-  sessionSetModel: 'session/set_model',
-  sessionSetMode: 'session/set_mode',
-  sessionClose: 'session/close',
-  modelsList: 'x.ai/models/list',
-  providersAdd: 'x.ai/providers/add',
-  providersUpdate: 'x.ai/providers/update',
-  providersRemove: 'x.ai/providers/remove',
-} as const
 
 /** Structural read of the session store: this bridge needs only one flush entry point. */
 interface SessionsLike {
@@ -216,10 +197,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     socketPath: config.socketPath ?? DEFAULT_SOCKET_PATH,
     version: PACKAGE_VERSION,
     async request(clientId, method, params) {
-      try { return await dispatchRequest(clientId, method, params) }
+      try { return await routes.request(clientId, method, params) }
       catch (error) { throw error instanceof RpcError ? error : internalError(errorChain(error)) }
     },
-    notification: (clientId, method, params) => { handleNotification(clientId, method, params) },
+    notification: (clientId, method, params) => { routes.notification(clientId, method, params) },
     registered: () => { leaderHost.registered() },
     disconnected: clientId => { leaderHost.disconnected(clientId) },
     failed: error => { leaderHost.failed(error) },
@@ -478,148 +459,6 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     archive: (id, cwd, filename, signal) => exportSessionArchive(ctx, id, world().kind === 'local' ? cwd : homedir(), filename, signal),
   })
 
-  const dispatchRequest = async (clientId: number, method: string, params: unknown): Promise<unknown> => {
-    switch (method) {
-      case 'x.ai/session/export':
-        return await artifacts.archive(clientId, params)
-      case 'x.ai/session/references':
-        return await artifacts.references(clientId, params)
-      case 'x.ai/goal':
-        return await nativeStatus.goal(clientId, params)
-      case 'x.ai/task/output':
-        return tasks.output(clientId, params)
-      case 'x.ai/task/kill':
-        return await tasks.kill(clientId, params)
-      case 'x.ai/subagent/history':
-        return await children.history(clientId, params)
-      case 'x.ai/subagent/cancel':
-        return await children.cancel(clientId, params)
-      case 'x.ai/subagent/inbox':
-        return await children.inbox(clientId, params)
-      case 'x.ai/scheduler/list':
-      case 'x.ai/scheduler/create':
-      case 'x.ai/scheduler/delete':
-        return await tasks.reminders(clientId, method, params)
-      case 'x.ai/subagents':
-        return await children.command(clientId, params)
-      case WIRE.initialize:
-        return await initializeResponse()
-      case WIRE.authenticate:
-        return {}
-      case WIRE.sessionNew:
-        return await lifecycle.new(clientId, params)
-      case WIRE.sessionPrompt:
-        return await input.prompt(clientId, params)
-      case 'x.ai/session/cancel_prompt':
-        return input.cancelPrompt(clientId, params)
-      case WIRE.sessionLoad:
-        return await lifecycle.load(clientId, params)
-      case WIRE.sessionList:
-        return await discovery.list(WIRE.sessionList)
-      case WIRE.sessionSetModel:
-        return await sessionModels.set(clientId, params)
-      case WIRE.sessionSetMode:
-        return await interactions.mode(clientId, params)
-      case 'x.ai/session/fork':
-        return await lifecycle.fork(clientId, params)
-      case 'x.ai/rewind/points':
-        return await lifecycle.points(clientId, params)
-      case 'x.ai/rewind/execute':
-        return await lifecycle.rewind(clientId, params)
-      case 'x.ai/session/rename':
-        return await artifacts.rename(clientId, params)
-      case WIRE.sessionClose:
-        return await lifecycle.close(clientId, params)
-      case WIRE.modelsList:
-        return await models.list()
-      case WIRE.providersAdd:
-        return await models.add(params)
-      case WIRE.providersUpdate:
-        return await models.update(params)
-      case WIRE.providersRemove:
-        return await models.remove(params)
-      case 'x.ai/btw':
-        return await asides.btw(clientId, params)
-      case 'x.ai/interject':
-        return input.interject(clientId, params)
-      case 'x.ai/commands/list':
-        return await sessionCommands.catalog(clientId, params)
-      case 'x.ai/prompt_history':
-        return lifecycle.history(clientId, params)
-      case 'x.ai/marketplace/list':
-        return { sources: [] }
-      // The extension modal always offers these tabs; an unimplemented method
-      // renders as "couldn't load hooks/plugins: method not found". No config
-      // is loaded in the dsh-backed leader, so answer with the empty shape.
-      case 'x.ai/hooks/list':
-        return { hooks: [], projectTrusted: false, loadErrors: [] }
-      case 'x.ai/plugins/list':
-        return { plugins: [] }
-      case 'x.ai/doctor':
-        return await execution.doctor(clientId, params)
-      case 'x.ai/terminals':
-        return await execution.terminals(clientId, params)
-      case 'x.ai/presets':
-        return await sessionPresets.controls(clientId, params)
-      case 'x.ai/skills/list':
-        return await sessionCommands.skills(clientId, params)
-      case 'x.ai/mcp/list': {
-        const p = paramRecord(params, 'x.ai/mcp/list')
-        const sessionId = sessionIdParam(p.sessionId)
-        const record = sessionId === undefined ? undefined : ownedRecord(clientId, sessionId)
-        return await listMcpServers(ctx, record?.agent)
-      }
-      case 'x.ai/workflows/list':
-        // Legacy template catalog. Native run history is pushed via workflow_updated.
-        return { workflows: [] }
-      case 'x.ai/billing':
-        return { config: null, onDemandEnabled: false, subscriptionTier: null }
-      case 'x.ai/bundle/status':
-        return await sessionPresets.status()
-      case 'x.ai/suggestPrompt':
-        return { suggestion: null, generation: (params as { generation?: number } | undefined)?.generation ?? 0 }
-      case 'x.ai/session/info':
-        return artifacts.info(clientId, params)
-      case 'x.ai/session/search':
-        return await discovery.search(params)
-      // The dashboard's delete (Ctrl+X twice) still sends this. DSH has no
-      // session delete, so say why instead of "method not found". An error
-      // without `data` (grok's delete failures are internal errors too): the
-      // TUI's toast prints the message and would append any data as JSON.
-      case 'x.ai/session/delete':
-        throw internalError('dscode sessions cannot be deleted; DSH keeps them. Archive is not supported yet.')
-      case 'x.ai/session/list':
-      case 'x.ai/sessions/list':
-        return await discovery.list(method, params)
-      default:
-        throw new RpcError(JSONRPC_METHOD_NOT_FOUND, 'method not found: ' + method)
-    }
-  }
-
-  const handleNotification = (clientId: number, method: string, params: unknown): void => {
-    switch (method) {
-      case 'x.ai/yolo_mode_changed':
-        interactions.notification(clientId, params)
-        return
-      case WIRE.sessionCancel:
-        input.cancel(clientId, params)
-        return
-      case 'x.ai/queue/interject':
-      case 'x.ai/queue/steer':
-      case 'x.ai/queue/remove':
-      case 'x.ai/queue/edit':
-      case 'x.ai/queue/hold_edit':
-      case 'x.ai/queue/release_edit':
-      case 'x.ai/queue/reorder':
-      case 'x.ai/queue/clear':
-        input.control(clientId, method, params)
-        return
-      default:
-        // Grok drops unknown ACP notifications (server.rs:1515).
-        logger.warn('grok-leader: dropped notification ' + method)
-    }
-  }
-
   const tasks = createNativeTasks({
     sessions, owned: ownedRecord,
     jobs: record => presetServiceFor(record, 'jobs'),
@@ -666,6 +505,79 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     projections: () => ctx.get('sessionProjections') as NativeStatusProjections | undefined,
     on: (name, listener) => ctx.on(name as never, listener as never),
   })
+
+  // ACP routes, grouped by owner. Registered only now that every owner they
+  // name is constructed; each route reads its owner at call time (as a method
+  // call, keeping `this`) and builds any literal reply fresh per call.
+  const routes = createLeaderRoutes({ logger })
+  const requests = (table: Record<string, RequestRoute>): void => {
+    for (const [method, request] of Object.entries(table)) routes.register(method, { request })
+  }
+  routes.register(WIRE.initialize, { request: () => initializeResponse() })
+  registerFixedReplies(routes)
+  requests({ // Session lifecycle, discovery and prompt history.
+    [WIRE.sessionNew]: (clientId, params) => lifecycle.new(clientId, params),
+    [WIRE.sessionLoad]: (clientId, params) => lifecycle.load(clientId, params),
+    [WIRE.sessionClose]: (clientId, params) => lifecycle.close(clientId, params),
+    'x.ai/session/fork': (clientId, params) => lifecycle.fork(clientId, params),
+    'x.ai/rewind/points': (clientId, params) => lifecycle.points(clientId, params),
+    'x.ai/rewind/execute': (clientId, params) => lifecycle.rewind(clientId, params),
+    'x.ai/prompt_history': (clientId, params) => lifecycle.history(clientId, params),
+    [WIRE.sessionList]: () => discovery.list(WIRE.sessionList),
+    'x.ai/session/list': (_clientId, params) => discovery.list('x.ai/session/list', params),
+    'x.ai/sessions/list': (_clientId, params) => discovery.list('x.ai/sessions/list', params),
+    'x.ai/session/search': (_clientId, params) => discovery.search(params),
+  })
+  requests({ // Session artifacts.
+    'x.ai/session/export': (clientId, params) => artifacts.archive(clientId, params),
+    'x.ai/session/references': (clientId, params) => artifacts.references(clientId, params),
+    'x.ai/session/rename': (clientId, params) => artifacts.rename(clientId, params),
+    'x.ai/session/info': (clientId, params) => artifacts.info(clientId, params),
+  })
+  requests({ // Composer input, models and permission modes.
+    [WIRE.sessionPrompt]: (clientId, params) => input.prompt(clientId, params),
+    'x.ai/session/cancel_prompt': (clientId, params) => input.cancelPrompt(clientId, params),
+    'x.ai/interject': (clientId, params) => input.interject(clientId, params),
+    [WIRE.sessionSetModel]: (clientId, params) => sessionModels.set(clientId, params),
+    [WIRE.modelsList]: () => models.list(),
+    [WIRE.providersAdd]: (_clientId, params) => models.add(params),
+    [WIRE.providersUpdate]: (_clientId, params) => models.update(params),
+    [WIRE.providersRemove]: (_clientId, params) => models.remove(params),
+    [WIRE.sessionSetMode]: (clientId, params) => interactions.mode(clientId, params),
+  })
+  requests({ // Native features: goals, tasks and reminders, children, asides, execution.
+    'x.ai/goal': (clientId, params) => nativeStatus.goal(clientId, params),
+    'x.ai/task/output': (clientId, params) => tasks.output(clientId, params),
+    'x.ai/task/kill': (clientId, params) => tasks.kill(clientId, params),
+    'x.ai/scheduler/list': (clientId, params, method) => tasks.reminders(clientId, method, params),
+    'x.ai/scheduler/create': (clientId, params, method) => tasks.reminders(clientId, method, params),
+    'x.ai/scheduler/delete': (clientId, params, method) => tasks.reminders(clientId, method, params),
+    'x.ai/subagent/history': (clientId, params) => children.history(clientId, params),
+    'x.ai/subagent/cancel': (clientId, params) => children.cancel(clientId, params),
+    'x.ai/subagent/inbox': (clientId, params) => children.inbox(clientId, params),
+    'x.ai/subagents': (clientId, params) => children.command(clientId, params),
+    'x.ai/btw': (clientId, params) => asides.btw(clientId, params),
+    'x.ai/doctor': (clientId, params) => execution.doctor(clientId, params),
+    'x.ai/terminals': (clientId, params) => execution.terminals(clientId, params),
+  })
+  requests({ // Commands, skills, presets and MCP servers.
+    'x.ai/commands/list': (clientId, params) => sessionCommands.catalog(clientId, params),
+    'x.ai/skills/list': (clientId, params) => sessionCommands.skills(clientId, params),
+    'x.ai/presets': (clientId, params) => sessionPresets.controls(clientId, params),
+    'x.ai/bundle/status': () => sessionPresets.status(),
+    'x.ai/mcp/list': (clientId, params) => {
+      const p = paramRecord(params, 'x.ai/mcp/list')
+      const sessionId = sessionIdParam(p.sessionId)
+      const record = sessionId === undefined ? undefined : ownedRecord(clientId, sessionId)
+      return listMcpServers(ctx, record?.agent)
+    },
+  })
+  routes.register('x.ai/yolo_mode_changed', { notification: (clientId, params) => { interactions.notification(clientId, params) } })
+  routes.register(WIRE.sessionCancel, { notification: (clientId, params) => { input.cancel(clientId, params) } })
+  for (const method of ['x.ai/queue/interject', 'x.ai/queue/steer', 'x.ai/queue/remove', 'x.ai/queue/edit',
+    'x.ai/queue/hold_edit', 'x.ai/queue/release_edit', 'x.ai/queue/reorder', 'x.ai/queue/clear']) {
+    routes.register(method, { notification: (clientId, params) => { input.control(clientId, method, params) } })
+  }
 
   const leaderHost = createLeaderLifecycle({
     sessions: registry, catalog: models, transport,

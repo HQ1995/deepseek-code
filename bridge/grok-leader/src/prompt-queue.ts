@@ -7,6 +7,8 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams } from './acp.ts'
 import { errorMessage } from './guards.ts'
 import { turnEndToStopReason, type StopReasonWire } from './projection.ts'
+import { controlQueue, type PromptSettleResult, type PromptState, type QueueControlContext } from './queue-controls.ts'
+export type { PromptSettleResult } from './queue-controls.ts'
 
 /** A model call DSH refused for want of a usable key fails the same way on
  * every retry, and DSH's wording points at its web Models page. It settles as
@@ -21,58 +23,8 @@ export function credentialFix(failure: { message: string; code?: string }): stri
   return undefined
 }
 
-/** RPC result of a settled session/prompt. `_meta.promptId` lets the pager
- *  attribute the response to its queue row directly (the grok shell's
- *  PromptResponse `_meta` shape) instead of inferring from RPC ids. */
-export interface PromptSettleResult {
-  stopReason: StopReasonWire
-  _meta: { sessionId: string; promptId: string }
-}
-
 /** Already-submitted steering/settling input cannot be retracted independently. */
 export type PromptCancelResult = 'cancelled' | 'not_found' | 'already_submitted'
-
-interface PromptState {
-  /** Serializes pre-enqueue image admission so later text prompts cannot overtake it. */
-  promptAdmissionTail: Promise<void>
-  /** FIFO of validated prompts waiting for the in-flight one to settle. */
-  promptQueue: Array<{
-    resolve: (value: PromptSettleResult) => void
-    reject: (error: Error) => void
-    /** Stable queue-row id: the request _meta.promptId or a minted uuid. */
-    id: string
-    text: string
-    /** Durable model content; text is kept separately for queue/history display. */
-    content: DurablePromptBlock[]
-    /** Edit counter: fresh rows start at 0 (grok QueueEntryMeta), edits bump by one. */
-    version: number
-    /** Per-prompt display texts when combine folded followers into this row (len >= 2). */
-    combinedTexts?: string[]
-  }>
-  /** Queue row id of the prompt the agent is currently draining. */
-  runningPromptId: string | undefined
-  /** Plain text of the running prompt (queue/changed carries it; the running row is omitted from entries). */
-  runningText: string | undefined
-  /** Per-prompt display texts of a combined running turn (len >= 2). */
-  runningCombinedTexts: string[] | undefined
-  /** Stamps the next prompt_complete broadcast (send_now suppresses the cancelled marker). */
-  cancelTrigger: string | undefined
-  /** Queue rows parked under queue/hold_edit; advance and combine skip them. */
-  editHolds: Set<string>
-  inflight: {
-    resolve: (reason: StopReasonWire) => void
-    reject: (error: Error) => void
-    messageId: string
-    promptId: string
-    turn: number | undefined
-  } | undefined
-  /** True while the one idle-gated promotion wait is outstanding on
-   *  `whenIdle`; dedups concurrent promotion requests. */
-  promotionScheduled: boolean
-  /** Prompts folded into the running turn as steering (follow-up steer).
-   *  They settle with the host turn's stop reason at its turn end. */
-  steered: Array<{ id: string; resolve: (value: PromptSettleResult) => void }>
-}
 
 export interface PromptQueueHost {
   sessionId: string
@@ -429,185 +381,10 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
       if (state.runningPromptId === runningBefore) broadcastQueueChanged()
     })
 
-  const control = (method: string, unwrapped: Record<string, unknown>): void => {
-    const queueEntry = (id: unknown): { index: number; entry: PromptState['promptQueue'][number] } | undefined => {
-      if (typeof id !== 'string') return undefined
-      const index = state.promptQueue.findIndex(entry => entry.id === id)
-      return index < 0 ? undefined : { index, entry: state.promptQueue[index]! }
-    }
-    const queueMutate = broadcastQueueChanged
-    switch (method) {
-      case 'x.ai/queue/interject': {
-        const p = unwrapped
-        // The client supplies the version it last saw (absent = 0, the version
-        // of never-edited rows); a mismatch is a benign no-op + resync.
-        const expectedVersion = typeof p.expectedVersion === 'number' ? p.expectedVersion : 0
-        const located = queueEntry(p.id)
-        if (located === undefined || located.entry.version !== expectedVersion) {
-          if (typeof p.id === 'string') state.editHolds.delete(p.id)
-          promoteWhenIdle()
-          queueMutate()
-          return
-        }
-        const [entry] = state.promptQueue.splice(located.index, 1)
-        if (typeof p.newText === 'string' && p.newText.trim().length > 0) {
-          entry.text = p.newText
-          entry.content = [
-            { type: 'text', text: p.newText },
-            ...entry.content.filter((block): block is Extract<DurablePromptBlock, { type: 'image' }> => block.type === 'image'),
-          ]
-          entry.combinedTexts = undefined
-          entry.version = entry.version + 1
-        }
-        state.promptQueue.unshift(entry)
-        state.editHolds.delete(entry.id)
-        // grok send-now: cancel the running turn and run this prompt next.
-        // cancelTrigger='send_now' suppresses the pager's Turn-cancelled marker.
-        if (state.inflight !== undefined) {
-          state.cancelTrigger = 'send_now'
-          host.agent.cancel({ kind: 'user' })
-          settlePrompt('cancelled')
-        } else {
-          promoteWhenIdle()
-        }
-        queueMutate()
-        return
-      }
-      case 'x.ai/queue/steer': {
-        const p = unwrapped
-        const expectedVersion = typeof p.expectedVersion === 'number' ? p.expectedVersion : 0
-        const located = queueEntry(p.id)
-        if (located === undefined || located.entry.version !== expectedVersion) {
-          if (typeof p.id === 'string') state.editHolds.delete(p.id)
-          promoteWhenIdle()
-          queueMutate()
-          return
-        }
-        // Steer is only meaningful into a live turn; otherwise keep the row
-        // queued and let it run normally (grok InterjectQueuedPrompt no-op).
-        if (state.inflight === undefined) {
-          promoteWhenIdle()
-          queueMutate()
-          return
-        }
-        const [entry] = state.promptQueue.splice(located.index, 1)
-        state.editHolds.delete(entry.id)
-        const text = entry.combinedTexts === undefined ? entry.text : entry.combinedTexts.join('\n\n')
-        const content = entry.combinedTexts === undefined
-          ? entry.content
-          : [{ type: 'text' as const, text }]
-        try {
-          host.agent.steer(createUserMessage({ content, source: { kind: 'user' } }))
-        } catch (error) {
-          // Put the row back so a failed steer never loses the queued message.
-          state.promptQueue.splice(located.index, 0, entry)
-          queueMutate()
-          entry.reject(internalError('prompt was not steered: ' + errorMessage(error)))
-          return
-        }
-        state.steered.push({ id: entry.id, resolve: entry.resolve })
-        host.echo(text)
-        queueMutate()
-        return
-      }
-      case 'x.ai/queue/remove': {
-        const p = unwrapped
-        const expectedVersion = typeof p.expectedVersion === 'number' ? p.expectedVersion : 0
-        const located = queueEntry(p.id)
-        if (located !== undefined && located.entry.version !== expectedVersion) {
-          // Stale version: leave the row untouched and resync the client.
-          state.editHolds.delete(located.entry.id)
-          promoteWhenIdle()
-          queueMutate()
-          return
-        }
-        if (located !== undefined) {
-          const [entry] = state.promptQueue.splice(located.index, 1)
-          entry.resolve(promptSettled(entry.id, 'cancelled'))
-          state.editHolds.delete(entry.id)
-          queueMutate()
-          // Removing a held front must not strand the rows behind it.
-          promoteWhenIdle()
-          return
-        }
-        if (state.runningPromptId === p.id) {
-          host.agent.cancel({ kind: 'user' })
-          settlePrompt('cancelled')
-          state.editHolds.delete(String(p.id))
-        }
-        promoteWhenIdle()
-        queueMutate()
-        return
-      }
-      case 'x.ai/queue/edit': {
-        const p = unwrapped
-        const located = queueEntry(p.id)
-        if (located === undefined) return
-        // Every path drops the hold (grok handle_edit_queued_prompt): a stale
-        // or blank edit must not leave promotion parked.
-        state.editHolds.delete(located.entry.id)
-        // The TUI sends no version for edit (grok edits LWW); honor one when a
-        // client pins it: a stale version no-ops + resyncs like remove/interject.
-        if (typeof p.expectedVersion === 'number' && located.entry.version !== p.expectedVersion) {
-          promoteWhenIdle()
-          queueMutate()
-          return
-        }
-        if (typeof p.newText === 'string' && p.newText.trim().length > 0) {
-          located.entry.text = p.newText
-          located.entry.content = [
-            { type: 'text', text: p.newText },
-            ...located.entry.content.filter((block): block is Extract<DurablePromptBlock, { type: 'image' }> => block.type === 'image'),
-          ]
-          located.entry.combinedTexts = undefined
-          located.entry.version = located.entry.version + 1
-        }
-        promoteWhenIdle()
-
-        queueMutate()
-        return
-      }
-      case 'x.ai/queue/hold_edit': {
-        const p = unwrapped
-        if (typeof p.id === 'string') state.editHolds.add(p.id)
-        return
-      }
-      case 'x.ai/queue/release_edit': {
-        const p = unwrapped
-        if (typeof p.id !== 'string' || !state.editHolds.delete(p.id)) return
-        // Unblocks a front parked under edit hold (grok SessionCommand::ReleaseEdit).
-        promoteWhenIdle()
-        return
-      }
-      case 'x.ai/queue/reorder': {
-        const p = unwrapped
-        const orderedIds = Array.isArray(p.orderedIds) ? p.orderedIds.filter((id): id is string => typeof id === 'string') : []
-        let changed = false
-        if (orderedIds.length > 0) {
-          const byId = new Map(state.promptQueue.map(entry => [entry.id, entry]))
-          const next: typeof state.promptQueue = []
-          for (const id of orderedIds) {
-            const entry = byId.get(id)
-            if (entry === undefined) continue
-            next.push(entry)
-            byId.delete(id)
-          }
-          for (const entry of state.promptQueue) if (byId.has(entry.id)) next.push(entry)
-          changed = next.length === state.promptQueue.length
-            && next.some((entry, index) => entry !== state.promptQueue[index])
-          state.promptQueue.splice(0, state.promptQueue.length, ...next)
-        }
-        if (changed) promoteWhenIdle()
-        queueMutate()
-        return
-      }
-      case 'x.ai/queue/clear': {
-        discardPromptQueue()
-        queueMutate()
-        return
-      }
-
-    }
+  /** The row controls' view of this queue, built once all its steps exist. */
+  const controls: QueueControlContext = {
+    state, host, broadcast: broadcastQueueChanged, promote: promoteWhenIdle,
+    settle: settlePrompt, discard: discardPromptQueue, settled: promptSettled,
   }
 
   const cancel = (): void => {
@@ -703,7 +480,7 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
       })
       return result
     },
-    control(method, params) { if (!disposed && host.isLive()) control(method, params) },
+    control(method, params) { if (!disposed && host.isLive()) controlQueue(controls, method, params) },
     observe(event) {
       const inflight = state.inflight
       if (inflight !== undefined && event.type === 'turn/end' && inflight.turn === event.data.turn) {
