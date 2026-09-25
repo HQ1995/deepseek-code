@@ -119,12 +119,12 @@ export function createNativeSessionStatus<S extends StatusSession>(host: StatusH
     if (typeof plan?.active === 'boolean') record.output.update(planModeUpdate(plan.active), replay)
   }
   const goal = async (clientId: number, params: unknown): Promise<{ result: { kind: string; text: string } }> => {
-    const p = paramRecord(params, 'x.ai/goal')
+    const p = paramRecord(params, 'x.ai/commands/run')
     const record = closed ? undefined : host.owned(clientId, sessionIdParam(p.sessionId))
     if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
     return record.work.run(async scope => {
       const parsed = parsePrompt(p.prompt)
-      if (!/^\/goal(?:\s|$)/i.test(parsed.text.trim())) throw invalidParams('x.ai/goal requires a /goal invocation')
+      if (!/^\/goal(?:\s|$)/i.test(parsed.text.trim())) throw invalidParams('/goal control requires a /goal invocation')
       const controller = new AbortController()
       commands.set(controller, record)
       try {

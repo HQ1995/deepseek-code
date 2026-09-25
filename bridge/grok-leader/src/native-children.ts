@@ -445,13 +445,13 @@ export function createNativeChildren<S extends ChildSession>(host: ChildHost<S>)
 
   /** Human controls use native child admission and inbox mutations; the parent turn is untouched. */
   const executeSubagentCommand = async (clientId: number, params: unknown): Promise<{ result: { kind: 'success' | 'error'; text: string } }> => {
-    const p = paramRecord(params, 'x.ai/subagents')
+    const p = paramRecord(params, 'x.ai/commands/run')
     const record = owned(clientId, sessionIdParam(p.sessionId))
     if (record === undefined) throw invalidParams('unknown session: ' + String(p.sessionId))
     const parsed = parsePrompt(p.prompt)
     if (parsed.images.length > 0) throw invalidParams('/subagents accepts text commands only')
     const command = parseSubagentsCommand(parsed.text)
-    if (command === undefined) throw invalidParams('x.ai/subagents requires a /subagents invocation')
+    if (command === undefined) throw invalidParams('/subagents control requires a /subagents invocation')
     return record.work.run(async scope => {
       const service = subagentsService(record)
       if (service === undefined) throw new Error('Subagents are unavailable in this preset.')

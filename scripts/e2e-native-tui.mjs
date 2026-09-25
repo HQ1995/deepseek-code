@@ -39,7 +39,7 @@ export function nativeTuiReply(body) {
 }
 
 export async function nativeTuiAcceptance(ui) {
-  const { send, key, type, wait, waitFor, capture, state, waitState, artifact, restart, readRequests, runHeadless, cwd } = ui
+  const { send, key, type, wait, waitFor, capture, state, waitState, settle, artifact, restart, readRequests, runHeadless, cwd } = ui
   const release = async name => {
     const response = await fetch(`${process.env.DSCODE_E2E_GATEWAY}/preset-probe/release?key=native-${name}`, { method: 'POST' })
     assert.ok(response.ok, `Release worker ${name}: ${response.status}`)
@@ -50,6 +50,25 @@ export async function nativeTuiAcceptance(ui) {
     await type(query)
     await waitFor(capture, screen => screen.includes(query) && !screen.includes('Searching sessions') && !screen.includes('No matching sessions'), 'native-reference-candidates')
   }
+  // Host commands, the bridge's own and DSH plugins', share the palette's one
+  // generic Commands section: no per-plugin rows in the TUI. /preset is the
+  // TUI's own picker and keeps its builtin row.
+  const paletteCommands = {}
+  for (const [name, label] of [['dsh', 'Manage dsh plugins'], ['preset', 'Switch Preset'], ['compact', 'Compact older conversation history']]) {
+    await key('C-p'); await type(name)
+    paletteCommands[name] = await waitFor(capture, screen => /\bCommands\b/.test(screen) && new RegExp(`${label}\\s+/${name}\\b`).test(screen), `palette-command-${name}`)
+    // The first Esc clears the query, the second closes the palette.
+    await key('Escape'); await settle(150); await key('Escape')
+    await waitFor(capture, screen => !new RegExp(`${label}\\s+/${name}\\b`).test(screen), `palette-command-${name}-closed`)
+  }
+  await artifact('native-palette-commands', paletteCommands)
+  // /loop follows the `schedule` capability the standard preset advertises;
+  // the leader sends no toolset, which once hid it everywhere.
+  await type('/loo')
+  const loopMenu = await wait(/\/loop[^\n]*Run a prompt on a recurring interval/)
+  await artifact('native-loop-offered', { screen: loopMenu })
+  await key('Escape'); await key('C-u')
+
   const sourceId = randomUUID(), secret = `fact-${randomUUID()}`
   await runHeadless({ cwd, preset: 'standard', sessionId: sourceId, prompt: `DSCODE_NATIVE_REFERENCE_SOURCE:${secret}` })
   await type('DSCODE_NATIVE_REFERENCE_USE ')

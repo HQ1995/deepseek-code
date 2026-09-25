@@ -295,9 +295,6 @@ pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, cause: SwitchC
             app.current_ui.permission_mode = Some(c.to_string());
         }
     }
-    // Seed the auto feature gate on the (possibly new) active agent's slash
-    // registry.
-    app.sync_permission_mode_slash_gate();
     surface_yolo_launch_block_notice(app, target);
 
     if matches!(cause, SwitchCause::New | SwitchCause::Fork)

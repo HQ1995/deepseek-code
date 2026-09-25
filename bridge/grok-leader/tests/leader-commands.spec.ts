@@ -428,7 +428,7 @@ describe('leader commands, skills and runtime rails', () => {
   })
 
   it.each([
-    ['x.ai/goal', '/goal status'], ['session/prompt', '/guard'],
+    ['x.ai/commands/run', '/goal status'], ['session/prompt', '/guard'],
   ])('session/close drains an accepted %s command before final flush without blocking another session', async (method, line) => {
     let release!: () => void, signal: AbortSignal | undefined
     const held = new Promise<void>(resolve => { release = resolve }), order: string[] = []
@@ -625,7 +625,7 @@ describe('leader commands, skills and runtime rails', () => {
     expect(meta.availableCommands).toEqual([
       { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | enable|disable <bundle>[#row] | add [--trust] <package> | remove <name> | inspect <name>' } },
       { name: 'browser', description: 'Turn the isolated browser on or off', input: { hint: 'status | on [--executable <path>] [--origin <origin>]... [--any-origin] | off | origins add|remove <origin>' } },
-      { name: 'subagents', description: 'Inspect and control child conversations', input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' } },
+      { name: 'subagents', description: 'Inspect and control child conversations', input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' }, _meta: { immediate: true } },
       { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | ptc | minimal | cordis' } },
     ])
 
@@ -639,7 +639,7 @@ describe('leader commands, skills and runtime rails', () => {
       commands: [
         { name: 'dsh', description: 'Manage dsh plugins', input: { hint: 'plugins | enable|disable <bundle>[#row] | add [--trust] <package> | remove <name> | inspect <name>' } },
         { name: 'browser', description: 'Turn the isolated browser on or off', input: { hint: 'status | on [--executable <path>] [--origin <origin>]... [--any-origin] | off | origins add|remove <origin>' } },
-        { name: 'subagents', description: 'Inspect and control child conversations', input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' } },
+        { name: 'subagents', description: 'Inspect and control child conversations', input: { hint: 'list | pending <child> | queue|steer <child> <text> | edit|remove|steer-queued|clear|stop <child> ...' }, _meta: { immediate: true } },
         { name: 'preset', description: 'Switch the active agent preset', input: { hint: 'standard | ptc | minimal | cordis' } },
       ],
     })

@@ -1744,21 +1744,6 @@ impl AppView {
             dashboard.set_voice_visible(enabled);
         }
     }
-    /// Sync the auto permission-mode feature gate into every slash surface.
-    /// `/auto` is hard-hidden when `self.auto_mode_gate` is off; otherwise both
-    /// `/always-approve` and `/auto` stay offered as true toggles. Mirrors
-    /// [`Self::apply_voice_mode_enabled`]. Call after gate flips, startup,
-    /// reconnect, and session create/switch (so new agents inherit the gate).
-    pub fn sync_permission_mode_slash_gate(&mut self) {
-        let available = self.auto_mode_gate;
-        for agent in self.agents.values_mut() {
-            agent.prompt.set_auto_mode_available(available);
-        }
-        self.welcome_prompt.set_auto_mode_available(available);
-        if let Some(dashboard) = self.dashboard.as_mut() {
-            dashboard.set_auto_mode_available(available);
-        }
-    }
     /// Recompute the tier-restricted slash commands from the current auth
     /// state and sync the deny list into every slash surface (welcome
     /// prompt, all agents, dashboard) so restricted commands hide/show in

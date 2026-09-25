@@ -61,6 +61,7 @@ unless `--force` is explicit. Headless formats are `plain`, `json`,
 | `/subagents`, `/inbox` | Inspect children; queue, steer, edit, remove, or stop pending work |
 | `/tasks`, `/workflows` | Read jobs, child transcripts, workflow phases, and retained output |
 | `/tasks terminals` | Inspect persistent shells; `i` interrupts, `x` then Enter closes |
+| `/loop [interval] <prompt>` | Ask the model to set a recurring reminder (presets with scheduling, such as `standard`) |
 | `/reminders` | Schedule `after 10m <text>`, `every 1h <text>`, `at <ISO time> <text>`, `daily 09:00 <text>`, `weekly mon,wed 09:00 <text>` or `cron "0 9 * * 1-5" <text>` (local time zone) |
 | `/skills`, `/mcps` | Browse session skills and MCP servers; `u` inserts a selected skill |
 | `/rewind`, `/undo` | Continue from an earlier prompt in a new session |
@@ -69,12 +70,16 @@ unless `--force` is explicit. Headless formats are `plain`, `json`,
 | `/browser` | Turn the isolated headless browser on or off and edit its allowed origins |
 | `/dsh plugins` | List, switch, add and remove dsh plugins; see [Plugins](#plugins) |
 | `/doctor` | Check terminal, installation, and optional LSP/PTY dependencies |
-| `Ctrl+P` | Open commands while keeping the current draft |
+| `Ctrl+P` | Open commands while keeping the current draft; its Commands section lists the session's plugin commands |
 | `Ctrl+S`, `Alt+S` | Stash or restore one prompt draft |
 | `Ctrl+T` | View the native Todo list |
 | `Enter` in a block viewer | Quote the selection into the draft |
 
 Paste or drag PNG, JPEG, WebP, or GIF images when the model supports image input.
+A plugin command that takes no images, such as `/dsh` or `/compact` (`/goal`
+takes them), keeps the draft and its images and says so instead of sending.
+Completion offers `/btw`, `/plan`, `/inbox`, `/reminders` and `/loop` only in
+presets whose agent can run them.
 Completed child transcripts remain readable after restart. A reminder is
 delivered while its session is open; one that falls due while it is closed
 arrives when the session next opens. Session ZIP export refuses existing files.

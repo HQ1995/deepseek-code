@@ -98,11 +98,9 @@ impl SlashCommand for LoopCommand {
         Some("[interval] <prompt>")
     }
 
-    fn required_tools(&self) -> &[&str] {
-        // DIVERGENCE(deepseek): use the native session-local dsh tool.
-        &["schedule_create"]
-    }
-
+    // DIVERGENCE(dscode): no `required_tools`. The leader advertises runtime
+    // capabilities, never a toolset, so a `schedule_create` requirement hid
+    // `/loop` from every session; the `schedule` capability is the gate.
     fn visible(&self, ctx: &crate::slash::command::AppCtx) -> bool {
         ctx.capabilities
             .as_ref()

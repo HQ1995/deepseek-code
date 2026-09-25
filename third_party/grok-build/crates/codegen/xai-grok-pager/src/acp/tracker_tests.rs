@@ -4799,3 +4799,123 @@ fn structured_question_answers_render_as_qa_pairs() {
         assert_eq!(block.output.as_deref(), Some(other));
     }
 }
+/// A call stamped with `_meta['x.ai/tool'].name` and titled by what it does.
+fn named_tool_call(id: &str, name: &str, title: &str) -> acp::ToolCall {
+    let mut meta = acp::Meta::new();
+    meta.insert("x.ai/tool".into(), serde_json::json!({ "name": name }));
+    acp::ToolCall::new(acp::ToolCallId::new(Arc::from(id)), title.to_string())
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::InProgress)
+        .meta(meta)
+}
+#[test]
+fn tool_identity_prefers_the_meta_name_over_the_title() {
+    assert_eq!(
+        tool_name(&named_tool_call("t1", "todo_write", "Update todo list")),
+        "todo_write"
+    );
+    assert_eq!(
+        tool_name(&initial_tool_call("t2", "todo_write")),
+        "todo_write",
+        "without the stamp the title is the identity"
+    );
+    let mut blank = named_tool_call("t3", "", "Run tests");
+    assert_eq!(tool_name(&blank), "Run tests");
+    blank.meta = None;
+    assert_eq!(tool_name(&blank), "Run tests");
+}
+#[test]
+fn tool_identity_keeps_presenter_titled_host_tools_hidden() {
+    for (name, title) in [
+        ("todo_write", "Update todo list"),
+        ("update_goal", "Update goal"),
+        ("workflow", "Run workflow deep-research"),
+        ("scheduler_create", "Schedule a reminder"),
+    ] {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        let id = format!("hidden-{name}");
+        let shown = tracker.handle_update(
+            acp::SessionUpdate::ToolCall(named_tool_call(&id, name, title)),
+            &meta(),
+            &mut sb,
+        );
+        assert!(!shown, "{name} titled {title:?} must stay hidden");
+        tracker.handle_update(tool_update_completed(&id), &meta(), &mut sb);
+        assert_eq!(sb.len(), 0, "{name} titled {title:?} must stay hidden");
+    }
+    // The stamp decides: a todo-looking title on another tool is shown.
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(named_tool_call("shown", "grep", "todo_write")),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(sb.len(), 1);
+}
+#[test]
+fn tool_identity_update_meta_keys_override_the_base_call_meta() {
+    let mut base = named_tool_call("m1", "bash", "Run tests");
+    base.meta.as_mut().unwrap().insert(
+        "dscode/view".into(),
+        serde_json::json!({ "kind": "terminal" }),
+    );
+    let mut update_meta = acp::Meta::new();
+    update_meta.insert(
+        "dscode/view".into(),
+        serde_json::json!({ "kind": "terminal", "exitCode": 0 }),
+    );
+    update_meta.insert("result".into(), serde_json::json!(true));
+    let update = acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from("m1")),
+        acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
+    )
+    .meta(update_meta);
+    let merged = merge_tool_call_update(base.clone(), update);
+    let meta = merged.meta.as_ref().expect("merged meta");
+    assert_eq!(meta["x.ai/tool"], serde_json::json!({ "name": "bash" }));
+    assert_eq!(
+        meta["dscode/view"],
+        serde_json::json!({ "kind": "terminal", "exitCode": 0 })
+    );
+    assert_eq!(meta["result"], serde_json::json!(true));
+    // An update without `_meta` keeps the base call's.
+    let bare = acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from("m1")),
+        acp::ToolCallUpdateFields::new(),
+    );
+    let base_meta = base.meta.clone();
+    assert_eq!(merge_tool_call_update(base, bare).meta, base_meta);
+}
+#[test]
+fn tool_identity_streaming_update_meta_merges_into_the_pending_call() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(named_tool_call("s1", "grep", "Search for foo")),
+        &meta(),
+        &mut sb,
+    );
+    let mut update_meta = acp::Meta::new();
+    update_meta.insert(
+        "dscode/view".into(),
+        serde_json::json!({ "kind": "search" }),
+    );
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCallUpdate(
+            acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(Arc::from("s1")),
+                acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::InProgress)),
+            )
+            .meta(update_meta),
+        ),
+        &meta(),
+        &mut sb,
+    );
+    let pending = tracker.pending_tools.get("s1").expect("still pending");
+    let meta = pending.base.meta.as_ref().expect("meta kept");
+    assert_eq!(meta["x.ai/tool"], serde_json::json!({ "name": "grep" }));
+    assert_eq!(meta["dscode/view"], serde_json::json!({ "kind": "search" }));
+    assert_eq!(tracker.tool_name("s1"), Some("grep"));
+}

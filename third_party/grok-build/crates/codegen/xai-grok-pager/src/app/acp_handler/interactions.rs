@@ -271,10 +271,12 @@ pub(super) fn plan_review_source_for_tool(
     tool_call_id: &str,
     agent: &AgentView,
 ) -> PlanReviewSource {
-    agent
-        .session
-        .tracker
-        .tool_title(tool_call_id)
-        .filter(|title| *title == "CreatePlan" || *title == "Plan: Submit for approval")
-        .map_or(PlanReviewSource::FileBacked, |_| PlanReviewSource::Inline)
+    let tracker = &agent.session.tracker;
+    let inline = tracker.tool_name(tool_call_id) == Some("CreatePlan")
+        || tracker.tool_title(tool_call_id) == Some("Plan: Submit for approval");
+    if inline {
+        PlanReviewSource::Inline
+    } else {
+        PlanReviewSource::FileBacked
+    }
 }

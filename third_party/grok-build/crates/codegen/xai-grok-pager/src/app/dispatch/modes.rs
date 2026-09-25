@@ -266,8 +266,6 @@ pub(super) fn sync_active_auto_flag(app: &mut AppView) {
     {
         agent.session.auto_mode = effective_auto(agent.session.is_yolo(), is_auto);
     }
-    // Keep `/auto` feature-gate visibility in lockstep across slash surfaces.
-    app.sync_permission_mode_slash_gate();
 }
 
 /// State-only `permission_mode` (YOLO) mutation; also called from rollback.

@@ -1207,12 +1207,6 @@ impl PromptWidget {
             .set_voice_visible(visible);
     }
 
-    /// Gate `/auto` on the auto permission-mode feature.
-    /// See [`crate::slash::SlashController::set_auto_mode_available`].
-    pub(crate) fn set_auto_mode_available(&mut self, available: bool) {
-        self.slash_controller.set_auto_mode_available(available);
-    }
-
     /// Replace the restricted slash-command deny list (see
     /// [`crate::slash::registry::CommandRegistry::set_restricted_commands`]).
     pub(crate) fn set_restricted_commands(&mut self, names: &[String]) {

@@ -427,11 +427,6 @@ pub(crate) fn default_palette_entries(
             command: PaletteCommand::SlashCommand("/session-info".into()),
         },
         PaletteEntry {
-            label: "Goal".into(),
-            shortcut: "/goal".into(),
-            command: PaletteCommand::SlashCommand("/goal".into()),
-        },
-        PaletteEntry {
             label: "Workflow Runs".into(),
             shortcut: "/workflows".into(),
             command: PaletteCommand::SlashCommand("/workflows".into()),
@@ -458,11 +453,6 @@ pub(crate) fn default_palette_entries(
             command: PaletteCommand::SlashCommand("/reference".into()),
         },
         PaletteEntry {
-            label: "Compact History".into(),
-            shortcut: "/compact".into(),
-            command: PaletteCommand::SlashCommand("/compact".into()),
-        },
-        PaletteEntry {
             label: "Context Usage".into(),
             shortcut: "/context".into(),
             command: PaletteCommand::SlashCommand("/context".into()),
@@ -487,6 +477,11 @@ pub(crate) fn default_palette_entries(
             label: "Switch Model".into(),
             shortcut: "/model".into(),
             command: PaletteCommand::SlashCommand("/model ".into()),
+        },
+        PaletteEntry {
+            label: "Switch Preset".into(),
+            shortcut: "/preset".into(),
+            command: PaletteCommand::SlashCommand("/preset".into()),
         },
         PaletteEntry {
             label: "Always Approve Mode".into(),
@@ -590,15 +585,43 @@ pub(crate) fn default_palette_entries(
             command: PaletteCommand::Quit,
         },
     ];
+    // DIVERGENCE(dscode): the host's own commands (DSH plugin commands and
+    // the bridge's /dsh, /preset, …) get one generic section, in advertised
+    // order, instead of per-plugin rows. Skills are excluded.
+    let host: Vec<PaletteEntry> = slash
+        .registry()
+        .host_commands()
+        .into_iter()
+        .map(|(name, description)| PaletteEntry {
+            label: if description.trim().is_empty() {
+                format!("/{name}")
+            } else {
+                description.to_string()
+            },
+            shortcut: format!("/{name}"),
+            command: PaletteCommand::SlashCommand(format!("/{name}")),
+        })
+        .collect();
+    if !host.is_empty() {
+        let other = entries
+            .iter()
+            .position(|entry| matches!(&entry.command, PaletteCommand::SectionHeader(title) if title == "Other"))
+            .unwrap_or(entries.len());
+        let section = std::iter::once(PaletteEntry {
+            label: "Commands".into(),
+            shortcut: String::new(),
+            command: PaletteCommand::SectionHeader("Commands".into()),
+        })
+        .chain(host);
+        entries.splice(other..other, section);
+    }
     entries.retain(|entry| {
         if let PaletteCommand::SlashCommand(text) = &entry.command
             && let Some(invocation) = crate::slash::parse_invocation(text.trim())
-            && ((matches!(invocation.token, "compact" | "goal")
-                && slash.registry().get(invocation.token).is_none())
-                || !slash
-                    .registry()
-                    .mode_support(invocation.token)
-                    .supports(screen_mode))
+            && !slash
+                .registry()
+                .mode_support(invocation.token)
+                .supports(screen_mode)
         {
             return false;
         }
@@ -1424,43 +1447,101 @@ mod palette_tests {
         ]);
         assert!(slash_rows_with(&controller).contains(&"/compact".to_string()));
     }
+    /// DIVERGENCE(dscode): host commands get one generic "Commands" section,
+    /// in advertised order, before "Other"; skills and builtins stay out of it,
+    /// and it tracks the advertisement in every screen mode.
     #[test]
-    fn palette_goal_tracks_acp_command_presence() {
+    fn palette_commands_section_lists_host_commands() {
+        use agent_client_protocol::AvailableCommand;
         for mode in [
             crate::app::ScreenMode::Minimal,
             crate::app::ScreenMode::Fullscreen,
         ] {
             let mut controller = slash(mode);
-            assert!(!slash_rows_with(&controller).contains(&"/goal".to_string()));
-            controller.registry_mut().set_acp_commands(&[
-                agent_client_protocol::AvailableCommand::new(
-                    "goal".to_string(),
-                    "Manage the current goal".to_string(),
-                ),
-            ]);
-            let entries = default_palette_entries(true, &controller);
-            let goals: Vec<_> = entries
-                .iter()
-                .filter(|entry| entry.label == "Goal")
-                .collect();
-            assert_eq!(goals.len(), 1);
-            assert_eq!(goals[0].shortcut, "/goal");
+            let section = |controller: &crate::slash::SlashController| {
+                let entries = default_palette_entries(true, controller);
+                let start = entries.iter().position(|entry| {
+                    matches!(&entry.command, PaletteCommand::SectionHeader(title) if title == "Commands")
+                })?;
+                Some(
+                    entries[start + 1..]
+                        .iter()
+                        .take_while(|entry| {
+                            !matches!(entry.command, PaletteCommand::SectionHeader(_))
+                        })
+                        .map(|entry| {
+                            (
+                                entry.label.clone(),
+                                entry.shortcut.clone(),
+                                entry.command.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            };
             assert!(
-                matches!(&goals[0].command, PaletteCommand::SlashCommand(text) if text == "/goal")
+                section(&controller).is_none(),
+                "no host commands, no section"
+            );
+            let skill = serde_json::json!({ "scope": "plugin", "path": "/p/SKILL.md" });
+            controller.registry_mut().set_acp_commands(&[
+                AvailableCommand::new("dsh", "Manage dsh plugins"),
+                AvailableCommand::new("preset", "Switch the active agent preset"),
+                AvailableCommand::new("review", "Review code")
+                    .meta(skill.as_object().cloned().unwrap()),
+                AvailableCommand::new("compact", "Compact older conversation history"),
+                AvailableCommand::new("goal", ""),
+                // Collides with a builtin, which keeps the name.
+                AvailableCommand::new("model", "shadow"),
+            ]);
+            let rows = section(&controller).expect("Commands section");
+            let shortcuts: Vec<_> = rows
+                .iter()
+                .map(|(_, shortcut, _)| shortcut.as_str())
+                .collect();
+            // `/preset` and `/model` collide with builtins, which keep the names
+            // and their own palette rows.
+            assert_eq!(shortcuts, ["/dsh", "/compact", "/goal"]);
+            assert_eq!(rows[0].0, "Manage dsh plugins");
+            assert_eq!(rows[2].0, "/goal", "an empty description shows the name");
+            assert_eq!(
+                slash_rows_with(&controller)
+                    .iter()
+                    .filter(|text| *text == "/preset")
+                    .count(),
+                1
+            );
+            assert!(rows.iter().all(|(_, shortcut, command)| matches!(command,
+                PaletteCommand::SlashCommand(text) if text == shortcut)));
+            let entries = default_palette_entries(true, &controller);
+            let header = |title: &str| {
+                entries.iter().position(|entry| {
+                    matches!(&entry.command, PaletteCommand::SectionHeader(t) if t == title)
+                })
+            };
+            assert_eq!(
+                header("Commands").map(|i| i + rows.len() + 1),
+                header("Other")
             );
             assert_eq!(
                 slash_rows_with(&controller)
                     .iter()
                     .filter(|text| *text == "/goal")
                     .count(),
-                1
+                1,
+                "no per-plugin goal row besides the section"
             );
+            let found = filter_palette_entries("compact", true, &controller);
+            assert!(found.iter().any(|entry| entry.shortcut == "/compact"));
+            assert!(found.iter().any(|entry| entry.label == "Commands"));
             controller.registry_mut().set_acp_commands(&[]);
+            assert!(section(&controller).is_none());
             assert!(!slash_rows_with(&controller).contains(&"/goal".to_string()));
         }
     }
     #[test]
     fn every_palette_slash_row_resolves_to_a_registered_command() {
+        // Host rows come from the advertisement; with none, every row is a builtin.
         let builtins = crate::slash::commands::builtin_commands();
         for row in slash_rows(crate::app::ScreenMode::Fullscreen) {
             let invocation = crate::slash::parse_invocation(&row)

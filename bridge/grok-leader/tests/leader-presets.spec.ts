@@ -314,7 +314,7 @@ describe('leader preset selection and composition', () => {
       for (const [id, method, payload] of [
         [3, 'session/prompt', { prompt: [{ type: 'text', text: 'do not admit yet' }] }],
         [4, 'x.ai/interject', { text: 'do not steer yet' }],
-        [5, 'x.ai/goal', { prompt: [{ type: 'text', text: '/goal do not start yet' }] }],
+        [5, 'x.ai/commands/run', { prompt: [{ type: 'text', text: '/goal do not start yet' }] }],
         [6, 'x.ai/btw', { question: 'do not delegate yet' }],
         [7, 'session/set_mode', { modeId: 'plan' }],
       ] as const) {
@@ -392,9 +392,9 @@ describe('leader preset selection and composition', () => {
     })
     expect(created.error).toBeUndefined()
     await waitFor(() => c.all.some(message => {
-      const update = (message.params as { update?: { sessionUpdate?: string; meta?: { capabilities?: string[] } } } | undefined)?.update
+      const update = (message.params as { update?: { sessionUpdate?: string; _meta?: { capabilities?: string[] } } } | undefined)?.update
       return update?.sessionUpdate === 'available_commands_update'
-        && update.meta?.capabilities?.includes('subagents') === false
+        && update._meta?.capabilities?.includes('subagents') === false
     }))
   })
 
@@ -413,9 +413,9 @@ describe('leader preset selection and composition', () => {
     })
     expect(created.error).toBeUndefined()
     await waitFor(() => c.all.some(message => {
-      const update = (message.params as { update?: { sessionUpdate?: string; meta?: { capabilities?: string[] } } } | undefined)?.update
+      const update = (message.params as { update?: { sessionUpdate?: string; _meta?: { capabilities?: string[] } } } | undefined)?.update
       return update?.sessionUpdate === 'available_commands_update'
-        && update.meta?.capabilities?.includes('subagents') === true
+        && update._meta?.capabilities?.includes('subagents') === true
     }))
   })
 

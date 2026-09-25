@@ -90,6 +90,44 @@ describe('owned session commands', () => {
     expect(f.skills).toHaveBeenCalledWith({ cwd: '/work', scope: f.record.agent })
   })
 
+  it('advertises native descriptors whole: identity and attachment admission ride _meta', async () => {
+    const f = fixture()
+    f.list.mockReturnValue([
+      { definitionId: '@deepseek-ai/dsh-command-goal', name: 'goal', description: 'Set or view the goal', input: { hint: '[<objective>]', attachments: true } },
+      { definitionId: '@deepseek-ai/dsh-command-compact', name: 'compact', description: 'Compact older conversation history' },
+      { name: 'plain', description: 'no identity', input: { hint: 'text', attachments: false } },
+    ])
+    const { commands } = await f.commands.catalog(1, { sessionId: 'one' })
+    expect(commands.map(command => command.name)).toEqual(['dsh', 'browser', 'subagents', 'preset', 'goal', 'compact', 'plain'])
+    expect(commands.slice(4)).toEqual([
+      { name: 'goal', description: 'Set or view the goal', input: { hint: '[<objective>]' },
+        _meta: { definitionId: '@deepseek-ai/dsh-command-goal', attachments: true, immediate: true } },
+      { name: 'compact', description: 'Compact older conversation history', _meta: { definitionId: '@deepseek-ai/dsh-command-compact' } },
+      { name: 'plain', description: 'no identity', input: { hint: 'text' } },
+    ])
+    // Bridge-owned commands take no attachments; only /subagents runs immediately.
+    expect(commands.slice(0, 4).map(command => command._meta)).toEqual([undefined, undefined, { immediate: true }, undefined])
+  })
+
+  it('runs immediate commands at once through their owners and refuses every other line', async () => {
+    const f = fixture()
+    const goal = { sessionId: 'one', prompt: [{ type: 'text', text: ' /GOAL pause ' }, { type: 'image', mimeType: 'image/png', data: 'aA==' }] }
+    await expect(f.commands.run(1, goal)).resolves.toEqual({ result: { kind: 'success', text: 'goal done' } })
+    expect(f.host.goals.goal).toHaveBeenCalledWith(1, goal)
+    const children = { sessionId: 'one', prompt: [{ type: 'text', text: '/subagents stop child' }] }
+    await expect(f.commands.run(2, children)).resolves.toEqual({ result: { kind: 'success', text: 'children done' } })
+    expect(f.host.children.command).toHaveBeenCalledWith(2, children)
+    for (const text of ['/dsh plugins', '/goals', 'plain text', '/', '/__proto__', '/constructor']) {
+      await expect(f.commands.run(1, { sessionId: 'one', prompt: [{ type: 'text', text }] })).rejects.toMatchObject({ code: -32602 })
+    }
+    await expect(f.commands.run(1, null)).rejects.toMatchObject({ code: -32602 })
+    await expect(f.commands.run(1, { sessionId: 'one', prompt: '/goal' })).rejects.toMatchObject({ code: -32602 })
+    expect(f.host.goals.goal).toHaveBeenCalledOnce(); expect(f.host.children.command).toHaveBeenCalledOnce()
+    expect(f.execute).not.toHaveBeenCalled(); expect(f.record.output.update).not.toHaveBeenCalled()
+    await f.commands.dispose()
+    await expect(f.commands.run(1, goal)).rejects.toThrow('disposed')
+  })
+
   it('keeps the full skill view independent of slash visibility and owns session validation', async () => {
     const f = fixture()
     f.skills.mockResolvedValue([{ name: 'hidden', description: 'native description', whenToUse: 'work', invocation: { userInvocable: false }, source: 'user-local', path: '/user/skill' }])
@@ -144,7 +182,7 @@ describe('owned session commands', () => {
     const [method, params] = notify.mock.calls[0]!
     expect(method).toBe('session/update')
     expect(params.update.availableCommands.map((command: { name: string }) => command.name)).toEqual(['dsh', 'browser', 'subagents', 'preset', 'fresh'])
-    expect(params.update.meta).toEqual({ capabilities: ['skills', 'subagents'] })
+    expect(params.update._meta).toEqual({ capabilities: ['skills', 'subagents'] })
     expect(params).not.toHaveProperty('promptId'); expect(params).not.toHaveProperty('eventSeq')
     expect(f.record.output.update).not.toHaveBeenCalled(); expect(f.skills).toHaveBeenCalledTimes(2)
   })
@@ -171,7 +209,7 @@ describe('owned session commands', () => {
     f.host.capabilities.mockImplementation((record: TestSession) => record === f.record ? ['skills', 'subagents', 'jobs'] : ['skills', 'subagents'])
     f.emit('tools/change'); f.emit('tools/change'); f.emit('tools/change'); await tick()
     expect(notify).toHaveBeenCalledTimes(2)
-    expect(notify.mock.calls[1]![1].update.meta).toEqual({ capabilities: ['skills', 'subagents', 'jobs'] })
+    expect(notify.mock.calls[1]![1].update._meta).toEqual({ capabilities: ['skills', 'subagents', 'jobs'] })
     expect(f.clients.get(2)!.notify).toHaveBeenCalledOnce()
     f.emit('tools/change'); await tick()
     expect(notify).toHaveBeenCalledTimes(2)
@@ -187,7 +225,7 @@ describe('owned session commands', () => {
     gate.resolve([]); await first
     const notify = f.clients.get(1)!.notify
     expect(notify).toHaveBeenCalledOnce()
-    expect(notify.mock.calls[0]![1].update.meta).toEqual({ capabilities: ['skills'] })
+    expect(notify.mock.calls[0]![1].update._meta).toEqual({ capabilities: ['skills'] })
     expect(f.skills).toHaveBeenCalledTimes(2)
     // A record still listed after another took over its session is not checked or refreshed.
     const current = f.add('one')
@@ -197,7 +235,7 @@ describe('owned session commands', () => {
     expect(f.host.capabilities).toHaveBeenCalled()
     expect(f.host.capabilities.mock.calls.every(([record]) => record === current)).toBe(true)
     expect(notify).toHaveBeenCalledTimes(2)
-    expect(notify.mock.calls[1]![1].update.meta).toEqual({ capabilities: ['plan'] })
+    expect(notify.mock.calls[1]![1].update._meta).toEqual({ capabilities: ['plan'] })
     expect(f.record.output.update).not.toHaveBeenCalled()
     await current.work.dispose()
   })

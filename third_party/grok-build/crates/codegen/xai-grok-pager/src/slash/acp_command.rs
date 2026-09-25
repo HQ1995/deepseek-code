@@ -6,6 +6,10 @@
 //!
 //! Skills (`SkillMeta::Skill`) are also passed through as `/name args` for
 //! the shell to expand, but marked `InjectSkill` for rendering.
+//!
+//! DIVERGENCE(dscode): a host command's `_meta` also carries the rest of its
+//! DSH descriptor ([`CommandMeta`]): its plugin-owned `definitionId`, whether
+//! composer attachments may accompany it, and whether it runs immediately.
 
 use agent_client_protocol as acp;
 use xai_grok_tools::implementations::skills::types::SkillScope;
@@ -77,6 +81,33 @@ fn trimmed_string_field(
         .map(str::to_string)
 }
 
+/// The parts of a host command's descriptor ACP's name, description and hint
+/// cannot carry, read from its `_meta`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandMeta {
+    /// Stable plugin-owned identity (`@deepseek-ai/dsh-command-goal`).
+    pub definition_id: Option<String>,
+    /// Composer attachments may accompany an invocation. Absent means the
+    /// host rejects them, so the composer refuses them before dispatch.
+    pub attachments: bool,
+    /// The host runs it at once over `x.ai/commands/run`, beside a running
+    /// turn and its queue, instead of receiving it as a queued prompt.
+    pub immediate: bool,
+}
+
+impl CommandMeta {
+    pub fn parse(meta: Option<&serde_json::Map<String, serde_json::Value>>) -> Self {
+        let Some(m) = meta else {
+            return Self::default();
+        };
+        Self {
+            definition_id: trimmed_string_field(m, "definitionId"),
+            attachments: m.get("attachments").and_then(|v| v.as_bool()) == Some(true),
+            immediate: m.get("immediate").and_then(|v| v.as_bool()) == Some(true),
+        }
+    }
+}
+
 /// A slash command backed by an ACP `AvailableCommand`.
 pub struct AcpSlashCommand {
     name: String,
@@ -84,6 +115,14 @@ pub struct AcpSlashCommand {
     has_args: bool,
     arg_hint: Option<String>,
     skill: SkillMeta,
+    command: CommandMeta,
+}
+
+impl AcpSlashCommand {
+    /// The host's plugin-owned identity for this command, when it has one.
+    pub fn definition_id(&self) -> Option<&str> {
+        self.command.definition_id.as_deref()
+    }
 }
 
 impl SlashCommand for AcpSlashCommand {
@@ -126,6 +165,16 @@ impl SlashCommand for AcpSlashCommand {
         matches!(self.skill, SkillMeta::Skill(_))
     }
 
+    /// A host command takes composer attachments only when its descriptor
+    /// says so; skills are prompts and keep theirs.
+    fn refuses_attachments(&self) -> bool {
+        matches!(self.skill, SkillMeta::Absent) && !self.command.attachments
+    }
+
+    fn runs_immediately(&self) -> bool {
+        matches!(self.skill, SkillMeta::Absent) && self.command.immediate
+    }
+
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let text = if args.trim().is_empty() {
             format!("/{}", self.name)
@@ -164,6 +213,7 @@ impl From<&acp::AvailableCommand> for AcpSlashCommand {
             has_args: true,
             arg_hint,
             skill: SkillMeta::parse(cmd.meta.as_ref()),
+            command: CommandMeta::parse(cmd.meta.as_ref()),
         }
     }
 }
@@ -309,6 +359,62 @@ mod tests {
         assert_eq!(shell_cmd.provenance(), CommandProvenance::Shell);
     }
 
+    #[test]
+    fn host_descriptor_meta_parses_identity_and_attachments() {
+        let goal = AcpSlashCommand::from(&make_cmd(
+            "goal",
+            Some(serde_json::json!({
+                "definitionId": "@deepseek-ai/dsh-command-goal",
+                "attachments": true,
+            })),
+        ));
+        assert_eq!(goal.definition_id(), Some("@deepseek-ai/dsh-command-goal"));
+        assert!(!goal.refuses_attachments());
+        assert!(!goal.runs_immediately());
+        assert_eq!(goal.provenance(), CommandProvenance::Shell);
+
+        let compact = AcpSlashCommand::from(&make_cmd(
+            "compact",
+            Some(serde_json::json!({ "definitionId": "@deepseek-ai/dsh-command-compact" })),
+        ));
+        assert_eq!(
+            compact.definition_id(),
+            Some("@deepseek-ai/dsh-command-compact")
+        );
+        assert!(compact.refuses_attachments());
+
+        for meta in [
+            None,
+            Some(serde_json::json!({ "attachments": false })),
+            Some(serde_json::json!({ "attachments": "yes", "definitionId": 7 })),
+        ] {
+            let bare = AcpSlashCommand::from(&make_cmd("dsh", meta.clone()));
+            assert_eq!(bare.definition_id(), None, "{meta:?}");
+            assert!(bare.refuses_attachments(), "{meta:?}");
+        }
+
+        let subagents = AcpSlashCommand::from(&make_cmd(
+            "subagents",
+            Some(serde_json::json!({ "immediate": true })),
+        ));
+        assert!(subagents.runs_immediately());
+        assert!(subagents.refuses_attachments());
+        assert!(
+            !AcpSlashCommand::from(&make_cmd(
+                "subagents",
+                Some(serde_json::json!({ "immediate": "yes" })),
+            ))
+            .runs_immediately()
+        );
+
+        // Skills are prompts: their attachments ride along.
+        let skill = AcpSlashCommand::from(&make_cmd(
+            "review",
+            Some(serde_json::json!({ "scope": "plugin", "path": "/p/SKILL.md" })),
+        ));
+        assert!(!skill.refuses_attachments());
+    }
+
     fn make_skill_cmd(name: &str, path: &str, scope: SkillScope) -> AcpSlashCommand {
         AcpSlashCommand {
             name: name.to_string(),
@@ -320,6 +426,7 @@ mod tests {
                 scope,
                 plugin_name: None,
             }),
+            command: CommandMeta::default(),
         }
     }
 

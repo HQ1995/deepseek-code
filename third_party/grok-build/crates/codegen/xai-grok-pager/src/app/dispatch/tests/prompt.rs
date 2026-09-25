@@ -3063,6 +3063,62 @@ fn palette_dispatch_preserves_prompt_draft() {
     );
 }
 
+/// DIVERGENCE(dscode): a host command whose descriptor admits no attachments
+/// refuses the draft's images before dispatch and keeps the draft whole; one
+/// that declares `attachments` sends them.
+#[test]
+fn host_command_attachment_refusal_keeps_the_draft() {
+    let image = || crate::prompt_images::PastedImage {
+        element_id: xai_ratatui_textarea::ElementId::from_raw(0),
+        display_number: 0,
+        mime_type: "image/png".into(),
+        dimensions: Some((8, 8)),
+        byte_len: 3,
+        encoded_bytes: Some(vec![1, 2, 3].into()),
+        source_path: None,
+        staged_temp_path: None,
+        session_image_path: None,
+        preview: crate::prompt_images::PromptImagePreview::default(),
+    };
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let models = app.agents[&id].session.models.clone();
+    let agent = app.agents.get_mut(&id).unwrap();
+    let attachments = serde_json::json!({ "attachments": true });
+    agent.prompt.sync_acp_commands(
+        &[
+            acp::AvailableCommand::new("dsh", "Manage dsh plugins"),
+            acp::AvailableCommand::new("describe", "Describe an image")
+                .meta(attachments.as_object().cloned().unwrap()),
+        ],
+        None,
+        &models,
+    );
+    agent.prompt.set_text("/dsh plugins");
+    agent.prompt.insert_image(image()).unwrap();
+    let draft = agent.prompt.text().to_owned();
+    let effects = dispatch(Action::SendPrompt("/dsh plugins".into()), &mut app);
+    assert!(effects.is_empty(), "{effects:?}");
+    let agent = &app.agents[&id];
+    assert_eq!(agent.prompt.text(), draft);
+    assert_eq!(agent.prompt.images.len(), 1);
+    assert!(agent.session.pending_prompts.is_empty());
+    assert_eq!(
+        agent.toast.as_ref().map(|(text, _)| text.as_str()),
+        Some("/dsh does not accept image attachments")
+    );
+
+    // A command that declares attachments takes the draft's images along.
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.toast = None;
+    agent.prompt.set_text("/describe sketch");
+    let effects = dispatch(Action::SendPrompt("/describe sketch".into()), &mut app);
+    let agent = &app.agents[&id];
+    assert!(agent.toast.is_none());
+    assert!(agent.prompt.images.is_empty(), "{effects:?}");
+    assert!(agent.prompt.text().is_empty());
+}
+
 #[test]
 fn slash_compact_with_context_enqueues_command() {
     let mut app = test_app_with_agent();
@@ -3090,6 +3146,45 @@ fn slash_compact_with_context_enqueues_command() {
     assert!(app.agents[&id].session.state.is_turn_running());
 }
 
+/// Advertise the host's immediate controls as the bridge does
+/// (`_meta.immediate`; `/goal` also takes attachments).
+fn advertise_immediate_controls(app: &mut AppView, id: AgentId) {
+    let models = app.agents[&id].session.models.clone();
+    let meta = |value: serde_json::Value| value.as_object().cloned().unwrap();
+    app.agents.get_mut(&id).unwrap().prompt.sync_acp_commands(
+        &[
+            acp::AvailableCommand::new("goal", "Set or view the goal").meta(meta(
+                serde_json::json!({
+                    "definitionId": "@deepseek-ai/dsh-command-goal",
+                    "attachments": true,
+                    "immediate": true,
+                }),
+            )),
+            acp::AvailableCommand::new("subagents", "Inspect and control child conversations")
+                .meta(meta(serde_json::json!({ "immediate": true }))),
+        ],
+        None,
+        &models,
+    );
+}
+
+/// DIVERGENCE(dscode): only the descriptor makes a command immediate. Without
+/// the advertisement, `/goal` is an ordinary command queued behind the turn.
+#[test]
+fn unadvertised_goal_waits_behind_the_running_turn() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.state = AgentState::TurnRunning;
+    agent.prompt.set_text("/goal pause");
+    let effects = dispatch(Action::SendPrompt("/goal pause".into()), &mut app);
+    assert!(effects.is_empty(), "{effects:?}");
+    assert_eq!(
+        app.agents[&id].session.pending_prompts[0].text,
+        "/goal pause"
+    );
+}
+
 #[test]
 fn native_session_controls_bypass_busy_queue_without_starting_a_turn() {
     for command in [
@@ -3111,6 +3206,7 @@ fn native_session_controls_bypass_busy_queue_without_starting_a_turn() {
     ] {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
+        advertise_immediate_controls(&mut app, id);
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
         agent.session.current_prompt_id = Some("held-round".into());
@@ -3131,14 +3227,7 @@ fn native_session_controls_bypass_busy_queue_without_starting_a_turn() {
             ] => {
                 assert_eq!(*agent_id, id);
                 assert_eq!(*receiving_session, session_id);
-                assert_eq!(
-                    *method,
-                    if command.starts_with("/goal") {
-                        "x.ai/goal"
-                    } else {
-                        "x.ai/subagents"
-                    }
-                );
+                assert_eq!(*method, "x.ai/commands/run");
                 assert_eq!(
                     serde_json::to_value(prompt).unwrap(),
                     serde_json::json!([
@@ -3167,6 +3256,7 @@ fn native_session_controls_bypass_busy_queue_without_starting_a_turn() {
 fn native_goal_palette_preserves_draft_and_attachments_while_busy() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
+    advertise_immediate_controls(&mut app, id);
     let agent = app.agents.get_mut(&id).unwrap();
     agent.session.state = AgentState::TurnRunning;
     agent.prompt.set_text("unfinished draft");
@@ -3230,6 +3320,7 @@ fn literal_goal_and_auto_text_remain_ordinary_queued_prompts() {
     for text in ["/goal pause", "/auto"] {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
+        advertise_immediate_controls(&mut app, id);
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
         agent.session.enqueue_prompt("earlier".into());
@@ -3253,6 +3344,7 @@ fn native_goal_submit_respects_paste_reconnect_and_session_guards() {
     for guard in ["paste", "reconnect", "unbound"] {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
+        advertise_immediate_controls(&mut app, id);
         let agent = app.agents.get_mut(&id).unwrap();
         agent.prompt.set_text("/goal pause");
         match guard {
@@ -3270,8 +3362,11 @@ fn native_goal_submit_respects_paste_reconnect_and_session_guards() {
     }
 }
 
+/// DIVERGENCE(dscode): the pager has no `/auto`. A typed one is the host's to
+/// refuse: it waits behind the running turn like any unknown command, and the
+/// local permission mode never changes.
 #[test]
-fn unsupported_auto_refuses_immediately_while_busy_without_permission_change() {
+fn auto_waits_for_the_host_like_any_unknown_command() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
@@ -3280,29 +3375,23 @@ fn unsupported_auto_refuses_immediately_while_busy_without_permission_change() {
     agent.session.enqueue_prompt("earlier".into());
     agent.prompt.set_text("/auto");
     let effects = dispatch(Action::SendPrompt("/auto".into()), &mut app);
-    assert!(effects.is_empty());
+    assert!(effects.is_empty(), "{effects:?}");
     let agent = &app.agents[&id];
     assert!(agent.session.state.is_turn_running());
     assert_eq!(
         agent.session.current_prompt_id.as_deref(),
         Some("held-round")
     );
-    assert_eq!(agent.session.pending_prompts.len(), 1);
+    assert_eq!(agent.session.pending_prompts.len(), 2);
+    assert_eq!(agent.session.pending_prompts[1].text, "/auto");
     assert!(!agent.session.is_auto());
     assert!(!agent.session.is_yolo());
-    assert!(scrollback_has_system_text(&app, id, "/auto is unsupported"));
+    assert!(!scrollback_has_system_text(&app, id, "/auto"));
 }
 
 #[test]
 fn slash_unavailable_commands_never_reach_the_model() {
-    for name in [
-        "hooks",
-        "plugins",
-        "marketplace",
-        "delete",
-        "remember",
-        "loop",
-    ] {
+    for name in ["hooks", "plugins", "marketplace", "delete", "remember"] {
         let mut app = test_app_with_agent();
         let before = app.agents[&AgentId(0)].scrollback.len();
         let effects = dispatch(Action::SendPrompt(format!("/{name}")), &mut app);

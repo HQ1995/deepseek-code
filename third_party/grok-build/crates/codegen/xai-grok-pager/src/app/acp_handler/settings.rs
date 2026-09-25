@@ -92,9 +92,6 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
             super::super::dispatch::downgrade_displayed_auto_if_gated(app);
             notify_sessions_leave_auto(app, &leaving_auto);
         }
-        // Reveal/hide `/auto` on every slash surface in lockstep with the gate
-        // (covers both a mid-session kill-switch and re-enablement).
-        app.sync_permission_mode_slash_gate();
     }
 
     // `permission_mode` is presence-aware (omit / null / string). While the

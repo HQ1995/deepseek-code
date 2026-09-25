@@ -280,7 +280,10 @@ after entering the namespace to handle older util-linux launchers.
   command. The pager snapshot field, its lock type and its `current_value_for`
   mapping stay dormant. `tests/settings_e2e.rs` omits the row's tests and
   asserts that neither the row nor `/privacy` is registered.
-Unavailable built-ins: `/dashboard`, `/cd`, `/recap`, `/voice`, `/auto`, `/hooks`, `/plugins`, `/marketplace`, `/delete`, `/remember`.
+Unavailable built-ins: `/dashboard`, `/cd`, `/recap`, `/voice`, `/hooks`, `/plugins`, `/marketplace`, `/delete`, `/remember`.
+`/auto` is not a pager command at all: the builtin, its feature-gate plumbing
+and its `PAGER_COMMAND_KEYS` entry are gone, so a typed `/auto` reaches the host,
+which refuses it.
 
 These commands remain known to the registry while hidden from completion.
 Typed names and aliases get a local unavailable message, including tool-gated
@@ -308,8 +311,9 @@ commands before capability discovery; they do not become model prompts.
   instead of silently weakening CLI flags. The leader profile does not mount
   dsh-schedule globally: doing so injects its three tools into every root agent
   and breaks the shipped minimal preset's exact two-tool contract. TUI /loop
-  therefore stays hidden unless scheduling is supplied by a preset-scoped
-  composition.
+  therefore follows the `schedule` capability (a preset whose agent has
+  `schedule_create`, such as `standard`); it is not tool-gated, since the
+  leader advertises capabilities and never `meta.tools`.
 - The host profile mounts `dsh-code-runtime-worker-thread`; without it dsh's
   shipped `code` preset silently exposes the native standard roster instead of
   its intended single `run_code` tool.
@@ -714,8 +718,9 @@ unrelated `!!js` expressions remain intact.
 
 ### DSH continuable-child controls
 
-`/subagents` uses the same immediate session-command effect as `/goal`, sending
-`x.ai/subagents` while preserving the parent's active turn and queued prompts.
+`/subagents` and `/goal` run over the generic immediate-command rail (see
+"Immediate host commands"), preserving the parent's active turn and queued
+prompts.
 
 Native DSH child views fetch `x.ai/subagent/history` pages through the owning
 parent connection. Their committed-event notifications refresh open views;
@@ -940,3 +945,43 @@ with the key state from the bridge's non-secret `credential` facts: "key
 missing" when the key reference resolves to nothing, "key from env" for the
 launch environment or a `.env` file, and nothing for a saved key. Generic over
 the field; no provider is named (class: feature).
+
+### Tool identity comes from `_meta['x.ai/tool']`
+
+A tool card's identity is `_meta['x.ai/tool'].name` when the host stamps one,
+else its title, as headless output already reads it. The checks that hide
+todo, goal, workflow, scheduler, task and background-wait cards, the execute
+and skill detection, and the inline plan-review source use that identity, so a
+host may title a card by what it does ("Update todo list") without the card
+reappearing. Title-shaped checks (`Goal:`, `Await:`, `Validating workflow`)
+still read the title. A `tool_call_update`'s `_meta` keys now override the
+start's key by key, streamed or final, instead of being dropped (class: feature).
+
+### Host command descriptors and the palette's Commands section
+
+`slash/acp_command.rs` reads the rest of a host command's DSH descriptor from
+its `_meta`: `definitionId` and `attachments`. A non-skill host command without
+`attachments: true` refuses the composer's images before dispatch
+(`SlashCommand::refuses_attachments`): the draft keeps its text and images and a
+toast names the command. Builtins, skills and unknown names keep their images.
+The Ctrl+P palette lists the host's non-skill commands in one generic Commands
+section before Other, in advertised order, in place of the per-plugin Goal and
+Compact History rows; builtins that shadow an advertised name (such as
+`/preset`, now a Model & Input row) keep their own rows (class: feature).
+
+### Immediate host commands
+
+A host command whose descriptor carries `_meta.immediate: true`
+(`SlashCommand::runs_immediately`) runs at once over `x.ai/commands/run`, beside
+a running turn and its queue, and its `{result: {kind, text}}` lands like the
+old goal reply. The bridge marks `/goal` and `/subagents`; the TUI names neither,
+and the dedicated `x.ai/goal` / `x.ai/subagents` intercept and routes are gone.
+Without the advertisement, `/goal` is an ordinary queued command (class:
+feature).
+
+The bridge used to send the capability list as a bare `meta` key, which is
+not ACP's `_meta`, so the TUI never received capabilities: `/btw`, `/plan`,
+`/inbox` and `/reminders` were always offered (their gates fail open) and
+`/loop` never was. It now sends `_meta.capabilities`, and `/loop` drops its
+`schedule_create` toolset requirement (the leader sends no `_meta.tools`)
+for the `schedule` capability alone.

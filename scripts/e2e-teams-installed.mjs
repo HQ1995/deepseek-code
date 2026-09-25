@@ -139,7 +139,7 @@ try {
   assert.equal(spawned.persona, 'reviewer'); assert.equal(spawned.role, 'teammate')
   const commands = commandsOf(host, team)
   assert.ok(commands.availableCommands.some(item => item.name === 'team'))
-  assert.equal(commands.meta.capabilities.includes('subagents'), false, '/btw stays off in Teams')
+  assert.equal(commands._meta.capabilities.includes('subagents'), false, '/btw stays off in Teams')
   const board = await command(host, team, '/team')
   assert.match(board, /^- reviewer \(teammate [0-9a-f]{8}\) · /m)
   assert.match(board, /Check notes · in progress/)

@@ -508,13 +508,6 @@ impl SlashController {
         &self.registry
     }
 
-    /// Gate `/auto` on the auto permission-mode feature. When unavailable,
-    /// `/auto` is hard-hidden. `/always-approve` is always offered; both
-    /// commands are true toggles (re-running the active mode turns it off).
-    pub fn set_auto_mode_available(&mut self, available: bool) {
-        self.registry.set_auto_mode_available(available);
-    }
-
     /// Suppress (or restore) session-scoped commands in completion.
     ///
     /// Called once on session-less surfaces (the agent dashboard's
@@ -2573,50 +2566,42 @@ mod tests {
         );
     }
 
-    /// Gate open → both `/always-approve` and `/auto` offered + dispatchable.
-    /// Gate closed → `/auto` hard-hidden; `/always-approve` still offered.
+    /// DIVERGENCE(dscode): `/always-approve` is the pager's one permission-mode
+    /// toggle; `/auto` is not a pager command (the host refuses it).
     #[test]
-    fn set_auto_mode_available_gates_only_auto() {
-        let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
-        let visible = |ctrl: &SlashController, name: &str| ctrl.registry().get(name).is_some();
-        let dispatchable =
-            |ctrl: &SlashController, name: &str| ctrl.registry().get_for_dispatch(name).is_some();
-
-        ctrl.set_auto_mode_available(true);
-        assert!(visible(&ctrl, "always-approve"));
-        assert!(visible(&ctrl, "auto"));
-        assert!(dispatchable(&ctrl, "always-approve"));
-        assert!(dispatchable(&ctrl, "auto"));
-
-        ctrl.set_auto_mode_available(false);
-        assert!(visible(&ctrl, "always-approve"));
-        assert!(!visible(&ctrl, "auto"));
-        assert!(dispatchable(&ctrl, "always-approve"));
-        assert!(!dispatchable(&ctrl, "auto"));
+    fn always_approve_is_the_only_permission_mode_toggle() {
+        let ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
+        assert!(ctrl.registry().get("always-approve").is_some());
+        assert!(ctrl.registry().get_for_dispatch("always-approve").is_some());
+        assert!(ctrl.registry().get("auto").is_none());
+        assert!(ctrl.registry().get_for_dispatch("auto").is_none());
     }
 
-    /// With the gate open, both permission-mode toggles appear in completion
-    /// for full-list, prefix, and exact-name queries.
+    /// The permission-mode toggle appears in completion for full-list,
+    /// prefix, and exact-name queries; `/auto` never does.
     #[test]
     fn permission_mode_toggles_appear_in_completion_when_available() {
         let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
         let state = SlashState::default();
         let models = ModelState::default();
-        ctrl.set_auto_mode_available(true);
 
-        for (query, display) in [
-            ("/", "/always-approve"),
-            ("/alw", "/always-approve"),
-            ("/always-approve", "/always-approve"),
-            ("/", "/auto"),
-            ("/au", "/auto"),
-            ("/auto", "/auto"),
-        ] {
+        for query in ["/", "/alw", "/always-approve"] {
             ctrl.refresh(&state, query, query.len(), &models);
             let snapshot = state.snapshot();
             assert!(
-                snapshot.matches.iter().any(|row| row.display == display),
-                "{display} missing from completion for query {query:?}"
+                snapshot
+                    .matches
+                    .iter()
+                    .any(|row| row.display == "/always-approve"),
+                "/always-approve missing from completion for query {query:?}"
+            );
+        }
+        for query in ["/", "/au", "/auto"] {
+            ctrl.refresh(&state, query, query.len(), &models);
+            let snapshot = state.snapshot();
+            assert!(
+                !snapshot.matches.iter().any(|row| row.display == "/auto"),
+                "/auto offered for query {query:?}"
             );
         }
     }
@@ -2624,10 +2609,8 @@ mod tests {
     /// No-arg toggles are complete so Enter submits immediately.
     #[test]
     fn permission_mode_toggles_are_complete_for_enter() {
-        let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
-        ctrl.set_auto_mode_available(true);
+        let ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
         assert!(is_command_complete("/always-approve", ctrl.registry()));
-        assert!(is_command_complete("/auto", ctrl.registry()));
     }
 
     #[test]

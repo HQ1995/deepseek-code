@@ -428,7 +428,8 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "agents-dashboard",
     "always-approve",
     "announcements",
-    "auto",
+    // DIVERGENCE(dscode): no "auto": the pager has no /auto; a typed one
+    // reaches the host, which refuses it.
     "btw",
     "cd",
     "changelog",

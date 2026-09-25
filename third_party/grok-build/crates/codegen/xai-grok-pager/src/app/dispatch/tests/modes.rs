@@ -338,16 +338,13 @@ fn set_plan_mode_mutates_only_active_agent_not_others() {
 //     `rollback_permission_mode_reverts_state_no_effect`.
 // ----------------------------------------------------------------
 
-/// Slash gate sync: both toggles stay offered while modes change; only the
-/// auto feature gate suppresses `/auto`.
+/// `/always-approve` stays offered while modes and the auto feature gate
+/// change. DIVERGENCE(dscode): `/auto` is never a pager command.
 #[test]
-fn permission_mode_slash_gate_offers_toggles_subject_to_auto_feature() {
+fn always_approve_stays_offered_while_modes_change() {
     use crate::app::actions::PermissionModeKind;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    app.auto_mode_gate = true;
-    app.sync_permission_mode_slash_gate();
-
     let offered = |app: &AppView, name: &str| {
         app.agents[&id]
             .prompt
@@ -356,46 +353,36 @@ fn permission_mode_slash_gate_offers_toggles_subject_to_auto_feature() {
             .get(name)
             .is_some()
     };
-
-    assert!(offered(&app, "always-approve"));
-    assert!(offered(&app, "auto"));
-
-    // Mode changes must not hide either toggle.
-    let _ = dispatch(Action::SetYoloMode(true), &mut app);
-    assert!(offered(&app, "always-approve"));
-    assert!(offered(&app, "auto"));
-
-    let _ = dispatch(
-        Action::SetPermissionMode(PermissionModeKind::Auto),
-        &mut app,
-    );
-    assert!(offered(&app, "always-approve"));
-    assert!(offered(&app, "auto"));
-
-    // Gate off → only `/auto` disappears.
-    app.auto_mode_gate = false;
-    app.sync_permission_mode_slash_gate();
-    assert!(offered(&app, "always-approve"));
-    assert!(!offered(&app, "auto"));
+    for gate in [true, false] {
+        app.auto_mode_gate = gate;
+        let _ = dispatch(Action::SetYoloMode(true), &mut app);
+        assert!(offered(&app, "always-approve"));
+        let _ = dispatch(Action::SetPermissionMode(PermissionModeKind::Ask), &mut app);
+        assert!(offered(&app, "always-approve"));
+        assert!(!offered(&app, "auto"));
+    }
 }
 
-/// DSH supports always-approve; refusing /auto must preserve the current mode.
+/// DSH supports always-approve. DIVERGENCE(dscode): `/auto` is the host's to
+/// refuse; it leaves the local permission mode alone and reaches the host as
+/// ordinary text.
 #[test]
-fn slash_always_approve_toggles_and_auto_refusal_preserves_mode() {
+fn slash_always_approve_toggles_and_auto_goes_to_the_host() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     for expected in [true, false] {
         dispatch(Action::SendPrompt("/always-approve".into()), &mut app);
         assert_eq!(app.agents[&id].session.is_yolo(), expected);
-        let effects = dispatch(Action::SendPrompt("/auto".into()), &mut app);
-        assert_eq!(app.agents[&id].session.is_yolo(), expected);
-        assert!(!app.agents[&id].session.is_auto());
-        assert!(
-            !effects
-                .iter()
-                .any(|effect| matches!(effect, Effect::SendPrompt { .. }))
-        );
     }
+    let effects = dispatch(Action::SendPrompt("/auto".into()), &mut app);
+    assert!(!app.agents[&id].session.is_yolo());
+    assert!(!app.agents[&id].session.is_auto());
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendPrompt { text, .. } if text == "/auto")),
+        "{effects:?}"
+    );
 }
 
 #[test]

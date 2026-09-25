@@ -107,7 +107,7 @@ describe('leader native goals', () => {
     expect(agent.internals.followups).toEqual([])
   })
 
-  it('executes x.ai/goal immediately beside a held model prompt and queued prompt without settling or notifying either', async () => {
+  it('executes an immediate /goal over x.ai/commands/run beside a held model prompt and queued prompt without settling or notifying either', async () => {
     const execute = vi.fn(async (_agent: Agent, _line: string, _images: unknown[], _signal: AbortSignal) => ({
       commandId: 'native-goal', result: { kind: 'success', text: 'native goal updated' },
     }))
@@ -132,7 +132,7 @@ describe('leader native goals', () => {
     const idleWaiters = [...agent.internals.idleWaiters]
     expect(idleWaiters).toHaveLength(2)
     const raw = '  /goal set  preserve "quoted args"  --max-rounds 7  '
-    const response = await c.request(4, 'x.ai/goal', {
+    const response = await c.request(4, 'x.ai/commands/run', {
       sessionId,
       prompt: [{ type: 'text', text: raw }, { type: 'image', data: 'AQID', mimeType: 'image/png' }],
     })
@@ -155,7 +155,7 @@ describe('leader native goals', () => {
     expect(c.all.slice(before).filter(m => m.method === 'session/update')).toEqual([])
     expect(c.all.some(m => m.id === 2 || m.id === 3)).toBe(false)
 
-    await c.request(5, 'x.ai/goal', { sessionId, prompt: [{ type: 'text', text: '/goal status' }] })
+    await c.request(5, 'x.ai/commands/run', { sessionId, prompt: [{ type: 'text', text: '/goal status' }] })
     expect(execute.mock.calls[1]![3]).not.toBe(signal)
     expect(execute.mock.calls[1]![3].aborted).toBe(false)
     agent.internals.idleWaiters.shift()!()
@@ -170,7 +170,7 @@ describe('leader native goals', () => {
     expect(c.completes).toHaveLength(completes.length + 2)
   })
 
-  it.each(['success', 'error'])('returns native %s over x.ai/goal and preserves its outcome over session/prompt', async (kind) => {
+  it.each(['success', 'error'])('returns native %s over x.ai/commands/run and preserves its outcome over session/prompt', async (kind) => {
     const result = { kind, text: 'native admission response' }
     const execute = vi.fn(async (_agent: Agent, _line: string, _images: unknown[], _signal: AbortSignal) => ({ commandId: 'goal', result }))
     const { registry, client: c } = await start({ commands: { list: () => [], execute } })
@@ -181,7 +181,7 @@ describe('leader native goals', () => {
     const agent = registry.byId.get(sessionId)!
     const prompt = [{ type: 'text', text: ' /goal status  ' }]
     const before = c.all.length
-    expect((await c.request(2, 'x.ai/goal', { sessionId, prompt })).result).toEqual({ result })
+    expect((await c.request(2, 'x.ai/commands/run', { sessionId, prompt })).result).toEqual({ result })
     expect(c.all.slice(before).filter(m => m.method === 'session/update')).toEqual([])
     expect(c.completes).toEqual([])
     const response = await c.request(3, 'session/prompt', { sessionId, prompt, _meta: { promptId: 'native-headless' } })
@@ -208,7 +208,7 @@ describe('leader native goals', () => {
     await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
-    for (const [index, method] of ['x.ai/goal', 'session/prompt'].entries()) {
+    for (const [index, method] of ['x.ai/commands/run', 'session/prompt'].entries()) {
       const response = await c.request(index + 2, method, {
         sessionId, prompt: [{ type: 'text', text: '/goal status' }, { type: 'image', data: 'AQID', mimeType: 'image/png' }],
       })
@@ -222,7 +222,7 @@ describe('leader native goals', () => {
     expect(c.completes).toEqual([])
   })
 
-  it('requires the exact owned session for x.ai/goal including absent unknown and other-client IDs', async () => {
+  it('requires the exact owned session for an immediate /goal including absent unknown and other-client IDs', async () => {
     const execute = vi.fn(async () => ({ commandId: 'goal', result: { kind: 'success', text: 'ok' } }))
     const { socketPath, client: c } = await start({ commands: { list: () => [], execute } })
     register(c)
@@ -235,10 +235,10 @@ describe('leader native goals', () => {
       await other.next()
       await other.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
       for (const [index, id] of [undefined, 'unknown-goal-session', '', 42, null].entries()) {
-        expect((await c.request(index + 2, 'x.ai/goal', { sessionId: id, prompt: [{ type: 'text', text: '/goal status' }] })).error)
+        expect((await c.request(index + 2, 'x.ai/commands/run', { sessionId: id, prompt: [{ type: 'text', text: '/goal status' }] })).error)
           .toMatchObject({ code: -32602 })
       }
-      expect((await other.request(2, 'x.ai/goal', { sessionId, prompt: [{ type: 'text', text: '/goal status' }] })).error)
+      expect((await other.request(2, 'x.ai/commands/run', { sessionId, prompt: [{ type: 'text', text: '/goal status' }] })).error)
         .toMatchObject({ code: -32602 })
       expect(execute).not.toHaveBeenCalled()
     } finally {
@@ -262,7 +262,7 @@ describe('leader native goals', () => {
       [{ type: 'text', text: '/goal status' }, { type: 'image', mimeType: 'image/png' }],
     ]
     for (const [index, prompt] of invalidPrompts.entries()) {
-      expect((await c.request(index + 2, 'x.ai/goal', { sessionId, prompt })).error, `invalid prompt case ${index}: ${JSON.stringify(prompt)}`).toMatchObject({ code: -32602 })
+      expect((await c.request(index + 2, 'x.ai/commands/run', { sessionId, prompt })).error, `invalid prompt case ${index}: ${JSON.stringify(prompt)}`).toMatchObject({ code: -32602 })
     }
     // The shared parser must classify null/primitive/array blocks before any
     // type projection on both native controls and the ordinary prompt route.
@@ -270,7 +270,7 @@ describe('leader native goals', () => {
       expect((await c.request(40 + index, 'session/prompt', { sessionId, prompt: [block] })).error)
         .toMatchObject({ code: -32602, message: 'prompt content blocks must be objects' })
     }
-    expect((await c.request(30, 'x.ai/goal', null)).error).toMatchObject({ code: -32602 })
+    expect((await c.request(30, 'x.ai/commands/run', null)).error).toMatchObject({ code: -32602 })
     expect(execute).not.toHaveBeenCalled()
     expect(registry.byId.get(sessionId)!.internals.followups).toEqual([])
     expect(c.completes).toEqual([])
@@ -288,7 +288,7 @@ describe('leader native goals', () => {
     await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
-    for (const [index, method] of ['x.ai/goal', 'session/prompt'].entries()) {
+    for (const [index, method] of ['x.ai/commands/run', 'session/prompt'].entries()) {
       expect((await c.request(index + 2, method, { sessionId, prompt: [{ type: 'text', text: '/goal status' }] })).error)
         .toMatchObject({ code: -32603 })
     }
@@ -306,7 +306,7 @@ describe('leader native goals', () => {
     await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
-    for (const [index, method] of ['x.ai/goal', 'session/prompt'].entries()) {
+    for (const [index, method] of ['x.ai/commands/run', 'session/prompt'].entries()) {
       expect((await c.request(index + 2, method, { sessionId, prompt: [{ type: 'text', text: '/goal status' }] })).error)
         .toMatchObject({ code: -32602, message: expect.stringContaining('unavailable') })
     }
@@ -339,7 +339,23 @@ describe('leader native goals', () => {
     expect(registry.byId.get(sessionId)!.internals.followups).toEqual([])
   })
 
-  it('keeps an executing x.ai/goal signal live when the held model prompt is cancelled', async () => {
+  it('serves immediate commands only over x.ai/commands/run: the dedicated goal and subagents routes are gone', async () => {
+    const execute = vi.fn(async () => ({ commandId: 'goal', result: { kind: 'success', text: 'ok' } }))
+    const { client: c } = await start({ commands: { list: () => [], execute } })
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    for (const [index, method] of ['x.ai/goal', 'x.ai/subagents'].entries()) {
+      expect((await c.request(index + 2, method, { sessionId, prompt: [{ type: 'text', text: '/goal status' }] })).error)
+        .toMatchObject({ code: -32601 })
+    }
+    expect(execute).not.toHaveBeenCalled()
+    expect((await c.request(4, 'x.ai/commands/run', { sessionId, prompt: [{ type: 'text', text: '/goal status' }] })).result)
+      .toEqual({ result: { kind: 'success', text: 'ok' } })
+  })
+
+  it('keeps an executing immediate /goal signal live when the held model prompt is cancelled', async () => {
     let releaseGoal!: () => void
     const gate = new Promise<void>(resolve => { releaseGoal = resolve })
     const execute = vi.fn(async (_agent: Agent, _line: string, _images: unknown[], _signal: AbortSignal) => {
@@ -358,7 +374,7 @@ describe('leader native goals', () => {
     const agent = registry.byId.get(sessionId)!
     sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: 'held' }] })
     await waitFor(() => agent.internals.idleWaiters.length === 1)
-    sendRequest(c, 3, 'x.ai/goal', { sessionId, prompt: [{ type: 'text', text: '/goal status' }] })
+    sendRequest(c, 3, 'x.ai/commands/run', { sessionId, prompt: [{ type: 'text', text: '/goal status' }] })
     await waitFor(() => execute.mock.calls.length === 1)
     const signal = execute.mock.calls[0]![3]
     c.notify('session/cancel', { sessionId })
