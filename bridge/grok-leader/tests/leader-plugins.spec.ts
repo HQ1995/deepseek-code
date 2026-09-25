@@ -9,6 +9,12 @@ import { Context } from '@deepseek-ai/cordis'
 import { register, sendRequest, useLeaderHarness, waitFor, waitForId } from './support/leader-harness.ts'
 import { fakeSettingsService } from './support/settings-fake.ts'
 
+/** A bridge-owned command's reply: the text of its `command_result` block
+ * ('' for any other message). */
+const reply = (message: Record<string, unknown>): string => message.method === 'x.ai/session_notification'
+  && (message.params as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === 'command_result'
+  ? String((message.params as { update: { text?: string } }).update.text ?? '') : ''
+
 describe('leader plugin inspection, /dsh command and bundle management', () => {
   const start = useLeaderHarness()
 
@@ -43,16 +49,14 @@ describe('leader plugin inspection, /dsh command and bundle management', () => {
       const settled = await waitForId(c, 2)
       expect(settled.result).toMatchObject({ stopReason: 'end_turn', _meta: { promptId: 'ins-1' } })
       await waitFor(() => c.all.some(m => {
-        if (m.method !== 'session/update') return false
-        const text = String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '')
+        const text = reply(m)
         return text.includes('provides services: exampleThing') && text.includes('registered effects:')
       }))
 
       // Unknown plugin: actionable, not a crash.
       sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh inspect dsh-plugin-ghost' }] })
       await waitForId(c, 3)
-      await waitFor(() => c.all.some(m => m.method === 'session/update'
-        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('is not installed')))
+      await waitFor(() => c.all.some(m => reply(m).includes('is not installed')))
     } finally {
       delete process.env.DSH_PROFILE_DIR
       rmSync(profileDir, { recursive: true, force: true })
@@ -86,26 +90,23 @@ describe('leader plugin inspection, /dsh command and bundle management', () => {
       expect(names).toContain('dsh')
 
       // /dsh plugins settles as its own end_turn without ever reaching the
-      // model, and streams the profile bundle list as an agent message.
+      // model, and sends the profile bundle list as its command block.
       sendRequest(c, 3, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh plugins' }], _meta: { promptId: 'dsh-1' } })
       const settled = await waitForId(c, 3)
       expect(settled.result).toMatchObject({ stopReason: 'end_turn', _meta: { promptId: 'dsh-1' } })
-      await waitFor(() => c.all.some(m => m.method === 'session/update'
-        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('dsh-plugin-example')))
+      await waitFor(() => c.all.some(m => reply(m).includes('dsh-plugin-example')))
       expect(agent.internals.followups).toEqual([])
 
       // Core components refuse removal.
       sendRequest(c, 4, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh remove @hqzhao95/dscode' }] })
       await waitForId(c, 4)
-      await waitFor(() => c.all.some(m => m.method === 'session/update'
-        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('refusing to remove')))
+      await waitFor(() => c.all.some(m => reply(m).includes('refusing to remove')))
       expect(agent.internals.followups).toEqual([])
 
       // Unknown subcommands reply with usage instead of reaching the model.
       sendRequest(c, 5, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh frobnicate' }] })
       await waitForId(c, 5)
-      await waitFor(() => c.all.some(m => m.method === 'session/update'
-        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('Usage: `/dsh')))
+      await waitFor(() => c.all.some(m => reply(m).includes('Usage: `/dsh')))
       expect(agent.internals.followups).toEqual([])
     } finally {
       delete process.env.DSH_PROFILE_DIR
@@ -170,8 +171,7 @@ describe('leader plugin inspection, /dsh command and bundle management', () => {
         id: 'enable @deepseek-ai/dsh-experimental-auto-review', label: 'Auto Authorization Review', detail: '@deepseek-ai/dsh-experimental-auto-review@0.1.7-rc.2' }] })
       sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh enable @deepseek-ai/dsh-experimental-auto-review' }] })
       expect((await waitForId(c, 2)).error).toBeUndefined()
-      await waitFor(() => c.all.some(m => m.method === 'session/update'
-        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '')
+      await waitFor(() => c.all.some(m => reply(m)
           .startsWith('Could not enable: no profile context: restart dscode to apply the change; restart dscode to unload what did start')))
       expect(JSON.stringify(c.all)).toContain('It was switched off again, so the next start is unaffected.')
       expect(selected).toEqual([true, false])
@@ -227,8 +227,7 @@ describe('leader plugin inspection, /dsh command and bundle management', () => {
       sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh add ' + JSON.stringify(spec) }] })
       const refused = await waitForId(c, 2)
       expect(refused.error).toBeUndefined()
-      await waitFor(() => c.all.some(message => message.method === 'session/update'
-        && String((message.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('Not installed. Review the requested composition changes')))
+      await waitFor(() => c.all.some(message => reply(message).includes('Not installed. Review the requested composition changes')))
       let manifest = JSON.parse(readFileSync(resolve(profileDir, 'package.json'), 'utf8')) as { dependencies: Record<string, string>; dsh: { profile: { bundles: string[] } } }
       expect((manifest.dependencies ?? {})['dsh-plugin-local-bundle']).toBeUndefined()
 
@@ -257,8 +256,7 @@ describe('leader plugin inspection, /dsh command and bundle management', () => {
     await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
     const sessionId = (created.result as { sessionId: string }).sessionId
-    const replies = () => c.all.filter(message => message.method === 'session/update')
-      .map(message => String((message.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? ''))
+    const replies = () => c.all.map(reply).filter(text => text !== '')
     const dsh = async (id: number, text: string) => {
       const before = replies().length
       sendRequest(c, id, 'session/prompt', { sessionId, prompt: [{ type: 'text', text }] })

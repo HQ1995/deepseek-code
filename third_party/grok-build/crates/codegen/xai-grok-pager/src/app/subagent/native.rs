@@ -5,6 +5,9 @@ use crate::app::agent_view::AgentView;
 use crate::app::app_view::AppView;
 use agent_client_protocol as acp;
 use serde::Deserialize;
+use xai_grok_shell::extensions::notification::{
+    CommandResultKind, SessionUpdate as XaiSessionUpdate,
+};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NativeChild {
@@ -32,6 +35,9 @@ pub(crate) struct HistoryEntry {
     meta: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
     image_notes: Vec<String>,
+    /// DIVERGENCE(dscode): a command's result block (`command_result`).
+    #[serde(default)]
+    command_result: Option<XaiSessionUpdate>,
     #[serde(default)]
     turn_ended: bool,
 }
@@ -51,6 +57,45 @@ mod tests {
         assert_eq!(notice.image_notes, ["Older image omitted"]);
         assert!(notice.update.is_none());
         assert!(!notice.turn_ended);
+    }
+
+    #[test]
+    fn command_result_entry_parses_as_its_own_block() {
+        let entry: HistoryEntry = serde_json::from_value(serde_json::json!({"commandResult": {
+            "sessionUpdate": "command_result", "name": "goal", "args": "pause", "kind": "error", "text": "No goal"
+        }}))
+        .unwrap();
+        assert!(entry.update.is_none() && entry.image_notes.is_empty());
+        let mut scrollback = crate::scrollback::state::ScrollbackState::new();
+        super::push_command_result(&mut scrollback, entry.command_result.unwrap());
+        assert!(matches!(
+            &scrollback.entry(0).unwrap().block,
+            crate::scrollback::block::RenderBlock::CommandResult(block)
+                if block.invocation == "/goal pause" && block.error
+        ));
+    }
+}
+
+/// Push a child history page's command result as its block.
+fn push_command_result(
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+    update: XaiSessionUpdate,
+) {
+    if let XaiSessionUpdate::CommandResult {
+        name,
+        args,
+        kind,
+        text,
+        markdown,
+    } = update
+    {
+        scrollback.push_block(crate::scrollback::block::RenderBlock::command_result(
+            &name,
+            args.as_deref(),
+            kind == CommandResultKind::Error,
+            text,
+            markdown,
+        ));
     }
 }
 
@@ -175,6 +220,9 @@ pub(crate) fn apply_history(
                     .push_block(crate::scrollback::block::RenderBlock::system(
                         entry.image_notes.join("\n"),
                     ));
+            }
+            if let Some(result) = entry.command_result {
+                push_command_result(&mut child.scrollback, result);
             }
             if let Some(update) = entry.update {
                 if let acp::SessionUpdate::Plan(plan) = update {

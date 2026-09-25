@@ -1009,7 +1009,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 if agent.session.session_id.as_ref() != Some(&session_id) {
                     return vec![];
                 }
-                let text = result.unwrap_or_else(|error| format!("Command failed: {error}"));
+                let text = match result {
+                    Ok(Some(text)) => text,
+                    Ok(None) => return vec![],
+                    Err(error) => format!("Command failed: {error}"),
+                };
                 // A native round may stream before its command acknowledgement.
                 // Keep the acknowledgement before the live tail, and follow it
                 // without pinning past a response that is already in progress.

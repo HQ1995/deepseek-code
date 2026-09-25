@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { collectIds, makeClient, packageVersion, register, sendRequest, useLeaderHarness, waitFor, waitForId } from './support/leader-harness.ts'
+import { collectIds, commandResults, makeClient, packageVersion, recordCommand, register, sendRequest, useLeaderHarness, waitFor, waitForId } from './support/leader-harness.ts'
 
 describe('leader commands, skills and runtime rails', () => {
   const start = useLeaderHarness()
@@ -294,18 +294,22 @@ describe('leader commands, skills and runtime rails', () => {
     const executed: string[] = []
     const commandImages: unknown[][] = []
     const commandSignals: boolean[] = []
+    let ctx!: Parameters<typeof recordCommand>[0]
     const commandsService = {
       list: () => [{ name: 'greet', description: 'Say hello', input: { hint: '<name>', images: true } }],
-      execute: async (_agent: unknown, line: string, images: unknown[], signal: AbortSignal) => {
+      execute: async (agent: Agent, line: string, images: unknown[], signal: AbortSignal) => {
         const parsed = /^\/greet(\s+(.*))?$/.exec(line)
         if (parsed === null) return undefined
         executed.push(line)
         commandImages.push(images)
         commandSignals.push(signal instanceof AbortSignal)
-        return { commandId: 'c1', result: { kind: 'success', text: 'hello ' + (parsed[2] ?? 'world') } }
+        const result = { kind: 'success', text: 'hello ' + (parsed[2] ?? 'world') }
+        recordCommand(ctx, agent, line, 'c' + String(executed.length), result)
+        return { commandId: 'c' + String(executed.length), result }
       },
     }
-    const { registry, client: c } = await start({ commands: commandsService })
+    const { registry, pluginCtx, client: c } = await start({ commands: commandsService })
+    ctx = pluginCtx
     register(c)
     await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
@@ -327,8 +331,10 @@ describe('leader commands, skills and runtime rails', () => {
     expect(executed).toEqual(['/greet dscode'])
     expect(commandImages).toEqual([[]])
     expect(commandSignals).toEqual([true])
-    await waitFor(() => c.all.some(m => m.method === 'session/update'
-      && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '') === 'hello dscode'))
+    // Its result is its own block, projected from the registry's durable record, not assistant text.
+    await waitFor(() => commandResults(c.all).length === 1)
+    expect(commandResults(c.all)[0]!.update).toEqual({ sessionUpdate: 'command_result', name: 'greet', args: 'dscode', kind: 'success', text: 'hello dscode' })
+    expect(c.all.some(m => m.method === 'session/update' && JSON.stringify(m.params).includes('hello dscode'))).toBe(false)
     expect(agent.internals.followups).toEqual([])
 
     // rc.2 commands receive raw composer images before their registry performs
@@ -541,13 +547,17 @@ describe('leader commands, skills and runtime rails', () => {
     const executions: Array<{ line: string; images: unknown[]; signal: boolean }> = []
     const commandsService = {
       list: () => [{ name: 'compact', description: 'Compact older conversation history' }],
-      execute: async (_agent: unknown, line: string, images: unknown[], signal: AbortSignal) => {
+      execute: async (agent: Agent, line: string, images: unknown[], signal: AbortSignal) => {
         if (line !== '/compact') return undefined
         executions.push({ line, images, signal: signal instanceof AbortSignal })
-        return { commandId: 'compact-1', result: { kind: 'success', text: 'No compactable history yet.' } }
+        const result = { kind: 'success', text: 'No compactable history yet.' }
+        recordCommand(ctx, agent, line, 'compact-1', result)
+        return { commandId: 'compact-1', result }
       },
     }
-    const { registry, client: c } = await start({ commands: commandsService })
+    let ctx!: Parameters<typeof recordCommand>[0]
+    const { registry, pluginCtx, client: c } = await start({ commands: commandsService })
+    ctx = pluginCtx
     register(c)
     await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
@@ -566,7 +576,7 @@ describe('leader commands, skills and runtime rails', () => {
       _meta: { promptId: 'compact-prompt' },
     })
     expect(executions).toEqual([{ line: '/compact', images: [], signal: true }])
-    await waitFor(() => c.all.some(message => JSON.stringify(message).includes('No compactable history yet.')))
+    await waitFor(() => commandResults(c.all).some(params => params.update.text === 'No compactable history yet.'))
     expect(agent.internals.followups).toEqual([])
   })
 

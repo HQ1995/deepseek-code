@@ -989,11 +989,13 @@ Compact History rows; builtins that shadow an advertised name (such as
 
 A host command whose descriptor carries `_meta.immediate: true`
 (`SlashCommand::runs_immediately`) runs at once over `x.ai/commands/run`, beside
-a running turn and its queue, and its `{result: {kind, text}}` lands like the
-old goal reply. The bridge marks `/goal` and `/subagents`; the TUI names neither,
-and the dedicated `x.ai/goal` / `x.ai/subagents` intercept and routes are gone.
-Without the advertisement, `/goal` is an ordinary queued command (class:
-feature).
+a running turn and its queue. Its result arrives as the command's own block
+(below), so the `{result: {kind, text}}` reply adds nothing; only a failed
+request shows "Command failed: …" (`/export`'s `x.ai/session/export` reply still
+shows its text). The bridge marks `/goal` and `/subagents`; the TUI names
+neither, and the dedicated `x.ai/goal` / `x.ai/subagents` intercept and routes
+are gone. Without the advertisement, `/goal` is an ordinary queued command
+(class: feature).
 
 The bridge used to send the capability list as a bare `meta` key, which is
 not ACP's `_meta`, so the TUI never received capabilities: `/btw`, `/plan`,
@@ -1028,6 +1030,28 @@ notification's view card. The bridge sends no typed `rawOutput` (the Bash byte
 array, `ReadFile`, `GrepSearch`, `WebSearch`, `WebFetch`) for a call with a
 view, so these cards no longer read it for DSH tools. A call without a view
 renders as before, from its typed `rawOutput` (class: feature).
+
+### Command results as their own blocks
+
+`XaiSessionUpdate::CommandResult` (`command_result`
+`{name, args?, kind, text?, markdown}`, xai-grok-shell
+`extensions/notification.rs`) is a host command's result, which used to arrive
+as assistant text (and, for an immediate command, as a plain system line).
+`RenderBlock::CommandResult` (`scrollback/blocks/command_result.rs`) shows the
+invocation, `/name args` on one line, over the command's text. Text marked
+`markdown` (the bridge's own commands, whose replies were agent messages)
+renders exactly as an agent message's does (tables, code, links); other text
+(DSH's command output, plain UI text that DSH's own client shows preformatted)
+renders verbatim, line by line, as the plain system line showed it, so a usage
+line such as `/goal [<objective>|clear]` is not read as inline HTML. An error
+result tones the header and bullet with the error accent. The block folds to its
+header, copies and searches like a message, and lands behind a streaming reply
+live (an immediate command runs beside the turn); replayed, in order. The bridge
+sends it live, on resume and in native child history pages (a `commandResult`
+entry), so a DSH command's result survives a resume; the bridge's own commands
+send it live only. Headless mode prints the result's text as it printed the
+reply; a Markdown `/export` leaves the block out with the other non-conversation
+blocks. No command is named in Rust (class: feature).
 
 ### Host-served option pickers
 

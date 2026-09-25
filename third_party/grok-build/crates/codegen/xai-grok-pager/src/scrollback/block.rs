@@ -14,11 +14,11 @@ use xai_grok_pager_diff::DiffHunk;
 
 use super::blocks::mermaid_content::DiagramAffordance;
 use super::blocks::{
-    AgentMessageBlock, BgTaskBlock, BtwBlock, ContextInfoBlock, CreditLimitBlock,
-    EditToolCallBlock, ExecuteToolCallBlock, LineRange, ListDirToolCallBlock, OtherToolCallBlock,
-    ReadToolCallBlock, SearchFileMatch, SearchToolCallBlock, SessionEvent, SessionEventBlock,
-    SubagentBlock, SubagentBlockKind, SystemMessageBlock, ThinkingBlock, ToolCallBlock,
-    UserPromptBlock, WorkflowBlock,
+    AgentMessageBlock, BgTaskBlock, BtwBlock, CommandResultBlock, ContextInfoBlock,
+    CreditLimitBlock, EditToolCallBlock, ExecuteToolCallBlock, LineRange, ListDirToolCallBlock,
+    OtherToolCallBlock, ReadToolCallBlock, SearchFileMatch, SearchToolCallBlock, SessionEvent,
+    SessionEventBlock, SubagentBlock, SubagentBlockKind, SystemMessageBlock, ThinkingBlock,
+    ToolCallBlock, UserPromptBlock, WorkflowBlock,
 };
 use super::types::{
     AccentStyle, BlockBackground, BlockContext, BlockOutput, DisplayMode, RenderedBlockOutput,
@@ -390,6 +390,8 @@ pub enum RenderBlock {
     Workflow(WorkflowBlock),
     /// /btw side-question response (golden accent).
     Btw(BtwBlock),
+    /// DIVERGENCE(dscode): a host command's result under its invocation.
+    CommandResult(CommandResultBlock),
     /// `/context` snapshot with categorical bar + breakdown.
     ContextInfo(ContextInfoBlock),
     /// Credit-limit card for max-tier users (red accent, single action).
@@ -411,6 +413,7 @@ macro_rules! delegate_block {
             RenderBlock::Subagent(b) => b.$method($($arg),*),
             RenderBlock::Workflow(b) => b.$method($($arg),*),
             RenderBlock::Btw(b) => b.$method($($arg),*),
+            RenderBlock::CommandResult(b) => b.$method($($arg),*),
             RenderBlock::ContextInfo(b) => b.$method($($arg),*),
             RenderBlock::CreditLimit(b) => b.$method($($arg),*),
         }
@@ -771,6 +774,18 @@ impl RenderBlock {
         RenderBlock::System(SystemMessageBlock::new(text))
     }
 
+    /// Create a host command's result block (`/name args` over its text,
+    /// Markdown or plain).
+    pub fn command_result(
+        name: &str,
+        args: Option<&str>,
+        error: bool,
+        text: Option<String>,
+        markdown: bool,
+    ) -> Self {
+        RenderBlock::CommandResult(CommandResultBlock::new(name, args, error, text, markdown))
+    }
+
     /// Create a `/context` snapshot block.
     ///
     /// The block stores the raw `ContextInfo` snapshot + model name and
@@ -973,6 +988,11 @@ impl RenderBlock {
             RenderBlock::AgentMessage(b) => b.content().evict_wrap_cache(),
             RenderBlock::Thinking(b) => b.content().evict_wrap_cache(),
             RenderBlock::Btw(b) => b.content().evict_wrap_cache(),
+            RenderBlock::CommandResult(b) => {
+                if let Some(content) = b.content() {
+                    content.evict_wrap_cache();
+                }
+            }
             _ => {}
         }
     }
@@ -1030,6 +1050,11 @@ impl RenderBlock {
             | RenderBlock::ContextInfo(_)
             | RenderBlock::CreditLimit(_) => None,
             RenderBlock::Btw(_) => Some(theme.accent_plan),
+            RenderBlock::CommandResult(block) => Some(if block.error {
+                theme.accent_error
+            } else {
+                theme.accent_skill
+            }),
             RenderBlock::Stub(block) => Some(block.accent_color),
         }
     }
@@ -1069,6 +1094,7 @@ impl RenderBlock {
             RenderBlock::UserPrompt(_)
                 | RenderBlock::AgentMessage(_)
                 | RenderBlock::Thinking(_)
+                | RenderBlock::CommandResult(_)
                 | RenderBlock::ToolCall(ToolCallBlock::Execute(_))
                 | RenderBlock::ToolCall(ToolCallBlock::Read(_))
                 | RenderBlock::ToolCall(ToolCallBlock::Edit(_))
@@ -1097,6 +1123,7 @@ impl RenderBlock {
             RenderBlock::UserPrompt(b) => Some(b.copy_text()),
             RenderBlock::AgentMessage(b) => Some(b.copy_text(raw)),
             RenderBlock::Thinking(b) => Some(b.copy_text(raw)),
+            RenderBlock::CommandResult(b) => Some(b.copy_text(raw)),
             RenderBlock::ToolCall(ToolCallBlock::Execute(b)) => Some(b.copy_text()),
             RenderBlock::ToolCall(ToolCallBlock::Read(b)) => b.content.clone(),
             RenderBlock::ToolCall(ToolCallBlock::Edit(b)) => Some(b.copy_text()),
@@ -1174,6 +1201,9 @@ impl RenderBlock {
                 Some(b.question.clone()),
                 Some(b.content().rendered_plain_text()),
             ]),
+            RenderBlock::CommandResult(b) => {
+                join_searchable([Some(b.invocation.clone()), Some(b.copy_text(false))])
+            }
             RenderBlock::ContextInfo(b) => join_searchable([Some(b.model.clone())]),
             RenderBlock::CreditLimit(b) => {
                 join_searchable([Some(b.heading.clone()), Some(b.url.clone())])
@@ -1211,6 +1241,10 @@ impl RenderBlock {
             RenderBlock::AgentMessage(b) => b.content().with_hyperlinks(f),
             RenderBlock::Thinking(b) => b.content().with_hyperlinks(f),
             RenderBlock::Btw(b) => b.content().with_hyperlinks(f),
+            RenderBlock::CommandResult(b) => match b.content() {
+                Some(content) => content.with_hyperlinks(f),
+                None => f(&[]),
+            },
             _ => f(&[]),
         }
     }
@@ -1223,6 +1257,10 @@ impl RenderBlock {
             RenderBlock::AgentMessage(b) => b.content().with_table_copy_meta(f),
             RenderBlock::Thinking(b) => b.content().with_table_copy_meta(f),
             RenderBlock::Btw(b) => b.content().with_table_copy_meta(f),
+            RenderBlock::CommandResult(b) => match b.content() {
+                Some(content) => content.with_table_copy_meta(f),
+                None => f(&[]),
+            },
             _ => f(&[]),
         }
     }
@@ -1234,6 +1272,7 @@ impl RenderBlock {
     ) -> usize {
         match self {
             RenderBlock::Btw(_) if mode != DisplayMode::Collapsed => 2,
+            RenderBlock::CommandResult(_) if mode != DisplayMode::Collapsed => 1,
             RenderBlock::Thinking(_)
                 if mode != DisplayMode::Collapsed
                     && appearance.scrollback.blocks.thinking.header =>

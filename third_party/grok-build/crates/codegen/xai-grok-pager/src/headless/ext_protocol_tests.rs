@@ -496,6 +496,22 @@ fn headless_unknown_leader_method_is_silent_none() {
     );
 }
 
+/// DIVERGENCE(dscode): a host command's result block prints its text in
+/// headless mode, as its reply text did; a bare success prints nothing.
+#[test]
+fn headless_command_result_prints_its_text() {
+    let notif = make_ext_notif(
+        "x.ai/session_notification",
+        serde_json::json!({ "sessionUpdate": "command_result", "name": "goal", "kind": "success", "text": "Goal paused." }),
+    );
+    assert!(matches!(handle_ext_notification(&notif), ExtEvent::CommandText(text) if text == "Goal paused."));
+    let bare = make_ext_notif(
+        "x.ai/session_notification",
+        serde_json::json!({ "sessionUpdate": "command_result", "name": "plan", "kind": "success" }),
+    );
+    assert!(matches!(handle_ext_notification(&bare), ExtEvent::None));
+}
+
 #[test]
 fn headless_session_notification_unknown_tag_is_clean_ignore() {
     let notif = make_ext_notif(

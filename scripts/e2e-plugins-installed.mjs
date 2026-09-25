@@ -38,13 +38,14 @@ async function withLeader(run) {
     await host.ready
     const open = async () => (await host.rpc('session/new', { cwd: home, mcpServers: [] })).sessionId
     const sessionId = await open()
-    const replies = () => host.notes.filter(note => note.method === 'session/update' && note.params.update.sessionUpdate === 'agent_message_chunk')
+    // A /dsh reply is its own `command_result` block.
+    const replies = () => host.notes.filter(note => /^_?x\.ai\/session_notification$/.test(note.method) && note.params.update.sessionUpdate === 'command_result')
     const dsh = async text => {
       const before = replies().length
       const done = await host.rpc('session/prompt', { sessionId, prompt: [{ type: 'text', text }] })
       assert.equal(done.stopReason, 'end_turn')
       await waitFor(() => replies().length > before, 'the reply to ' + text)
-      return replies().slice(before).map(note => note.params.update.content.text).join('')
+      return replies().slice(before).map(note => note.params.update.text ?? '').join('')
     }
     const systemNotes = () => host.notes.filter(note => /^_?x\.ai\/session_notification$/.test(note.method) && note.params.update.sessionUpdate === 'image_dropped')
       .map(note => ({ sessionId: note.params.sessionId, text: note.params.update.notes.join('\n') }))

@@ -1,9 +1,21 @@
 /** Leader socket spec: leader native goals. */
 import { describe, expect, it, vi } from 'vitest'
+import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { NativeGoalView } from '../src/projection.ts'
-import { makeClient, mockAttachments, register, sendRequest, useLeaderHarness, waitFor, waitForId } from './support/leader-harness.ts'
+import { commandResults, makeClient, mockAttachments, recordCommand, register, sendRequest, useLeaderHarness, waitFor, waitForId } from './support/leader-harness.ts'
+
+/** A registry `execute` that records its run like DSH's registry. */
+function recordingExecute(pluginCtx: () => Context, result: { kind: string; text?: string }) {
+  let count = 0
+  return vi.fn(async (agent: Agent, line: string, _images: unknown[], _signal: AbortSignal) => {
+    const commandId = 'cmd-test-' + String(++count)
+    recordCommand(pluginCtx(), agent, line, commandId, result)
+    return { commandId, result }
+  })
+}
 
 describe('leader native goals', () => {
   const start = useLeaderHarness()
@@ -185,10 +197,12 @@ describe('leader native goals', () => {
     expect(c.completes).toHaveLength(completes.length + 2)
   })
 
-  it.each(['success', 'error'])('returns native %s over x.ai/commands/run and preserves its outcome over session/prompt', async (kind) => {
+  it.each(['success', 'error'])('returns native %s over x.ai/commands/run and shows it once as its durable command block on both routes', async (kind) => {
     const result = { kind, text: 'native admission response' }
-    const execute = vi.fn(async (_agent: Agent, _line: string, _images: unknown[], _signal: AbortSignal) => ({ commandId: 'goal', result }))
-    const { registry, client: c } = await start({ commands: { list: () => [], execute } })
+    let ctx!: Context
+    const execute = recordingExecute(() => ctx, result)
+    const { registry, pluginCtx, client: c } = await start({ commands: { list: () => [], execute } })
+    ctx = pluginCtx
     register(c)
     await c.next()
     const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
@@ -199,18 +213,40 @@ describe('leader native goals', () => {
     expect((await c.request(2, 'x.ai/commands/run', { sessionId, prompt })).result).toEqual({ result })
     expect(c.all.slice(before).filter(m => m.method === 'session/update')).toEqual([])
     expect(c.completes).toEqual([])
+    // An error result is recorded and shown like a success; neither route fails.
     const response = await c.request(3, 'session/prompt', { sessionId, prompt, _meta: { promptId: 'native-headless' } })
-    if (kind === 'error') {
-      expect(response.error).toMatchObject({ code: -32602, message: result.text })
-      expect(c.all.slice(before).filter(m => m.method === 'session/update')).toEqual([])
-    } else {
-      expect(response.result).toMatchObject({ stopReason: 'end_turn', _meta: { promptId: 'native-headless' } })
-      await waitFor(() => c.all.some(m => m.method === 'session/update'
-        && (m.params as { update?: { content?: { text?: string } } }).update?.content?.text === result.text))
-    }
+    expect(response.result).toMatchObject({ stopReason: 'end_turn', _meta: { promptId: 'native-headless' } })
+    await waitFor(() => commandResults(c.all).length === 2)
+    const block = { sessionUpdate: 'command_result', name: 'goal', args: 'status', kind, text: result.text }
+    expect(commandResults(c.all.slice(before)).map(params => params.update)).toEqual([block, block])
+    expect(commandResults(c.all).every(params => params._meta.isReplay === undefined)).toBe(true)
+    // Never as assistant text.
+    expect(c.all.slice(before).filter(m => m.method === 'session/update'
+      && (m.params as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === 'agent_message_chunk')).toEqual([])
     expect(execute.mock.calls.map(call => call[1])).toEqual([' /goal status  ', ' /goal status  '])
     expect(execute.mock.calls.every(call => call[0] === agent && call[3] instanceof AbortSignal && !call[3].aborted)).toBe(true)
     expect(agent.internals.followups).toEqual([])
+  })
+
+  it('replays command results from their durable records on session/load, except one an earlier event presents', async () => {
+    const { persistence, client: c } = await start()
+    register(c)
+    await c.next()
+    const event = (seq: number, type: string, data: unknown) => ({ type, seq: SessionSeq(seq), time: seq, data }) as unknown as SessionEvent
+    persistence.readEvents = async () => [
+      event(0, 'command/run', { commandId: 'a', name: 'goal', args: ' pause', source: { kind: 'user' } }),
+      event(1, 'command/done', { commandId: 'a', kind: 'success', text: 'Goal paused' }),
+      event(2, 'command/run', { commandId: 'b', name: 'compact', args: '', source: { kind: 'user' } }),
+      event(3, 'command/done', { commandId: 'b', kind: 'success', sourceEventSeq: 0 }),
+      event(4, 'command/run', { commandId: 'c', name: 'goal', args: ' resume', source: { kind: 'user' } }),
+      event(5, 'command/done', { commandId: 'c', kind: 'error', text: 'No goal is currently set' }),
+    ]
+    expect((await c.request(1, 'session/load', { sessionId: 'persisted-session', cwd: '/tmp/proj', mcpServers: [] })).error).toBeUndefined()
+    await waitFor(() => commandResults(c.all).length === 2)
+    expect(commandResults(c.all)).toEqual([
+      expect.objectContaining({ update: { sessionUpdate: 'command_result', name: 'goal', args: 'pause', kind: 'success', text: 'Goal paused' }, _meta: expect.objectContaining({ isReplay: true }) }),
+      expect.objectContaining({ update: { sessionUpdate: 'command_result', name: 'goal', args: 'resume', kind: 'error', text: 'No goal is currently set' }, _meta: expect.objectContaining({ isReplay: true }) }),
+    ])
   })
 
   it('delegates goal attachment admission and native throws without model I/O or attachment persistence', async () => {

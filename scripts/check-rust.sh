@@ -15,7 +15,7 @@ cd "$ROOT/third_party/grok-build"
 cargo check -p xai-grok-pager-bin
 cargo test -p xai-grok-pager-bin --bin dscode -- dsh_launch dscode_aliases dashboard_subcommand
 cargo test -p xai-grok-shell-base util::tests:: --lib
-cargo test -p xai-grok-shell --lib -- leader:: image_normalize util::config
+cargo test -p xai-grok-shell --lib -- leader:: image_normalize util::config command_result
 cargo test -p xai-grok-tools --lib ask_user_question
 cargo test -p xai-grok-update --lib
 cargo test -p xai-grok-pager -p xai-grok-pager-render --lib -- \
@@ -25,6 +25,6 @@ cargo test -p xai-grok-pager -p xai-grok-pager-render --lib -- \
   scrollback_paste_focus_forward tool_identity_ tool_view_ host_command_ palette_commands_ command_options_ quit_activity_ \
   loop_gating_ unadvertised_goal_ auto_waits_for_the_host always_approve_stays_offered approval_view_ \
   native_session_controls native_goal_ literal_goal_ native_session_effect remote_session_references_ \
-  sessions_cmd plan_aware_toast non_shell_execute other_tool_expanded structured_question_answers \
+  sessions_cmd plan_aware_toast non_shell_execute other_tool_expanded structured_question_answers command_result \
   d_is_not_a_delete_key session_picker_footer_offers_no_delete delete_session_complete
 echo 'PASS Rust product contracts'

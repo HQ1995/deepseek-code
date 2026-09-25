@@ -4,6 +4,7 @@ import type { EncodedImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { internalError, invalidParams, paramRecord, sessionIdParam } from './acp.ts'
 import { boundOptions, type SelectOption } from './command-options.ts'
+import { commandLine, commandResultNotice, type CommandResultNotice } from './command-results.ts'
 import { errorMessage } from './guards.ts'
 import type { AgentPresetsLike } from './session-presets.ts'
 import type { SessionWork, SessionOperation } from './session-work.ts'
@@ -100,7 +101,13 @@ const unsupported: Record<string, string> = {
  * Catalog work without a session still drains on host shutdown. Bound reads
  * and executions also belong to their session's work scope. Native features
  * retain their own mutations; this module owns precedence, cancellation-aware
- * dispatch and turnless/ambient presentation, never prompt queue settlement. */
+ * dispatch and turnless/ambient presentation, never prompt queue settlement.
+ *
+ * A command's result (either kind) is its own `command_result` block, never
+ * assistant text. DSH's registry records its commands durably and the session
+ * output projects those records, so a registry command settles with nothing
+ * sent here; a bridge-owned command is no DSH command and sends its result
+ * live only. A thrown refusal still fails the request. */
 export function createSessionCommands<S extends CommandSession>(host: CommandHost<S>) {
   let closed = false, ready = false, disposal: Promise<void> | undefined
   const shutdown = new AbortController(), pending = new Set<Promise<unknown>>()
@@ -203,14 +210,20 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
     refreshes.set(record, state)
     return state.promise
   }
-  const notify = (record: S, message: string) => record.output.update({
-    sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: message },
-  }, false, Date.now())
-  const settle = (record: S, params: Record<string, unknown>, message: string, scope: SessionOperation): PromptSettleResult => {
+  /** A bridge-owned command's progress: a plain system line, not its result. */
+  const progress = (record: S, message: string) => record.output.update({ sessionUpdate: 'image_dropped', notes: [message] }, false, Date.now())
+  /** A bridge-owned command's result for its invocation line (live only), in Markdown. */
+  const owned = (text: string, kind: 'success' | 'error', message: string): CommandResultNotice => {
+    const line = commandLine(text)
+    return commandResultNotice(line?.name ?? '', line?.args, kind, message, true)
+  }
+  /** Settle the command's prompt turnless, sending a bridge-owned result;
+   * a registry command's result is its durable record's. */
+  const settle = (record: S, params: Record<string, unknown>, scope: SessionOperation, result?: CommandResultNotice): PromptSettleResult => {
     active(record, scope)
     const meta = params._meta as Record<string, unknown> | null | undefined
     const promptId = typeof meta?.promptId === 'string' && meta.promptId.length > 0 ? meta.promptId : randomUUID()
-    notify(record, message)
+    if (result !== undefined) record.output.update(result, false, Date.now())
     return { stopReason: 'end_turn', _meta: { sessionId: String(record.agent.session.id), promptId } }
   }
   const execute = (record: S, params: Record<string, unknown>, parsed: ParsedPrompt, signal?: AbortSignal): Promise<PromptSettleResult | undefined> | undefined => {
@@ -240,39 +253,36 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
           // Let accepted profile transactions finish atomically, but suppress
           // progress from a cancelled generation even if its owner reopens.
           try { active(record, scope) } catch { return }
-          notify(record, message)
+          progress(record, message)
         })
-        return settle(record, params, message, scope)
+        return settle(record, params, scope, owned(text, 'success', message))
       }
       if (browser) {
         textOnly('/browser')
         const message = await host.browser.execute(text)
-        return settle(record, params, message, scope)
+        return settle(record, params, scope, owned(text, 'success', message))
       }
       if (team) {
         textOnly('/team')
-        return settle(record, params, host.team.execute(record, text), scope)
+        return settle(record, params, scope, owned(text, 'success', host.team.execute(record, text)))
       }
       if (preset) {
         textOnly('/preset')
         const message = await host.preset(record, text)
         active(record, scope); void refresh(record)
-        return settle(record, params, message, scope)
+        return settle(record, params, scope, owned(text, 'success', message))
       }
-      if (children || name === 'goal') {
-        const execution = children ? await host.children.command(record.clientId, params) : await host.goals.goal(record.clientId, params)
-        if (execution.result.kind === 'error') throw invalidParams(execution.result.text)
-        return settle(record, params, execution.result.text, scope)
+      if (children) {
+        const { result } = await host.children.command(record.clientId, params)
+        return settle(record, params, scope, owned(text, result.kind === 'error' ? 'error' : 'success', result.text))
       }
+      // `/goal` is the registry's: its durable record carries the result.
+      if (name === 'goal') { await host.goals.goal(record.clientId, params); return settle(record, params, scope) }
       if (refusal !== undefined) { textOnly('/' + name); throw invalidParams(refusal) }
       if (registry !== undefined) {
         const execution = await registry.execute(record.agent, text, parsed.images, AbortSignal.any([scope.signal, shutdown.signal]))
         active(record, scope)
-        if (execution !== undefined) {
-          const body = execution.result.text ?? (execution.result.kind === 'success' ? 'done' : 'command failed')
-          if (execution.result.kind === 'error') throw invalidParams(body)
-          return settle(record, params, body, scope)
-        }
+        if (execution !== undefined) return settle(record, params, scope)
       }
       if (name === 'compact') { textOnly('/compact'); throw invalidParams('Manual compaction is unavailable in this session.') }
       return undefined
@@ -335,7 +345,11 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
         const name = /^\/([^\s]+)/.exec(text)?.[1]?.toLowerCase()
         const owner = name === undefined || !IMMEDIATE.has(name) ? undefined : immediate[name]
         if (owner === undefined) throw invalidParams(`x.ai/commands/run requires an immediate command (${[...IMMEDIATE].map(name => '/' + name).join(', ')})`)
-        return owner(clientId, params)
+        const execution = await owner(clientId, params)
+        // `/goal`'s durable record shows its result; `/subagents` is the bridge's.
+        const record = name === 'subagents' ? host.owned(clientId, sessionIdParam(p.sessionId)) : undefined
+        if (record !== undefined && !closed) record.output.update(owned(text, execution.result.kind === 'error' ? 'error' : 'success', execution.result.text), false, Date.now())
+        return execution
       })
     },
     /** `x.ai/commands/options`: the choices of a command's bare invocation

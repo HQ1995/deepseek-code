@@ -1694,7 +1694,11 @@ fn track_background_lifecycle(
             }
         }
         // Routed to the emitter by the caller, never tracked.
-        ExtEvent::MonitorEvent | ExtEvent::None | ExtEvent::Lifecycle(_) | ExtEvent::Stream(_) => {}
+        ExtEvent::MonitorEvent
+        | ExtEvent::None
+        | ExtEvent::Lifecycle(_)
+        | ExtEvent::Stream(_)
+        | ExtEvent::CommandText(_) => {}
     }
 }
 
@@ -1853,6 +1857,7 @@ fn handle_headless_acp_message(
             match event {
                 ExtEvent::Lifecycle(l) => emitter.on_lifecycle(l),
                 ExtEvent::Stream(event) => emitter.reduce_and_emit(*event),
+                ExtEvent::CommandText(text) => emitter.on_text_chunk(&text),
                 other => track_background_lifecycle(other, pending_bg, completed_bg),
             }
         }

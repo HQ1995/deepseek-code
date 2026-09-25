@@ -172,6 +172,24 @@ describe('native child/workflow ownership', () => {
     await f.children.dispose()
   })
 
+  it('shows a child\'s command results as command blocks in paged child history', async () => {
+    const f = fixture(), child = f.add('child')
+    f.append(child, 'command/run', { commandId: 'c1', name: 'feedback', args: ' works', source: { kind: 'user' } })
+    f.append(child, 'command/done', { commandId: 'c1', kind: 'success', text: 'Feedback recorded' })
+    f.append(child, 'command/run', { commandId: 'c2', name: 'compact', source: { kind: 'user' } })
+    f.append(child, 'command/done', { commandId: 'c2', kind: 'success', sourceEventSeq: 0 })
+    const result = await f.children.history(1, { sessionId: 'root', childSessionId: 'child' })
+    expect((result as { entries: Array<{ commandResult?: unknown }> }).entries).toEqual([
+      { commandResult: { sessionUpdate: 'command_result', name: 'feedback', args: 'works', kind: 'success', text: 'Feedback recorded' } }])
+    // A page that starts after the run still pairs its settlement.
+    f.append(child, 'command/run', { commandId: 'c3', name: 'goal', args: ' clear', source: { kind: 'user' } })
+    await f.children.history(1, { sessionId: 'root', childSessionId: 'child', after: 4 })
+    f.append(child, 'command/done', { commandId: 'c3', kind: 'error', text: 'no goal' })
+    await expect(f.children.history(1, { sessionId: 'root', childSessionId: 'child', after: 5 })).resolves.toMatchObject({ entries: [
+      { commandResult: { name: 'goal', args: 'clear', kind: 'error', text: 'no goal' } }] })
+    await f.children.dispose()
+  })
+
   it('shows a child\'s model-visible context as system notices in paged child history', async () => {
     const f = fixture(), child = f.add('child')
     f.append(child, 'user/message', { id: 'a', source: { kind: 'team-message', form: 'relay', senderName: 'lead' }, content: [{ type: 'text', text: 'rebase first' }] })

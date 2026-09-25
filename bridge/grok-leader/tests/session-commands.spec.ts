@@ -76,7 +76,7 @@ describe('owned session commands', () => {
     expect(f.execute.mock.calls[0]![3].aborted).toBe(true)
     gate.resolve({ result: { kind: 'success', text: 'late output' } }); await rejected
     expect(f.record.output.update).not.toHaveBeenCalled()
-    await f.request('/goal show')
+    await f.request('/team')
     expect(f.record.output.update).toHaveBeenCalledOnce()
   })
 
@@ -145,13 +145,20 @@ describe('owned session commands', () => {
     const children = { sessionId: 'one', prompt: [{ type: 'text', text: '/subagents stop child' }] }
     await expect(f.commands.run(2, children)).resolves.toEqual({ result: { kind: 'success', text: 'children done' } })
     expect(f.host.children.command).toHaveBeenCalledWith(2, children)
+    // Another client's session receives no result block.
+    expect(f.record.output.update).not.toHaveBeenCalled()
     for (const text of ['/dsh plugins', '/goals', 'plain text', '/', '/__proto__', '/constructor']) {
       await expect(f.commands.run(1, { sessionId: 'one', prompt: [{ type: 'text', text }] })).rejects.toMatchObject({ code: -32602 })
     }
     await expect(f.commands.run(1, null)).rejects.toMatchObject({ code: -32602 })
     await expect(f.commands.run(1, { sessionId: 'one', prompt: '/goal' })).rejects.toMatchObject({ code: -32602 })
     expect(f.host.goals.goal).toHaveBeenCalledOnce(); expect(f.host.children.command).toHaveBeenCalledOnce()
+    // `/goal`'s result is its durable record's; the bridge's `/subagents` sends its own, either kind.
     expect(f.execute).not.toHaveBeenCalled(); expect(f.record.output.update).not.toHaveBeenCalled()
+    f.host.children.command.mockResolvedValueOnce({ result: { kind: 'error', text: 'no such child' } })
+    await expect(f.commands.run(1, children)).resolves.toEqual({ result: { kind: 'error', text: 'no such child' } })
+    expect(f.record.output.update).toHaveBeenCalledExactlyOnceWith(
+      { sessionUpdate: 'command_result', name: 'subagents', args: 'stop child', kind: 'error', text: 'no such child', markdown: true }, false, expect.any(Number))
     await f.commands.dispose()
     await expect(f.commands.run(1, goal)).rejects.toThrow('disposed')
   })
@@ -295,8 +302,14 @@ describe('owned session commands', () => {
     f.execute.mockResolvedValue({ result: { kind: 'success', text: 'native reply' } })
     await expect(f.request(' /native text ', f.record, true)).resolves.toEqual({ stopReason: 'end_turn', _meta: { sessionId: 'one', promptId: 'command-id' } })
     expect(f.execute).toHaveBeenCalledWith(f.record.agent, '/native text', [expect.objectContaining({ mediaType: 'image/png' })], expect.any(AbortSignal))
-    expect(f.record.output.update).toHaveBeenCalledWith({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'native reply' } }, false, expect.any(Number))
+    // The reply is the registry's durable `command/done`, which the session
+    // output projects: never an assistant message, never sent twice.
+    expect(f.record.output.update).not.toHaveBeenCalled()
     expect(f.clients.get(1)!.notify).not.toHaveBeenCalled()
+    // An error result is recorded and shown the same way; it no longer fails the request.
+    f.execute.mockResolvedValue({ result: { kind: 'error', text: 'native refused' } })
+    await expect(f.request('/native text')).resolves.toMatchObject({ stopReason: 'end_turn' })
+    expect(f.record.output.update).not.toHaveBeenCalled()
   })
 
   it.each(['/auto', '/delete', '/remember'])('keeps %s ahead of plugins and refuses image attachments', async command => {
@@ -310,20 +323,22 @@ describe('owned session commands', () => {
   it('offers compact to native commands first and only then emits the fallback', async () => {
     const f = fixture()
     f.execute.mockResolvedValueOnce({ result: { kind: 'success', text: 'compacted' } })
-    await f.request('/compact')
-    expect(f.record.output.update.mock.calls[0]![0].content.text).toBe('compacted')
+    await expect(f.request('/compact')).resolves.toMatchObject({ stopReason: 'end_turn' })
+    expect(f.execute).toHaveBeenCalledOnce()
     await expect(f.request('/compact')).rejects.toThrow('Manual compaction is unavailable')
-    expect(f.record.output.update).toHaveBeenCalledOnce()
+    expect(f.record.output.update).not.toHaveBeenCalled()
     await expect(f.request('/compact', f.record, true)).rejects.toThrow('does not accept image attachments')
   })
 
   it('preserves reserved-command casing and delegates native child and goal controls', async () => {
     const f = fixture()
     f.host.children.command.mockResolvedValueOnce({ result: { kind: 'error', text: 'child failed' } })
-    await expect(f.request('/SUBAGENTS list')).rejects.toThrow('child failed')
-    expect(f.record.output.update).not.toHaveBeenCalled()
+    await expect(f.request('/SUBAGENTS list')).resolves.toMatchObject({ stopReason: 'end_turn' })
+    expect(f.record.output.update).toHaveBeenCalledExactlyOnceWith(
+      { sessionUpdate: 'command_result', name: 'subagents', args: 'list', kind: 'error', text: 'child failed', markdown: true }, false, expect.any(Number))
     await f.request('/GOAL show')
     expect(f.host.children.command).toHaveBeenCalledOnce(); expect(f.host.goals.goal).toHaveBeenCalledOnce()
+    expect(f.record.output.update).toHaveBeenCalledOnce()
     expect(f.execute).not.toHaveBeenCalled()
     await f.request('/DSH plugins')
     expect(f.execute).toHaveBeenCalledOnce(); expect(f.host.profile.execute).not.toHaveBeenCalled()
@@ -333,7 +348,12 @@ describe('owned session commands', () => {
     const f = fixture()
     f.host.profile.execute.mockImplementationOnce(async (_text, notify) => { notify('auditing'); return 'installed' })
     await f.request('/dsh add plugin'); await f.request('/preset minimal'); await tick()
-    expect(f.record.output.update.mock.calls.map(call => call[0].content.text)).toEqual(['auditing', 'installed', 'preset done'])
+    // Progress is a plain system line; each result is its command's own block, live only.
+    expect(f.record.output.update.mock.calls.map(call => call[0])).toEqual([
+      { sessionUpdate: 'image_dropped', notes: ['auditing'] },
+      { sessionUpdate: 'command_result', name: 'dsh', args: 'add plugin', kind: 'success', text: 'installed', markdown: true },
+      { sessionUpdate: 'command_result', name: 'preset', args: 'minimal', kind: 'success', text: 'preset done', markdown: true },
+    ])
     expect(f.host.preset).toHaveBeenCalledWith(f.record, '/preset minimal')
     expect(f.clients.get(1)!.notify.mock.calls.map(call => call[1].update.sessionUpdate)).toEqual(['available_commands_update'])
     expect(f.execute).not.toHaveBeenCalled()
@@ -359,7 +379,7 @@ describe('owned session commands', () => {
     f.host.profile.execute.mockImplementationOnce(async (_text, notify) => { notify('before'); await gate.promise; notify('late'); return 'late result' })
     const result = f.request('/dsh plugins')!, rejected = expect(result).rejects.toThrow('session closed')
     f.record.work.cancel(); gate.resolve(); await rejected
-    expect(f.record.output.update.mock.calls.map(call => call[0].content.text)).toEqual(['before'])
+    expect(f.record.output.update.mock.calls.map(call => call[0].notes)).toEqual([['before']])
     await expect(f.request('/auto')).rejects.toThrow('/auto is unsupported')
   })
 
