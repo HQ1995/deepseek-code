@@ -58,7 +58,8 @@ runtimeEdges.get('src/package-location.ts')!.add('bin/update.mjs')
 // Every bridge module except the composition root declares the local modules
 // it may import (type-only edges included). A path entry names a launcher file.
 const declaredDependencies = [
-    ['model-catalog', ['acp', 'protocol', 'model-endpoint', 'native-provider', 'native-seams', 'provider-profile', 'wire-catalog', 'guards']],
+    ['model-catalog', ['acp', 'protocol', 'model-endpoint', 'native-provider', 'native-seams', 'provider-profile', 'provider-roster', 'wire-catalog', 'guards']],
+    ['provider-roster', ['model-endpoint', 'native-provider', 'native-seams', 'provider-profile', 'wire-catalog', 'guards']],
     ['native-provider', ['acp', 'native-seams', 'plugin-rows', 'provider-profile']],
     ['plugin-rows', ['acp', 'guards']],
     ['browser-control', ['acp', 'native-seams', 'plugin-rows', 'profile-plugins', 'guards']],

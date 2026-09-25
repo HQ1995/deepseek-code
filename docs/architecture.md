@@ -40,7 +40,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 
 ## Bridge modules
 
-`src/` has 55 modules; `index.ts` is the composition root.
+`src/` has 56 modules; `index.ts` is the composition root.
 
 | Module | Owns |
 | --- | --- |
@@ -52,6 +52,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `leader-lifecycle` | Host heartbeat, no-client grace, shutdown that joins every owner's drain |
 | `model-catalog` | Catalog snapshots, accepted native reads, discovery, route writes, disposal; no socket or Cordis |
 | `wire-catalog` | Pure: wire ids, catalog assembly, selection resolution, effort acceptance, provider notes |
+| `provider-roster` | Pure: roster rows, each provider's model list and display row, discovery request and rows, client replies |
 | `provider-profile` | Pure llm-pi-ai rules: settings reads, `/provider` form validation, profile merge |
 | `model-endpoint` | The catalog's only outbound HTTP: bounded `/models` probe, injected `fetch` |
 | `native-provider` | The official DeepSeek Messages adapter as an explicit `/provider` route |
