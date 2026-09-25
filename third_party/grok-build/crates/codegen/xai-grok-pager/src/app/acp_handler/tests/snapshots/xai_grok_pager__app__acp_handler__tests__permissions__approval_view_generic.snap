@@ -1,0 +1,16 @@
+---
+source: crates/codegen/xai-grok-pager/src/app/acp_handler/tests/permissions.rs
+expression: "render(approval_view_request(\"Schedule nightly\", serde_json::json!({}),\ngeneric))"
+---
+┃
+┃  Allow Schedule nightly?
+┃  {
+┃    "cron": "0 3 * * *",
+┃    "prompt": "Summarize the day"
+┃  }
+┃
+┃  1 (●) Allow once
+┃  2 (○) No, reject (type to add feedback)
+┃
+┃
+┃

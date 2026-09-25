@@ -4,7 +4,8 @@
  * reads from `_meta['dscode/view']`. They run at projection time, live and on
  * replay alike, against the registry of the agent whose log is projected: a
  * presenter reads only the call's arguments and the durable result (`content`,
- * `isError`, `meta`), so nothing is persisted. An unmounted tool, a throwing
+ * `isError`, `meta`), so nothing is persisted. An approval prompt carries the
+ * pending call's view too (`native-interactions`). An unmounted tool, a throwing
  * presenter, arguments that no longer match the tool's schema or a view of an
  * unknown shape give no view; the name tables in `projection` then apply.
  *

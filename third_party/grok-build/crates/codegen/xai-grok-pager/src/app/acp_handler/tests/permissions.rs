@@ -77,6 +77,113 @@
         assert!(command.is_none());
     }
 
+    /// DIVERGENCE(dscode): a request carrying the call's own view, as the
+    /// bridge sends it: the view in the tool call's `_meta`, the view title
+    /// (then " — " and the asker's reason) as the tool title.
+    fn approval_view_request(title: &str, raw: serde_json::Value, view: serde_json::Value) -> acp::RequestPermissionRequest {
+        let mut req = permission_req_with_raw_input(Some(raw));
+        req.tool_call.fields.title = Some(title.to_string());
+        req.tool_call.meta = Some(serde_json::Map::from_iter([("dscode/view".to_string(), view)]));
+        req.options = vec![
+            acp::PermissionOption::new(acp::PermissionOptionId::new(std::sync::Arc::from("allow-once")), "Allow once", acp::PermissionOptionKind::AllowOnce),
+            acp::PermissionOption::new(acp::PermissionOptionId::new(std::sync::Arc::from("reject-once")), "Reject", acp::PermissionOptionKind::RejectOnce),
+        ];
+        req
+    }
+    const APPROVAL_REASON: &str = "Allow this operation with danger-full-access permissions: fix perms";
+
+    /// A terminal view: the command's description titles the prompt, the
+    /// command is the body, and the reason and the working directory lead the
+    /// lines. The shell-input parsing is only the fallback.
+    #[test]
+    fn approval_view_terminal_shows_command_cwd_and_reason() {
+        let view = serde_json::json!({ "card": "terminal", "title": "chmod -R u+w build", "description": "Fix build permissions", "cwd": "/w/pkg" });
+        // Arguments the grok shell input would not parse: the view alone decides.
+        let raw = serde_json::json!({ "cmd": "ignored" });
+        let req = approval_view_request(&format!("chmod -R u+w build \u{2014} {APPROVAL_REASON}"), raw.clone(), view.clone());
+        let (title, description, command) = build_permission_display(&req, None, false);
+        assert_eq!(title, "Fix build permissions");
+        assert_eq!(description, vec![APPROVAL_REASON.to_string(), "cwd: /w/pkg".to_string()]);
+        assert_eq!(command.as_deref(), Some("chmod -R u+w build"));
+        // No reason: the title is the view's own and no line repeats it.
+        let req = approval_view_request("chmod -R u+w build", raw.clone(), view);
+        assert_eq!(build_permission_display(&req, None, false).1, vec!["cwd: /w/pkg".to_string()]);
+        // A background run (a generic execute) is a command too.
+        let background = serde_json::json!({ "card": "generic", "title": "sleep 60", "kind": "execute", "rawInput": "sleep 60", "content": [{ "type": "text", "text": "Wait a minute" }] });
+        let (title, description, command) = build_permission_display(&approval_view_request("sleep 60", raw, background), None, false);
+        assert_eq!((title.as_str(), description.len(), command.as_deref()), ("Wait a minute", 0, Some("sleep 60")));
+    }
+
+    /// A diff view: "Allow <view title>?" over the change as unified lines,
+    /// the reason first; a new file is all insertions; several files are
+    /// headed by their paths.
+    #[test]
+    fn approval_view_diff_previews_the_change() {
+        let edit = serde_json::json!({ "card": "diff", "title": "Edit /w/a.ts", "diffs": [{ "path": "/w/a.ts", "oldText": "const a = 1", "newText": "const a = 2" }] });
+        let req = approval_view_request(&format!("Edit /w/a.ts \u{2014} {APPROVAL_REASON}"), serde_json::json!({ "file_path": "/w/a.ts" }), edit);
+        let (title, description, command) = build_permission_display(&req, None, false);
+        assert_eq!(title, "Allow Edit /w/a.ts?");
+        assert_eq!(description, vec![APPROVAL_REASON, "-const a = 1", "+const a = 2"]);
+        assert!(command.is_none());
+        let write = serde_json::json!({ "card": "diff", "title": "Write /w/new.txt", "diffs": [{ "path": "/w/new.txt", "oldText": null, "newText": "one\ntwo\n" }] });
+        let (title, description, _) = build_permission_display(&approval_view_request("Write /w/new.txt", serde_json::json!({}), write), None, false);
+        assert_eq!((title.as_str(), description), ("Allow Write /w/new.txt?", vec!["+one".to_string(), "+two".to_string()]));
+        let patch = serde_json::json!({ "card": "diff", "title": "Apply patch", "diffs": [
+            { "path": "a", "oldText": "x", "newText": "y" }, { "path": "b", "newText": "z" }] });
+        let (_, description, _) = build_permission_display(&approval_view_request("Apply patch", serde_json::json!({}), patch), None, false);
+        assert_eq!(description, vec!["a", "-x", "+y", "b", "+z"]);
+    }
+
+    /// A generic view: "Allow <view title>?" over its salient input, else the
+    /// planned arguments, capped by the same formatter as MCP arguments.
+    #[test]
+    fn approval_view_generic_shows_salient_input() {
+        let salient = serde_json::json!({ "card": "generic", "title": "Schedule nightly", "kind": "other", "rawInput": "0 3 * * *" });
+        let req = approval_view_request(&format!("Schedule nightly \u{2014} {APPROVAL_REASON}"), serde_json::json!({ "cron": "0 3 * * *" }), salient);
+        let (title, description, command) = build_permission_display(&req, None, false);
+        assert_eq!(title, "Allow Schedule nightly?");
+        assert_eq!(description, vec![APPROVAL_REASON, "0 3 * * *"]);
+        assert!(command.is_none());
+        let bare = serde_json::json!({ "card": "generic", "title": "Update todos" });
+        let (_, description, _) = build_permission_display(&approval_view_request("Update todos", serde_json::json!({ "todos": [1] }), bare.clone()), None, false);
+        assert_eq!(description.join("\n"), "{\n  \"todos\": [\n    1\n  ]\n}");
+        let big = serde_json::json!({ "card": "generic", "title": "Big", "rawInput": (0..MCP_ARGS_MAX_LINES + 5).map(|i| i.to_string()).collect::<Vec<_>>().join("\n") });
+        let (_, description, _) = build_permission_display(&approval_view_request("Big", serde_json::json!({}), big), None, false);
+        assert_eq!(description.len(), MCP_ARGS_MAX_LINES + 1);
+        assert_eq!(description.last().map(String::as_str), Some("… (+5 more lines)"));
+        // An unknown card is no view: the prompt renders as before.
+        let unknown = serde_json::json!({ "card": "hologram", "title": "x" });
+        let (title, _, _) = build_permission_display(&approval_view_request("mcp__x__y \u{2014} why", serde_json::json!({}), unknown), None, false);
+        assert!(title.starts_with("Allow ") && title.contains("why"), "{title}");
+    }
+
+    /// The prompt as it renders, per view kind.
+    #[test]
+    fn approval_view_renders_each_kind() {
+        let render = |req: acp::RequestPermissionRequest| -> String {
+            let mut app = make_app_with_agent("sess-1");
+            let mut req = req;
+            req.session_id = acp::SessionId::new("sess-1");
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            handle(AcpClientMessage::RequestPermission(xai_acp_lib::AcpArgs { request: req, response_tx: tx }), &mut app);
+            let state = app.agents[&AgentId(0)].permission_queue.front().expect("queued");
+            let theme = crate::theme::Theme::current();
+            let area = ratatui::layout::Rect::new(0, 0, 72, 12);
+            let mut buf = ratatui::buffer::Buffer::empty(area);
+            let _ = crate::views::permission_view::render_permission_view(&mut buf, area, state, "", None, None, &theme, true);
+            (0..area.height)
+                .map(|row| (0..area.width).map(|col| buf[(col, row)].symbol().to_string()).collect::<String>().trim_end().to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let terminal = serde_json::json!({ "card": "terminal", "title": "chmod -R u+w build", "description": "Fix build permissions", "cwd": "/w/pkg" });
+        insta::assert_snapshot!("approval_view_terminal", render(approval_view_request(&format!("chmod -R u+w build \u{2014} {APPROVAL_REASON}"), serde_json::json!({}), terminal)));
+        let edit = serde_json::json!({ "card": "diff", "title": "Edit /w/a.ts", "diffs": [{ "path": "/w/a.ts", "oldText": "const a = 1", "newText": "const a = 2" }] });
+        insta::assert_snapshot!("approval_view_diff", render(approval_view_request(&format!("Edit /w/a.ts \u{2014} {APPROVAL_REASON}"), serde_json::json!({}), edit)));
+        let generic = serde_json::json!({ "card": "generic", "title": "Schedule nightly", "kind": "other", "rawInput": { "cron": "0 3 * * *", "prompt": "Summarize the day" } });
+        insta::assert_snapshot!("approval_view_generic", render(approval_view_request("Schedule nightly", serde_json::json!({}), generic)));
+    }
+
     /// A `tool_input` that is missing or JSON null renders nothing rather
     /// than a misleading `null`.
     #[test]

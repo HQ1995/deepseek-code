@@ -10,6 +10,7 @@ import { browserAction, isBrowserTool } from './browser-actions.ts'
 import { isRecord } from './guards.ts'
 import type { LeaderClient } from './leader-transport.ts'
 import { environmentLocale, pick } from './localized-text.ts'
+import { callView, registryPresenter, viewKind } from './tool-views.ts'
 
 interface InteractionSession { agent: Agent; clientId: number; yolo: boolean; queue: { cancel(): void }; work: { cancel(): void } }
 interface PendingCall { readonly callId?: string; readonly name: string; readonly arguments: unknown }
@@ -83,23 +84,29 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
   }
   const locale = (): string | undefined => host.locale === undefined ? environmentLocale() : host.locale()
   /** The TUI shows the planned arguments and, for browser calls, what they do.
-   * Its prompt reads "Allow <title>?", so the asker's reason rides the title
-   * (a bash prompt shows the command's own description there instead). A
-   * browser prompt names its action instead: the browser plugin's fixed
-   * reason restates what the docs and `/browser status` say. */
-  const permissionToolCall = (callId: string, toolName: string, reason: string | undefined) => {
+   * A tool that presents its call sends that view (`_meta['dscode/view']`) and
+   * the kind it implies, and the prompt renders from it as the tool's card does.
+   * The title is the view's title (else the tool name) and, after " — ", the
+   * asker's reason, which the TUI shows as its own line. A browser prompt names
+   * its action instead: the browser plugin's fixed reason restates what the
+   * docs and `/browser status` say. */
+  const permissionToolCall = (agent: Agent, callId: string, toolName: string, reason: string | undefined) => {
     const call = calls.get(callId)
     calls.delete(callId)
     const args = call?.name === toolName ? call.arguments : undefined
     const action = browserAction(toolName, args)
+    const view = args === undefined || action !== undefined ? undefined
+      : callView(registryPresenter(agent), toolName, args, agent.session.header?.cwd)
     const title = action !== undefined ? 'the browser to ' + action
-      : reason === undefined ? undefined : toolName + ' — ' + reason.replace(/[.。]+$/u, '')
+      : reason === undefined ? view?.title : (view?.title ?? toolName) + ' — ' + reason.replace(/[.。]+$/u, '')
     return {
       toolCallId: callId, displayName: toolName,
       ...title === undefined ? {} : { title },
+      ...view === undefined ? {} : { kind: viewKind(view) },
       ...args === undefined ? {} : {
         rawInput: toolName.startsWith('mcp__') ? { variant: 'MCPTool', tool_name: toolName, tool_input: args } : args,
       },
+      ...view === undefined ? {} : { _meta: { 'dscode/view': view } },
     }
   }
   const assertReady = (record: S): void => {
@@ -167,7 +174,7 @@ export function createNativeInteractions<S extends InteractionSession>(host: Int
       try {
         const response = await client.request<unknown>('session/request_permission', {
           sessionId: record.agent.session.id,
-          toolCall: permissionToolCall(callId, request.toolName, approvalReason(request, locale())),
+          toolCall: permissionToolCall(request.agent, callId, request.toolName, approvalReason(request, locale())),
           options: [
             { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
             { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },

@@ -92,7 +92,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `session-controller` | `sessionController` for Schedule delivery into sessions open in dscode |
 | `legacy-reminders` | Projection of rc.1 session-event reminders and their one-time notice |
 | `native-session-status` | Goal, activity, plan-mode and context observations; reads never arm a goal |
-| `native-interactions` | Permission modes and approvals, user questions and plan reviews, reverse-request admission |
+| `native-interactions` | Permission modes and approvals (rendered from the asking tool's call view), user questions and plan reviews, reverse-request admission |
 | `native-execution` | Runtime doctor and persistent-terminal controls |
 | `terminal-signal` | Retries a foreground-group signal that races an exiting group, a bounded number of times, through the provider |
 | `native-asides` | One-shot `/btw` asides, including late handles |
@@ -101,7 +101,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `projection` | Pure mapping of session events and tool metadata to TUI wire updates |
 | `tool-titles` | Fallback tool card titles read off argument shapes, never tool names |
 | `tool-output` | Pure fallback tool-card shapes by tool name: ToolKind, rawInput variants, fallback diffs, typed `rawOutput` |
-| `tool-views` | A tool's own DSH presenters run at projection time, live and on replay, and their views normalized for the TUI |
+| `tool-views` | A tool's own DSH presenters run at projection time, live and on replay, and for approvals, and their views normalized for the TUI |
 | `image-output` | Resolves tool images through the attachment authority |
 | `browser-actions` | Human wording for browser tool cards and approvals |
 | `browser-control` | `/browser`: toggles the isolated browser row, edits its settings |

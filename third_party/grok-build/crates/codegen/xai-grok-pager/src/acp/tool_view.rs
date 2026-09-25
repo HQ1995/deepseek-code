@@ -8,6 +8,8 @@
 //! `search` → Search, `web` → WebSearch / WebFetch, `generic` → Other (an
 //! `execute` kind stays Execute; a pending file read, search or fetch keeps its
 //! card family while it runs). A call without a view renders as before.
+//! An approval prompt for a call reads the same call view
+//! ([`approval_view`]).
 use super::{
     Path, RAW_INPUT_MAX_LINES, RenderBlock, content_text, execute_command_from_tool_call,
     extract_edit_error, extract_raw_field, extract_search_meta, fill_non_shell_execute,
@@ -40,8 +42,9 @@ pub(super) fn settled_meta(update: Option<acp::Meta>) -> Option<acp::Meta> {
     })
 }
 
-/// The card a notification's view names, for the debug log: `none` without one.
-pub(super) fn view_card(meta: Option<&acp::Meta>) -> &str {
+/// The card a view names (`none` without one): the debug log's field, and
+/// how an approval prompt knows its planned lines preview a diff.
+pub(crate) fn view_card(meta: Option<&acp::Meta>) -> &str {
     meta.and_then(|m| m.get(VIEW_KEY))
         .and_then(|view| view.get("card"))
         .and_then(Value::as_str)
@@ -67,6 +70,8 @@ struct FileDiff {
 }
 #[derive(Debug, Deserialize)]
 struct DiffView {
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     diffs: Vec<FileDiff>,
 }
@@ -237,6 +242,86 @@ pub(super) fn view_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> Opti
         }
     };
     Some(RenderBlock::ToolCall(block))
+}
+
+/// What an approval prompt shows of the call it asks about: the call's own
+/// view, read as its card reads it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ApprovalView {
+    /// A command (a terminal, or an `execute` without one): its text, its
+    /// description and the working directory it names.
+    Command {
+        title: String,
+        command: String,
+        description: Option<String>,
+        cwd: Option<String>,
+    },
+    /// File changes: one `(path, old text, new text)` per file, no old text
+    /// for a new file.
+    Diff {
+        title: String,
+        diffs: Vec<(String, Option<String>, String)>,
+    },
+    /// Anything else: the view's title and its salient input.
+    Generic { title: String, input: Option<Value> },
+}
+
+impl ApprovalView {
+    /// The view's own title, which the host puts first in the request title.
+    pub(crate) fn title(&self) -> &str {
+        match self {
+            Self::Command { title, .. }
+            | Self::Diff { title, .. }
+            | Self::Generic { title, .. } => title,
+        }
+    }
+}
+
+/// The call view a permission request carries on its tool call, or `None`
+/// when it has none the TUI understands (the prompt then renders as before).
+pub(crate) fn approval_view(meta: Option<&acp::Meta>) -> Option<ApprovalView> {
+    let view: CallView = serde_json::from_value(meta?.get(VIEW_KEY)?.clone()).ok()?;
+    Some(match view {
+        CallView::Terminal(call) => ApprovalView::Command {
+            command: call.title.clone(),
+            title: call.title,
+            description: call.description,
+            cwd: call.cwd,
+        },
+        CallView::Generic(call) if call.kind.as_deref() == Some("execute") => {
+            let command = match &call.raw_input {
+                Some(Value::String(command)) => command.clone(),
+                _ => call.title.clone(),
+            };
+            let description = call
+                .content
+                .as_deref()
+                .map(texts)
+                .filter(|text| !text.trim().is_empty());
+            ApprovalView::Command {
+                title: call.title,
+                command,
+                description,
+                cwd: None,
+            }
+        }
+        CallView::Generic(call) => ApprovalView::Generic {
+            title: call.title,
+            input: call.raw_input,
+        },
+        CallView::Diff(view) => {
+            let diffs: Vec<_> = view
+                .diffs
+                .into_iter()
+                .map(|d| (d.path, d.old_text, d.new_text))
+                .collect();
+            let title = view
+                .title
+                .or_else(|| diffs.first().map(|d| format!("Edit {}", d.0)))
+                .unwrap_or_else(|| "Edit".into());
+            ApprovalView::Diff { title, diffs }
+        }
+    })
 }
 
 /// A shell command: the call view's command, description and cwd; the

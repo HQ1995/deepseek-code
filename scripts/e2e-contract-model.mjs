@@ -49,6 +49,15 @@ export function contractReply(body) {
   if (prompt.includes('DSCODE_CHILD_CONTROL_HOLD')) return { text: 'DSCODE_CHILD_CONTROL_RUNNING', hold: true, releaseKey: 'child', releaseText: ' DSCODE_CHILD_CONTROL_END' }
   if (/DSCODE_CHILD_(EDITED|KEEP_[12]|DIRECT_STEER|RESUME)/.test(prompt)) return { text: 'DSCODE_CHILD_CONTROL_DONE' }
   if (prompt.includes('DSCODE_CHILD_HOLD')) return { text: '', hold: true }
+  const edit = prompt.match(/DSCODE_PERMISSION_EDIT:([A-Za-z0-9_-]+)/)
+  if (edit) {
+    // An escalated edit asks before it runs; its prompt previews the diff.
+    if (!results.length) return { name: 'edit', arguments: {
+      file_path: Buffer.from(edit[1], 'base64url').toString('utf8'), old_string: 'DSCODE_EDIT_BEFORE', new_string: 'DSCODE_EDIT_AFTER',
+      sandbox_permissions: 'danger-full-access', justification: 'Exercise the edit approval preview on this isolated fixture file.',
+    } }
+    return { text: 'DSCODE_PERMISSION_EDIT_DONE' }
+  }
   const match = prompt.match(/DSCODE_PERMISSION_(PROBE|ESCALATED):([A-Za-z0-9_-]+)/)
   if (match) {
     const path = Buffer.from(match[2], 'base64url').toString('utf8')
