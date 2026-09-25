@@ -67,7 +67,7 @@ unless `--force` is explicit. Headless formats are `plain`, `json`,
 | `/export [filename]` | Copy/save Markdown; `.zip` exports logs, descendants, and attachments |
 | `/team` | Show the roster and task board of a `teams` session's Agent Team |
 | `/browser` | Turn the isolated headless browser on or off and edit its allowed origins |
-| `/dsh plugins` | List, add and remove dsh plugins; see [Plugins](#plugins) |
+| `/dsh plugins` | List, switch, add and remove dsh plugins; see [Plugins](#plugins) |
 | `/doctor` | Check terminal, installation, and optional LSP/PTY dependencies |
 | `Ctrl+P` | Open commands while keeping the current draft |
 | `Ctrl+S`, `Alt+S` | Stash or restore one prompt draft |
@@ -115,8 +115,20 @@ Authorization Review.
 | Command | Action |
 |---|---|
 | `/dsh plugins` | The table above |
+| `/dsh enable <bundle>`, `/dsh disable <bundle>` | Select or deselect a bundle; its package stays installed |
+| `/dsh enable <bundle>#<row>`, `/dsh disable <bundle>#<row>` | Switch one component of a bundle that is on |
 | `/dsh inspect <bundle>` | Its components, their state and the services they provide |
 | `/dsh add [--trust] <package>`, `/dsh remove <bundle>` | Audit and install with npm, or uninstall |
+
+Switches go through DSH's plugin manager and apply to the running leader at
+once. The reply uses the Plugins page's outcomes: applied, saved but overridden
+by a higher-priority configuration (a `cordis.patch.yml` in the DSH home or a
+`--patch` overlay), or could not enable with the reason. A bundle or component
+whose rows do not start is switched off again, so the next start is unaffected.
+dscode's own bundles (`@deepseek-ai/dsh-base`, `@hqzhao95/dscode`) stay on;
+their rows follow the commands that own them, such as `/browser` and
+`/provider`. Agent Teams gives every session Team tools, which `/doctor` warns
+about; `/preset teams` mounts them in one session instead.
 
 ## Remote workspace over SSH (experimental)
 

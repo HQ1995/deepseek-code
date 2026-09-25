@@ -1,9 +1,9 @@
 /** Read-only plugin views for `/dsh`: the plugin table over the DSH plugin
- * manager, English wording for its refusals (the copy of DSH's own Plugins
- * page), and the bundles boot skipped. No writes. */
+ * manager, English wording for its outcomes and refusals (the copy of DSH's
+ * own Plugins page), and the bundles boot skipped. No writes. */
 import { loadProfileDirectory } from '@deepseek-ai/dsh-app-boot'
 import { errorMessage } from './guards.ts'
-import type { BundleLike, LocalizedTextLike, ManagementErrorLike, PluginEntryLike } from './plugin-rows.ts'
+import type { BundleLike, LocalizedTextLike, ManagementErrorLike, PluginEntryLike, SwitchOutcome } from './plugin-rows.ts'
 
 /** English of a localized display text. */
 export const english = (text: LocalizedTextLike | undefined): string | undefined =>
@@ -123,7 +123,7 @@ export function pluginTable({ dir, bundles, plugins, order, core, skipped }: Plu
   return lines.join('\n')
 }
 
-/** `/dsh inspect <bundle>`: its rows and their live state. */
+/** `/dsh inspect <bundle>`: its rows, their live state and switch address. */
 export function bundleDetail(bundle: BundleLike, plugins: readonly PluginEntryLike[], core: ReadonlySet<string>): string {
   const description = english(bundle.meta?.description) ?? bundle.description
   const lines = ['**' + bundleTitle(bundle) + '** `' + bundle.name + (bundle.version === undefined ? '' : '@' + bundle.version) + '`: '
@@ -139,7 +139,29 @@ export function bundleDetail(bundle: BundleLike, plugins: readonly PluginEntryLi
     lines.push('- `' + row.rowId + '` ' + row.moduleName + ' · ' + state + locked)
   }
   if (bundle.overrides.length > 0) lines.push('', 'Changes built-in rows: ' + bundle.overrides.join(', '))
+  lines.push('', 'Switch one component with /dsh enable|disable ' + bundle.name + '#<row>.')
   return lines.join('\n')
+}
+
+/** The sentence an outcome reads as, in the Plugins page's wording. */
+export function outcomeText(outcome: SwitchOutcome, enabled: boolean, subject: string, component: boolean): string {
+  const noun = component ? 'the component ' + subject : subject
+  switch (outcome.kind) {
+    case 'applied':
+      return (enabled ? 'Enabled ' : 'Disabled ') + noun + '; applied to the running leader.'
+        + (outcome.warnings.length > 0 ? '\nUnrelated rows that were already inactive:\n' + outcome.warnings.map(line => '- ' + line).join('\n') : '')
+    case 'overridden':
+      return subject + ' was saved, but a higher-priority configuration overrides it, so it is not in effect'
+        + ' (a cordis.patch.yml in the DSH home, or a --patch overlay).'
+    case 'failed': {
+      const reason = outcome.detail ?? managementText(outcome.error)
+      const lead = 'Could not ' + (enabled ? 'enable' : 'disable') + (component ? ' the component' : '') + ': ' + reason
+      if (outcome.saved === 'changed') return lead + '\nThe choice is saved; the change takes effect at the next start.'
+      if (outcome.saved === 'reverted') return lead + '\nIt was switched off again, so the next start is unaffected.'
+      if (outcome.saved === 'unknown') return lead + '\nRun /dsh plugins to see what is saved.'
+      return lead
+    }
+  }
 }
 
 /** A boot skip reason without the error class, the CLI prefix, or DSH's pnpm

@@ -8,6 +8,7 @@ import { load } from 'js-yaml'
 import { getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
 import type { BundleInfo, PluginInfo } from '@deepseek-ai/dsh-plugin-manager'
 import { analyzeBundlePatch, createProfilePlugins, SENSITIVE_ROW_IDS } from '../src/profile-plugins.ts'
+import { createPluginRows } from '../src/plugin-rows.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -284,21 +285,79 @@ async function managed() {
   const manager = {
     listBundles: vi.fn(async () => structuredClone(bundles)),
     listPlugins: vi.fn(async () => structuredClone(plugins)),
-    setPluginEnabled: vi.fn(async () => ({ application: 'failed' })),
+    setBundleEnabled: vi.fn(async (name: string, enabled: boolean) => {
+      bundles.find(bundle => bundle.name === name)!.enabled = enabled
+      if (name === '@deepseek-ai/dsh-experimental-auto-review') bundles[2]!.rows = enabled ? [{ ...bundles[2]!.rows[0]!, entryId: 'include:auto-review' }] as BundleInfo['rows'] : bundles[2]!.rows
+      return { application: 'restart-required' }
+    }),
+    setPluginEnabled: vi.fn(async (entryId: string, enabled: boolean) => {
+      plugins.find(plugin => plugin.entryId === entryId)!.enabled = enabled
+      return { application: 'restart-required' }
+    }),
   }
+  const reload = vi.fn(async (_required: readonly string[]) => {})
   const plugins_ = createProfilePlugins({ directory: () => root, exec: vi.fn(), inspectRuntime: () => undefined, pluginManager: () => manager,
-    skipped: () => [{ packageName: 'dsh-plugin-gone', reason: 'cannot resolve it' }] })
-  return { root, manager, plugins: plugins_ }
+    switches: createPluginRows({ pluginManager: () => manager, reload }), skipped: () => [{ packageName: 'dsh-plugin-gone', reason: 'cannot resolve it' }] })
+  return { root, manager, reload, plugins: plugins_ }
 }
 
-describe('/dsh plugins over the plugin manager', () => {
-  it('lists every bundle with its kind, rows and problems', async () => {
+describe('/dsh enable and disable', () => {
+  it('lists bundles through the plugin manager with the switch verbs in the usage line', async () => {
     const f = await managed()
     const text = await f.plugins.execute('/dsh plugins')
     expect(text).toContain('| on | **dscode** | `@hqzhao95/dscode@0.0.0` | core | 1 row · 1 off |')
     expect(text).toContain('| off | **Auto Authorization Review** | `@deepseek-ai/dsh-experimental-auto-review@0.1.7-rc.2` | official · optional · experimental | 1 row |')
     expect(text).toContain('- `dsh-plugin-broken`: This package declares no bundle, so it cannot be managed as a plugin.')
     expect(text).toContain('- `dsh-plugin-gone`: skipped at startup: cannot resolve it')
+    expect(text).toContain('/dsh enable <bundle>[#row] | /dsh disable <bundle>[#row]')
     expect(await f.plugins.execute('/dsh inspect dsh-plugin-mine')).toContain('- `shared` dsh-plugin-mine/shared · running · locked: The profile patch cannot address this one uniquely.')
+  })
+
+  it('switches an optional bundle and one row live, under the profile lock', async () => {
+    const f = await managed()
+    const { withProfileLock } = await import('../bin/update.mjs')
+    let settled = false
+    let enabling!: Promise<string>
+    await withProfileLock(f.root, async () => {
+      enabling = f.plugins.execute('/dsh enable @deepseek-ai/dsh-experimental-auto-review').then(text => { settled = true; return text })
+      await new Promise(resolve => setTimeout(resolve, 150))
+      expect(settled).toBe(false)
+      expect(f.manager.setBundleEnabled).not.toHaveBeenCalled()
+    })
+    expect(await enabling).toBe('Enabled Auto Authorization Review (@deepseek-ai/dsh-experimental-auto-review); applied to the running leader.')
+    expect(f.reload).toHaveBeenLastCalledWith(['auto-review'])
+    expect(await f.plugins.execute('/dsh enable @deepseek-ai/dsh-experimental-auto-review')).toBe('Auto Authorization Review is already on.')
+    expect(await f.plugins.execute('/dsh disable dsh-plugin-mine#mine')).toBe('Disabled the component mine of plugin-mine; applied to the running leader.')
+    expect(f.manager.setPluginEnabled).toHaveBeenCalledExactlyOnceWith('include:mine', false)
+    expect(await f.plugins.execute('/dsh disable dsh-plugin-mine')).toBe('Disabled plugin-mine (dsh-plugin-mine); applied to the running leader.')
+    expect(f.reload).toHaveBeenLastCalledWith([])
+  })
+
+  it.each([
+    ['/dsh disable @hqzhao95/dscode', 'is part of dscode itself; turning it off would stop dscode from starting'],
+    ['/dsh disable @deepseek-ai/dsh-base', 'is part of dscode itself'],
+    ['/dsh disable @hqzhao95/dscode#dscode-browser', 'use the command that owns it (/browser, /provider)'],
+    ['/dsh enable dsh-plugin-broken', 'Could not enable: This package declares no bundle'],
+    ['/dsh enable dsh-plugin-nowhere', 'dsh-plugin-nowhere is not a bundle of this profile'],
+    ['/dsh enable dsh-plugin-mine#nope', 'plugin-mine has no component "nope". Components: mine, shared.'],
+    ['/dsh disable dsh-plugin-mine#shared', 'shared: The profile patch cannot address this one uniquely.'],
+    ['/dsh enable @deepseek-ai/dsh-experimental-auto-review#auto-review', 'Auto Authorization Review is off; turn it on first'],
+    ['/dsh enable', 'Usage: /dsh enable <bundle>[#row]'],
+  ])('refuses %s before any write', async (text, reply) => {
+    const f = await managed()
+    expect(await f.plugins.execute(text)).toContain(reply)
+    expect(f.manager.setBundleEnabled).not.toHaveBeenCalled()
+    expect(f.manager.setPluginEnabled).not.toHaveBeenCalled()
+  })
+
+  it('honors a bundle the plugin manager keeps for itself', async () => {
+    const f = await managed()
+    // Enabling the base is refused by its management lock, not the core rule.
+    expect(await f.plugins.execute('/dsh enable @deepseek-ai/dsh-base')).toBe('base: Plugin management needs it; it cannot be switched off or uninstalled.')
+  })
+
+  it('needs the plugin manager to switch anything', async () => {
+    const f = await fixture()
+    expect(await f.plugins.execute('/dsh enable x')).toContain('needs the DSH plugin manager')
   })
 })

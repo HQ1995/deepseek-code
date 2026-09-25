@@ -111,6 +111,40 @@ describe('leader plugin inspection, /dsh command and bundle management', () => {
     }
   })
 
+  it('switches a bundle through the plugin manager and turns it off again when the leader cannot apply it', async () => {
+    const { mkdirSync, writeFileSync, rmSync } = await import('node:fs')
+    const profileDir = resolve(tmpdir(), 'dsh-profile-switch-' + randomUUID())
+    mkdirSync(profileDir, { recursive: true })
+    writeFileSync(resolve(profileDir, 'package.json'), JSON.stringify({ private: true, dependencies: {}, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }))
+    const selected: boolean[] = []
+    const manager = {
+      listPlugins: async () => [],
+      listBundles: async () => [{ name: '@deepseek-ai/dsh-experimental-auto-review', version: '0.1.7-rc.2', meta: { title: { en: 'Auto Authorization Review' } },
+        enabled: selected.at(-1) ?? false, installed: false, optional: true, removable: false, rows: [{ rowId: 'auto-review', moduleName: '@deepseek-ai/dsh-experimental-auto-review' }], overrides: [] }],
+      setBundleEnabled: async (_name: string, enabled: boolean) => { selected.push(enabled); return { changed: true, application: 'restart-required' } },
+      setPluginEnabled: async () => ({ application: 'failed' }),
+    }
+    process.env.DSH_PROFILE_DIR = profileDir
+    try {
+      // No launcher profile context: the leader cannot reconcile, so the enable is undone.
+      const { client: c } = await start({ pluginManager: manager })
+      register(c)
+      await c.next()
+      const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      const sessionId = (created.result as { sessionId: string }).sessionId
+      sendRequest(c, 2, 'session/prompt', { sessionId, prompt: [{ type: 'text', text: '/dsh enable @deepseek-ai/dsh-experimental-auto-review' }] })
+      expect((await waitForId(c, 2)).error).toBeUndefined()
+      await waitFor(() => c.all.some(m => m.method === 'session/update'
+        && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '')
+          .startsWith('Could not enable: no profile context: restart dscode to apply the change; restart dscode to unload what did start')))
+      expect(JSON.stringify(c.all)).toContain('It was switched off again, so the next start is unaffected.')
+      expect(selected).toEqual([true, false])
+    } finally {
+      delete process.env.DSH_PROFILE_DIR
+      rmSync(profileDir, { recursive: true, force: true })
+    }
+  })
+
   it('pre-audits local bundle plugins, requires trust, and removes them with npm', async () => {
     const root = resolve(tmpdir(), 'dsh-plugin-flow-' + randomUUID())
     const profileDir = resolve(root, 'profile')

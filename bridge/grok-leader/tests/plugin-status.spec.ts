@@ -1,5 +1,5 @@
 /** Plugin views: the /dsh plugins table over the installed runtime's own
- * bundles, refusal wording, and the bundles boot skipped. */
+ * bundles, outcome wording, and the bundles boot skipped. */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { OPTIONAL_BUNDLES, bundlePatchPaths, composeEntries, loadOverlayPatches, readPluginMeta } from '@deepseek-ai/dsh-app-boot'
 import type { BundleInfo, PluginInfo } from '@deepseek-ai/dsh-plugin-manager'
-import { bundleDetail, createPluginStatus, managementText, pluginTable, rowSummary, skipReason } from '../src/plugin-status.ts'
+import { bundleDetail, createPluginStatus, managementText, outcomeText, pluginTable, rowSummary, skipReason } from '../src/plugin-status.ts'
 
 const CORE = new Set(['@deepseek-ai/dsh-base', '@hqzhao95/dscode'])
 const roots: string[] = []
@@ -75,7 +75,7 @@ describe('the plugin table', () => {
     expect(rowSummary({ ...bundle, enabled: false }, [entry('agent-team', 'x')])).toBe('3 rows')
   })
 
-  it('details a bundle\'s components', () => {
+  it('details a bundle\'s components with their switch address', () => {
     const bundle = installed('@deepseek-ai/dsh-experimental-agent-team-profile', { enabled: true, live: true, overrides: ['tool-subagent'] })
     const detail = bundleDetail(bundle, [entry('agent-team', '@deepseek-ai/dsh-experimental-agent-team'), { ...entry('tool-agent-team', 'x', false, null) },
       { ...entry('ui-agent-team', 'x'), readOnlyReason: 'unaddressable', patchId: undefined } as unknown as PluginInfo], CORE)
@@ -84,6 +84,7 @@ describe('the plugin table', () => {
     expect(detail).toContain('- `tool-agent-team` @deepseek-ai/dsh-experimental-tool-agent-team · off')
     expect(detail).toContain('- `ui-agent-team` @deepseek-ai/dsh-experimental-client-ui-agent-team · running · locked: The profile patch cannot address this one uniquely.')
     expect(detail).toContain('Changes built-in rows: tool-subagent')
+    expect(detail).toContain('/dsh enable|disable @deepseek-ai/dsh-experimental-agent-team-profile#<row>')
   })
 })
 
@@ -94,6 +95,19 @@ describe('plugin wording', () => {
     expect(managementText({ code: 'operation-error', diagnostic: 'EACCES: package.json' })).toBe('EACCES: package.json')
     expect(managementText({ code: 'incompatible-version' })).toContain('incompatible with the running DSH version')
     expect(managementText(undefined)).toBe('The Host reported an error.')
+  })
+
+  it('reports each official outcome', () => {
+    expect(outcomeText({ kind: 'applied', warnings: [] }, true, 'Auto Authorization Review', false)).toBe('Enabled Auto Authorization Review; applied to the running leader.')
+    expect(outcomeText({ kind: 'applied', warnings: ['x (y): pending'] }, false, 'auto-review of R', true))
+      .toBe('Disabled the component auto-review of R; applied to the running leader.\nUnrelated rows that were already inactive:\n- x (y): pending')
+    expect(outcomeText({ kind: 'overridden' }, true, 'auto-review', true))
+      .toMatch(/^auto-review was saved, but a higher-priority configuration overrides it, so it is not in effect/)
+    expect(outcomeText({ kind: 'failed', error: { code: 'management-required' }, saved: 'unchanged' }, false, 'base', false))
+      .toBe('Could not disable: Plugin management needs it; it cannot be switched off or uninstalled.')
+    expect(outcomeText({ kind: 'failed', detail: 'boom', saved: 'reverted' }, true, 'R', true)).toBe('Could not enable the component: boom\nIt was switched off again, so the next start is unaffected.')
+    expect(outcomeText({ kind: 'failed', detail: 'boom', saved: 'changed' }, false, 'R', false)).toBe('Could not disable: boom\nThe choice is saved; the change takes effect at the next start.')
+    expect(outcomeText({ kind: 'failed', detail: 'boom', saved: 'unknown' }, true, 'R', false)).toContain('Run /dsh plugins to see what is saved.')
   })
 
   it('reads the bundles this start skipped, without DSH\'s pnpm repair hint', () => {

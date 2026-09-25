@@ -173,7 +173,7 @@ be on PATH; dscode's `/dsh add` uses npm.
 | HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY | Native runtime proxy support; environment is inherited by the managed runtime |
 | Streaming tool-call continuation | Native DeepSeek fix preserves call identifiers and names |
 | MCP tool pagination | Native repeated-cursor rejection; `/mcps` and bridge initialization keep diagnostic behavior |
-| Plugin manager and shipped optional bundles | `/dsh plugins` over the native manager; see [plugin management](#plugin-management) |
+| Plugin manager and shipped optional bundles | `/dsh plugins` and `/dsh enable|disable <bundle>[#row]` over the native manager, applied live; see [plugin management](#plugin-management) |
 | Skills and commands | `/skills`, skill insertion and native command discovery; TUI search uses its existing picker |
 | Declarative preset registry and ordered bundle patches | `/preset manage`, `/dsh`; local editable declaration bundles, read-only legacy import and shared host service identities |
 | `present` file delivery | Clickable transcript links from `deliverables/presented`, live and after resume; child/fork paths use the viewed workspace |
@@ -244,6 +244,20 @@ selection, `installed`, `optional`, `removable` and `readOnlyReason`, and
 bundles every installation carries (web, headless, SDK, ACP) unless one is
 selected. rc.2 ships `OPTIONAL_BUNDLES` = Agent Teams, Voice input and Auto
 Authorization Review, off until switched on and never removable.
+
+`/dsh enable|disable <bundle>` calls `setBundleEnabled` and `<bundle>#<row>`
+calls `setPluginEnabled`, under the same profile lock as `/dsh add`. dscode runs
+without `hmr`, so the manager saves the change and answers `restart-required`;
+the bridge then reconciles the running Loader with the saved patches, as
+`/browser` and the native provider do, requiring the bundle's rows (or the row)
+to activate. Verified on an installed leader: all three optional bundles and a
+row switch on and off live. An enable whose rows do not activate is switched off
+again; a disable the live Loader rejects stays saved for the next start. A row
+still off after the reconcile is reported as overridden by a higher layer. The
+manager's `readOnlyReason` locks a bundle or row, and dscode refuses to switch
+off `@deepseek-ai/dsh-base`, `@hqzhao95/dscode` or their rows, which would stop
+the leader from starting. The Agent Teams bundle inserts host-level Team tools
+that dscode confines to its `teams` preset; `/doctor` warns while it is on.
 
 ### Approval reasons
 
