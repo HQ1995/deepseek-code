@@ -130,6 +130,8 @@ export function initializeReply(facts: InitializeFacts): unknown {
       dscodeExecutionWorld: facts.world,
       cancelRewind: false,
       sessionRecap: false,
+      // x.ai/remote/invoke: allowlisted DSH Remote methods (grok-leader-protocol.md).
+      dscodeRemote: 1,
       availableCommands: facts.commands,
       modelState: {
         currentModelId: facts.catalog.currentModelId,

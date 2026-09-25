@@ -41,6 +41,7 @@ import { TEAM_TOOLS_MODULE } from './team-presets.ts'
 import { configuredRemote, executionWorld, remoteUnavailable, SSH_FAILURE, type RemoteConnection, type RemoteLike } from './execution-world.ts'
 import { createHostServices } from './host-services.ts'
 import { createClientActivity } from './client-activity.ts'
+import { createRemoteChannel } from './remote-channel.ts'
 /**
  * Grok leader-protocol unix-socket server driving harness agents.
  *
@@ -401,6 +402,10 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     // Archives are written on this computer: a remote cwd names no host directory.
     archive: (id, cwd, filename, signal) => exportSessionArchive(ctx, id, world().kind === 'local' ? cwd : homedir(), filename, signal),
   })
+  const remoteChannel = createRemoteChannel<SessionRecord>({
+    owned: ownedRecord, assertReady: lifecycle.assertReady, client: id => connections.get(id),
+    gateway: host.typertGateway, typert: host.typert,
+  })
 
   const tasks = createNativeTasks({
     sessions, owned: ownedRecord,
@@ -484,6 +489,8 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     'x.ai/session/rename': (clientId, params) => artifacts.rename(clientId, params),
     'x.ai/session/info': (clientId, params) => artifacts.info(clientId, params),
   })
+  // Allowlisted DSH Remote methods, through the in-process gateway.
+  routes.register('x.ai/remote/invoke', { request: (clientId, params) => remoteChannel.invoke(clientId, params) })
   requests({ // Composer input, models and permission modes.
     [WIRE.sessionPrompt]: (clientId, params) => input.prompt(clientId, params),
     'x.ai/session/cancel_prompt': (clientId, params) => input.cancelPrompt(clientId, params),
@@ -533,7 +540,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
   const leaderHost = createLeaderLifecycle({
     sessions: registry, catalog: models, transport,
     owners: [discovery, sessionCommands, execution, asides, artifacts, input, interactions,
-      sessionPresets, sessionModels, profilePlugins, children, nativeStatus, tasks, sessionController],
+      sessionPresets, sessionModels, profilePlugins, children, nativeStatus, tasks, sessionController, remoteChannel],
     pollers: [tasks, children, nativeStatus],
     // A leader whose remote connection is gone exits at once, so restarting dscode reconnects.
     idleExitMs: () => remoteProblem() === undefined ? config.idleExitMs ?? 2000 : 0,

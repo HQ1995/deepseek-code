@@ -103,6 +103,28 @@ export interface TypertGatewayLike {
   invoke(request: RemoteInvocationLike): Promise<unknown>
 }
 
+/** The parts of a generated Remote invocation descriptor the bridge checks
+ * its allowlist bindings against. */
+export interface RemoteDescriptorLike {
+  /** Absent for unary methods. */
+  readonly mode?: 'stream'
+  /** `context`: a `@RemoteScope` receiver resolved from the `wire` identity. */
+  readonly invocation: { readonly kind: 'direct' } | { readonly kind: 'context'; readonly context: string; readonly wire: string }
+  /** The lookup parameter a consuming Context fills with its own identity. */
+  readonly scope?: { readonly context: string; readonly wire: string }
+  readonly parameters: ReadonlyArray<{ readonly wire: string; readonly source: 'json' | 'lookup'; readonly lookup?: string }>
+  readonly cancellation?: { readonly parameter: 'signal' }
+}
+
+/** Structural read of the Typert registry (`ctx.typert`): strict local definitions by endpoint. */
+export interface TypertRegistryLike {
+  readonly local: {
+    get(endpoint: string): RemoteDescriptorLike | undefined
+    /** Defined once and since withdrawn: the gateway refuses it rather than weakening validation. */
+    hasSeen(endpoint: string): boolean
+  }
+}
+
 /** Cordis registers the wrapper-to-instance symbol globally; it is read
  * structurally so modules keep no framework dependency of their own. */
 const TRACEABLE_ORIGINAL = Symbol.for('cordis.original')

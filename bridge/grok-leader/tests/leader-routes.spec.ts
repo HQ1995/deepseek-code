@@ -107,6 +107,7 @@ describe('initialize reply', () => {
         dscodeExecutionWorld: { kind: 'ssh', host: 'build', workspace: '/srv/work' },
         cancelRewind: false,
         sessionRecap: false,
+        dscodeRemote: 1,
         availableCommands: commands,
         modelState: {
           currentModelId: 'deepseek-chat',

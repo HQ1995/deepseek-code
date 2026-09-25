@@ -18,7 +18,7 @@ const serviceNames: Record<Exclude<keyof HostServices, 'flush' | 'messageProject
   sessionTitles: 'sessionTitle', sessionReferences: 'sessionReferenceResolver', sessionQuery: 'sessionQuery',
   sessionProjectionCache: 'sessionProjectionCache', sessionProjections: 'sessionProjections',
   permissionPresets: 'permissionPresets', agentTeams: 'agentTeams', browser: 'dscodeBrowser',
-  inspector: 'dscodeInspector', appExit: 'appExit', typertGateway: 'typertGateway',
+  inspector: 'dscodeInspector', appExit: 'appExit', typertGateway: 'typertGateway', typert: 'typert',
 }
 
 describe('host services seam', () => {
