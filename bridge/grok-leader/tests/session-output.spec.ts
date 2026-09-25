@@ -248,6 +248,12 @@ describe('session output ownership', () => {
     await restored.output.restore([scheduled, failed])
     expect(restored.notes.map(note => [note.params.update, note.params._meta.isReplay]))
       .toEqual([[f.notes[1]!.params.update, true]])
+    // The retried attempt starting ends the Retrying state with the meters' no-op chunk; replay sends none.
+    const started = event(2, 'llm/retry-started', { retryId: 'r', turn: 1, step: 1, retry: 1 })
+    f.output.live(started)
+    expect(f.notes.at(-1)!.params.update).toEqual({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '' } })
+    await restored.output.restore([started])
+    expect(restored.notes).toHaveLength(1)
   })
 
   it('keeps occupancy separate from cumulative spend and owns feature envelope identity', () => {

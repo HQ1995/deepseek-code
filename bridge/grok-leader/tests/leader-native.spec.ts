@@ -41,6 +41,8 @@ describe('leader native jobs, children, workflows and activity', () => {
     pluginCtx.emit('agent/assistant-stream', { agent, frame: { type: 'end', attemptId: 'failed', revision: 8, index: 3, outcome: { kind: 'committed', eventType: 'assistant/attempt', seq: 0 } } } as never)
     expect(await c.next()).toMatchObject({ params: { update: { content: { text: '' } }, _meta: { cumulativeTokens: 12 } } })
     pluginCtx.emit('session/event', agent.session, { type: 'llm/retry-started', seq: 1, time: 3, data: { retryId: 'retry-1', turn: 0, step: 0, retry: 1 } } as never)
+    // The retried attempt starting ends the TUI's Retrying state with an empty chunk.
+    expect(await c.next()).toMatchObject({ params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: '' } } } })
     startAttempt('retry', 9)
     chunk('failed', 8, 'late failed')
     chunk('retry', 10, 'success')
@@ -58,7 +60,7 @@ describe('leader native jobs, children, workflows and activity', () => {
     expect(await c.next()).toMatchObject({ params: { update: { sessionUpdate: 'tool_call', toolCallId: 'call-1' } } })
     await c.request(2, 'x.ai/session/info', { sessionId })
     const updates = c.all.filter(message => message.method === 'session/update').map(message => message.params as { update: { sessionUpdate: string; content?: { text: string } } })
-    expect(updates.map(item => item.update.content?.text).filter(text => text !== undefined)).toEqual(['partial', 'failed text', '', 'success', ''])
+    expect(updates.map(item => item.update.content?.text).filter(text => text !== undefined)).toEqual(['partial', 'failed text', '', '', 'success', ''])
     expect(updates.filter(item => item.update.sessionUpdate === 'tool_call')).toHaveLength(1)
   })
 

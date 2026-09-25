@@ -132,15 +132,17 @@ decoder. `session/update` remains the normal unprefixed ACP notification.
 
 ## Turn activity notices
 
-These ride `_x.ai/session_notification`, as `image_dropped` notes do, with the
-session output's `eventSeq` and `promptId` stamps. They feed TUI renderers that
-already exist; nothing here adds a TUI code path.
+Unless noted, these ride `_x.ai/session_notification`, as `image_dropped`
+notes do, with the session output's `eventSeq` and `promptId` stamps. They feed
+TUI renderers that already exist; nothing here adds a TUI code path.
 
 - A DSH `llm/retry` (a scheduled model-request retry) sends `retry_state`
   `{type: 'retrying', attempt, max_retries, reason}`, live only; `max_retries`
   is 0 for an unbounded policy. `is_rate_limited` is never sent: that flag is
-  xAI's upsell. The TUI clears the state at the retried attempt's first
-  streamed update, a later failure or the turn's end.
+  xAI's upsell. When DSH starts the retried attempt (`llm/retry-started`) the
+  bridge sends an empty text chunk (ACP `session/update`, the meters' no-op
+  update), which ends the TUI's Retrying state; a later failure or the turn's
+  end also clears it.
 - A `turn/end` whose reason is an error sends `retry_state`
   `{type: 'failed', error_type, message}` live and on replay, before the prompt
   RPC rejects. `error_type` follows the native code (`CONTEXT_WINDOW_EXCEEDED`

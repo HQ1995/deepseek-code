@@ -96,9 +96,9 @@ export function turnFailure(value: unknown): RetryStateUpdate | undefined {
 /**
  * Retry and failure notices one durable event carries. A scheduled retry is a
  * live spinner only (`isRateLimited` is never set: that is xAI's upsell); the
- * TUI clears it at the retried attempt's first streamed update, a later
- * failure or the turn's end. A failed turn's typed failure is part of its
- * history, so it is sent on replay too.
+ * session output ends it when the retried attempt starts, and a later failure
+ * or the turn's end also clears it. A failed turn's typed failure is part of
+ * its history, so it is sent on replay too.
  */
 export function turnNotices(event: SessionEvent, replay: boolean): XaiNotice[] {
   if (event.type === 'llm/retry') {

@@ -317,13 +317,18 @@ export function createSessionOutput(host: SessionOutputHost) {
     return { ...used === undefined ? {} : { used }, ...native === undefined ? {} : { native: true },
       ...pressure?.contextWindow === undefined ? {} : { window: pressure.contextWindow } }
   }
-  /** The xAI notices one event carries; folds see every event, sent or not. */
+  /** What one event adds beside its projected updates: system notes, xAI
+   * turn notices and mode updates. Folds see every event, sent or not. */
   const notices = (event: SessionEvent, replay: boolean): OutputUpdate[] => {
     const trigger = triggerNotes(triggers, event), notes = systemNotes(event) ?? trigger, mode = planModeNotice(event)
     const compaction = compactionNotices(compactions, event, replay, occupancy(replay))
+    // DSH starts the retried attempt: an empty text chunk (the meters' no-op
+    // update) ends the TUI's Retrying state, as that attempt's first chunk would.
+    const retried = !replay && event.type === 'llm/retry-started'
     return [
       ...notes === undefined ? [] : [{ sessionUpdate: 'image_dropped' as const, notes }], ...mode === undefined ? [] : [mode],
       ...turnNotices(event, replay), ...compaction,
+      ...retried ? [{ sessionUpdate: 'agent_message_chunk' as const, content: { type: 'text' as const, text: '' } }] : [],
       ...lastPlan !== undefined && compaction.some(item => item.sessionUpdate === 'auto_compact_completed') ? [lastPlan] : [],
     ]
   }
