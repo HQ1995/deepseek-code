@@ -130,6 +130,11 @@ their rows follow the commands that own them, such as `/browser` and
 `/provider`. Agent Teams gives every session Team tools, which `/doctor` warns
 about; `/preset teams` mounts them in one session instead.
 
+A bundle that cannot load is skipped at startup: dscode starts without it and
+the next session you open says which one and why. `/doctor` and
+`dscode doctor --runtime` report skipped bundles, rows that failed or wait for a
+service, and the leader log.
+
 ## Remote workspace over SSH (experimental)
 
 A remote workspace is its own dscode home: every tool, shell, file edit and

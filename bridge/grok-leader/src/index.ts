@@ -34,7 +34,7 @@ import { errorMessage } from './guards.ts'
 import { createModelCatalog } from './model-catalog.ts'
 import { createNativeProviders } from './native-provider.ts'
 import { createPluginRows, type PluginManagerLike } from './plugin-rows.ts'
-import { createPluginStatus } from './plugin-status.ts'
+import { createPluginStatus, type LoaderEntryLike } from './plugin-status.ts'
 import { createBrowserControl, type BrowserStatus } from './browser-control.ts'
 import { createNativeTeam, type TeamServiceLike } from './native-team.ts'
 import { TEAM_TOOLS_MODULE } from './team-presets.ts'
@@ -218,8 +218,11 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
       await reconcileProfilePatches(ctx.root, readProfilePatches('dsh', profile), 'dsh', requiredIds)
     },
   })
-  // Bundles this start skipped, for /dsh plugins.
+  // Plugin health: bundles this start skipped (told once to the next opened
+  // session), and rows that did not activate (for /doctor).
   const pluginStatus = createPluginStatus({
+    manager: () => ctx.get('pluginManager') as PluginManagerLike | undefined,
+    loader: () => ctx.get('loader') as unknown as { entries(): Iterable<LoaderEntryLike> } | undefined,
     profile: () => ctx.get('profileContext') as ProfileContext | undefined,
     logger,
   })
@@ -300,6 +303,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     permissions: interactions,
     contextValues: record => nativeStatus.contextValues(record), projectImages, logger,
     unblocked: record => { sessionController.deliverable(record) },
+    notice: pluginStatus.notice,
     views: {
       status: (record, replay) => nativeStatus.snapshot(record, replay),
       children: (record, replay) => children.snapshot(record, replay),
@@ -449,6 +453,7 @@ export function apply(ctx: Context, config: GrokLeaderConfig): void {
     remote: () => { const configured = remote(); return configured === undefined ? undefined : { ...configured, connected: sshState().state === 'connected' } },
     hostTeamRows: async () => (await (ctx.get('pluginManager') as PluginManagerLike | undefined)?.listPlugins() ?? [])
       .filter(row => row.enabled && row.moduleName === TEAM_TOOLS_MODULE).map(row => row.patchId ?? row.entryId),
+    plugins: () => pluginStatus.findings(),
     terminals: record => presetServiceFor(record, 'terminals') as NativeTerminals | undefined,
     subprocess: record => presetServiceFor(record, 'subprocess') as NativeExecutionHost | undefined,
     toolNames: nativeCapabilities.toolNames,

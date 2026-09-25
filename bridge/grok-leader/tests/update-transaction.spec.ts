@@ -303,6 +303,8 @@ it('reports profile bundles and inserted rows the runtime would skip, using its 
     mkdirSync(join(install, 'dsh'), { recursive: true })
     writeFileSync(anchor, JSON.stringify({ name: '@deepseek-ai/dsh', version: runtimeVersion }))
     symlinkSync(appBoot, join(install, 'dsh-app-boot'))
+    // The installation supplies the base bundle, as a real one does.
+    symlinkSync(dirname(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-base/cordis.patch.yml')), join(install, 'dsh-base'))
     const write = (name: string, manifest: Record<string, unknown>, patch?: string) => {
       mkdirSync(join(profile, 'node_modules', name), { recursive: true })
       writeFileSync(join(profile, 'node_modules', name, 'package.json'), JSON.stringify({ name, version: '1.0.0', ...manifest }))

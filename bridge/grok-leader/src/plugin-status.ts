@@ -1,9 +1,10 @@
-/** Read-only plugin views for `/dsh`: the plugin table over the DSH plugin
- * manager, English wording for its outcomes and refusals (the copy of DSH's
- * own Plugins page), and the bundles boot skipped. No writes. */
+/** Read-only plugin views for `/dsh` and `/doctor`: the plugin table over the
+ * DSH plugin manager, English wording for its outcomes and refusals (the copy
+ * of DSH's own Plugins page), Loader rows that did not activate, and the
+ * bundles boot skipped with the one-time notice that names them. No writes. */
 import { loadProfileDirectory } from '@deepseek-ai/dsh-app-boot'
 import { errorMessage } from './guards.ts'
-import type { BundleLike, LocalizedTextLike, ManagementErrorLike, PluginEntryLike, SwitchOutcome } from './plugin-rows.ts'
+import type { BundleLike, LocalizedTextLike, ManagementErrorLike, PluginEntryLike, PluginManagerLike, SwitchOutcome } from './plugin-rows.ts'
 
 /** English of a localized display text. */
 export const english = (text: LocalizedTextLike | undefined): string | undefined =>
@@ -164,21 +165,87 @@ export function outcomeText(outcome: SwitchOutcome, enabled: boolean, subject: s
   }
 }
 
+/** The leader log the TUI opened for this leader (xai-grok-pager dsh_leader.rs):
+ * DSCODE_LOG, else the socket path with a `.log` extension. */
+export function leaderLogPath(env: Readonly<Record<string, string | undefined>> = process.env): string | undefined {
+  if (env.DSCODE_LOG !== undefined && env.DSCODE_LOG !== '') return env.DSCODE_LOG
+  const socket = env.DSCODE_SOCKET
+  if (socket === undefined || socket === '') return undefined
+  const slash = socket.lastIndexOf('/'), dot = socket.lastIndexOf('.')
+  return (dot > slash + 1 ? socket.slice(0, dot) : socket) + '.log'
+}
+
 /** A boot skip reason without the error class, the CLI prefix, or DSH's pnpm
  * repair hint (dscode manages this profile with npm through /dsh). */
 export const skipReason = (reason: string): string =>
   reason.replace(/^\w*Error: /, '').replace(/^(?:dsh|dscode): /, '').replace(/; run 'dsh plugin [^']*'.*$/, '')
 
+/** The one-time system note for bundles this start skipped. */
+export function skippedNotice(skipped: readonly SkippedBundle[], log: string | undefined): string {
+  const one = skipped.length === 1
+  const named = skipped.slice(0, 3).map(({ packageName, reason }) => packageName + ' (' + oneLine(reason, 160) + ')').join('; ')
+  return 'dscode started without ' + (one ? 'a plugin bundle' : String(skipped.length) + ' plugin bundles') + ': ' + named
+    + (skipped.length > 3 ? ' and ' + String(skipped.length - 3) + ' more' : '') + '. '
+    + 'Run /doctor for details, or /dsh disable ' + (one ? skipped[0]!.packageName : '<bundle>') + ' to stop loading ' + (one ? 'it' : 'one') + '.'
+    + (log === undefined ? '' : ' Leader log: ' + log)
+}
+
+/** Cordis `FiberState` is a const enum across packages; these mirror the
+ * values DSH's own plugin inventory mirrors. */
+const FIBER = { PENDING: 0, LOADING: 1, ACTIVE: 2, FAILED: 3 } as const
+/** Structural read of one Loader entry. */
+export interface LoaderEntryLike {
+  readonly options: { readonly id?: string; readonly name?: string }
+  readonly disabled: boolean
+  readonly fiber?: { readonly state: number; await(): Promise<unknown>; readonly inject?: object; readonly ctx?: { get(name: string): unknown } }
+}
+export interface InactiveRow { id: string; module: string; state: 'failed' | 'waiting'; reason: string }
+
+/** Enabled Loader entries that are not active, and why, as DSH's reload
+ * reports them; plus how many are active. */
+export async function inactiveRows(entries: Iterable<LoaderEntryLike>): Promise<{ active: number; inactive: InactiveRow[] }> {
+  let active = 0
+  const inactive: InactiveRow[] = []
+  for (const entry of entries) {
+    const row = { id: entry.options.id ?? '(no id)', module: entry.options.name ?? '(unnamed)' }
+    let disabled: boolean
+    try { disabled = entry.disabled } catch (error) {
+      inactive.push({ ...row, state: 'failed', reason: 'its disabled expression failed: ' + errorMessage(error) })
+      continue
+    }
+    if (disabled) continue
+    const fiber = entry.fiber
+    if (fiber === undefined) inactive.push({ ...row, state: 'failed', reason: 'failed to import' })
+    else if (fiber.state === FIBER.ACTIVE) active++
+    else if (fiber.state === FIBER.FAILED) {
+      let reason = 'failed'
+      try { await fiber.await() } catch (error) { reason = errorMessage(error) }
+      inactive.push({ ...row, state: 'failed', reason })
+    } else if (fiber.state === FIBER.PENDING) {
+      const missing = Object.keys(fiber.inject ?? {}).filter(service => fiber.ctx?.get(service) === undefined)
+      inactive.push({ ...row, state: 'waiting', reason: 'waiting for ' + (missing.length === 1 ? 'service' : 'services') + ': ' + (missing.join(', ') || 'unknown') })
+    } else if (fiber.state === FIBER.LOADING) inactive.push({ ...row, state: 'waiting', reason: 'still loading' })
+    else inactive.push({ ...row, state: 'failed', reason: 'fiber state ' + String(fiber.state) })
+  }
+  return { active, inactive }
+}
+
+export interface Finding { status: 'OK' | 'INFO' | 'WARN' | 'ERROR'; name: string; detail: string }
 /** Launcher facts of the running profile (`ProfileContext`). */
 export interface ProfileContextLike { readonly dir: string; readonly installAnchor: string; readonly startedBundles: readonly string[] }
 export interface PluginStatusDependencies {
+  manager(): PluginManagerLike | undefined
+  loader(): { entries(): Iterable<LoaderEntryLike> } | undefined
   profile(): ProfileContextLike | undefined
   logger: { warn(message: string): void }
+  env?: Readonly<Record<string, string | undefined>>
 }
 
-/** The bundles this leader's start skipped, read once from the profile. */
+/** The live leader's plugin health: bundles its start skipped (read once),
+ * the one-time note naming them, and the rows /doctor reports. */
 export function createPluginStatus(dependencies: PluginStatusDependencies) {
   let skipped: SkippedBundle[] | undefined
+  let delivered = false
   const readSkipped = (): readonly SkippedBundle[] => {
     if (skipped !== undefined) return skipped
     const profile = dependencies.profile()
@@ -193,7 +260,35 @@ export function createPluginStatus(dependencies: PluginStatusDependencies) {
     }
     return skipped
   }
-  return { skipped: readSkipped }
+  const pending = (): boolean => !delivered && readSkipped().length > 0
+  return {
+    skipped: readSkipped,
+    /** Once per leader: the next opened session learns what this start skipped. */
+    notice: {
+      pending,
+      take(): string | undefined {
+        if (!pending()) return undefined
+        delivered = true
+        return skippedNotice(readSkipped(), leaderLogPath(dependencies.env))
+      },
+    },
+    /** `/doctor`: every enabled row that did not activate, with its reason and owning bundle. */
+    async findings(): Promise<Finding[]> {
+      const loader = dependencies.loader()
+      if (loader === undefined) return [{ status: 'INFO', name: 'Plugin rows', detail: 'Not checked: this leader runs no plugin Loader.' }]
+      const { active, inactive } = await inactiveRows(loader.entries())
+      let bundles: readonly BundleLike[] = []
+      try { bundles = await dependencies.manager()?.listBundles() ?? [] } catch { /* attribution only */ }
+      const findings: Finding[] = inactive.map(row => {
+        const owner = bundles.find(bundle => bundle.enabled && bundle.rows.some(candidate => candidate.rowId === row.id))
+        return { status: row.state === 'failed' ? 'ERROR' : 'WARN', name: 'Plugin row ' + row.id,
+          detail: row.module + (row.state === 'failed' ? ' failed: ' : ' is ') + row.reason + '.'
+            + (owner === undefined ? '' : ' It belongs to ' + owner.name + '; /dsh disable ' + owner.name + '#' + row.id + ' turns it off.') }
+      })
+      if (findings.length === 0) findings.push({ status: 'OK', name: 'Plugin rows', detail: String(active) + ' running; none failed or waiting for a service.' })
+      return findings
+    },
+  }
 }
 
 export type PluginStatus = ReturnType<typeof createPluginStatus>

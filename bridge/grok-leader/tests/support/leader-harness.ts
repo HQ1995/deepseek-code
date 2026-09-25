@@ -327,7 +327,8 @@ export interface HarnessOptions {
   sessionProjectionCache?: unknown
   /** MCP servers the stub host reports as mounted by the mcp-client plugin. */
   mcpServers?: Array<{ serverName: string; transport?: string }>
-  /** The DSH plugin manager of a profile-launched leader. */
+  /** Launcher facts of a profile-launched leader, and its DSH plugin manager. */
+  profileContext?: unknown
   pluginManager?: unknown
   combineQueuedPrompts?: boolean
   followUpBehavior?: 'queue' | 'steer'
@@ -490,6 +491,7 @@ export async function makeHarness(
   if (options.sessionTitle !== undefined) ctx.provide('sessionTitle', options.sessionTitle as never)
   if (options.sessionQuery !== undefined) ctx.provide('sessionQuery', options.sessionQuery as never)
   if (options.sessionProjectionCache !== undefined) ctx.provide('sessionProjectionCache', options.sessionProjectionCache as never)
+  if (options.profileContext !== undefined) ctx.provide('profileContext', options.profileContext as never)
   if (options.pluginManager !== undefined) ctx.provide('pluginManager', options.pluginManager as never)
   ctx.provide('sessionPersistence', persistence as unknown as Context['sessionPersistence'])
   const sessionsStore = (options.sessionsStore ?? mockSessionsStore) as typeof mockSessionsStore

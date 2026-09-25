@@ -122,6 +122,10 @@ The bridge also implements the `x.ai/*` surfaces required by this TUI:
   Schedule read is logged and never fails a session open. rc.1 session-event
   reminders are not migrated: each open sends one `image_dropped` system note
   naming them (`_meta.legacySchedule`).
+- When the leader's start skipped profile bundles, the first session opened in
+  that leader (new, loaded or forked) gets one `image_dropped` system note, after
+  its response, naming each bundle, its reason and the leader log path. Later
+  sessions of the same leader get none.
 
 Extension notifications use the `_x.ai/*` wire spelling expected by the ACP
 decoder. `session/update` remains the normal unprefixed ACP notification.

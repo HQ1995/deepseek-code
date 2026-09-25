@@ -1,5 +1,5 @@
 /** Plugin views: the /dsh plugins table over the installed runtime's own
- * bundles, outcome wording, and the bundles boot skipped. */
+ * bundles, outcome wording, inactive Loader rows and the skipped-bundle note. */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -7,7 +7,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { OPTIONAL_BUNDLES, bundlePatchPaths, composeEntries, loadOverlayPatches, readPluginMeta } from '@deepseek-ai/dsh-app-boot'
 import type { BundleInfo, PluginInfo } from '@deepseek-ai/dsh-plugin-manager'
-import { bundleDetail, createPluginStatus, managementText, outcomeText, pluginTable, rowSummary, skipReason } from '../src/plugin-status.ts'
+import {
+  bundleDetail, createPluginStatus, inactiveRows, leaderLogPath, managementText, outcomeText, pluginTable, rowSummary, skipReason, skippedNotice,
+  type LoaderEntryLike,
+} from '../src/plugin-status.ts'
 
 const CORE = new Set(['@deepseek-ai/dsh-base', '@hqzhao95/dscode'])
 const roots: string[] = []
@@ -110,17 +113,77 @@ describe('plugin wording', () => {
     expect(outcomeText({ kind: 'failed', detail: 'boom', saved: 'unknown' }, true, 'R', false)).toContain('Run /dsh plugins to see what is saved.')
   })
 
-  it('reads the bundles this start skipped, without DSH\'s pnpm repair hint', () => {
+  it('finds the leader log the TUI opened for this leader', () => {
+    expect(leaderLogPath({ DSCODE_SOCKET: '/tmp/dscode-1000-abc.sock' })).toBe('/tmp/dscode-1000-abc.log')
+    expect(leaderLogPath({ DSCODE_SOCKET: '/tmp/a.b/leader' })).toBe('/tmp/a.b/leader.log')
+    expect(leaderLogPath({ DSCODE_SOCKET: '/tmp/.hidden' })).toBe('/tmp/.hidden.log')
+    expect(leaderLogPath({ DSCODE_SOCKET: '/tmp/x.sock', DSCODE_LOG: '/var/log/d.log' })).toBe('/var/log/d.log')
+    expect(leaderLogPath({})).toBeUndefined()
+  })
+
+  it('names skipped bundles once, without DSH\'s pnpm repair hint', () => {
     expect(skipReason('Error: dsh: cannot resolve profile bundle "x" from the dsh installation or /p; run \'dsh plugin --profile dscode install\' if its dependency is not installed'))
       .toBe('cannot resolve profile bundle "x" from the dsh installation or /p')
+    expect(skippedNotice([{ packageName: 'x', reason: 'gone' }], '/tmp/l.log'))
+      .toBe('dscode started without a plugin bundle: x (gone). Run /doctor for details, or /dsh disable x to stop loading it. Leader log: /tmp/l.log')
+    expect(skippedNotice(['a', 'b', 'c', 'd'].map(packageName => ({ packageName, reason: 'r' })), undefined))
+      .toBe('dscode started without 4 plugin bundles: a (r); b (r); c (r) and 1 more. Run /doctor for details, or /dsh disable <bundle> to stop loading one.')
+  })
+})
+
+describe('plugin health', () => {
+  const fiber = (state: number, extra: object = {}) => ({ state, await: async () => undefined, ...extra })
+  const loaderEntry = (id: string, value: Partial<LoaderEntryLike> = {}): LoaderEntryLike => ({ options: { id, name: '@x/' + id }, disabled: false, fiber: fiber(2), ...value })
+
+  it('reads the Loader rows that did not activate, and why', async () => {
+    const rows = await inactiveRows([
+      loaderEntry('ok'),
+      loaderEntry('off', { disabled: true, fiber: undefined }),
+      loaderEntry('crash', { fiber: { state: 3, await: async () => { throw new Error('apply threw') } } }),
+      loaderEntry('wait', { fiber: fiber(0, { inject: { llm: {}, speech: {} }, ctx: { get: (name: string) => name === 'llm' ? {} : undefined } }) }),
+      loaderEntry('missing', { fiber: undefined }),
+      { options: { id: 'expr', name: 'e' }, get disabled(): boolean { throw new Error('ctx is not defined') }, fiber: undefined },
+    ])
+    expect(rows).toEqual({ active: 1, inactive: [
+      { id: 'crash', module: '@x/crash', state: 'failed', reason: 'apply threw' },
+      { id: 'wait', module: '@x/wait', state: 'waiting', reason: 'waiting for service: speech' },
+      { id: 'missing', module: '@x/missing', state: 'failed', reason: 'failed to import' },
+      { id: 'expr', module: 'e', state: 'failed', reason: 'its disabled expression failed: ctx is not defined' },
+    ] })
+  })
+
+  it('reports failed rows with their bundle for /doctor, and tells the next session once what boot skipped', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dscode-plugin-status-'))
     roots.push(root)
     mkdirSync(join(root, 'profile'))
     writeFileSync(join(root, 'profile', 'package.json'), JSON.stringify({ private: true, dependencies: {},
       dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-plugin-vanished'] } } }))
     const anchor = fileURLToPath(new URL('../node_modules/@deepseek-ai/dsh/package.json', import.meta.url))
-    const status = createPluginStatus({ profile: () => ({ dir: join(root, 'profile'), installAnchor: anchor, startedBundles: ['@deepseek-ai/dsh-base'] }), logger: { warn: () => {} } })
+    const warnings: string[] = []
+    const status = createPluginStatus({
+      manager: () => ({ listBundles: async () => [{ ...installed('@deepseek-ai/dsh-experimental-auto-review', { enabled: true }) }],
+        listPlugins: async () => [], setBundleEnabled: async () => ({ application: 'failed' }), setPluginEnabled: async () => ({ application: 'failed' }) }),
+      loader: () => ({ entries: () => [loaderEntry('auto-review', { fiber: { state: 3, await: async () => { throw new Error('no model') } } }), loaderEntry('llm')] }),
+      profile: () => ({ dir: join(root, 'profile'), installAnchor: anchor, startedBundles: ['@deepseek-ai/dsh-base'] }),
+      logger: { warn: message => { warnings.push(message) } },
+      env: { DSCODE_SOCKET: '/tmp/dscode-1-x.sock' },
+    })
+    expect(await status.findings()).toEqual([{ status: 'ERROR', name: 'Plugin row auto-review',
+      detail: '@x/auto-review failed: no model. It belongs to @deepseek-ai/dsh-experimental-auto-review; /dsh disable @deepseek-ai/dsh-experimental-auto-review#auto-review turns it off.' }])
     expect(status.skipped()).toEqual([{ packageName: 'dsh-plugin-vanished', reason: expect.stringMatching(/^cannot resolve profile bundle "dsh-plugin-vanished"/) }])
-    expect(createPluginStatus({ profile: () => undefined, logger: { warn: () => {} } }).skipped()).toEqual([])
+    expect(status.notice.pending()).toBe(true)
+    expect(status.notice.take()).toMatch(/^dscode started without a plugin bundle: dsh-plugin-vanished \(cannot resolve .*\)\. Run \/doctor .* Leader log: \/tmp\/dscode-1-x\.log$/)
+    expect(status.notice.pending()).toBe(false)
+    expect(status.notice.take()).toBeUndefined()
+    expect(warnings).toEqual([])
+  })
+
+  it('says every row runs, and stays quiet without a profile or Loader', async () => {
+    const quiet = createPluginStatus({ manager: () => undefined, loader: () => ({ entries: () => [loaderEntry('a'), loaderEntry('b')] }),
+      profile: () => undefined, logger: { warn: () => {} } })
+    expect(await quiet.findings()).toEqual([{ status: 'OK', name: 'Plugin rows', detail: '2 running; none failed or waiting for a service.' }])
+    expect(quiet.notice.pending()).toBe(false)
+    const bare = createPluginStatus({ manager: () => undefined, loader: () => undefined, profile: () => undefined, logger: { warn: () => {} } })
+    expect(await bare.findings()).toEqual([{ status: 'INFO', name: 'Plugin rows', detail: 'Not checked: this leader runs no plugin Loader.' }])
   })
 })

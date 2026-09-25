@@ -26,6 +26,8 @@ interface ExecutionHost<S extends ExecutionSession> {
   browser?(): BrowserStatus | undefined
   /** Enabled host-level Team tools rows, which reach every session's agents. */
   hostTeamRows?(): Promise<readonly string[]>
+  /** Plugin rows that did not activate in this leader, or that none failed. */
+  plugins?(): Promise<ReadonlyArray<{ status: string; name: string; detail: string }>>
   /** The remote workspace identity when this profile runs tools over SSH. */
   remote?(): { host: string; workspace: string; helperHash?: string; connected: boolean } | undefined
 }
@@ -91,6 +93,10 @@ export function createNativeExecution<S extends ExecutionSession>(host: Executio
             && typeof row.status === 'string' && typeof row.name === 'string' && typeof row.detail === 'string')) throw new Error('invalid installation findings')
           findings.push(...parsed)
         } catch { findings.push({ status: 'ERROR', name: 'Installation checks', detail: 'Could not finish. Run dscode doctor --runtime in a shell.' }) }
+        active(record, scope)
+        try { findings.push(...await host.plugins?.() ?? []) } catch (error) {
+          findings.push({ status: 'WARN', name: 'Plugin rows', detail: 'Could not read the Loader: ' + (error instanceof Error ? error.message : String(error)) })
+        }
         active(record, scope)
         const subprocess = host.subprocess(record)
         active(record, scope)

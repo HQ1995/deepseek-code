@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { register, sendRequest, useLeaderHarness, waitFor, waitForId } from './support/leader-harness.ts'
@@ -105,6 +106,37 @@ describe('leader plugin inspection, /dsh command and bundle management', () => {
       await waitFor(() => c.all.some(m => m.method === 'session/update'
         && String((m.params as { update?: { content?: { text?: string } } }).update?.content?.text ?? '').includes('Usage: /dsh')))
       expect(agent.internals.followups).toEqual([])
+    } finally {
+      delete process.env.DSH_PROFILE_DIR
+      rmSync(profileDir, { recursive: true, force: true })
+    }
+  })
+
+  it('tells the first opened session once which bundles this start skipped', async () => {
+    const { mkdirSync, writeFileSync, rmSync } = await import('node:fs')
+    const profileDir = resolve(tmpdir(), 'dsh-profile-skipped-' + randomUUID())
+    mkdirSync(profileDir, { recursive: true })
+    writeFileSync(resolve(profileDir, 'package.json'), JSON.stringify({ private: true, dependencies: {},
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-plugin-vanished'] } } }))
+    const installAnchor = fileURLToPath(new URL('../node_modules/@deepseek-ai/dsh/package.json', import.meta.url))
+    process.env.DSH_PROFILE_DIR = profileDir
+    try {
+      const { client: c } = await start({ profileContext: { name: 'dscode', dir: profileDir, patchPath: resolve(profileDir, 'cordis.patch.yml'), installAnchor,
+        cwd: process.cwd(), home: profileDir, startedBundles: ['@deepseek-ai/dsh-base'], overlays: [], telemetryDisabledEnv: '1' } })
+      register(c)
+      await c.next()
+      const notes = () => c.all.filter(m => m.method === 'x.ai/session_notification')
+        .flatMap(m => (m.params as { update: { sessionUpdate: string; notes?: string[] } }).update.notes ?? [])
+        .filter(note => note.includes('dscode started without'))
+      const first = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      await waitFor(() => notes().length === 1)
+      expect(notes()[0]).toMatch(/^dscode started without a plugin bundle: dsh-plugin-vanished \(cannot resolve profile bundle "dsh-plugin-vanished".*\)\. Run \/doctor for details, or \/dsh disable dsh-plugin-vanished to stop loading it\./)
+      expect(notes()[0]).not.toContain("run 'dsh plugin")
+      const noteSession = c.all.find(m => m.method === 'x.ai/session_notification' && JSON.stringify(m).includes('dscode started without'))
+      expect((noteSession!.params as { sessionId: string }).sessionId).toBe((first.result as { sessionId: string }).sessionId)
+      await c.request(2, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+      await new Promise(resolve => setTimeout(resolve, 150))
+      expect(notes()).toHaveLength(1)
     } finally {
       delete process.env.DSH_PROFILE_DIR
       rmSync(profileDir, { recursive: true, force: true })

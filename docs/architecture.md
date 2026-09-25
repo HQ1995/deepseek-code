@@ -104,7 +104,7 @@ Stateful modules own their caches, subscriptions, pending work and disposal.
 | `profile-plugins` | `/dsh` plugin commands: verb parsing, the profile lock, list/enable/disable/add/inspect/remove, version trust |
 | `plugin-bundles` | Bundle patch analysis, isolated npm audit, install verification and rollback; no command parsing |
 | `plugin-rows` | Switches bundles and rows through the DSH plugin manager and applies them to the live Loader, rolling back an enable that does not start |
-| `plugin-status` | Read-only plugin views: the `/dsh plugins` table and outcome wording, and the bundles boot skipped |
+| `plugin-status` | Read-only plugin views: the `/dsh plugins` table and outcome wording, inactive Loader rows for `/doctor`, bundles boot skipped and their one-time note |
 | `package-location` | Package provenance; lazy updater resolution and profile lock |
 | `guards` | Leaf value guards shared across the bridge; no imports |
 

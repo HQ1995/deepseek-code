@@ -34,6 +34,7 @@ function fixture() {
     browser: vi.fn<() => BrowserStatus | undefined>(() => undefined),
     hostTeamRows: vi.fn(async (): Promise<readonly string[]> => []),
     remote: vi.fn((): { host: string; workspace: string; helperHash?: string; connected: boolean } | undefined => undefined),
+    plugins: vi.fn(async (): Promise<ReadonlyArray<{ status: string; name: string; detail: string }>> => []),
   }
   const installation = vi.fn(async (_version: string, _directory: string | undefined, _signal: AbortSignal) => JSON.stringify([{ status: 'OK', name: 'Runtime', detail: 'pinned' }]))
   const execution = createNativeExecution(host, installation)
@@ -66,6 +67,13 @@ describe('native execution ownership', () => {
     expect((await f.doctor()).text).not.toContain('Agent Teams')
     f.host.hostTeamRows.mockResolvedValue(['host-tool-agent-team'])
     expect((await f.doctor()).text).toContain('[WARN] Agent Teams: Host-level Team tools (host-tool-agent-team) give every session Team tools')
+  })
+  it('reports plugin rows that did not activate right after the installation checks', async () => {
+    const f = fixture()
+    f.host.plugins.mockResolvedValue([{ status: 'ERROR', name: 'Plugin row auto-review', detail: 'x failed: boom.' }])
+    expect((await f.doctor()).text).toContain('[OK] Runtime: pinned\n\n[ERROR] Plugin row auto-review: x failed: boom.\n\n[')
+    f.host.plugins.mockRejectedValue(new Error('loader gone'))
+    expect((await f.doctor()).text).toContain('[WARN] Plugin rows: Could not read the Loader: loader gone')
   })
   it('reports the browser only while its row is on, and warns without an executable or sandbox', async () => {
     const f = fixture()

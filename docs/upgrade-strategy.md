@@ -132,7 +132,9 @@ earlier:
   inserted rows with the runtime's own app-boot. They report skipped bundles and
   disabled rows as errors, and exempted ones as warnings. An unreadable
   `compatibility.json`, or a DSH executable outside an `@deepseek-ai/dsh`
-  installation, is reported rather than silently passed.
+  installation, is reported rather than silently passed. They also run boot's
+  own profile loader, so a bundle skipped for any other reason (not installed,
+  no `dsh.bundle`, an unreadable patch) is an error with that reason.
 
 Exemptions are exact package and DSH versions, stored in the profile's
 `compatibility.json`; a dscode update to a new DSH version does not carry them
@@ -258,6 +260,13 @@ manager's `readOnlyReason` locks a bundle or row, and dscode refuses to switch
 off `@deepseek-ai/dsh-base`, `@hqzhao95/dscode` or their rows, which would stop
 the leader from starting. The Agent Teams bundle inserts host-level Team tools
 that dscode confines to its `teams` preset; `/doctor` warns while it is on.
+
+Boot skips a bundle it cannot load and says so only in the leader log. The
+bridge compares the profile's selection with `profileContext.startedBundles`,
+reads the reasons with app-boot's `loadProfileDirectory`, and the first session
+opened in that leader gets one `image_dropped` system note naming them.
+`/doctor` adds the Loader rows that failed or wait for a service, with their
+bundle and the leader log.
 
 ### Approval reasons
 
