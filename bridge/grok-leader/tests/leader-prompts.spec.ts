@@ -469,6 +469,31 @@ describe('leader prompt turns, content and usage', () => {
     expect(updates[0]![1]).toEqual({ sessionUpdate: 'tool_call_delta_chunk', tool_index: 0, name: 'write' })
   })
 
+  it('shows an automatic compaction, not a /compact command, with its before and after context', async () => {
+    const { registry, pluginCtx, client: c } = await start()
+    register(c)
+    await c.next()
+    const created = await c.request(1, 'session/new', { cwd: process.cwd(), mcpServers: [] })
+    const sessionId = (created.result as { sessionId: string }).sessionId
+    const agent = registry.byId.get(sessionId)!
+    const emit = (type: string, data: unknown) => pluginCtx.emit('session/event', agent.session, agent.session.append(type, data as never))
+    emit('assistant/message', { turn: 1, step: 1, stream: [], usage: { inputTokens: 1000, outputTokens: 10 },
+      message: createAssistantMessage({ content: [{ type: 'text', text: 'long' }], source: { provider: 'deepseek', model: 'chat' } }) })
+    for (const [id, command] of [['manual', 'command-1'], ['auto', undefined]] as const) {
+      const owner = { compactionId: id, turn: 1, ...command === undefined ? {} : { sourceCommandId: command } }
+      emit('compaction/start', owner)
+      emit('compaction/summary', { ...owner, shadowedTokenCount: 700, usage: { inputTokens: 900, outputTokens: 40 }, summary: [{ type: 'text', text: 'The gist' }] })
+      emit('compaction/end', owner)
+    }
+    await waitFor(() => c.all.some(message => JSON.stringify(message).includes('auto_compact_completed')))
+    const compactions = c.all.filter(message => /auto_compact/.test(JSON.stringify(message)))
+    expect(compactions.map(message => [message.method, (message.params as { update: unknown }).update])).toEqual([
+      ['x.ai/session_notification', { sessionUpdate: 'auto_compact_completed', tokens_before: 1000, tokens_after: 340, elapsed_ms: expect.any(Number) as number, summary_preview: 'The gist' }],
+    ])
+    const info = await c.request(2, 'x.ai/session/info', { sessionId })
+    expect(JSON.stringify(info.result)).toContain('"compactionCount":2')
+  })
+
   it('rejects a prompt only when agent/error names its in-flight turn', async () => {
     const { registry, pluginCtx, client: c } = await start({ manualIdle: true })
     register(c)

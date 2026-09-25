@@ -166,6 +166,31 @@ describe('session output ownership', () => {
     expect(restored.notes).toEqual([])
   })
 
+  it('shows automatic compaction in the transcript and restores the todo pane the TUI clears', async () => {
+    const f = fixture()
+    const todos = event(0, 'todo/write', { todos: [{ content: 'keep me', status: 'in_progress' }] })
+    const log = [todos,
+      event(1, 'compaction/start', { compactionId: 'c', turn: 1 }, 1000),
+      event(2, 'compaction/summary', { compactionId: 'c', turn: 1, shadowedTokenCount: 50, usage: { inputTokens: 1, outputTokens: 5 }, summary: [{ type: 'text', text: 'short' }] }),
+      event(3, 'compaction/end', { compactionId: 'c', turn: 1 }, 1600)]
+    f.setContext({ contextPressure: { projectedTokens: 90, contextWindow: 100 } })
+    f.output.live(log[0]!); f.output.live(log[1]!); f.output.live(log[2]!)
+    f.setContext({ contextPressure: { projectedTokens: 45, contextWindow: 100 } })
+    f.output.live(log[3]!)
+    expect(f.notes.map(note => [note.method, note.params.update.sessionUpdate])).toEqual([
+      ['session/update', 'plan'], ['x.ai/session_notification', 'auto_compact_started'],
+      ['x.ai/session_notification', 'auto_compact_completed'], ['session/update', 'plan']])
+    expect(f.notes[1]!.params.update).toMatchObject({ tokens_used: 90, context_window: 100, percentage: 90 })
+    expect(f.notes[2]!.params.update).toEqual({ sessionUpdate: 'auto_compact_completed', tokens_before: 90, tokens_after: 45, elapsed_ms: 600, summary_preview: 'short' })
+    expect(f.notes[3]!.params.update).toEqual(f.notes[0]!.params.update)
+    expect(f.output.stats.compactionCount).toBe(1)
+    // Replay: the completion only, from the last reported prompt size.
+    const restored = fixture()
+    await restored.output.restore([assistantEvent(0, 'big', { inputTokens: 80, outputTokens: 2 }), ...log.slice(1).map((item, index) => ({ ...item, seq: index + 1 }))])
+    expect(restored.notes.map(note => note.params.update.sessionUpdate)).toEqual(['agent_message_chunk', 'auto_compact_completed'])
+    expect(restored.notes[1]!.params.update).toMatchObject({ tokens_before: 80, tokens_after: 35 })
+  })
+
   it('replaces same-step usage but keeps separately billed retry attempts', () => {
     const f = fixture()
     f.output.live(assistantEvent(0, 'first', { inputTokens: 10, outputTokens: 2 }))

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { describeFailure, isXaiNotice, toolCallWriting, turnFailure, turnNotices, WRITING_REFRESH_MS, type WritingCalls } from '../src/turn-notices.ts'
+import { compactionNotices, describeFailure, isXaiNotice, toolCallWriting, turnFailure, turnNotices, WRITING_REFRESH_MS, type CompactionFold, type WritingCalls } from '../src/turn-notices.ts'
 import { event } from './support/session-events.ts'
 
 const retry = (data: Record<string, unknown>) => event('llm/retry', {
@@ -63,6 +63,49 @@ describe('turn notices', () => {
     expect(WRITING_REFRESH_MS).toBeLessThan(10_000)
     expect(toolCallWriting(calls, { type: 'text-delta', index: 0, text: 'x' }, 50)).toBeUndefined()
     expect(isXaiNotice({ sessionUpdate: 'tool_call_delta_chunk' })).toBe(true)
+  })
+
+  it('shows an automatic compaction from its markers, estimating the result on replay', () => {
+    const marker = (type: string, time: number, data: Record<string, unknown> = {}) => event('compaction/' + type, { compactionId: 'c1', turn: 3, ...data }, 0, time)
+    const summary = marker('summary', 1500, { shadowedTokenCount: 20000, usage: { inputTokens: 21000, outputTokens: 900 },
+      summary: [{ type: 'text', text: '## Summary\n' + 'x'.repeat(200) }] })
+    const live: CompactionFold = new Map()
+    let context = { used: 26000, window: 32000, native: true }
+    expect(compactionNotices(live, marker('start', 1000), false, () => context)).toEqual([{ sessionUpdate: 'auto_compact_started',
+      tokens_used: 26000, context_window: 32000, percentage: 81, reason: 'context pressure' }])
+    expect(compactionNotices(live, summary, false, () => context)).toEqual([])
+    context = { used: 7000, window: 32000, native: true }
+    const [completed] = compactionNotices(live, marker('end', 4200), false, () => context)
+    expect(completed).toMatchObject({ sessionUpdate: 'auto_compact_completed', tokens_before: 26000, tokens_after: 7000, elapsed_ms: 3200 })
+    expect(completed).toHaveProperty('summary_preview', expect.stringMatching(/^## Summary x+…$/))
+    expect((completed as { summary_preview: string }).summary_preview).toHaveLength(100)
+    expect(live.size).toBe(0)
+
+    const replayed: CompactionFold = new Map()
+    const durable = () => ({ used: 26000 })
+    expect(compactionNotices(replayed, marker('start', 1000), true, durable)).toEqual([])
+    compactionNotices(replayed, summary, true, durable)
+    expect(compactionNotices(replayed, marker('end', 4200), true, durable)).toMatchObject([{ tokens_before: 26000, tokens_after: 6900 }])
+    // Live without the native projection: the stale reported prompt is no result; estimate it.
+    const stale: CompactionFold = new Map()
+    compactionNotices(stale, marker('start', 1000), false, durable)
+    compactionNotices(stale, summary, false, durable)
+    expect(compactionNotices(stale, marker('end', 1200), false, durable)).toMatchObject([{ tokens_before: 26000, tokens_after: 6900 }])
+  })
+
+  it('leaves /compact to the command flow and reports a failed automatic compaction', () => {
+    const fold: CompactionFold = new Map()
+    const context = () => ({ used: 10, window: 100 })
+    expect(compactionNotices(fold, event('compaction/start', { compactionId: 'm', sourceCommandId: 'cmd', turn: null }), false, context)).toEqual([])
+    expect(compactionNotices(fold, event('compaction/end', { compactionId: 'm', sourceCommandId: 'cmd', turn: null }), false, context)).toEqual([])
+    compactionNotices(fold, event('compaction/start', { compactionId: 'a', turn: 1 }), false, context)
+    expect(compactionNotices(fold, event('compaction/end', { compactionId: 'a', turn: 1, error: 'summary failed: 500' }), false, context))
+      .toEqual([{ sessionUpdate: 'auto_compact_failed', error: 'summary failed: 500' }])
+    // No capacity: no percentage to show, but the completion is still reported.
+    compactionNotices(fold, event('compaction/start', { compactionId: 'b', turn: 1 }, 0, 5), false, () => ({ used: 10 }))
+    expect(compactionNotices(fold, event('compaction/end', { compactionId: 'b', turn: 1 }, 0, 9), false, () => ({ used: 4, native: true })))
+      .toEqual([{ sessionUpdate: 'auto_compact_completed', tokens_before: 10, tokens_after: 4, elapsed_ms: 4 }])
+    expect(isXaiNotice({ sessionUpdate: 'auto_compact_completed' })).toBe(true)
   })
 
   it('routes only xAI session updates to the xAI notification', () => {

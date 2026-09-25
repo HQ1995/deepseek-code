@@ -1,8 +1,9 @@
 /**
  * Turn lifecycle facts the TUI already renders from its xAI session updates:
- * model-request retries, typed turn failures and tool calls the model is still
- * writing. Pure mapping of native events and stream chunks; the owning session
- * output decides when to send them.
+ * model-request retries, typed turn failures, tool calls the model is still
+ * writing and automatic compaction. Pure mapping of native events and stream
+ * chunks; the owning session output keeps their state and decides when to
+ * send them.
  *
  * @module dscode/turn-notices
  */
@@ -27,9 +28,10 @@ export type RetryStateUpdate =
 export type ToolCallWriting = { sessionUpdate: 'tool_call_delta_chunk'; tool_index: number; name?: string }
 
 /** Updates that ride `x.ai/session_notification` rather than ACP `session/update`. */
-export type XaiNotice = { sessionUpdate: 'image_dropped'; notes: string[] } | RetryStateUpdate | ToolCallWriting
+export type XaiNotice = { sessionUpdate: 'image_dropped'; notes: string[] } | RetryStateUpdate | ToolCallWriting | CompactionNotice
 
-const XAI_NOTICES: ReadonlySet<string> = new Set<XaiNotice['sessionUpdate']>(['image_dropped', 'retry_state', 'tool_call_delta_chunk'])
+const XAI_NOTICES: ReadonlySet<string> = new Set<XaiNotice['sessionUpdate']>(['image_dropped', 'retry_state', 'tool_call_delta_chunk',
+  'auto_compact_started', 'auto_compact_completed', 'auto_compact_failed'])
 export const isXaiNotice = (update: { sessionUpdate: string }): update is XaiNotice => XAI_NOTICES.has(update.sessionUpdate)
 
 /** A model call DSH refused for want of a usable key fails the same way on
@@ -134,4 +136,64 @@ export function toolCallWriting(calls: WritingCalls, chunk: StreamChunk, time: n
   if (seen !== undefined && (name === undefined || seen.named) && time - seen.at < WRITING_REFRESH_MS) return undefined
   calls.set(chunk.index, { named: seen?.named === true || name !== undefined, at: time })
   return { sessionUpdate: 'tool_call_delta_chunk', tool_index: chunk.index, ...name === undefined ? {} : { name } }
+}
+
+/** The TUI's automatic-compaction blocks (`session_event.rs`). */
+export type CompactionNotice =
+  | { sessionUpdate: 'auto_compact_started'; tokens_used: number; context_window: number; percentage: number; reason: string }
+  | { sessionUpdate: 'auto_compact_completed'; tokens_before?: number; tokens_after: number; elapsed_ms: number; summary_preview?: string }
+  | { sessionUpdate: 'auto_compact_failed'; error: string }
+
+/** Automatic compactions between their durable start and end markers. */
+export type CompactionFold = Map<string, { start: number; before?: number; shadowed?: number; summaryTokens?: number; preview?: string }>
+
+/** Context occupancy when a compaction event is seen: the native next-request
+ * projection (`native`) live, else the last provider-reported prompt size. */
+export interface ContextTokens { used?: number; window?: number; native?: boolean }
+
+const PREVIEW_CHARS = 100
+
+/**
+ * Map one `compaction/*` marker of an automatic compaction (no initiating
+ * command: `/compact` keeps the TUI's own command flow). Start shows the
+ * TUI's "Context N% full. Compacting…" with its spinner, live only and only
+ * when occupancy and capacity are known. End shows the failure, or the
+ * completion with the context before and after; live, "after" is the native
+ * projection, which reprices the span the summary shadowed at once, and on
+ * replay it is estimated from the summary's own accounting.
+ */
+export function compactionNotices(fold: CompactionFold, event: SessionEvent, replay: boolean, context: () => ContextTokens): CompactionNotice[] {
+  const type = String(event.type)
+  if (type !== 'compaction/start' && type !== 'compaction/summary' && type !== 'compaction/end') return []
+  const data = event.data as { compactionId?: unknown; sourceCommandId?: unknown; error?: unknown; shadowedTokenCount?: unknown;
+    usage?: { outputTokens?: unknown }; summary?: Array<{ type?: unknown; text?: unknown }> } | null
+  if (typeof data?.compactionId !== 'string' || data.sourceCommandId !== undefined) return []
+  const id = data.compactionId
+  if (type === 'compaction/start') {
+    const { used, window } = context()
+    fold.set(id, { start: event.time, ...used === undefined ? {} : { before: used } })
+    if (replay || used === undefined || window === undefined || window <= 0) return []
+    return [{ sessionUpdate: 'auto_compact_started', tokens_used: used, context_window: window,
+      percentage: Math.min(255, Math.round(used / window * 100)), reason: 'context pressure' }]
+  }
+  const open = fold.get(id)
+  if (type === 'compaction/summary') {
+    if (open === undefined) return []
+    const text = (Array.isArray(data.summary) ? data.summary : []).flatMap(block => block?.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('\n')
+    if (typeof data.shadowedTokenCount === 'number') open.shadowed = data.shadowedTokenCount
+    open.summaryTokens = typeof data.usage?.outputTokens === 'number' ? data.usage.outputTokens : Math.ceil(text.length / 4)
+    const preview = text.trim().replace(/\s+/g, ' ')
+    if (preview !== '') open.preview = preview.length > PREVIEW_CHARS ? preview.slice(0, PREVIEW_CHARS - 1) + '…' : preview
+    return []
+  }
+  fold.delete(id)
+  if (typeof data.error === 'string') return [{ sessionUpdate: 'auto_compact_failed', error: data.error }]
+  const estimate = open?.before === undefined || open.shadowed === undefined ? undefined
+    : Math.max(0, open.before - open.shadowed + (open.summaryTokens ?? 0))
+  const now = replay ? undefined : context()
+  const after = (now?.native === true ? now.used : undefined) ?? estimate
+  if (after === undefined) return []
+  return [{ sessionUpdate: 'auto_compact_completed', tokens_after: after, elapsed_ms: Math.max(0, event.time - (open?.start ?? event.time)),
+    ...open?.before === undefined ? {} : { tokens_before: open.before },
+    ...open?.preview === undefined ? {} : { summary_preview: open.preview } }]
 }

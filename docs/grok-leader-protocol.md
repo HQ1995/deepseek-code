@@ -160,6 +160,18 @@ already exist; nothing here adds a TUI code path.
   sent when it starts, when its name arrives and then at most every 2 s while
   it keeps streaming, inside the TUI's 10 s dead-stream cutoff. Replay sends
   none.
+- An automatic compaction (`compaction/*` markers without a
+  `sourceCommandId`; a `/compact` command keeps the TUI's command flow) sends
+  `auto_compact_started` `{tokens_used, context_window, percentage}` at its
+  start, live only and only when native occupancy and capacity are known: the
+  TUI's "Context N% full. Compacting…" line and spinner. Its end sends
+  `auto_compact_failed` `{error}` or `auto_compact_completed`
+  `{tokens_before, tokens_after, elapsed_ms, summary_preview}`, live and on
+  replay. Live, `tokens_after` is the native next-request projection, which
+  reprices the shadowed span at once; on replay, and live without that
+  projection, it is the last reported prompt size minus the summary's shadowed
+  tokens plus its output. The TUI shows the completion at the turn's end and
+  empties its todo pane, so the bridge sends the turn's last plan again.
 
 ## Invariants
 
