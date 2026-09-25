@@ -104,7 +104,9 @@ async function boot(resume = false, preset) {
   await waitFor(() => readFile(join(artifacts, `tui-${generation}.log`), 'utf8'),
     log => log.includes(`"msg":"session.${resume ? 'load' : 'create'}.done"`), 'tui-session-ready', 30000)
 }
-const readRequests = async () => (await readFile(env.DSCODE_E2E_MOCK_LOG, 'utf8')).split('\n')
+/** Whole lines only: the fixture may be mid-append of a large request body. */
+const completeLines = text => text.slice(0, text.lastIndexOf('\n') + 1).split('\n')
+const readRequests = async () => completeLines(await readFile(env.DSCODE_E2E_MOCK_LOG, 'utf8'))
   .map(line => line.match(/^POST \S*\/chat\/completions (.*)$/)).filter(Boolean).map(match => JSON.parse(match[1]))
   .filter(body => !JSON.stringify(body).includes('Create a concise title'))
 let headlessCount = 0

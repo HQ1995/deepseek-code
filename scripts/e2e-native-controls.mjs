@@ -242,9 +242,10 @@ export async function nativeControlsAcceptance(ui) {
   const imageScreen = await wait(/\[Open/)
   const lines = imageScreen.split('\n'), y = lines.findLastIndex(line => line.includes('[Open'))
   await click(lines[y].indexOf('[Open') + 2, y)
+  // Whole lines only: the opener may be mid-append.
   await waitFor(() => readFile(mediaOpenerLog, 'utf8').catch(error => {
     if (error.code === 'ENOENT') return ''; throw error
-  }), log => log.split('\n').some(line => line && JSON.parse(line)[0] === stored.path), 'native-image-open-verified-path')
+  }), log => log.slice(0, log.lastIndexOf('\n') + 1).split('\n').some(line => line && JSON.parse(line)[0] === stored.path), 'native-image-open-verified-path')
   await artifact('controls-image-live', { image: stored, screen: await capture() })
   await send(`/subagents queue ${childId} ${imagePrompt} hold child image`)
   await waitFor(child, value => value?.images.length > 0 && value.status === 'running', 'child-tool-image')
