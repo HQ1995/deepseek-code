@@ -1768,6 +1768,22 @@ pub(crate) fn execute(
                 TaskResult::CommandOptionsLoaded { agent_id, session_id, command, key, result }
             });
         }
+        Effect::FetchClientActivity { key } => {
+            // DIVERGENCE(dscode): the quit guard. A slow or old leader keeps
+            // today's quit text, so the wait is short and failures are quiet.
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({});
+                let request = acp::ExtRequest::new("x.ai/client/activity", serde_json::value::to_raw_value(&params).expect("serialize client activity query").into());
+                let result = match tokio::time::timeout(crate::app::dispatch::quit_activity::FETCH_TIMEOUT, acp_send(request, &tx)).await {
+                    Ok(Ok(response)) => serde_json::from_str::<crate::app::dispatch::quit_activity::ClientActivity>(response.0.get())
+                        .map_err(|error| format!("Invalid client activity: {error}")),
+                    Ok(Err(error)) => Err(sanitize_user_error(&error.to_string())),
+                    Err(_) => Err("Request timed out.".into()),
+                };
+                TaskResult::ClientActivityLoaded { key, result }
+            });
+        }
         Effect::RunSessionCommand { agent_id, session_id, method, prompt } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {

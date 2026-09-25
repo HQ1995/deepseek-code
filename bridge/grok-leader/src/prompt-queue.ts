@@ -27,6 +27,9 @@ export interface PromptQueueHost {
 export interface PromptQueue {
   readonly busy: boolean
   readonly promptId: string | undefined
+  /** What closing the session would drop now: whether a prompt runs, and the
+   * queued rows' texts, oldest first (the quit guard's own counts). */
+  readonly pending: { readonly running: boolean; readonly queued: readonly string[] }
   /** Check the supplied admission before further native work after an await.
    * Queue cancellation at that checkpoint settles cancelled; disposal rejects. */
   submit(params: Record<string, unknown>, text: string, prepare: (admission: { assertActive(): void }) => Promise<DurablePromptBlock[]>): Promise<PromptSettleResult>
@@ -417,6 +420,9 @@ function attachPromptQueue(host: PromptQueueHost, options: Parameters<typeof cre
   return {
     get busy() { return admissions > 0 || state.promptQueue.length > 0 || state.inflight !== undefined || state.runningPromptId !== undefined },
     get promptId() { return state.inflight?.promptId },
+    get pending() {
+      return { running: state.inflight !== undefined || state.runningPromptId !== undefined, queued: state.promptQueue.map(entry => entry.text) }
+    },
     submit(params, text, prepare) {
       if (disposed || !host.isLive()) return Promise.reject(invalidParams('unknown session: ' + host.sessionId))
       const epoch = admissionEpoch

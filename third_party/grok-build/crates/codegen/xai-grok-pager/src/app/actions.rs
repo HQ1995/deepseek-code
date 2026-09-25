@@ -2042,6 +2042,9 @@ pub enum Effect {
         /// The picker's loading key, echoed back to reject stale replies.
         key: String,
     },
+    /// DIVERGENCE(dscode): `x.ai/client/activity` for the quit arm carrying
+    /// `key`: what quitting now would stop, and what waits.
+    FetchClientActivity { key: u64 },
     /// Fetch and display session info via x.ai/session/info.
     /// Auth lines are derived in the effect from SessionFlags + env (not Effect fields).
     ShowSessionInfo {
@@ -2900,6 +2903,10 @@ pub enum TaskResult {
         command: String,
         key: String,
         result: Result<Vec<crate::app::dispatch::command_options::SelectOption>, String>,
+    },
+    ClientActivityLoaded {
+        key: u64,
+        result: Result<crate::app::dispatch::quit_activity::ClientActivity, String>,
     },
     /// Session info fetched successfully.
     SessionInfoComplete {

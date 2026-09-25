@@ -12,7 +12,9 @@ import {
   CORE_PLUGIN_NAMES, bundleRequiresTrust, createPluginBundles, describeAnalysis, readProfileManifest, refusedCompatibility, writeProfileBundles,
   type PluginBundleDependencies, type PluginBundles,
 } from './plugin-bundles.ts'
+import type { SettingsLike } from './native-seams.ts'
 import type { BundleLike, PluginManagerLike, PluginRows } from './plugin-rows.ts'
+import { CONFIG_USAGE, createPluginSettings } from './plugin-settings.ts'
 import { bundleDetail, bundleTitle, managementText, outcomeText, pluginTable, shownBundles, type SkippedBundle } from './plugin-status.ts'
 
 export { SENSITIVE_ROW_IDS, analyzeBundlePatch, type BundlePatchAnalysis } from './plugin-bundles.ts'
@@ -155,11 +157,14 @@ export interface ProfilePluginDependencies extends PluginBundleDependencies {
   switches?: Pick<PluginRows, 'switchBundle' | 'switchRow'>
   /** Bundles this leader's start skipped, with why. */
   skipped?: () => readonly SkippedBundle[]
+  /** DSH's settings service, which `/dsh config` reads and writes through. */
+  settings?: () => SettingsLike | undefined
 }
 
 // Inline code: the TUI renders replies as Markdown, where a bare `<name>` is HTML.
 const USAGE = 'Usage: `/dsh plugins` | `/dsh enable <bundle>[#row]` | `/dsh disable <bundle>[#row]` | `/dsh add [--trust] <package|git-url|file:path>`'
   + ' | `/dsh remove <name>` | `/dsh inspect <name>` | `/dsh allow-version <package@version> --accept-risk` | `/dsh revoke-version <package@version>`'
+  + ' | ' + CONFIG_USAGE
 
 /** Verbs that mutate the profile, and so run under its lock. */
 const LOCKED_VERBS: ReadonlySet<string | undefined> = new Set(['add', 'remove', 'enable', 'disable', 'allow-version', 'revoke-version'])
@@ -331,12 +336,14 @@ async function removePlugin({ dir, rest, bundles: pluginBundles }: PluginVerb): 
 
 /** `/dsh` choices: the verbs a pick completes, then the bundles `enable`,
  * `disable`, `inspect` or `remove` applies to, by title with the package as
- * detail. Adding a package and version trust need typed text. */
-async function pluginOptions(dir: string, query: string, manager: PluginManagerLike | undefined): Promise<SelectOption[]> {
+ * detail; `config` asks `plugin-settings` for its namespaces. Adding a package
+ * and version trust need typed text. */
+async function pluginOptions(dir: string, query: string, manager: PluginManagerLike | undefined, configurable: boolean): Promise<SelectOption[]> {
   if (query === '') {
     return [{ id: 'plugins', label: 'List plugins', detail: 'Every bundle, its state and problems' },
       ...manager === undefined ? [] : [{ id: 'enable', label: 'Turn a plugin on', next: true } as const, { id: 'disable', label: 'Turn a plugin off', next: true } as const],
-      { id: 'inspect', label: 'Inspect a plugin', next: true }, { id: 'remove', label: 'Remove a plugin', next: true }]
+      { id: 'inspect', label: 'Inspect a plugin', next: true }, { id: 'remove', label: 'Remove a plugin', next: true },
+      ...configurable ? [{ id: 'config', label: 'Configure a plugin', detail: 'The settings each loaded plugin serves', next: true } as const] : []]
   }
   const bundles = shownBundles(await manager?.listBundles() ?? [], CORE_PLUGIN_NAMES)
   const row = (bundle: BundleLike): SelectOption => ({ id: query + ' ' + bundle.name, label: bundleTitle(bundle),
@@ -396,8 +403,17 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
   })
 
   const bundles = createPluginBundles(dependencies)
+  const settings = createPluginSettings({
+    settings: () => dependencies.settings?.(),
+    bundles: async () => await dependencies.pluginManager?.()?.listBundles() ?? [],
+  })
 
   const executeCommand = async (text: string, notify: (message: string) => void = () => {}): Promise<string> => {
+    // Settings edits go through DSH's settings service, which locks and
+    // validates them itself; the raw line keeps a JSON value's quotes.
+    if (settings.matches(text)) {
+      try { return await settings.execute(text) } catch (error: unknown) { throw invalidParams('/dsh config failed: ' + errorMessage(error)) }
+    }
     let words: string[]
     try {
       words = parseCommandLine(text).slice(1)
@@ -431,8 +447,9 @@ export function createProfilePlugins(dependencies: ProfilePluginDependencies) {
     /** `x.ai/commands/options` for `/dsh`: reads only, outside the profile lock. */
     async options(query: string): Promise<SelectOption[]> {
       if (closed) throw new Error('profile plugin management has been disposed')
+      if (query === 'config' || query.startsWith('config ')) return await settings.options(query)
       const dir = dshProfileDir()
-      return dir === undefined ? [] : await pluginOptions(dir, query, dependencies.pluginManager?.())
+      return dir === undefined ? [] : await pluginOptions(dir, query, dependencies.pluginManager?.(), dependencies.settings?.()?.describe !== undefined)
     },
     /** Let an accepted locked mutation finish its post-install verification;
      * exiting midway could leave a dependency enabled without that check. */

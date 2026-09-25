@@ -89,7 +89,7 @@ pub(super) fn render_pending_hint(
     let line = Line::from(vec![
         Span::styled(format!("  {}", pending.shortcut.display()), key_style),
         Span::styled(":", action_style),
-        Span::styled(format!("press again to {}", pending.label), action_style),
+        Span::styled(pending.text(), action_style),
     ]);
     buf.set_line(area.x, area.y, &line, area.width);
 }
@@ -867,7 +867,7 @@ pub fn render_welcome(
                     notice,
                     params.selected,
                     params.consent_hover_link,
-                    params.pending_hint,
+                    params.pending_hint.clone(),
                     h_margin,
                     params.compact,
                 )
@@ -1931,7 +1931,7 @@ fn render_welcome_done(
                 state: session_picker_state,
                 sessions: p.session_picker,
                 loading: p.session_picker_loading,
-                pending_hint: p.pending_hint,
+                pending_hint: p.pending_hint.clone(),
                 shortcuts_area: None,
                 content_results: p.session_picker_content_results,
                 content_loading: p.session_picker_content_loading,
@@ -2282,7 +2282,7 @@ fn render_welcome_done(
             p.team_name,
             h_margin,
             p.compact,
-            p.pending_hint,
+            p.pending_hint.clone(),
             p.is_api_key_auth,
             layout.has_hero_box(),
         )
@@ -2553,7 +2553,7 @@ pub(crate) fn render_session_picker(
         expandable: true,
         esc_clears_query: true,
         shortcuts: Some(&default_shortcuts),
-        pending_hint: ctx.pending_hint,
+        pending_hint: ctx.pending_hint.clone(),
         non_selectable: &non_selectable_indices,
         non_selectable_clickable: &[],
         shortcuts_area: ctx.shortcuts_area,

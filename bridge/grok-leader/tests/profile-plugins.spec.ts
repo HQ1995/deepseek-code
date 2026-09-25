@@ -9,6 +9,7 @@ import { getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
 import type { BundleInfo, PluginInfo } from '@deepseek-ai/dsh-plugin-manager'
 import { analyzeBundlePatch, createProfilePlugins, SENSITIVE_ROW_IDS } from '../src/profile-plugins.ts'
 import { createPluginRows } from '../src/plugin-rows.ts'
+import { fakeSettingsService } from './support/settings-fake.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -363,6 +364,20 @@ describe('/dsh enable and disable', () => {
       confirmation: expect.objectContaining({ title: 'Remove plugin-mine?', confirmLabel: 'Remove' }) }])
     for (const query of ['add', 'plugins', 'enable x']) expect(await f.plugins.options(query)).toEqual([])
     expect(f.manager.setBundleEnabled).not.toHaveBeenCalled()
+  })
+
+  it('routes /dsh config to the settings service with the raw line, outside the profile lock', async () => {
+    const f = await fixture()
+    const settings = fakeSettingsService()
+    const plugins = createProfilePlugins({ directory: () => f.root, exec: f.exec, inspectRuntime: f.inspectRuntime, settings: () => settings.service })
+    // The tokenizer would reject the apostrophe and strip the JSON quotes.
+    expect(await plugins.execute('/dsh config set bash-sandbox cwd "/srv/it\'s here"')).toBe('Set `cwd` of `bash-sandbox` to `"/srv/it\'s here"`; applied to the running leader.')
+    expect((await plugins.options('')).map(option => [option.id, option.next === true])).toContainEqual(['config', true])
+    expect((await plugins.options('config')).map(option => option.id)).toEqual(['config bash-sandbox', 'config web-search'])
+    // Without the service, /dsh offers no config step.
+    expect((await f.plugins.options('')).map(option => option.id)).not.toContain('config')
+    expect(await f.plugins.execute('/dsh config')).toBe('The DSH settings service is not running in this leader; restart dscode and retry.')
+    expect(f.exec).not.toHaveBeenCalled()
   })
 
   it('offers only profile reads as options without the plugin manager', async () => {

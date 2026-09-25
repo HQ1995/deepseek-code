@@ -132,7 +132,7 @@ export function createSessionCommands<S extends CommandSession>(host: CommandHos
     const presets = roster === undefined ? [] : await roster.list()
     check()
     const commands: AdvertisedCommand[] = [{ name: 'dsh', description: 'Manage dsh plugins',
-      input: { hint: 'plugins | enable|disable <bundle>[#row] | add [--trust] <package> | remove <name> | inspect <name>' }, _meta: { options: true } },
+      input: { hint: 'plugins | enable|disable <bundle>[#row] | add [--trust] <package> | remove <name> | inspect <name> | config [<namespace>] | config set|reset <namespace> <field> [<json>]' }, _meta: { options: true } },
     { name: 'browser', description: 'Turn the isolated browser on or off',
       input: { hint: 'status | on [--executable <path>] [--origin <origin>]... [--any-origin] | off | origins add|remove <origin>' }, _meta: { options: true } },
     { name: 'subagents', description: 'Inspect and control child conversations',

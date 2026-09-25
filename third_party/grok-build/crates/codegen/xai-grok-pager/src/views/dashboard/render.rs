@@ -3435,6 +3435,7 @@ fn render_footer(
             let pending = PendingHint {
                 shortcut: stop_key,
                 label: "delete this session",
+                detail: None,
             };
             ShortcutsBar::new(&[])
                 .with_pending(Some(pending))

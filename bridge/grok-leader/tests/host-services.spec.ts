@@ -11,7 +11,7 @@ const fakeAgent = (services: Record<string, unknown>): Agent =>
   ({ ctx: { get: (name: string) => services[name] } } as unknown as Agent)
 
 /** Reader → the host service name it resolves. */
-const serviceNames: Record<Exclude<keyof HostServices, 'flush' | 'messageProjection' | 'agentTools' | 'presetService'>, string> = {
+const serviceNames: Record<Exclude<keyof HostServices, 'flush' | 'messageProjection' | 'agentTools' | 'presetService' | 'sessionActivity'>, string> = {
   settings: 'settings', llm: 'llm', credentials: 'credentials', agentDefaultModel: 'agentDefaultModel',
   persistence: 'sessionPersistence', attachments: 'attachments', commands: 'commands', schedule: 'schedule',
   profileContext: 'profileContext', pluginManager: 'pluginManager', loader: 'loader', configEditor: 'configEditor', ssh: 'ssh',
@@ -24,7 +24,7 @@ const serviceNames: Record<Exclude<keyof HostServices, 'flush' | 'messageProject
 describe('host services seam', () => {
   it('names every reader the seam offers', () => {
     const host = createHostServices(fakeContext({}), { roster: () => undefined })
-    expect(Object.keys(host).sort()).toEqual([...Object.keys(serviceNames), 'flush', 'messageProjection', 'agentTools', 'presetService'].sort())
+    expect(Object.keys(host).sort()).toEqual([...Object.keys(serviceNames), 'flush', 'messageProjection', 'agentTools', 'presetService', 'sessionActivity'].sort())
   })
 
   it('reads each service by its host name at call time and retains nothing', () => {
@@ -92,6 +92,22 @@ describe('host services seam', () => {
     expect(bare.presetService(agent, 'jobs')).toBe('agent jobs')
     const noScope = createHostServices(fakeContext(hostServices), { roster: () => ({}) })
     expect(noScope.presetService(agent, 'goals')).toBe('host goals')
+  })
+
+  it('asks the session-activity waterfall through the context, and answers none without a dispatch', async () => {
+    const calls: unknown[][] = []
+    const ctx = {
+      get: () => undefined,
+      async waterfall(this: unknown, ...args: unknown[]) {
+        calls.push([this === ctx, ...args])
+        const next = args[2] as () => Promise<unknown[]>
+        return [{ kind: 'job', items: [{ id: 'job-1', label: 'npm test' }] }, ...await next()]
+      },
+    }
+    const host = createHostServices(ctx, { roster: () => undefined })
+    expect(await host.sessionActivity('s1')).toEqual([{ kind: 'job', items: [{ id: 'job-1', label: 'npm test' }] }])
+    expect(calls).toEqual([[true, 'workspace/session-activity', { sessionId: 's1' }, expect.any(Function)]])
+    await expect(createHostServices(fakeContext({}), { roster: () => undefined }).sessionActivity('s1')).resolves.toEqual([])
   })
 
   it("reads an agent's tool registry from that agent's context, not the host", () => {

@@ -113,6 +113,15 @@ route and a new account route, lets tools change inside a running
 conversation, and gives approval requests a localized reason. dscode adopts
 each of these below; the account route stays off.
 
+The quit guard asks rc.2's `workspace/session-activity` waterfall, which DSH's
+archive admission and desktop quit inspection read, for each session a client
+owns: the Agent registry reports a running turn, the job registry running jobs,
+the subagent runtime running descendants and the Schedule its armed reminders.
+The bridge adds its own queue, counts a background subagent's job once (as its
+child, as the Tasks pane does), and answers `x.ai/client/activity`. A family a
+plugin adds is reported by its own kind. At a runtime bump, recheck these
+families and their `items`.
+
 rc.1 enforces plugin compatibility: every `@deepseek-ai/dsh` and
 `@deepseek-ai/dsh-*` peer of a profile bundle or preset row must be satisfied by
 the running DSH version, prereleases included. At startup, DSH skips an
@@ -288,10 +297,22 @@ its manager's `installBundle` use pnpm (`pnpm-lock.yaml`), and the two layouts
 diverge. `/doctor` warns when the profile holds a `pnpm-lock.yaml`. Test homes
 that install the plugin with `dsh plugin --profile dscode add` show that warning.
 
+`/dsh config` uses the host settings service (`@deepseek-ai/dsh-settings`) as
+DSH's Settings pages do through its settings controller: `describe({redactSecrets:
+true})` for each row's live-editable (volatile) Config fields with their
+schema, resolved value, composition base, user section, revision, `applies` and
+secret slots, and `mutate` with one path op at that revision. The service's
+config editor writes the profile patch and reconciles the Loader, so a change
+is live without `hmr`; rc.2 describes every field as `applies: 'live'`. At a
+runtime bump, recheck the descriptor shape (a test compiles `SettingsForms`
+against `SettingsLike`), the `SETTINGS_CONFLICT` code and the secret roles.
+
 `scripts/e2e-plugins-installed.mjs <runtime> <home>` checks an installed leader
 over ACP: the table, enabling and disabling an optional bundle and one of its
-rows, the core refusals, an override by a DSH-home patch, `/doctor`, the note
-for a skipped bundle, and `--reset-plugins` with a restart.
+rows, the core refusals, an override by a DSH-home patch, `/dsh config` (list,
+a live set, a rejected value, a refused secret and a reset, all through the
+settings service), `/doctor`, the note for a skipped bundle, and
+`--reset-plugins` with a restart.
 
 ### Approval reasons
 

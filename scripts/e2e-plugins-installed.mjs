@@ -2,8 +2,9 @@
 // Keyless acceptance for plugin management on an installed leader over ACP:
 // the /dsh plugins table, an optional bundle and one of its rows switched on
 // and off live, the core refusals, an override by a DSH-home patch, /doctor,
-// the one-time note for a bundle the next start skips, the shell doctor, and
-// `dscode doctor --reset-plugins` followed by a clean start.
+// /dsh config over DSH's settings service, the one-time note for a bundle the
+// next start skips, the shell doctor, and `dscode doctor --reset-plugins`
+// followed by a clean start.
 // Usage: e2e-plugins-installed.mjs <extracted-runtime> <fresh-dsh-home-with-dscode>
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -109,6 +110,31 @@ await withLeader(async ({ dsh, doctor }) => {
   assert.match(await dsh('/dsh disable @hqzhao95/dscode#grok-leader'), /use the command that owns it/)
   assert.equal(readFileSync(join(profile, 'package.json'), 'utf8'), before)
   checks.push('dscode\'s own bundles and rows refuse to switch off')
+
+  // /dsh config: DSH's settings service reads, validates, persists and
+  // applies; the value shown after a change is the live row's own config.
+  samples.config = await dsh('/dsh config')
+  assert.match(samples.config, /^Settings served by loaded plugins: \d+ namespaces · 0 overridden\n/)
+  assert.match(samples.config, /\| `bash-sandbox` \| base \| 6 \| 0 \|/)
+  assert.match(samples.config, /\| `agent-preset-registry` \| dscode \| 1 \| 0 \|/)
+  assert.match(await dsh('/dsh config bash-sandbox'), /\| `timeoutMs` \| `60000` \| `60000` \|/)
+  samples.configSet = await dsh('/dsh config set bash-sandbox timeoutMs 90000')
+  assert.equal(samples.configSet, 'Set `timeoutMs` of `bash-sandbox` to `90000`; applied to the running leader.')
+  assert.match(patch(), /- id: bash-sandbox\n(?:.*\n)*?\s+timeoutMs: 90000/)
+  samples.configNamespace = await dsh('/dsh config bash-sandbox')
+  assert.match(samples.configNamespace, /^\*\*bash-sandbox\*\* \(base\): 6 fields · 1 overridden · changes apply to the running leader/)
+  assert.match(samples.configNamespace, /\| `timeoutMs` \| `90000` · overridden \| `60000` \|/)
+  const withOverride = patch()
+  samples.configInvalid = await dsh('/dsh config set bash-sandbox timeoutMs soon')
+  assert.match(samples.configInvalid, /^Not saved: invalid config:\n  - \$\.timeoutMs expected number but got soon/)
+  samples.configSecret = await dsh('/dsh config set web-search-deepseek apiKey sk-typed-in-chat')
+  assert.match(samples.configSecret, /is or holds a secret.*`\/dsh config set web-search-deepseek apiKeyEnv <NAME>`/)
+  assert.match(await dsh('/dsh config web-search-deepseek'), /\| `apiKey` \| unset · secret \| - \|/)
+  assert.equal(patch(), withOverride, 'a refused change writes nothing')
+  samples.configReset = await dsh('/dsh config reset bash-sandbox timeoutMs')
+  assert.equal(samples.configReset, 'Reset `timeoutMs` of `bash-sandbox` to its default `60000`; applied to the running leader.')
+  assert.doesNotMatch(patch(), /timeoutMs|sk-typed/)
+  checks.push('/dsh config lists, sets, validates and resets settings through DSH\'s settings service, live, and never writes a secret')
 
   const report = await doctor()
   samples.doctor = report.split('\n\n').filter(line => /Plugin rows|Leader log|Profile package manager|Profile bundles/.test(line))
